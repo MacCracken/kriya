@@ -1,0 +1,16 @@
+[package]
+name = "kriya"
+version = "0.1.0"
+description = "kriya — TODO"
+license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "5.11.54"
+
+[build]
+entry = "src/main.cyr"
+test = "src/test.cyr"
+output = "kriya"
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert"]
+---
