@@ -1,13 +1,26 @@
-# kriya test suite
-# Stdlib auto-included via cyrius.cyml
+# kriya — primary unit-test suite.
+# Stdlib auto-included via cyrius.cyml. We explicitly include the
+# project-local source files we exercise so this suite stays
+# independent of the dispatcher entry point in src/main.cyr.
+
+include "src/lib/exit.cyr"
+include "src/cmd/true.cyr"
+include "src/cmd/false.cyr"
 
 fn main() {
     alloc_init();
-    test_group("smoke");
-    assert(1, "true is true");
-    assert_eq(1 + 1, 2, "math works");
+
+    test_group("exit codes");
+    assert_eq(EXIT_SUCCESS, 0, "EXIT_SUCCESS == 0");
+    assert_eq(EXIT_FAILURE, 1, "EXIT_FAILURE == 1");
+    assert_eq(EXIT_USAGE,   2, "EXIT_USAGE == 2");
+
+    test_group("cmd_true / cmd_false");
+    assert_eq(cmd_true(1),  EXIT_SUCCESS, "cmd_true returns EXIT_SUCCESS");
+    assert_eq(cmd_false(1), EXIT_FAILURE, "cmd_false returns EXIT_FAILURE");
+
     return assert_summary();
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+syscall(SYS_EXIT, exit_code);

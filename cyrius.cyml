@@ -12,5 +12,5 @@ test = "src/test.cyr"
 output = "kriya"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert"]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "args", "assert"]
 ---

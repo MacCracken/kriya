@@ -1,0 +1,5 @@
+# true — POSIX `true(1)`: do nothing, exit 0.
+# Args ignored per POSIX (true takes none, but extras must not fail).
+fn cmd_true(start: i64): i64 {
+    return EXIT_SUCCESS;
+}

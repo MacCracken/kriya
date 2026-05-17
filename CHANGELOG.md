@@ -6,6 +6,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Dispatcher**: `src/main.cyr` now reads `argv[0]`, basename-strips, and routes to the matching `cmd_*` function. Both symlink form (`./true`) and explicit form (`kriya true`) dispatch identically. Unknown utilities and missing utility names emit a usage message to stderr and exit `2`. Implements ADR 0001.
+- **Shared lib**: `src/lib/exit.cyr` defines `EXIT_SUCCESS=0` / `EXIT_FAILURE=1` / `EXIT_USAGE=2` as an enum (no `gvar_toks` cost per CLAUDE.md Cyrius Conventions).
+- **`true`** (`src/cmd/true.cyr`) — POSIX `true(1)`, always exits `0`.
+- **`false`** (`src/cmd/false.cyr`) — POSIX `false(1)`, always exits `1`.
+- **`args` added to `cyrius.cyml [deps].stdlib`** — dispatcher needs `args_init()` / `argc()` / `argv(n)` for argv access.
+- **Tests**: `tests/kriya.tcyr` covers exit-code constants and `cmd_true`/`cmd_false` return values (5/5 passing).
+
 ## [0.1.0] — 2026-05-15
 
 ### Added

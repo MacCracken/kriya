@@ -1,0 +1,5 @@
+# false — POSIX `false(1)`: do nothing, exit 1.
+# Args ignored per POSIX.
+fn cmd_false(start: i64): i64 {
+    return EXIT_FAILURE;
+}

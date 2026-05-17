@@ -17,16 +17,16 @@ Coreutils-equivalent for AGNOS — the small POSIX-style utilities (`cp`, `mv`, 
 
 ## Source
 
-Initial scaffold only — `src/main.cyr` is a stub. No utility implementations yet.
+M1 walking skeleton landed — dispatcher routes `argv[0]` basename (or `kriya <util>`) to the registered `cmd_*` functions. Two utilities wired; the remaining M1 utilities and lib modules are pending.
 
 | Module | Status |
 |---|---|
-| `src/main.cyr` | scaffold — dispatcher stub |
+| `src/main.cyr` | implemented — dispatch by `argv[0]` basename, fallback to `argv[1]` when invoked as `kriya` |
 | `src/lib/path.cyr` | not started — path manipulation primitives |
-| `src/lib/exit.cyr` | not started — exit-code conventions |
+| `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
 | `src/lib/errmsg.cyr` | not started — errno → message |
-| `src/lib/args.cyr` | not started — POSIX-style argument parsing |
-| `src/cmd/*.cyr` | not started — one file per utility |
+| `src/lib/args.cyr` | not started — POSIX-style argument parsing (on top of stdlib `lib/args.cyr`) |
+| `src/cmd/*.cyr` | 2 of ~40 — `true.cyr`, `false.cyr` |
 
 ## Per-utility status (will grow with each milestone)
 
@@ -34,8 +34,8 @@ Initial scaffold only — `src/main.cyr` is a stub. No utility implementations y
 |---|---|---|---|
 | `echo` | `src/cmd/echo.cyr` | not started | M1 |
 | `pwd` | `src/cmd/pwd.cyr` | not started | M1 (note: agnoshi has a builtin; kriya provides the binary form) |
-| `true` | `src/cmd/true.cyr` | not started | M1 |
-| `false` | `src/cmd/false.cyr` | not started | M1 |
+| `true` | `src/cmd/true.cyr` | **implemented** (walking skeleton) | M1 |
+| `false` | `src/cmd/false.cyr` | **implemented** (walking skeleton) | M1 |
 | `yes` | `src/cmd/yes.cyr` | not started | M1 |
 | `sleep` | `src/cmd/sleep.cyr` | not started | M1 |
 | `mkdir` | `src/cmd/mkdir.cyr` | not started | M2 |
@@ -87,7 +87,7 @@ Initial scaffold only — `src/main.cyr` is a stub. No utility implementations y
 
 Direct (declared in `cyrius.cyml`):
 
-- stdlib — `string`, `fmt`, `alloc`, `io`, `vec`, `str`, `syscalls`, `assert`
+- stdlib — `string`, `fmt`, `alloc`, `io`, `vec`, `str`, `syscalls`, `args`, `assert`
 
 External: none (and none planned for v1.0).
 
@@ -100,7 +100,7 @@ _None yet._ Expected consumers once M1 ships:
 
 ## In-flight work
 
-- Roadmap M1 (v0.2.0): dispatcher + `src/lib/{path,exit,errmsg,args}.cyr` + simplest utilities (`echo`, `pwd`, `true`, `false`, `yes`, `sleep`). See [`roadmap.md`](roadmap.md).
+- Roadmap M1 (v0.2.0) — walking skeleton landed (dispatcher + `src/lib/exit.cyr` + `true`/`false`). Remaining: `src/lib/{path,errmsg,args}.cyr`, utilities `echo`/`pwd`/`yes`/`sleep`, ADR 0002 (option-parsing), arch notes 001 (errno→message) and 002 (signal handling), benchmark for dispatcher cold-start. See [`roadmap.md`](roadmap.md).
 
 ## Next
 

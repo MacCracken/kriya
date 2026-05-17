@@ -1,0 +1,10 @@
+# exit.cyr — POSIX-aligned exit codes shared across kriya utilities.
+# 0 success, 1 general failure, 2 usage error. Utility-specific codes
+# (e.g. grep's "no match → 1, error → 2") get defined in the relevant
+# utility file and documented in its ADR.
+
+enum KriyaExit {
+    EXIT_SUCCESS = 0;
+    EXIT_FAILURE = 1;
+    EXIT_USAGE   = 2;
+}
