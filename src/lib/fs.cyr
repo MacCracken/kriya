@@ -71,11 +71,16 @@ enum FsStat {
     FS_STAT_MODE       = 24;
     FS_STAT_UID        = 28;
     FS_STAT_GID        = 32;
+    FS_STAT_RDEV       = 40;
     FS_STAT_SIZE       = 48;
+    FS_STAT_BLKSIZE    = 56;
+    FS_STAT_BLOCKS     = 64;
     FS_STAT_ATIME      = 72;
     FS_STAT_ATIME_NSEC = 80;
     FS_STAT_MTIME      = 88;
     FS_STAT_MTIME_NSEC = 96;
+    FS_STAT_CTIME      = 104;
+    FS_STAT_CTIME_NSEC = 112;
     FS_STAT_BUFSZ      = 144;
 }
 
