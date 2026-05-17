@@ -1,0 +1,339 @@
+# cp — POSIX `cp(1)`: copy files (non-recursive intersection at M2.5).
+#
+# This is the first ship of `cp`. Argument shapes covered:
+#   cp [opts] SRC DST                — copy SRC to DST
+#   cp [opts] SRC... DIRECTORY       — copy each SRC into DIRECTORY
+#
+# Flags:
+#   -f / --force        overwrite existing destination without prompt.
+#   -i / --interactive  prompt before overwrite. Per ADR 0002, when
+#                       stdin is not a tty this is a usage error
+#                       (exit 2), not a hang.
+#   -p / --preserve     preserve mode + atime/mtime (POSIX subset of
+#                       `-p`'s usual mode-ownership-times triple;
+#                       ownership preservation needs uid 0 to be
+#                       meaningful and is deferred).
+#   -v / --verbose      print "'src' -> 'dst'" per file.
+#
+# Deferred to the recursive ship (next commit, with `src/lib/fs.cyr`):
+#   -R / -r             recursive copy.
+#   -P / -H / -L        ADR 0003 symlink-policy matrix during recursion.
+#
+# Symlink policy at this ship (ADR 0003, non-recursive single source):
+# the source is opened O_RDONLY, which follows symlinks — POSIX cp's
+# default. To copy a symlink itself (rather than its target), wait for
+# `-P` to ship with the recursive surface. Destinations are opened
+# O_WRONLY | O_CREAT | O_TRUNC, which also follows symlinks at the
+# destination name — POSIX. When the recursive ship adds traversal,
+# destination opens inside a walked directory will use O_NOFOLLOW per
+# ADR 0003; that's a recursion-only refinement.
+#
+# Root protection (ADR 0004): cp is non-destructive of unnamed data;
+# the protected_paths check is rm-only.
+#
+# Each (SRC, DST) pair is attempted independently. Exit EXIT_FAILURE
+# if any failed, EXIT_SUCCESS otherwise.
+
+var _cp_spec = 0;
+var _cp_f_idx = 0;
+var _cp_i_idx = 0;
+var _cp_p_idx = 0;
+var _cp_v_idx = 0;
+
+# Lazy 64KiB I/O buffer (heap, process-lifetime).
+var _cp_buf    = 0;
+var _CP_BUFSZ  = 65536;
+
+fn _cp_init_spec(): i64 {
+    if (_cp_spec != 0) { return 0; }
+    var s = flags_new();
+    _cp_f_idx = flags_add_bool(s, 102, "force",       0, "overwrite existing destination");
+    _cp_i_idx = flags_add_bool(s, 105, "interactive", 0, "prompt before overwrite");
+    _cp_p_idx = flags_add_bool(s, 112, "preserve",    0, "preserve mode and timestamps");
+    _cp_v_idx = flags_add_bool(s, 118, "verbose",     0, "print each copy");
+    _cp_spec = s;
+    return 0;
+}
+
+fn _cp_buf_get(): i64 {
+    if (_cp_buf != 0) { return _cp_buf; }
+    _cp_buf = alloc(_CP_BUFSZ);
+    return _cp_buf;
+}
+
+fn _cp_report(operand, errno): i64 {
+    syscall(1, 2, "kriya cp: ", 10);
+    syscall(1, 2, operand, strlen(operand));
+    syscall(1, 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        syscall(1, 2, m, strlen(m));
+    } else {
+        syscall(1, 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        syscall(1, 2, &buf + i + 1, 6 - i);
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+# Is fd a tty? `ioctl(fd, TCGETS=0x5401, &buf)` returns 0 on a tty,
+# negative errno (typically -ENOTTY = -25) otherwise. struct termios
+# is 60 bytes on Linux x86_64 — use 96 to be safe across libc/kernel
+# minor differences.
+fn _cp_isatty(fd): i64 {
+    var tio[96];
+    var r = syscall(16, fd, 21505, &tio);  # SYS_IOCTL=16, TCGETS=0x5401=21505
+    if (r == 0) { return 1; }
+    return 0;
+}
+
+# Prompt the user: "kriya cp: overwrite 'dst'? ". Returns 1 if the
+# response begins with 'y' or 'Y', 0 otherwise.
+fn _cp_prompt(dst): i64 {
+    syscall(1, 2, "kriya cp: overwrite '", 21);
+    syscall(1, 2, dst, strlen(dst));
+    syscall(1, 2, "'? ", 3);
+    var c[8];
+    var n = syscall(0, 0, &c, 8);
+    if (n < 1) { return 0; }
+    var ch = load8(&c);
+    if (ch == 121) { return 1; }  # 'y'
+    if (ch == 89)  { return 1; }  # 'Y'
+    return 0;
+}
+
+# Stat-based "is `path` an existing directory" (follows symlinks).
+fn _cp_is_dir(path): i64 {
+    var buf[144];
+    var r = sys_stat(path, &buf);
+    if (r != 0) { return 0; }
+    var st_mode = load64(&buf + 24);
+    if ((st_mode & 61440) == 16384) { return 1; }
+    return 0;
+}
+
+# Copy SRC to DST. SRC must be a regular file (caller checks for dirs).
+# Returns 0 on success, negative errno on failure.
+fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
+    # Stat SRC for type-check, mode, and (if -p) times.
+    var src_stat[144];
+    var sr = sys_stat(src, &src_stat);
+    if (sr != 0) {
+        _cp_report(src, 0 - sr);
+        return sr;
+    }
+    var src_mode = load64(&src_stat + 24);
+    if ((src_mode & 61440) == 16384) {
+        # Directory without -R: POSIX/GNU emit "omitting directory" with
+        # exit 1. Use the errmsg table entry for EISDIR (21).
+        _cp_report(src, 21);
+        return 0 - 21;
+    }
+
+    # If DST already exists, gate on -f / -i.
+    var dst_stat[144];
+    var dr = sys_stat(dst, &dst_stat);
+    if (dr == 0) {
+        # Refuse self-copy: same inode + device means we'd truncate the
+        # source. POSIX behaviour. Compare st_dev (offset 0) + st_ino (8).
+        if (load64(&src_stat + 0) == load64(&dst_stat + 0)) {
+            if (load64(&src_stat + 8) == load64(&dst_stat + 8)) {
+                _cp_report(dst, 17);  # render as EEXIST; specific message later
+                syscall(1, 2, "kriya cp: '", 11);
+                syscall(1, 2, src, strlen(src));
+                syscall(1, 2, "' and '", 7);
+                syscall(1, 2, dst, strlen(dst));
+                syscall(1, 2, "' are the same file\n", 20);
+                return 0 - 17;
+            }
+        }
+        if (force == 0) {
+            if (interactive == 1) {
+                if (_cp_isatty(0) == 0) {
+                    syscall(1, 2, "kriya cp: error: -i requires stdin to be a terminal\n", 53);
+                    return 0 - 9999;  # sentinel for invocation-wide usage failure
+                }
+                if (_cp_prompt(dst) == 0) {
+                    return 0;  # user declined; not an error
+                }
+            } else {
+                _cp_report(dst, 17);
+                return 0 - 17;
+            }
+        }
+    } else {
+        # If -i is set but stdin is not a tty, we'd still be hostile to
+        # pipelines if a later operand triggered a prompt. Catch it
+        # upfront — per ADR 0002 the policy is invocation-wide.
+        if (interactive == 1) {
+            if (_cp_isatty(0) == 0) {
+                syscall(1, 2, "kriya cp: error: -i requires stdin to be a terminal\n", 53);
+                return 0 - 9999;
+            }
+        }
+    }
+
+    # Open source (O_RDONLY follows symlinks — POSIX cp default).
+    var src_fd = sys_open(src, 0, 0);
+    if (src_fd < 0) {
+        _cp_report(src, 0 - src_fd);
+        return src_fd;
+    }
+
+    # Open dest. Permissions: copy SRC's mode bits (low 12). When -p is
+    # NOT set, POSIX allows the destination mode to be filtered by the
+    # caller's umask — but we pass the source mode directly to mirror
+    # GNU's behaviour and keep the test surface predictable.
+    var perms = src_mode & 4095;
+    # O_WRONLY=1, O_CREAT=64, O_TRUNC=512 → 577.
+    var dst_fd = sys_open(dst, 577, perms);
+    if (dst_fd < 0) {
+        syscall(3, src_fd);
+        _cp_report(dst, 0 - dst_fd);
+        return dst_fd;
+    }
+
+    # Copy loop. Retry EINTR transparently; surface other errors.
+    var buf = _cp_buf_get();
+    var bufsz = _CP_BUFSZ;
+    var loop: i64 = 1;
+    var failed: i64 = 0;
+    while (loop == 1) {
+        var n = syscall(0, src_fd, buf, bufsz);  # SYS_READ
+        if (n < 0) {
+            if ((0 - n) == 4) {
+                # EINTR — retry.
+            } else {
+                _cp_report(src, 0 - n);
+                failed = 1;
+                loop = 0;
+            }
+        } else {
+            if (n == 0) {
+                loop = 0;
+            } else {
+                # Write the full block; partial writes are rare on files
+                # but possible. Loop until done.
+                var written: i64 = 0;
+                var write_done: i64 = 0;
+                while (write_done == 0) {
+                    var w = syscall(1, dst_fd, buf + written, n - written);  # SYS_WRITE
+                    if (w < 0) {
+                        if ((0 - w) == 4) {
+                            # EINTR — retry the same window.
+                        } else {
+                            _cp_report(dst, 0 - w);
+                            failed = 1;
+                            write_done = 1;
+                            loop = 0;
+                        }
+                    } else {
+                        written = written + w;
+                        if (written >= n) { write_done = 1; }
+                    }
+                }
+            }
+        }
+    }
+
+    syscall(3, src_fd);   # SYS_CLOSE
+    syscall(3, dst_fd);
+
+    if (failed == 1) {
+        # Best-effort cleanup of a half-written destination. We made it;
+        # leaving it would mislead callers about success.
+        sys_unlink(dst);
+        return 0 - 5;
+    }
+
+    # -p: preserve mode + times. Mode was already used as the open mode,
+    # but umask may have masked bits — chmod sets the exact value.
+    if (preserve == 1) {
+        sys_chmod(dst, perms);
+        # Build a timespec[2] from src_stat: atime @ +72, atime_nsec @ +80,
+        # mtime @ +88, mtime_nsec @ +96.
+        var ts[32];
+        store64(&ts + 0,  load64(&src_stat + 72));   # times[0].tv_sec  = src atime
+        store64(&ts + 8,  load64(&src_stat + 80));   # times[0].tv_nsec
+        store64(&ts + 16, load64(&src_stat + 88));   # times[1].tv_sec  = src mtime
+        store64(&ts + 24, load64(&src_stat + 96));   # times[1].tv_nsec
+        # utimensat(AT_FDCWD=-100, dst, &ts, 0). SYS_UTIMENSAT=280.
+        syscall(280, 0 - 100, dst, &ts, 0);
+    }
+
+    if (verbose == 1) {
+        syscall(1, 1, "'", 1);
+        syscall(1, 1, src, strlen(src));
+        syscall(1, 1, "' -> '", 6);
+        syscall(1, 1, dst, strlen(dst));
+        syscall(1, 1, "'\n", 2);
+    }
+    return 0;
+}
+
+fn cmd_cp(start: i64): i64 {
+    _cp_init_spec();
+    if (kriya_args_parse(_cp_spec, start) != 0) {
+        syscall(1, 2, "kriya cp: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        return EXIT_USAGE;
+    }
+
+    var npos = flags_positional_count(_cp_spec);
+    if (npos < 2) {
+        syscall(1, 2, "kriya cp: error: missing operand (need SRC and DST)\n", 53);
+        return EXIT_USAGE;
+    }
+
+    var force: i64 = 0;
+    if (flags_get_bool(_cp_spec, _cp_f_idx) == 1) { force = 1; }
+    var interactive: i64 = 0;
+    if (flags_get_bool(_cp_spec, _cp_i_idx) == 1) { interactive = 1; }
+    var preserve: i64 = 0;
+    if (flags_get_bool(_cp_spec, _cp_p_idx) == 1) { preserve = 1; }
+    var verbose: i64 = 0;
+    if (flags_get_bool(_cp_spec, _cp_v_idx) == 1) { verbose = 1; }
+
+    # Last positional decides shape: if it's a directory, copy each
+    # prior operand into it. Else exactly two operands and we copy
+    # SRC to DST.
+    var dst_arg = flags_positional(_cp_spec, npos - 1);
+    var dst_is_dir = _cp_is_dir(dst_arg);
+
+    var any_failed: i64 = 0;
+    if (dst_is_dir == 0) {
+        if (npos != 2) {
+            syscall(1, 2, "kriya cp: error: with multiple sources, the last operand must be a directory\n", 77);
+            return EXIT_USAGE;
+        }
+        var src = flags_positional(_cp_spec, 0);
+        var r = _cp_one(src, dst_arg, force, interactive, preserve, verbose);
+        if (r != 0) { any_failed = 1; }
+        # -i refusal-on-non-tty is exit 2 invocation-wide.
+        if (r == (0 - 9999)) { return EXIT_USAGE; }
+    } else {
+        var i: i64 = 0;
+        while (i < npos - 1) {
+            var src = flags_positional(_cp_spec, i);
+            var base = path_basename_ptr(src);
+            var dst = path_join(dst_arg, base);
+            var r = _cp_one(src, dst, force, interactive, preserve, verbose);
+            if (r != 0) { any_failed = 1; }
+            if (r == (0 - 9999)) { return EXIT_USAGE; }
+            i = i + 1;
+        }
+    }
+
+    if (any_failed == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}
