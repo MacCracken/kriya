@@ -1,0 +1,721 @@
+# ls — POSIX `ls(1)`: list directory contents (M3 closer).
+#
+# Argument shape:
+#   ls [opts] [file...]
+#
+# Without operands, lists the current directory. With one or more
+# operands, lists each (directory contents for directories, the entry
+# itself for non-directories).
+#
+# Flags (this ship):
+#   -a / --all              include `.` and `..` and other dotfiles.
+#   -A / --almost-all       include dotfiles but skip `.` and `..`.
+#   -l                      long form (mode nlink uid gid size mtime name).
+#   -h / --human-readable   human-readable size suffixes (B/K/M/G/T/P)
+#                           in -l form.
+#   -r / --reverse          reverse the alphabetical sort.
+#   -1                      one entry per line (the default for this
+#                           ship — flag accepted for ergonomics).
+#   -F                      append type indicator (`/` dir, `*` exec,
+#                           `@` symlink, `|` fifo, `=` socket).
+#   -i / --inode            prepend the inode number.
+#   -d / --directory        list directory operands as entries
+#                           themselves, not their contents.
+#   -R / --recursive        descend into subdirectories.
+#
+# Deferred (each a named follow-up):
+#   Multi-column packing on tty stdout — needs `ioctl(TIOCGWINSZ)`
+#     for terminal width + column-width math. Ships when there's
+#     consumer demand; default one-per-line is already script-safe.
+#   `-t` / `-S`           alternate sort keys (mtime / size). Trivial
+#                         once a comparator-by-flag indirection lands.
+#   `-n` / `--numeric-uid-gid`  alias for the current default of
+#                         numeric uid/gid in -l. When name lookup ships,
+#                         flag becomes "force numeric regardless".
+#   `--color=auto/always/never`  ANSI colouring; needs tty detection +
+#                         a per-type colour table.
+#   User / group names in -l — needs a passwd/group parser. Default
+#     stays numeric until that ships.
+#
+# Symlink policy: ls is purely informational. ADR 0003 doesn't apply.
+# `-l` of a symlink renders `link -> target`; the target is not opened.
+# `-R` does not follow symlinks into subdirectories (matches GNU default).
+#
+# Each operand is processed independently. Exit `EXIT_FAILURE` if any
+# failed; partial successes still print.
+
+var _ls_spec   = 0;
+var _ls_a_idx  = 0;
+var _ls_A_idx  = 0;
+var _ls_l_idx  = 0;
+var _ls_h_idx  = 0;
+var _ls_r_idx  = 0;
+var _ls_1_idx  = 0;
+var _ls_F_idx  = 0;
+var _ls_i_idx  = 0;
+var _ls_d_idx  = 0;
+var _ls_R_idx  = 0;
+
+fn _ls_init_spec(): i64 {
+    if (_ls_spec != 0) { return 0; }
+    var s = flags_new();
+    _ls_a_idx = flags_add_bool(s, 97,  "all",             0, "include all entries including . and ..");
+    _ls_A_idx = flags_add_bool(s, 65,  "almost-all",      0, "include dotfiles but skip . and ..");
+    _ls_l_idx = flags_add_bool(s, 108, "",                0, "long form");
+    _ls_h_idx = flags_add_bool(s, 104, "human-readable",  0, "human-readable size suffixes (with -l)");
+    _ls_r_idx = flags_add_bool(s, 114, "reverse",         0, "reverse sort order");
+    _ls_1_idx = flags_add_bool(s, 49,  "",                0, "one entry per line (default)");
+    _ls_F_idx = flags_add_bool(s, 70,  "",                0, "append type indicator");
+    _ls_i_idx = flags_add_bool(s, 105, "inode",           0, "print inode number");
+    _ls_d_idx = flags_add_bool(s, 100, "directory",       0, "list dir operands as entries, not contents");
+    _ls_R_idx = flags_add_bool(s, 82,  "recursive",       0, "descend into subdirectories");
+    _ls_spec = s;
+    return 0;
+}
+
+fn _ls_report(operand, errno): i64 {
+    syscall(1, 2, "kriya ls: ", 10);
+    syscall(1, 2, operand, strlen(operand));
+    syscall(1, 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        syscall(1, 2, m, strlen(m));
+    } else {
+        syscall(1, 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        syscall(1, 2, &buf + i + 1, 6 - i);
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+# --- per-entry record ---
+#
+# Layout (160 bytes):
+#   offset 0   : pointer to name cstring (heap-allocated)
+#   offset 8   : 144-byte stat buffer
+#   offset 152 : pointer to symlink target cstring (or 0)
+
+fn _ls_rec_new(name_cstr): i64 {
+    var rec = alloc(160);
+    store64(rec, name_cstr);
+    store64(rec + 152, 0);
+    return rec;
+}
+
+fn _ls_rec_name(rec): i64 { return load64(rec); }
+fn _ls_rec_st(rec): i64   { return rec + 8; }
+fn _ls_rec_link_target(rec): i64       { return load64(rec + 152); }
+fn _ls_rec_set_link_target(rec, t): i64 {
+    store64(rec + 152, t);
+    return 0;
+}
+
+# --- rendering helpers (ls-internal; cross-utility shared lib lands
+#     when a third consumer asks) ---
+
+fn _ls_render_dec(v, buf): i64 {
+    if (v == 0) { store8(buf, 48); return 1; }
+    var tmp[32];
+    var n: i64 = 0;
+    var rem = v;
+    while (rem > 0) {
+        store8(&tmp + n, 48 + (rem - (rem / 10) * 10));
+        rem = rem / 10;
+        n = n + 1;
+    }
+    var i: i64 = 0;
+    while (i < n) {
+        store8(buf + i, load8(&tmp + n - 1 - i));
+        i = i + 1;
+    }
+    return n;
+}
+
+# Number of decimal digits needed to render `v`.
+fn _ls_dec_width(v): i64 {
+    if (v == 0) { return 1; }
+    var w: i64 = 0;
+    var rem = v;
+    while (rem > 0) {
+        w = w + 1;
+        rem = rem / 10;
+    }
+    return w;
+}
+
+# Emit `v` as decimal right-justified to `width` characters with
+# leading space padding.
+fn _ls_emit_dec_padded(v, width): i64 {
+    var buf[32];
+    var n = _ls_render_dec(v, &buf);
+    var pad = width - n;
+    var sp[2];
+    store8(&sp, 32);
+    while (pad > 0) {
+        syscall(1, 1, &sp, 1);
+        pad = pad - 1;
+    }
+    syscall(1, 1, &buf, n);
+    return 0;
+}
+
+# Symbolic permissions (10-byte sequence: type + ugo rwx triples).
+fn _ls_render_symperm(mode, buf): i64 {
+    var typ = mode & 61440;
+    var c: i64 = 45;  # '-'
+    if (typ == 16384) { c = 100; }
+    if (typ == 40960) { c = 108; }
+    if (typ == 8192)  { c = 99;  }
+    if (typ == 24576) { c = 98;  }
+    if (typ == 4096)  { c = 112; }
+    if (typ == 49152) { c = 115; }
+    store8(buf, c);
+
+    var dash: i64 = 45;
+    if ((mode & 256) != 0) { store8(buf + 1, 114); } else { store8(buf + 1, dash); }
+    if ((mode & 128) != 0) { store8(buf + 2, 119); } else { store8(buf + 2, dash); }
+    var ux = mode & 64;
+    var setuid = mode & 2048;
+    if (setuid != 0) {
+        if (ux != 0) { store8(buf + 3, 115); } else { store8(buf + 3, 83); }
+    } else {
+        if (ux != 0) { store8(buf + 3, 120); } else { store8(buf + 3, dash); }
+    }
+    if ((mode & 32) != 0) { store8(buf + 4, 114); } else { store8(buf + 4, dash); }
+    if ((mode & 16) != 0) { store8(buf + 5, 119); } else { store8(buf + 5, dash); }
+    var gx = mode & 8;
+    var setgid = mode & 1024;
+    if (setgid != 0) {
+        if (gx != 0) { store8(buf + 6, 115); } else { store8(buf + 6, 83); }
+    } else {
+        if (gx != 0) { store8(buf + 6, 120); } else { store8(buf + 6, dash); }
+    }
+    if ((mode & 4) != 0) { store8(buf + 7, 114); } else { store8(buf + 7, dash); }
+    if ((mode & 2) != 0) { store8(buf + 8, 119); } else { store8(buf + 8, dash); }
+    var ox = mode & 1;
+    var sticky = mode & 512;
+    if (sticky != 0) {
+        if (ox != 0) { store8(buf + 9, 116); } else { store8(buf + 9, 84); }
+    } else {
+        if (ox != 0) { store8(buf + 9, 120); } else { store8(buf + 9, dash); }
+    }
+    return 10;
+}
+
+# Human-readable size: writes up to 6 bytes (e.g. "1.5K", "999", "10G").
+# Rule: under 1024 → bare integer. Otherwise divide by 1024 with the
+# appropriate suffix from BKMGTP; if quotient < 10 emit "X.XS", else
+# integer + suffix. Matches GNU `ls -h` "smart rounding".
+fn _ls_render_human(v, buf): i64 {
+    var thresholds = "BKMGTP";
+    var unit: i64 = 0;
+    var val = v;
+    var rem10: i64 = 0;  # tenths
+    while (val >= 1024) {
+        # Carry the next decimal digit when we'll need < 10 output.
+        rem10 = ((val - (val / 1024) * 1024) * 10) / 1024;
+        val = val / 1024;
+        unit = unit + 1;
+    }
+    var n = _ls_render_dec(val, buf);
+    if (unit > 0) {
+        if (val < 10) {
+            store8(buf + n, 46);  # '.'
+            store8(buf + n + 1, 48 + rem10);
+            n = n + 2;
+        }
+        store8(buf + n, load8(thresholds + unit));
+        n = n + 1;
+    }
+    return n;
+}
+
+# Emit `v` as human-readable size right-justified to `width`.
+fn _ls_emit_human_padded(v, width): i64 {
+    var buf[16];
+    var n = _ls_render_human(v, &buf);
+    var pad = width - n;
+    var sp[2];
+    store8(&sp, 32);
+    while (pad > 0) {
+        syscall(1, 1, &sp, 1);
+        pad = pad - 1;
+    }
+    syscall(1, 1, &buf, n);
+    return 0;
+}
+
+fn _ls_human_width(v): i64 {
+    var buf[16];
+    return _ls_render_human(v, &buf);
+}
+
+# Emit `YYYY-MM-DD HH:MM ` (17 chars including trailing space) for the
+# given epoch. Uses chrono's `epoch_to_date`.
+fn _ls_emit_mtime(epoch): i64 {
+    var d = epoch_to_date(epoch);
+    var buf[20];
+    var year  = load64(d);
+    var month = load64(d + 8);
+    var day   = load64(d + 16);
+    var hour  = load64(d + 24);
+    var min   = load64(d + 32);
+    # Year: 4 digits.
+    store8(&buf + 0, 48 + (year / 1000));
+    store8(&buf + 1, 48 + ((year / 100) - ((year / 1000) * 10)));
+    store8(&buf + 2, 48 + ((year / 10) - ((year / 100) * 10)));
+    store8(&buf + 3, 48 + (year - (year / 10) * 10));
+    store8(&buf + 4, 45);  # '-'
+    store8(&buf + 5, 48 + (month / 10));
+    store8(&buf + 6, 48 + (month - (month / 10) * 10));
+    store8(&buf + 7, 45);  # '-'
+    store8(&buf + 8, 48 + (day / 10));
+    store8(&buf + 9, 48 + (day - (day / 10) * 10));
+    store8(&buf + 10, 32);  # ' '
+    store8(&buf + 11, 48 + (hour / 10));
+    store8(&buf + 12, 48 + (hour - (hour / 10) * 10));
+    store8(&buf + 13, 58);  # ':'
+    store8(&buf + 14, 48 + (min / 10));
+    store8(&buf + 15, 48 + (min - (min / 10) * 10));
+    store8(&buf + 16, 32);  # trailing space
+    syscall(1, 1, &buf, 17);
+    return 0;
+}
+
+# Append a `-F`-style type suffix character (returns the byte written,
+# or 0 if none).
+fn _ls_type_suffix(st): i64 {
+    var m = load64(st + 24);
+    if ((m & 61440) == 16384) { return 47; }   # / dir
+    if ((m & 61440) == 40960) { return 64; }   # @ symlink
+    if ((m & 61440) == 4096)  { return 124; }  # | fifo
+    if ((m & 61440) == 49152) { return 61; }   # = socket
+    if ((m & 61440) == 32768) {
+        # Regular file: '*' if any execute bit is set.
+        if ((m & 73) != 0) { return 42; }  # 73 = 64|8|1 (ux|gx|ox)
+    }
+    return 0;
+}
+
+fn _ls_emit_suffix(st): i64 {
+    var c = _ls_type_suffix(st);
+    if (c != 0) {
+        var sb[2];
+        store8(&sb, c);
+        syscall(1, 1, &sb, 1);
+    }
+    return 0;
+}
+
+# Read and cache the symlink target into the record (for -l rendering).
+fn _ls_load_link_target(parent_dirfd, rec): i64 {
+    if (_ls_rec_link_target(rec) != 0) { return 0; }
+    var buf = alloc(4096);
+    var n = fs_readlinkat(parent_dirfd, _ls_rec_name(rec), buf, 4095);
+    if (n < 0) { return n; }
+    store8(buf + n, 0);
+    _ls_rec_set_link_target(rec, buf);
+    return 0;
+}
+
+# --- collection + sorting ---
+
+# Three-way byte-comparison: < 0 if a<b, 0 if equal, > 0 if a>b.
+# Cyrius stdlib only exposes `streq`; we need ordering for the sort.
+fn _ls_strcmp(a, b): i64 {
+    var i: i64 = 0;
+    while (1 == 1) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (ca != cb) { return ca - cb; }
+        if (ca == 0) { return 0; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Insertion sort entries by name (case-sensitive). `reverse` flips
+# the comparator.
+fn _ls_sort(entries, reverse): i64 {
+    var n = vec_len(entries);
+    var i: i64 = 1;
+    while (i < n) {
+        var cur = vec_get(entries, i);
+        var cur_name = _ls_rec_name(cur);
+        var j = i;
+        var done: i64 = 0;
+        while (done == 0) {
+            if (j == 0) { done = 1; }
+            else {
+                var prev = vec_get(entries, j - 1);
+                var prev_name = _ls_rec_name(prev);
+                var cmp = _ls_strcmp(prev_name, cur_name);
+                if (reverse == 1) { cmp = 0 - cmp; }
+                if (cmp > 0) {
+                    vec_set(entries, j, prev);
+                    j = j - 1;
+                } else {
+                    done = 1;
+                }
+            }
+        }
+        vec_set(entries, j, cur);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Collect entries from `dir_path`. Returns a vec of records, or 0 on
+# open failure (caller reports its own error).
+fn _ls_collect(dir_path, all_mode, almost_all): i64 {
+    var dir_fd = fs_openat(0 - 100, dir_path, 65536, 0);  # O_RDONLY | O_DIRECTORY
+    if (dir_fd < 0) { return dir_fd; }
+
+    var entries = vec_new();
+    var dent_buf = alloc(4096);
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var nb = fs_getdents64(dir_fd, dent_buf, 4096);
+        if (nb < 0) {
+            if ((0 - nb) == 4) {
+                # EINTR — retry.
+            } else {
+                fs_close(dir_fd);
+                return nb;
+            }
+        } else {
+            if (nb == 0) { loop = 0; }
+            else {
+                var off: i64 = 0;
+                while (off < nb) {
+                    var ent = dent_buf + off;
+                    var reclen = fs_dent_reclen(ent);
+                    var name = fs_dent_name(ent);
+                    var is_dotdot = fs_dent_is_dotdot(ent);
+                    var include_it: i64 = 1;
+                    if (is_dotdot == 1) {
+                        if (all_mode == 0) { include_it = 0; }
+                        if (almost_all == 1) { include_it = 0; }
+                    } else {
+                        if (load8(name) == 46) {
+                            if (all_mode == 0) {
+                                if (almost_all == 0) { include_it = 0; }
+                            }
+                        }
+                    }
+                    if (include_it == 1) {
+                        var nlen = strlen(name);
+                        var name_copy = alloc(nlen + 1);
+                        memcpy(name_copy, name, nlen + 1);
+                        var rec = _ls_rec_new(name_copy);
+                        fs_lstat_at(dir_fd, name, _ls_rec_st(rec));
+                        # Cache symlink target if it'll be needed by -l.
+                        if (fs_is_lnk(_ls_rec_st(rec)) == 1) {
+                            _ls_load_link_target(dir_fd, rec);
+                        }
+                        vec_push(entries, rec);
+                    }
+                    off = off + reclen;
+                }
+            }
+        }
+    }
+    fs_close(dir_fd);
+    return entries;
+}
+
+# --- output ---
+
+fn _ls_print_simple(entries, F_mode, inode_mode): i64 {
+    var n = vec_len(entries);
+    # Compute inode column width if -i.
+    var ino_w: i64 = 0;
+    if (inode_mode == 1) {
+        var i: i64 = 0;
+        while (i < n) {
+            var rec = vec_get(entries, i);
+            var w = _ls_dec_width(load64(_ls_rec_st(rec) + 8));
+            if (w > ino_w) { ino_w = w; }
+            i = i + 1;
+        }
+    }
+    var i: i64 = 0;
+    while (i < n) {
+        var rec = vec_get(entries, i);
+        var name = _ls_rec_name(rec);
+        var st = _ls_rec_st(rec);
+        if (inode_mode == 1) {
+            _ls_emit_dec_padded(load64(st + 8), ino_w);
+            syscall(1, 1, " ", 1);
+        }
+        syscall(1, 1, name, strlen(name));
+        if (F_mode == 1) { _ls_emit_suffix(st); }
+        syscall(1, 1, "\n", 1);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _ls_print_long(entries, human, F_mode, inode_mode): i64 {
+    var n = vec_len(entries);
+    # Pass 1: compute widths.
+    var w_nlink: i64 = 1;
+    var w_uid:   i64 = 1;
+    var w_gid:   i64 = 1;
+    var w_size:  i64 = 1;
+    var w_ino:   i64 = 1;
+    var i: i64 = 0;
+    while (i < n) {
+        var rec = vec_get(entries, i);
+        var st = _ls_rec_st(rec);
+        var wn = _ls_dec_width(load64(st + 16));
+        if (wn > w_nlink) { w_nlink = wn; }
+        var wu = _ls_dec_width(load64(st + 28) & 4294967295);
+        if (wu > w_uid)   { w_uid = wu; }
+        var wg = _ls_dec_width(load64(st + 32) & 4294967295);
+        if (wg > w_gid)   { w_gid = wg; }
+        var sz: i64 = 0;
+        if (human == 1) {
+            sz = _ls_human_width(load64(st + 48));
+        } else {
+            sz = _ls_dec_width(load64(st + 48));
+        }
+        if (sz > w_size)  { w_size = sz; }
+        if (inode_mode == 1) {
+            var wi = _ls_dec_width(load64(st + 8));
+            if (wi > w_ino) { w_ino = wi; }
+        }
+        i = i + 1;
+    }
+    # Pass 2: emit.
+    i = 0;
+    while (i < n) {
+        var rec = vec_get(entries, i);
+        var st = _ls_rec_st(rec);
+        var name = _ls_rec_name(rec);
+        if (inode_mode == 1) {
+            _ls_emit_dec_padded(load64(st + 8), w_ino);
+            syscall(1, 1, " ", 1);
+        }
+        var perm_buf[16];
+        _ls_render_symperm(load64(st + 24), &perm_buf);
+        syscall(1, 1, &perm_buf, 10);
+        syscall(1, 1, " ", 1);
+        _ls_emit_dec_padded(load64(st + 16), w_nlink);
+        syscall(1, 1, " ", 1);
+        _ls_emit_dec_padded(load64(st + 28) & 4294967295, w_uid);
+        syscall(1, 1, " ", 1);
+        _ls_emit_dec_padded(load64(st + 32) & 4294967295, w_gid);
+        syscall(1, 1, " ", 1);
+        if (human == 1) {
+            _ls_emit_human_padded(load64(st + 48), w_size);
+        } else {
+            _ls_emit_dec_padded(load64(st + 48), w_size);
+        }
+        syscall(1, 1, " ", 1);
+        _ls_emit_mtime(load64(st + 88));
+        syscall(1, 1, name, strlen(name));
+        # Symlink target.
+        if (fs_is_lnk(st) == 1) {
+            var tgt = _ls_rec_link_target(rec);
+            if (tgt != 0) {
+                syscall(1, 1, " -> ", 4);
+                syscall(1, 1, tgt, strlen(tgt));
+            }
+        }
+        if (F_mode == 1) { _ls_emit_suffix(st); }
+        syscall(1, 1, "\n", 1);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _ls_print_dir(entries, long_mode, human, F_mode, inode_mode): i64 {
+    if (long_mode == 1) {
+        return _ls_print_long(entries, human, F_mode, inode_mode);
+    }
+    return _ls_print_simple(entries, F_mode, inode_mode);
+}
+
+# Print one directory's listing (and recurse if R_mode). `prefix_with_header`
+# means emit "path:\n" header before the entries (used in -R / multi-dir).
+fn _ls_list_dir(dir_path, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, header): i64 {
+    if (header == 1) {
+        syscall(1, 1, dir_path, strlen(dir_path));
+        syscall(1, 1, ":\n", 2);
+    }
+    var entries_or_err = _ls_collect(dir_path, all_mode, almost_all);
+    if (entries_or_err < 0) {
+        _ls_report(dir_path, 0 - entries_or_err);
+        return entries_or_err;
+    }
+    var entries = entries_or_err;
+    _ls_sort(entries, reverse);
+    _ls_print_dir(entries, long_mode, human, F_mode, inode_mode);
+
+    if (R_mode == 1) {
+        var n = vec_len(entries);
+        var i: i64 = 0;
+        while (i < n) {
+            var rec = vec_get(entries, i);
+            var name = _ls_rec_name(rec);
+            # Skip . and ..
+            var skip: i64 = 0;
+            if (load8(name) == 46) {
+                if (load8(name + 1) == 0) { skip = 1; }
+                if (skip == 0) {
+                    if (load8(name + 1) == 46) {
+                        if (load8(name + 2) == 0) { skip = 1; }
+                    }
+                }
+            }
+            if (skip == 0) {
+                var st = _ls_rec_st(rec);
+                # Only descend into REAL directories (not symlinks-to-dir).
+                if (fs_is_dir(st) == 1) {
+                    syscall(1, 1, "\n", 1);
+                    var child = path_join(dir_path, name);
+                    _ls_list_dir(child, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, 1);
+                }
+            }
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# Print a single-entry listing for a non-directory operand (or a
+# directory under -d). Caller has already lstat'd into st_buf.
+fn _ls_print_entry(name, st_buf, long_mode, human, F_mode, inode_mode): i64 {
+    # Build a one-entry vec, then route through the same printer.
+    var rec = _ls_rec_new(name);
+    memcpy(_ls_rec_st(rec), st_buf, 144);
+    if (fs_is_lnk(st_buf) == 1) {
+        var lb = alloc(4096);
+        var n = fs_readlinkat(0 - 100, name, lb, 4095);
+        if (n >= 0) {
+            store8(lb + n, 0);
+            _ls_rec_set_link_target(rec, lb);
+        }
+    }
+    var v = vec_new();
+    vec_push(v, rec);
+    _ls_print_dir(v, long_mode, human, F_mode, inode_mode);
+    return 0;
+}
+
+fn cmd_ls(start: i64): i64 {
+    _ls_init_spec();
+    if (kriya_args_parse(_ls_spec, start) != 0) {
+        syscall(1, 2, "kriya ls: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        return EXIT_USAGE;
+    }
+
+    var all_mode: i64 = 0;
+    if (flags_get_bool(_ls_spec, _ls_a_idx) == 1) { all_mode = 1; }
+    var almost_all: i64 = 0;
+    if (flags_get_bool(_ls_spec, _ls_A_idx) == 1) { almost_all = 1; }
+    var long_mode: i64 = 0;
+    if (flags_get_bool(_ls_spec, _ls_l_idx) == 1) { long_mode = 1; }
+    var human: i64 = 0;
+    if (flags_get_bool(_ls_spec, _ls_h_idx) == 1) { human = 1; }
+    var reverse: i64 = 0;
+    if (flags_get_bool(_ls_spec, _ls_r_idx) == 1) { reverse = 1; }
+    var F_mode: i64 = 0;
+    if (flags_get_bool(_ls_spec, _ls_F_idx) == 1) { F_mode = 1; }
+    var inode_mode: i64 = 0;
+    if (flags_get_bool(_ls_spec, _ls_i_idx) == 1) { inode_mode = 1; }
+    var d_mode: i64 = 0;
+    if (flags_get_bool(_ls_spec, _ls_d_idx) == 1) { d_mode = 1; }
+    var R_mode: i64 = 0;
+    if (flags_get_bool(_ls_spec, _ls_R_idx) == 1) { R_mode = 1; }
+
+    var npos = flags_positional_count(_ls_spec);
+
+    # No operands → list cwd.
+    if (npos < 1) {
+        var r = _ls_list_dir(".", all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, 0);
+        if (r != 0) { return EXIT_FAILURE; }
+        return EXIT_SUCCESS;
+    }
+
+    # Classify operands: split into non-directories (printed first as a
+    # flat list) and directories (each gets its own section).
+    var any_failed: i64 = 0;
+    var nondir_entries = vec_new();
+    var dir_paths      = vec_new();
+
+    var i: i64 = 0;
+    while (i < npos) {
+        var p = flags_positional(_ls_spec, i);
+        var st[144];
+        var sr = fs_lstat_at(0 - 100, p, &st);
+        if (sr != 0) {
+            _ls_report(p, 0 - sr);
+            any_failed = 1;
+        } else {
+            var is_dir: i64 = 0;
+            if (fs_is_dir(&st) == 1) { is_dir = 1; }
+            if (d_mode == 1)         { is_dir = 0; }
+            if (is_dir == 1) {
+                vec_push(dir_paths, p);
+            } else {
+                # Single-entry record for the flat list.
+                var nlen = strlen(p);
+                var name_copy = alloc(nlen + 1);
+                memcpy(name_copy, p, nlen + 1);
+                var rec = _ls_rec_new(name_copy);
+                memcpy(_ls_rec_st(rec), &st, 144);
+                if (fs_is_lnk(&st) == 1) {
+                    _ls_load_link_target(0 - 100, rec);
+                }
+                vec_push(nondir_entries, rec);
+            }
+        }
+        i = i + 1;
+    }
+
+    # Emit non-directory operands first (sorted).
+    if (vec_len(nondir_entries) > 0) {
+        _ls_sort(nondir_entries, reverse);
+        _ls_print_dir(nondir_entries, long_mode, human, F_mode, inode_mode);
+    }
+
+    # Then each directory operand. Header if multiple sources, or if -R.
+    var ndir = vec_len(dir_paths);
+    var multi_dir: i64 = 0;
+    if (ndir > 1) { multi_dir = 1; }
+    if (R_mode == 1) { multi_dir = 1; }
+    var any_nondir = 0;
+    if (vec_len(nondir_entries) > 0) { any_nondir = 1; }
+
+    var di: i64 = 0;
+    while (di < ndir) {
+        var dp = vec_get(dir_paths, di);
+        var header: i64 = 0;
+        if (multi_dir == 1) { header = 1; }
+        if (any_nondir == 1) { header = 1; }
+        # Separate sections with a blank line.
+        if (di > 0) { syscall(1, 1, "\n", 1); }
+        else {
+            if (any_nondir == 1) { syscall(1, 1, "\n", 1); }
+        }
+        var r = _ls_list_dir(dp, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, header);
+        if (r != 0) { any_failed = 1; }
+        di = di + 1;
+    }
+
+    if (any_failed == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}

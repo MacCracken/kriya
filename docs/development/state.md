@@ -26,7 +26,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0. All thirteen shipped utilities (six fr
 | `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
 | `src/lib/errmsg.cyr` | implemented — errnos 1..40 + `errmsg_is_known` |
 | `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
-| `src/cmd/*.cyr` | 19 of ~40 — M1 + M2 (13) + `basename.cyr`, `dirname.cyr`, `realpath.cyr`, `readlink.cyr`, `which.cyr`, `stat.cyr` (M3) |
+| `src/cmd/*.cyr` | 20 of ~40 — M1 + M2 (13) + M3 (7: `basename`, `dirname`, `realpath`, `readlink`, `which`, `stat`, `ls`) |
 | `src/lib/fs.cyr` | implemented — `*at()`-family wrappers, `getdents64` iteration, type predicates, AT/S_IF/DT constants. Foundation for cp -R / mv / rm -r per ADR 0003. Adds `fs_rename`/`fs_renameat`/`fs_realpath` (3-mode canonicalization). |
 | `src/lib/protected.cyr` | implemented — `protected_paths[]` table with `/`, canonicalization via `path_normalize` + getcwd, `is_protected_path()` membership check. Per ADR 0004, only consumed by `rm` today. |
 
@@ -47,7 +47,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0. All thirteen shipped utilities (six fr
 | `mv` | `src/cmd/mv.cyr` | **implemented** (`-f`/`-i`/`-n`/`-v`; same-FS rename; cross-FS files+symlinks; ADR-0003 symlink-to-dir refusal; cross-FS dir mv lands with rm tree-walk) | M2 |
 | `rm` | `src/cmd/rm.cyr` | **implemented** (`-f`/`-i`/`-r`/`-R`/`-d`/`-v`; fd-rooted recursion with O_NOFOLLOW per ADR 0003; protected-paths refusal per ADR 0004) | M2 |
 | `ln` | `src/cmd/ln.cyr` | **implemented** (`-s`, `-f`, `-P`, `-n`, `-v`; `-r`/`-T`/`-t`/`-b` deferred) | M2 |
-| `ls` | `src/cmd/ls.cyr` | not started | M3 |
+| `ls` | `src/cmd/ls.cyr` | **implemented** (`-a`/`-A`/`-l`/`-h`/`-r`/`-1`/`-F`/`-i`/`-d`/`-R`; defer multi-column tty packing, `-t`/`-S`, `--color`, `%U`/`%G` name lookup) | M3 |
 | `stat` | `src/cmd/stat.cyr` | **implemented** (`-c`/`--printf`/`-L`/`-t`; 22 format specifiers; %U/%G/%x/%y/%z/%N/%W deferred to chrono+passwd+statx) | M3 |
 | `basename` | `src/cmd/basename.cyr` | **implemented** (POSIX single-pair, `-a`/`-s`/`-z`) | M3 |
 | `dirname` | `src/cmd/dirname.cyr` | **implemented** (multi-operand, `-z`) | M3 |
@@ -103,6 +103,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0. All thirteen shipped utilities (six fr
 - `scripts/smoke-readlink.sh` — behavioural test for `readlink` (24/24 — POSIX raw read-link + EINVAL on non-symlink; `-f` REQUIRE_PARENT boundary; `-e` REQUIRE_ALL; `-m` ALLOW_MISSING; `-q` silences both surfaces; `-n` newline-on-final-only; `-z` overrides `-n`; precedence `-m > -e > -f`).
 - `scripts/smoke-which.sh` — behavioural test for `which` (23/23 — controlled-PATH first-match-wins, `-a` shadowing in PATH order, non-executable + directory entries skipped, empty PATH and empty-entry-means-cwd, slash-literal-bypasses-PATH, partial-failure exit + stdout preserved, `-s`/`-z` modifiers).
 - `scripts/smoke-stat.sh` — behavioural test for `stat` (37/37 — every shipped specifier compared against GNU `stat`, `-c` vs `--printf` escape handling, `-L` vs default lstat, `-t` 16-column terse parity, partial-failure exit, unknown-specifier literal emission).
+- `scripts/smoke-ls.sh` — behavioural test for `ls` (36/36 — default sort, `-a`/`-A` hidden-file split, `-r` reverse, `-F` type-suffix matrix, `-i` inode column, `-l` 8-column layout with ISO mtime, `-l` symlink target rendering, `-l -h` human-size matrix at 1K/5K/1.4M boundaries, `-d` directory-as-entry, `-R` recursion without symlink-follow, multi-operand layout, partial-failure exit).
 - `tests/kriya.fcyr` — fuzz stub (lands when M2 destructive utilities arrive).
 
 ## Dependencies
@@ -139,7 +140,7 @@ _None yet._ Expected consumers once M1 ships:
   3. ✅ `readlink` (2026-05-17) — POSIX raw read-link + canonicalize via shared `fs_realpath`. Display modifiers `-n`/`-z`/`-q`.
   4. ✅ `which` (2026-05-17) — `$PATH` walk with `-a`/`-s`/`-z`; slash-literal bypasses PATH.
   5. ✅ `stat` (2026-05-17) — printf-style format engine, `-c`/`--printf`/`-L`/`-t`; 22 specifiers verified cell-by-cell against GNU.
-  6. `ls` — biggest M3 utility; getdents64 + sort + `-l` columns + `-h` human sizes. Closes M3.
+  6. ✅ `ls` (2026-05-17) — `-a`/`-A`/`-l`/`-h`/`-r`/`-1`/`-F`/`-i`/`-d`/`-R`; two-pass long-form with right-justified column alignment; ISO mtime via `chrono.epoch_to_date`. **Closes M3.**
 - Deferred features tracked against future enablers (each a known-named follow-up, not "TBD"):
   - echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
   - pwd `$PWD` inode-match — waits on `fs.cyr` stat-compare.
