@@ -21,3 +21,5 @@ Decisions about kriya — what we chose, the context, and the consequences we ac
 
 - [0001 — BusyBox-style dispatcher vs N independent binaries](0001-busybox-dispatcher-vs-n-binaries.md) — one binary, symlinks per utility; `argv[0]` selects the command.
 - [0002 — Option parsing for humans and agents](0002-option-parsing-humans-and-agents.md) — one parser, POSIX-short + GNU-long, agent-safe restrictions (no prefix matching, no optional values, no interactive hangs, `--help=json` for capability discovery).
+- [0003 — Symlink-follow policy for destructive utilities](0003-symlink-follow-policy.md) — POSIX-aligned defaults; `cp -R` preserves symlinks; `rm` never follows (no flag opts in).
+- [0004 — `rm` refuses to operate on `/` — no escape hatch](0004-rm-refuses-root.md) — hard No-Go on bulk root deletion; no `--no-preserve-root`, no env var, no build flag. Wiping a drive belongs to the OS installer or external boot.

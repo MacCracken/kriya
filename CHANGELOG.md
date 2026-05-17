@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+#### M2 policy lead-in (no code yet — destructive utilities ship behind these decisions)
+
+- **ADR 0003** — Symlink-follow policy for destructive utilities. POSIX-aligned defaults across `cp`, `mv`, `rm`, `ln`; the kriya-defining choice is `cp -R` preserving symlinks by default (closes the POSIX implementation-defined gap in the safer direction) and `rm` having **no flag, env var, or build option** to follow symlinks under any circumstance. Recursive walks use `openat(O_NOFOLLOW | O_DIRECTORY)` to close TOCTOU windows; destination opens use `O_NOFOLLOW` when policy says preserve. `mv` refuses to overwrite a symlink-to-directory.
+- **ADR 0004** — `rm` refuses to operate on `/`, no escape hatch. Every operand is absolute-path-resolved and textually canonicalized (collapse `..`, no symlink resolution); if the result equals `/` the entire invocation exits `2` with `kriya rm: refusing to operate on '/'`. No `--no-preserve-root` flag, no `KRIYA_*` env var, no build-time bypass, no interactive override. Mechanism is a static `protected_paths[]` shipping with `/` only; future entries do not require a new ADR. Legitimate fine-grained removal (`rm /usr/bin/oldtool`, package-manager file replacement, `rm -rf /var/cache/zugot/build-1234`) is fully supported — only the bulk root operand is blocked. Known weakness: shell-expanded `/*` reaches kriya as `/bin /boot …`, none of which match `/`; a cross-operand bulk-root heuristic is deferred to a future architecture note (`003-cross-operand-bulk-root-defense.md`).
+
 ## [0.2.0] — 2026-05-17
 
 Closes M1 — dispatcher + six simplest utilities + four shared lib modules + two architecture notes + cold-start benchmark. Dispatcher cold-start median **1.185ms** (target ≤2ms per v1.0 acceptance in `roadmap.md`).

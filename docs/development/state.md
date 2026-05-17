@@ -106,7 +106,15 @@ _None yet._ Expected consumers once M1 ships:
 
 ## In-flight work
 
-- M1 closed; v0.2.0 cut. Next milestone: M2 (file operations — `mkdir`, `rmdir`, `touch`, `cp`, `mv`, `rm`, `ln`). M2 is the high-risk milestone (destructive ops, TOCTOU, symlink policy) and gets its own batch of ADRs (0003 symlink-follow, 0004 `rm -rf /` semantics) before any code lands. See [`roadmap.md`](roadmap.md).
+- M1 closed; v0.2.0 cut. M2 policy lead-in **landed 2026-05-17**: ADR 0003 (symlink-follow policy) and ADR 0004 (`rm` refuses `/`, no escape hatch — stronger than the GNU `--no-preserve-root` model). M2 code now unblocked. Recommended ship order:
+  1. `mkdir` — pure-create, simplest, exercises `*at()` + `path_normalize` end-to-end. Lays the M2 ground.
+  2. `rmdir` — empty-dir delete; first destructive utility but with the safest possible payload (empty-only).
+  3. `touch` — pure-create / metadata-update; no traversal.
+  4. `ln` — symlink + hard-link; the first user-facing surface of ADR 0003's `-P` semantics for `ln`.
+  5. `cp` — recursive copy under ADR 0003's preserve-by-default policy; `O_NOFOLLOW` on destinations.
+  6. `mv` — rename / cross-FS copy+unlink; symlink-to-dir refusal from ADR 0003.
+  7. `rm` — last, and most carefully — full ADR 0003 (`O_NOFOLLOW` traversal, no follow flag) and ADR 0004 (`protected_paths[]` check) enforcement.
+- M2 also introduces `src/lib/fs.cyr` (the `*at()` traversal + `O_NOFOLLOW` discipline lives there, shared across `cp`/`mv`/`rm`) and `src/lib/protected.cyr` (the `protected_paths[]` table from ADR 0004).
 - Deferred features tracked against future enablers (each a known-named follow-up, not "TBD"):
   - echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
   - pwd `$PWD` inode-match — waits on `fs.cyr` stat-compare.
