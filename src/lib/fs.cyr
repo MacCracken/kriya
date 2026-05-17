@@ -232,3 +232,227 @@ fn fs_dent_is_dotdot(ent): i64 {
     }
     return 0;
 }
+
+# --- canonical path resolution -------------------------------------
+#
+# `fs_realpath` walks a path component-by-component, normalising `.`
+# and `..`, resolving every symlink it encounters, and producing an
+# absolute canonical form. The three missing-component policies
+# correspond to GNU `realpath`'s `-e`/`-m` and `readlink`'s `-f`:
+#
+#   FS_REALPATH_REQUIRE_ALL    every component must exist (default for
+#                              `realpath` and `readlink -e`).
+#   FS_REALPATH_REQUIRE_PARENT every component except the last must
+#                              exist (the `readlink -f` mode — the
+#                              last component is treated as "would-be
+#                              created here" so the canonical path is
+#                              defined even if the target doesn't yet).
+#   FS_REALPATH_ALLOW_MISSING  no component need exist; once we hit
+#                              an ENOENT, we stop lstat'ing and append
+#                              the rest as text (`realpath -m`).
+#
+# Returns the result LENGTH (excluding the null terminator) on success.
+# Returns a negative -errno on failure:
+#   -ENOENT (-2)         a required component is missing per `mode`.
+#   -ENAMETOOLONG (-36)  result wouldn't fit in `out_bufsize`.
+#   -ELOOP (-40)         more than 40 symlink resolutions (cycle or
+#                        pathologically deep chain).
+#   other negative errno propagated from lstat/readlink/getcwd.
+
+enum FsRealpathMode {
+    FS_REALPATH_REQUIRE_ALL    = 0;
+    FS_REALPATH_REQUIRE_PARENT = 1;
+    FS_REALPATH_ALLOW_MISSING  = 2;
+}
+
+# Internal helper: strip the last component of `result` (in-place
+# truncation by writing a null and updating the length). Mirrors
+# `dirname` but operates on the caller's buffer to avoid an alloc.
+# `ri` is the current length; returns the new length.
+fn _fs_strip_last_component(result, ri): i64 {
+    if (ri <= 1) { return 1; }  # don't strip the root
+    var p = ri - 1;
+    var scanning: i64 = 1;
+    while (scanning == 1) {
+        if (p == 0) {
+            scanning = 0;
+        } else {
+            if (load8(result + p) == 47) {
+                scanning = 0;
+            } else {
+                p = p - 1;
+            }
+        }
+    }
+    if (p == 0) {
+        store8(result + 1, 0);
+        return 1;
+    }
+    store8(result + p, 0);
+    return p;
+}
+
+fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
+    if (input == 0)        { return 0 - 2; }
+    if (load8(input) == 0) { return 0 - 2; }
+
+    var BUFSZ: i64 = 16384;
+    var result    = alloc(BUFSZ);
+    var remaining = alloc(BUFSZ);
+    var ri: i64 = 0;
+
+    # Seed result + remaining.
+    if (path_is_absolute(input) == 1) {
+        store8(result, 47);
+        store8(result + 1, 0);
+        ri = 1;
+        var ilen = strlen(input);
+        memcpy(remaining, input + 1, ilen);  # also copies the null
+    } else {
+        var n = syscall(SYS_GETCWD, result, BUFSZ);
+        if (n < 0) { return n; }
+        ri = n - 1;  # SYS_GETCWD returns length INCLUDING null
+        if (ri < 1) { ri = 1; }
+        var ilen = strlen(input);
+        memcpy(remaining, input, ilen + 1);
+    }
+
+    var loop_count: i64 = 0;
+    var stopped: i64 = 0;  # set when ALLOW_MISSING / REQUIRE_PARENT-last hits ENOENT
+    var rp: i64 = 0;
+
+    while (load8(remaining + rp) != 0) {
+        # Skip leading slashes (collapses "//").
+        while (load8(remaining + rp) == 47) { rp = rp + 1; }
+        if (load8(remaining + rp) == 0) { rp = rp; }
+        else {
+            # Find end of segment.
+            var seg_end = rp;
+            var sc: i64 = 1;
+            while (sc == 1) {
+                var c = load8(remaining + seg_end);
+                if (c == 0) { sc = 0; }
+                else {
+                    if (c == 47) { sc = 0; }
+                    else { seg_end = seg_end + 1; }
+                }
+            }
+            var seg_len = seg_end - rp;
+
+            # Classify.
+            var is_dot: i64 = 0;
+            var is_dotdot: i64 = 0;
+            if (seg_len == 1) {
+                if (load8(remaining + rp) == 46) { is_dot = 1; }
+            }
+            if (seg_len == 2) {
+                if (load8(remaining + rp) == 46) {
+                    if (load8(remaining + rp + 1) == 46) { is_dotdot = 1; }
+                }
+            }
+
+            if (is_dot == 1) {
+                rp = seg_end;
+            } else {
+                if (is_dotdot == 1) {
+                    ri = _fs_strip_last_component(result, ri);
+                    rp = seg_end;
+                } else {
+                    # Build candidate by appending seg to result.
+                    var sep: i64 = 1;
+                    if (ri == 1) {
+                        if (load8(result) == 47) { sep = 0; }
+                    }
+                    if (ri + sep + seg_len + 1 > BUFSZ) { return 0 - 36; }
+                    if (sep == 1) {
+                        store8(result + ri, 47);
+                        ri = ri + 1;
+                    }
+                    memcpy(result + ri, remaining + rp, seg_len);
+                    var candidate_end = ri + seg_len;
+                    store8(result + candidate_end, 0);
+
+                    if (stopped == 1) {
+                        ri = candidate_end;
+                        rp = seg_end;
+                    } else {
+                        var st[144];
+                        var sr = fs_lstat_at(0 - 100, result, &st);
+                        if (sr != 0) {
+                            var errno = 0 - sr;
+                            if (errno != 2) { return sr; }
+                            # ENOENT — is this the last segment of remaining?
+                            var is_last: i64 = 1;
+                            var pp = seg_end;
+                            while (load8(remaining + pp) == 47) { pp = pp + 1; }
+                            if (load8(remaining + pp) != 0) { is_last = 0; }
+
+                            if (mode == 0) { return 0 - 2; }  # REQUIRE_ALL
+                            if (mode == 1) {
+                                if (is_last == 0) { return 0 - 2; }  # REQUIRE_PARENT, not last
+                            }
+                            # ALLOW_MISSING or REQUIRE_PARENT-last: commit, stop.
+                            ri = candidate_end;
+                            stopped = 1;
+                            rp = seg_end;
+                        } else {
+                            if (fs_is_lnk(&st) == 1) {
+                                loop_count = loop_count + 1;
+                                if (loop_count > 40) { return 0 - 40; }
+
+                                var link_buf = alloc(BUFSZ);
+                                var ln = fs_readlinkat(0 - 100, result, link_buf, BUFSZ - 1);
+                                if (ln < 0) { return ln; }
+                                store8(link_buf + ln, 0);
+
+                                # Strip the segment we just appended (the symlink).
+                                ri = candidate_end - seg_len - sep;
+                                if (ri < 1) { ri = 1; }
+                                store8(result + ri, 0);
+
+                                # If link is absolute, reset result to "/".
+                                if (path_is_absolute(link_buf) == 1) {
+                                    store8(result, 47);
+                                    store8(result + 1, 0);
+                                    ri = 1;
+                                }
+
+                                # Build new remaining = link_target + "/" + (old remaining past seg_end).
+                                var new_remaining = alloc(BUFSZ);
+                                var copy_off: i64 = 0;
+                                var tl = ln;
+                                if (path_is_absolute(link_buf) == 1) {
+                                    memcpy(new_remaining, link_buf + 1, tl);
+                                    tl = tl - 1;
+                                } else {
+                                    memcpy(new_remaining, link_buf, tl);
+                                }
+                                var rest_off = seg_end;
+                                while (load8(remaining + rest_off) == 47) { rest_off = rest_off + 1; }
+                                var rest_len = strlen(remaining + rest_off);
+                                if (rest_len > 0) {
+                                    store8(new_remaining + tl, 47);
+                                    memcpy(new_remaining + tl + 1, remaining + rest_off, rest_len + 1);
+                                } else {
+                                    store8(new_remaining + tl, 0);
+                                }
+
+                                remaining = new_remaining;
+                                rp = 0;
+                            } else {
+                                # Regular file/dir — commit.
+                                ri = candidate_end;
+                                rp = seg_end;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (ri + 1 > out_bufsize) { return 0 - 36; }
+    memcpy(out_buf, result, ri);
+    store8(out_buf + ri, 0);
+    return ri;
+}

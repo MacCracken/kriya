@@ -26,8 +26,8 @@ M1 closed at v0.2.0; M2 closed at v0.3.0. All thirteen shipped utilities (six fr
 | `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
 | `src/lib/errmsg.cyr` | implemented — errnos 1..40 + `errmsg_is_known` |
 | `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
-| `src/cmd/*.cyr` | 15 of ~40 — M1 + M2 (13) + `basename.cyr`, `dirname.cyr` (M3 start) |
-| `src/lib/fs.cyr` | implemented — `*at()`-family wrappers, `getdents64` iteration, type predicates, AT/S_IF/DT constants. Foundation for cp -R / mv / rm -r per ADR 0003. Adds `fs_rename`/`fs_renameat`. |
+| `src/cmd/*.cyr` | 16 of ~40 — M1 + M2 (13) + `basename.cyr`, `dirname.cyr`, `realpath.cyr` (M3) |
+| `src/lib/fs.cyr` | implemented — `*at()`-family wrappers, `getdents64` iteration, type predicates, AT/S_IF/DT constants. Foundation for cp -R / mv / rm -r per ADR 0003. Adds `fs_rename`/`fs_renameat`/`fs_realpath` (3-mode canonicalization). |
 | `src/lib/protected.cyr` | implemented — `protected_paths[]` table with `/`, canonicalization via `path_normalize` + getcwd, `is_protected_path()` membership check. Per ADR 0004, only consumed by `rm` today. |
 
 ## Per-utility status (will grow with each milestone)
@@ -51,7 +51,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0. All thirteen shipped utilities (six fr
 | `stat` | `src/cmd/stat.cyr` | not started | M3 |
 | `basename` | `src/cmd/basename.cyr` | **implemented** (POSIX single-pair, `-a`/`-s`/`-z`) | M3 |
 | `dirname` | `src/cmd/dirname.cyr` | **implemented** (multi-operand, `-z`) | M3 |
-| `realpath` | `src/cmd/realpath.cyr` | not started | M3 |
+| `realpath` | `src/cmd/realpath.cyr` | **implemented** (`-e`/`-m`/`-q`/`-z`; cycle ELOOP at 40 hops) | M3 |
 | `readlink` | `src/cmd/readlink.cyr` | not started | M3 |
 | `which` | `src/cmd/which.cyr` | not started | M3 |
 | `wc` | `src/cmd/wc.cyr` | not started | M4 |
@@ -99,6 +99,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0. All thirteen shipped utilities (six fr
 - `scripts/smoke-mv.sh` — behavioural test for `mv` (43/43 — same-FS rename, overwrite default, `-n` silent skip, `-i`-on-pipe usage error, multi-into-dir, dir rename, ADR-0003 symlink-to-dir refusal in both single-pair and multi-into-dir shapes, self-move detection, partial-failure paths, verbose. Cross-FS round-trips when `/tmp` and `/dev/shm` differ — file with inode-differs assertion, symlink with target preservation, cross-FS dir error path).
 - `scripts/smoke-rm.sh` — behavioural test for `rm` (53/53 — every ADR-0004 canonicalization escape (`/`, `/.`, `/tmp/..`, `////`, `/../../../`, relative `../../`), no `--no-preserve-root` flag, no env-var bypass, multi-op atomicity preserved; ADR-0003 symlink-to-dir `rm` leaves target intact, `rm -r` of dir-containing-symlink-to-dir never descends; `-f` silences ENOENT; `-r`/`-R`/`-d`/`-v`; partial-failure exit; `-i`-on-pipe usage error).
 - `scripts/smoke-basename-dirname.sh` — paired behavioural test (26/26 — POSIX single-pair, suffix-strip matching + non-matching, `-a`/`-s`/`-z`, multi-operand dirname, NUL-termination, error paths).
+- `scripts/smoke-realpath.sh` — behavioural test for `realpath` + the underlying `fs_realpath` helper (30/30 — absolute/relative, `.`/`..`/duplicate-slash collapse, symlink chains, `-e` default, `-m` text completion through missing components, cycle ELOOP, multi-operand partial-failure exit, `-q` silent mode, `-z` NUL termination).
 - `tests/kriya.fcyr` — fuzz stub (lands when M2 destructive utilities arrive).
 
 ## Dependencies
@@ -131,8 +132,8 @@ _None yet._ Expected consumers once M1 ships:
 - **M2 closed 2026-05-17 at v0.3.0.** All seven planned utilities ship; ADRs 0003 and 0004 verified end-to-end. Cross-repo proposals filed: `2026-05-17-octal-literal-syntax` and `2026-05-17-syscalls-at-family-stdlib` (sweep follow-ups when accepted). Cross-FS directory `mv` is one remaining M2 follow-up — now unblocked since `rm -r` exists.
 - **M3 in progress.** Order (simplest → biggest):
   1. ✅ `basename` + `dirname` (2026-05-17) — paired commit, pure-text utilities. Added `path_basename_len` to fix a latent trailing-slash bug in `path_basename_ptr`'s usage pattern.
-  2. `readlink` — single syscall (`sys_readlink`); flags `-f`/`-e`/`-m`, `-n`, `-z`. Next.
-  3. `realpath` — recursive symlink resolution; depends on path normalization + readlinkat in a loop.
+  2. ✅ `realpath` (2026-05-17) — built on a new `fs_realpath` helper (3-mode canonicalization) in `src/lib/fs.cyr`. Default `-e` requires every component, `-m` allows missing tails, `-q` silent, `-z` NUL. Cycle ELOOP at 40 hops.
+  3. `readlink` — trivial follow-up: POSIX read-link + `-f`/`-e`/`-m` modes reuse `fs_realpath`; plus `-n`/`-z` display modifiers. Next.
   4. `which` — `$PATH` iteration + `sys_access(X_OK)`.
   5. `stat` — formatted output of stat struct fields (format-string parser).
   6. `ls` — biggest M3 utility; getdents64 + sort + `-l` columns + `-h` human sizes.
