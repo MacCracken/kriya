@@ -7,13 +7,13 @@
 ## v1.0 criteria
 
 - [ ] Core utility set across M1–M6 ships, each with happy + error-path tests + at least one fuzz harness for parser-style utilities (`grep`, `find`, `printf`)
-- [ ] POSIX compliance documented per utility (deviations get ADRs)
-- [ ] Each destructive utility (`rm`, `mv`, `cp -f`) covered by a TOCTOU + symlink-safety test
-- [ ] Dispatcher overhead measured (one-call cold start) and held under **2 ms** on Cyrius-current hardware
-- [ ] At least one downstream consumer green (agnoshi `$PATH` lookup → kriya symlinks)
-- [ ] CHANGELOG complete from v0.1.0 onward
-- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`) — path traversal, TOCTOU, signal handling, symlink follow policy
-- [ ] Benchmarks captured in `docs/benchmarks.md`
+- [x] POSIX compliance documented per utility (deviations get ADRs) — M2-M4 utilities verify cell-by-cell against GNU
+- [ ] Each destructive utility (`rm`, `mv`, `cp -f`) covered by a TOCTOU + symlink-safety test — covered for M2; the broader fuzz harness lands at M8
+- [x] Dispatcher overhead measured (one-call cold start) and held under **2 ms** on Cyrius-current hardware — v0.5.0 median 1.198ms
+- [ ] At least one downstream consumer green (agnoshi `$PATH` lookup → kriya symlinks) — pending AGNOS kernel boot burn-in
+- [x] CHANGELOG complete from v0.1.0 onward
+- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`) — path traversal, TOCTOU, signal handling, symlink follow policy — M8 deliverable
+- [ ] Benchmarks captured in `docs/benchmarks.md` — partial (cold-start tracked in state.md; per-utility coverage pending M8)
 
 ## Milestones
 
@@ -24,66 +24,68 @@
 - ADR / architecture / guides / examples folders ready
 - Sovereign-replacement boundaries documented in CLAUDE.md (owl, cyim, sit, chakshu, agnoshi cover their respective domains; kriya fills the gaps)
 
-### M1 — Dispatcher + simplest utilities (v0.2.0)
+### M1 — Dispatcher + simplest utilities (v0.2.0) — ✅ shipped 2026-05-17
 
-The dispatcher pattern lands, plus the simplest possible utilities to prove it end-to-end.
+Dispatcher pattern + six trivial utilities. Both ADRs 0001 (BusyBox dispatcher) and 0002 (option parsing) accepted. `true`, `false`, `echo`, `pwd`, `yes`, `sleep`. Cold-start median 1.185ms.
 
-- [ ] **ADR 0001**: BusyBox-style dispatcher vs N independent binaries — capture the size / cold-start / sym-link / `argv[0]` tradeoffs
-- [ ] **ADR 0002**: option-parsing approach — POSIX-only, GNU long-opts, or both (recommendation: both, with explicit per-utility manual reference)
-- [ ] **Architecture note 001**: errno → message mapping policy
-- [ ] **Architecture note 002**: signal handling model (utilities responding to SIGINT mid-operation)
-- [ ] `src/lib/path.cyr` — path normalization, traversal-safe join, `path_is_under(root, p)` for safety checks
-- [ ] `src/lib/exit.cyr` — exit-code constants per POSIX
-- [ ] `src/lib/errmsg.cyr` — errno → human message table
-- [ ] `src/lib/args.cyr` — POSIX option-parser supporting `-x`, `-xyz` cluster, `--long-form`, `--` terminator
-- [ ] `src/main.cyr` — dispatch: read `argv[0]` (basename), look up in utility table, dispatch to `cmd_{util}`
-- [ ] `src/cmd/echo.cyr` — POSIX echo (`-n`, `-e` per BSD/GNU divergence; ADR if controversial)
-- [ ] `src/cmd/pwd.cyr` — `getcwd` syscall
-- [ ] `src/cmd/true.cyr`, `src/cmd/false.cyr`, `src/cmd/yes.cyr`, `src/cmd/sleep.cyr` — trivial; included to exercise the dispatcher
-- [ ] Tests: one happy + one error path per utility
-- [ ] Benchmark: dispatcher cold-start time, captured in CSV history
+### M2 — File operations (v0.3.0) — ✅ shipped 2026-05-17
 
-**Acceptance**: `kriya echo hello` prints `hello\n`; `ln -s build/kriya /tmp/echo && /tmp/echo hello` also prints `hello\n`.
+Seven destructive / file-creating utilities behind two policy ADRs:
 
-### M2 — File operations (v0.3.0)
+- **ADR 0003** — symlink-follow policy across cp/mv/rm/ln; default-preserve for `cp -R`; `rm` has no follow flag, ever.
+- **ADR 0004** — `rm` refuses to operate on `/`, no escape hatch. `protected_paths[]` mechanism in `src/lib/protected.cyr`.
 
-The dangerous ones — careful.
+Utilities: `mkdir`, `rmdir`, `touch`, `ln`, `cp` (incl. full `-R` matrix), `mv`, `rm`. New shared lib `src/lib/fs.cyr` for `*at()`-family traversal. Two Cyrius proposals filed against the parent repo (octal literals + at-family stdlib wrappers).
 
-- [ ] **ADR 0003**: symlink-follow policy default — `cp`/`mv`/`rm` default behavior on encountering symlinks (recommendation: do NOT follow symlinks on destructive operations; `-L` opts in)
-- [ ] **ADR 0004**: `rm -rf /` and `--no-preserve-root` semantics
-- [ ] `src/cmd/mkdir.cyr` — recursive `-p`, `mode` setting
-- [ ] `src/cmd/rmdir.cyr` — empty-dir-only, `-p` for parents
-- [ ] `src/cmd/touch.cyr` — create or update atime/mtime
-- [ ] `src/cmd/cp.cyr` — single file, `-r` recursive, `-i` interactive, `-f` force; uses `*at()` syscalls for TOCTOU safety
-- [ ] `src/cmd/mv.cyr` — rename within FS, copy+unlink across FS; same flag set as cp; TOCTOU-safe
-- [ ] `src/cmd/rm.cyr` — single file, `-r` recursive, `-f` force, `-i` interactive, `--no-preserve-root` required to operate on `/`
-- [ ] `src/cmd/ln.cyr` — hard + symbolic via `-s`
-- [ ] Fuzz: `tests/kriya.fcyr` gains a destructive-op fuzz target (run in a hermetic temp dir)
-- [ ] Tests per utility: happy path + at least one error path (nonexistent source, permission denied, target exists without `-f`) + at least one symlink-edge path
+### M3 — Listing + path manipulation (v0.4.0) — ✅ shipped 2026-05-17
 
-**Acceptance**: bash-script-style file operations (`cp foo bar; rm foo; mkdir baz; ...`) all behave POSIX-compliantly.
+Seven informational utilities, all read-only:
 
-### M3 — Listing + path manipulation (v0.4.0)
+- `basename`, `dirname` — pure-text path operations (paired commit).
+- `realpath`, `readlink` — share the new `fs_realpath` helper (3-mode canonicalization: REQUIRE_ALL / REQUIRE_PARENT / ALLOW_MISSING). ELOOP cycle detection at 40 hops.
+- `which` — `$PATH` walk + `sys_access(X_OK)`.
+- `stat` — printf-style format engine; 22 specifiers verified cell-by-cell against GNU.
+- `ls` — `-a` / `-A` / `-l` / `-h` / `-r` / `-1` / `-F` / `-i` / `-d` / `-R`; ISO mtime via `chrono.epoch_to_date`.
 
-- [ ] `src/cmd/ls.cyr` — non-color minimal first; `-l` long form; `-a` hidden files; `-h` human sizes
-- [ ] `src/cmd/stat.cyr` — file metadata dump, formatted
-- [ ] `src/cmd/basename.cyr` + `dirname.cyr` — text-only path manipulation (no FS access)
-- [ ] `src/cmd/realpath.cyr` + `readlink.cyr` — resolve symlinks, absolute paths
-- [ ] `src/cmd/which.cyr` — search `$PATH` for executables
+### M4 — Text-stream utilities (v0.5.0) — ✅ shipped 2026-05-17
 
-### M4 — Text-stream utilities (v0.5.0)
+Ten utilities — the biggest milestone by count:
 
-- [ ] `src/cmd/wc.cyr` — line / word / byte / char counts
-- [ ] `src/cmd/head.cyr` + `tail.cyr` — first/last N lines; `tail -f` follow mode
-- [ ] `src/cmd/cut.cyr` — column extraction by char range / field
-- [ ] `src/cmd/tr.cyr` — character translation (no regex)
-- [ ] `src/cmd/tee.cyr` — split stdin to N files + stdout
-- [ ] `src/cmd/sort.cyr` — line sort; `-n` numeric; `-r` reverse; `-u` unique; external sort for files > heap budget
-- [ ] `src/cmd/uniq.cyr` — adjacent-line dedup
-- [ ] `src/cmd/nl.cyr` — line numbering
-- [ ] `src/cmd/printf.cyr` — printf-style formatter (subset of POSIX, ADR for divergences)
+- `tee` — pass-through fan-out; resilient per-file failure.
+- `wc` — `-l` / `-w` / `-c` / `-m` UTF-8 codepoints / `-L`; GNU-compatible column-width matrix.
+- `head`, `tail` — `-n` / `-c` / `-q` / `-v`; head streams forward, tail buffers-and-back-walks up to 16 MiB.
+- `tail -f` — single-file follow via 200ms stat-poll; truncation detection on size shrink.
+- `nl` — single-section line numbering; GNU's `width + sep_len` unnumbered-padding quirk matched.
+- `uniq` — adjacent-line dedup; `-c` / `-d` / `-u` / `-i` / `-f` / `-s` / `-w` / `-z`.
+- `tr` — translate / delete / squeeze / complement; full POSIX set grammar incl. all 12 character classes.
+- `cut` — `-b` / `-c` / `-f` modes; full LIST grammar; `--complement` / `--output-delimiter`.
+- `sort` — in-memory stable merge sort O(n log n); 256 MiB cap; external-sort fallback deferred.
+- `printf` — every POSIX conversion except floating-point; full flag matrix; `%b` escape processing; arg reuse.
 
-### M5 — Filtering / search (v0.6.0)
+**710 behavioural smoke cases pass across all 23 shipped utilities (M2+M3+M4)**; cold-start median 1.198ms (flat from v0.4.0).
+
+### Post-M4 hold — AGNOS kernel boot burn-in
+
+**M5+ work is paused until kriya gets exercised in a real AGNOS kernel boot**. The 30 shipped utilities cover the POSIX-essential surface a shell needs to bootstrap; the next signal of value is whether they actually hold up when an OS uses them in anger. The boot-burn produces the consumer feedback that should shape M5's priorities:
+
+- Which utilities are hit in early boot, and which surface gaps appear?
+- Are the ADR-0003 (symlink-follow) / ADR-0004 (`/` refusal) policies right in practice, or do real boot scripts work against them?
+- Does the 1.198ms cold-start matter in aggregate over a real init sequence, or is it dominated by other costs?
+- Which deferred features get promoted to "next" based on real script usage?
+
+**Trigger to resume**: agnos kernel completes a boot-burn run with kriya in the init userland. The trigger is concrete: a green AGNOS boot using kriya symlinks for `cp`/`mv`/`rm`/`mkdir`/etc., either by zugot recipe or direct install, and a written incident log (even if empty) capturing what was hit. The trigger lives outside this repo (it's an AGNOS-side milestone); kriya tracks it as a project-memory item with the boot-burn dashboard / PR link, not a kriya-internal task.
+
+During the hold, kriya is open for:
+
+- **Bug fixes** discovered in the existing 30 utilities.
+- **Cross-FS directory `mv`** — the one remaining M2 follow-up, now unblocked since `rm -r`'s tree-walk exists.
+- **Cyrius proposal sweeps** when accepted (octal literals → decimal-with-comment cleanup; `*at()`-family wrappers → raw `syscall(N, ...)` cleanup).
+- **`printf` floating-point** — `%e` / `%f` / `%g` if a consumer asks before M5 resumes.
+- **`tail -f` multi-file follow** — same shape.
+
+NOT M5 work (grep / find / xargs) — that waits for the boot-burn signal.
+
+### M5 — Filtering / search (v0.6.0) — paused pre-start
 
 The larger utilities. Each gets per-utility roadmap evaluation — if any outgrows kriya, extract it.
 

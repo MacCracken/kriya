@@ -131,37 +131,53 @@ _None yet._ Expected consumers once M1 ships:
 
 ## In-flight work
 
-- M1 closed; v0.2.0 cut. M2 policy lead-in **landed 2026-05-17**: ADR 0003 (symlink-follow policy) and ADR 0004 (`rm` refuses `/`, no escape hatch — stronger than the GNU `--no-preserve-root` model). M2 code in progress. Ship order:
-  1. ✅ `mkdir` (2026-05-17) — `-p`/`-m`/`-v`, octal mode parser, EEXIST split, smoke-mkdir.sh pattern established.
-  2. ✅ `rmdir` (2026-05-17) — `-p`/`-v`/`--ignore-fail-on-non-empty`; first destructive utility shipped, kernel-EBUSY suffices for `/`.
-  3. ✅ `touch` (2026-05-17) — `-a`/`-m`/`-c`; raw `utimensat(280)` syscall (no stdlib wrapper yet). `-r`/`-t`/`-d` deferred to chrono helpers.
-  4. ✅ `ln` (2026-05-17) — `-s`/`-f`/`-P`/`-n`/`-v`; raw `linkat(265)` for `-P` policy; ADR-0003 deploy-retarget idiom verified by `smoke-ln.sh`.
-  5a. ✅ `cp` non-recursive (2026-05-17) — `-f`/`-i`/`-p`/`-v`. `-i`-on-pipe is a usage error (ADR 0002). Self-copy refused via `(st_dev,st_ino)` match.
-  5b. ✅ `cp -R` recursive (2026-05-17) — `-R`/`-r`/`-P`/`-H`/`-L` matrix on top of `src/lib/fs.cyr`. Every descent uses `openat(parent_fd, name, O_NOFOLLOW | O_DIRECTORY)`; destination opens are `O_NOFOLLOW` with `-f`-driven unlink+retry. The lstat-vs-stat decision is carried into the descend as `allow_follow`. `--preserve=links` for hardlink dedup deferred.
-  6. ✅ `mv` (2026-05-17) — same-FS `rename(2)`; cross-FS fallback for files + symlinks; cross-FS directory mv errors with a clear message (now unblocked — mv can use the rm tree-walk). ADR-0003 hard rule #3 enforced invocation-wide.
-  7. ✅ `rm` (2026-05-17) — `-f`/`-i`/`-r`/`-R`/`-d`/`-v`. ADR-0003 never-follow (no flag exists), ADR-0004 protected-paths refusal (no escape hatch). 53 behavioural cases covering every known canonicalization escape and the symlink-no-follow property. **Closes M2.**
-  7. `rm` — last, and most carefully — full ADR 0003 (`O_NOFOLLOW` traversal, no follow flag) and ADR 0004 (`protected_paths[]` check) enforcement.
-- **M2 closed 2026-05-17 at v0.3.0.** All seven planned utilities ship; ADRs 0003 and 0004 verified end-to-end. Cross-repo proposals filed: `2026-05-17-octal-literal-syntax` and `2026-05-17-syscalls-at-family-stdlib` (sweep follow-ups when accepted). Cross-FS directory `mv` is one remaining M2 follow-up — now unblocked since `rm -r` exists.
-- **M3 in progress.** Order (simplest → biggest):
-  1. ✅ `basename` + `dirname` (2026-05-17) — paired commit, pure-text utilities. Added `path_basename_len` to fix a latent trailing-slash bug in `path_basename_ptr`'s usage pattern.
-  2. ✅ `realpath` (2026-05-17) — built on a new `fs_realpath` helper (3-mode canonicalization) in `src/lib/fs.cyr`. Default `-e` requires every component, `-m` allows missing tails, `-q` silent, `-z` NUL. Cycle ELOOP at 40 hops.
-  3. ✅ `readlink` (2026-05-17) — POSIX raw read-link + canonicalize via shared `fs_realpath`. Display modifiers `-n`/`-z`/`-q`.
-  4. ✅ `which` (2026-05-17) — `$PATH` walk with `-a`/`-s`/`-z`; slash-literal bypasses PATH.
-  5. ✅ `stat` (2026-05-17) — printf-style format engine, `-c`/`--printf`/`-L`/`-t`; 22 specifiers verified cell-by-cell against GNU.
-  6. ✅ `ls` (2026-05-17) — `-a`/`-A`/`-l`/`-h`/`-r`/`-1`/`-F`/`-i`/`-d`/`-R`; two-pass long-form with right-justified column alignment; ISO mtime via `chrono.epoch_to_date`. **Closes M3.**
-- **M3 closed 2026-05-17 at v0.4.0.** All seven planned utilities ship. Cold-start at v0.4.0 median 1.208ms (~50µs uptick from v0.3.0 — still well under the 2ms v1.0 target).
-- **M4 in progress** (text-stream utilities; 10 utilities — largest milestone by count). Order (simplest → biggest):
-  1. ✅ `tee` (2026-05-17) — pass-through fan-out; `-a` append; resilient per-file failure. M4 opener.
-  2. ✅ `wc` (2026-05-17) — streaming `-l`/`-w`/`-c`/`-m`/`-L`; GNU-compatible column-width matrix verified cell-by-cell.
-  3. ✅ `head` + `tail` (2026-05-17, paired) — `-n`/`-c`/`-q`/`-v`; head streams forward, tail buffers up to 16 MiB and back-walks. `-f` follow mode deferred.
-  4. ✅ `nl` (2026-05-17) — single-section line numbering; `-b`/`-i`/`-n`/`-s`/`-v`/`-w`. GNU's `width + sep_len` unnumbered-padding quirk matched and tested.
-  5. ✅ `uniq` (2026-05-17) — adjacent-line dedup; `-c`/`-d`/`-u`/`-i`/`-f`/`-s`/`-w`/`-z`; 2-op INPUT OUTPUT.
-  6. ✅ `tr` (2026-05-17) — translate/delete/squeeze/complement; full POSIX set grammar incl. all 12 character classes.
-  7. ✅ `cut` (2026-05-17) — `-b`/`-c`/`-f` with full LIST grammar; `--complement`/`--output-delimiter`/`-z`.
-  8. ✅ `tail -f` (2026-05-17) — single-file follow via 200ms stat-poll; truncation detection (size shrink) emits warning and lseeks to 0. Multi-file follow + same-size-rewrite detection deferred.
-  9. ✅ `sort` (2026-05-17) — in-memory stable merge sort O(n log n) with full POSIX flag set; 256 MiB input cap; external-sort fallback deferred.
-  10. ✅ `printf` (2026-05-17) — full POSIX format engine sans floating-point; **closes M4**.
-- **M4 closed 2026-05-17 at v0.5.0.** All 10 planned text-stream utilities ship. 710 behavioural smoke cases across the 23 shipped utilities (M2+M3+M4); 86/86 unit. Cold-start median 1.198ms (flat from v0.4.0). Next milestone: M5 (filtering/search) — `grep`, `find`, `xargs`.
+- **M0 ✅ v0.1.0** (scaffold) — `cyrius init kriya`, doc-tree, sovereign-replacement boundaries.
+- **M1 ✅ v0.2.0** (2026-05-17) — dispatcher + 6 trivial utilities; ADR 0001 (BusyBox dispatcher) + ADR 0002 (option parsing) accepted; cold-start median 1.185ms.
+- **M2 ✅ v0.3.0** (2026-05-17) — 7 file-operation utilities (`mkdir`, `rmdir`, `touch`, `ln`, `cp` incl. full `-R` matrix, `mv`, `rm`); ADR 0003 (symlink-follow policy) + ADR 0004 (`rm` refuses `/`) accepted; new shared libs `src/lib/fs.cyr` (`*at()` traversal) and `src/lib/protected.cyr` (root refusal); 2 Cyrius proposals filed against parent repo (octal literals + at-family stdlib).
+- **M3 ✅ v0.4.0** (2026-05-17) — 7 listing/path utilities (`basename`, `dirname`, `realpath`, `readlink`, `which`, `stat`, `ls`); new `fs_realpath` helper (3-mode canonicalization) backs both `realpath` and `readlink -f`/`-e`/`-m`; `ls -l` mtime via `chrono.epoch_to_date`.
+- **M4 ✅ v0.5.0** (2026-05-17) — 10 text-stream utilities (`tee`, `wc`, `head`, `tail` incl. `-f`, `nl`, `uniq`, `tr`, `cut`, `sort`, `printf`); 710 behavioural smoke cases across all 23 M2+M3+M4 utilities; cold-start median **1.198ms** (flat from v0.4.0).
+
+### Post-M4 hold — AGNOS kernel boot burn-in
+
+**M5 (filtering / search) is paused until kriya gets exercised in a real AGNOS kernel boot.** Thirty utilities cover the POSIX-essential surface a shell needs to bootstrap; the next signal of value is whether they actually hold up when an OS uses them in anger. The boot-burn will produce the consumer feedback that should shape M5's priorities — which utilities are hit first, whether the ADR-0003 / 0004 policies are right in practice, which deferred features get promoted.
+
+**Resume trigger**: agnos kernel completes a boot-burn run with kriya in the init userland (zugot recipe install or direct), plus a written incident log capturing what was exercised. Trigger lives outside this repo; tracked as a project-memory item with the boot-burn dashboard / PR link, not a kriya-internal task.
+
+**Open during the hold:**
+
+- Bug fixes in any of the 30 shipped utilities (boot-burn is the most likely surface for these).
+- Cross-FS directory `mv` — only outstanding M2 follow-up; unblocked now that `rm -r` exists.
+- Cyrius proposal sweeps when accepted (octal-literal cleanup, raw-syscall → stdlib-wrapper cleanup).
+- Any deferred feature in the list below if a real consumer asks before M5 resumes.
+
+**NOT open during the hold:** new M5 work (`grep` / `find` / `xargs`). That waits for the boot-burn signal.
+
+### Deferred features
+
+Each tracked against a future enabler (named follow-up, not "TBD"):
+
+- echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
+- pwd `$PWD` inode-match — waits on `fs.cyr` stat-compare.
+- sleep fractional + suffix (`1.5s`, `1m`, `1h`) — waits on `lib/chrono.cyr` duration-parser.
+- touch `-r REF` / `-t STAMP` / `-d STR` — same `lib/chrono.cyr` dependency; `-h` (no-dereference) deferred until symlink-aware utimensat wrapper.
+- ln `-r` (relative symlink resolution), `-T`/`-t` (target-directory disambiguation), `-b`/`--backup`.
+- cp `--preserve=links` (hardlink dedup during recursive copy).
+- mv multi-file `--follow` + cross-FS directory mv (the latter unblocked now).
+- mkdir / touch decimal POSIX-mode constants (`511 # 0o777`, `1073741823 # UTIME_NOW`) — sweep to octal once Cyrius proposal `2026-05-17-octal-literal-syntax` lands.
+- touch `syscall(280, ...)`, ln `syscall(265, ...)`, fs.cyr raw at-family syscalls — sweep to `sys_utimensat`/`sys_linkat`/etc. once Cyrius proposal `2026-05-17-syscalls-at-family-stdlib` lands.
+- stat `%U`/`%G` (passwd/group lookup), `%x`/`%y`/`%z` (chrono strftime), `%N` (quoting+symlink-target rendering), real `%W` birth time (statx).
+- ls multi-column tty packing, `-t`/`-S` sort keys, `--color=auto`, `%U`/`%G` name lookup, locale mtime form.
+- tail `-f` multi-file + same-size-rewrite truncation detection; `-n +N` / `-c +N` start-from-line semantics; k/M/G suffixes on counts.
+- head `-n -N` / `-c -N` all-but-last (shared suffix-parser with tail/dd when extracted).
+- nl section delimiters (`-d`/`-h`/`-f`/`\:` markers); `-b p REGEX` (needs niyama); `-l N` empty-line collapse; `-p`.
+- uniq `--all-repeated[=METHOD]`, `--group[=METHOD]`, multi-byte case-fold.
+- tr `[=c=]` equivalence classes, `[c*N]` repetition, locale-aware case fold.
+- cut multi-byte `-c` distinct from `-b` (needs UTF-8 decoder).
+- sort `-h`/`-V`/`-g`/`-M`/`-R`/`-m`/`-d`/`-i`, multi-key `-k F1 -k F2 ...`, end-field key range `-k F1,F2`, external-sort fallback for inputs > 256 MiB.
+- printf floating-point conversions (`%e`/`%E`/`%f`/`%F`/`%g`/`%G`/`%a`/`%A`); hex escape `\xHH`; positional args `%N$s`.
+- Option-parser short clustering `-rfv` and attached short values `-n10` — waits on stdlib `lib/flags.cyr` upgrade. ADR 0002 honoured end-to-end after that.
+- `--help` / `--help=json` / `kriya --list` per ADR 0002 — waits on the spec-renderer on top of `flags.cyr`.
+- CI / release / build-script review — flagged 2026-05-17 against kindred Cyrius repos (`agnos`, `vidya`, `owl`, `cyim`, `sit`).
 - Deferred features tracked against future enablers (each a known-named follow-up, not "TBD"):
   - echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
   - pwd `$PWD` inode-match — waits on `fs.cyr` stat-compare.
