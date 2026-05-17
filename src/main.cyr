@@ -21,6 +21,7 @@ include "src/cmd/sleep.cyr"
 include "src/cmd/mkdir.cyr"
 include "src/cmd/rmdir.cyr"
 include "src/cmd/touch.cyr"
+include "src/cmd/ln.cyr"
 
 fn print_usage() {
     syscall(1, 2, "usage: kriya <utility> [args...]\n", 33);
@@ -48,6 +49,7 @@ fn dispatch(name, start: i64): i64 {
     if (streq(name, "mkdir")) { return cmd_mkdir(start); }
     if (streq(name, "rmdir")) { return cmd_rmdir(start); }
     if (streq(name, "touch")) { return cmd_touch(start); }
+    if (streq(name, "ln"))    { return cmd_ln(start); }
     print_unknown(name);
     return EXIT_USAGE;
 }

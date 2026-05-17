@@ -1,0 +1,244 @@
+# ln — POSIX `ln(1)`: create hard and symbolic links.
+#
+# Argument shapes:
+#   ln [opts] TARGET                — link TARGET in cwd, named basename(TARGET)
+#   ln [opts] TARGET LINKNAME       — create LINKNAME pointing at TARGET
+#   ln [opts] TARGET... DIRECTORY   — for each TARGET, create DIRECTORY/basename(TARGET)
+#
+# Flags:
+#   -s / --symbolic        create a symbolic link instead of a hard link.
+#   -f / --force           remove an existing destination before linking.
+#   -P / --physical        with hard links, link the symlink itself, not
+#                          its target (ADR 0003: ln's `-P` semantics).
+#   -n / --no-dereference  when LINKNAME is an existing symlink-to-directory,
+#                          treat it as the destination (replace the link),
+#                          not as a directory to link into. Required for
+#                          the `ln -sfn newdir.tmp linkdir` atomic-retarget
+#                          idiom called out in ADR 0003.
+#   -v / --verbose         print a line per link as it is created.
+#
+# GNU `-r` (relative symlink resolution), `-T` (no-target-directory),
+# `-t` (target-directory), and `-b` / `--backup` are not implemented at
+# M2 — separate utility-specific work in M3 once a use case lands.
+#
+# Symlink policy (ADR 0003):
+#   - `ln -s TARGET LINK`     — TARGET is text. No filesystem deref.
+#   - `ln TARGET LINK`        — hard link; follow TARGET if it is a
+#                               symlink (POSIX). `-P` flips to "link
+#                               the symlink itself".
+#
+# Root protection (ADR 0004): ln is non-destructive of existing data
+# unless `-f` is in play; even with `-f`, the operand is the LINK
+# being unlinked (a single name), not a recursive walk. No protected_paths
+# check is needed.
+#
+# Each TARGET is attempted independently. Exit EXIT_FAILURE if any
+# operation failed, EXIT_SUCCESS otherwise.
+
+var _ln_spec = 0;
+var _ln_s_idx = 0;
+var _ln_f_idx = 0;
+var _ln_P_idx = 0;
+var _ln_n_idx = 0;
+var _ln_v_idx = 0;
+
+fn _ln_init_spec(): i64 {
+    if (_ln_spec != 0) { return 0; }
+    var s = flags_new();
+    _ln_s_idx = flags_add_bool(s, 115, "symbolic",       0, "create a symbolic link");
+    _ln_f_idx = flags_add_bool(s, 102, "force",          0, "remove existing destination first");
+    _ln_P_idx = flags_add_bool(s, 80,  "physical",       0, "hard-link the symlink itself, not its target");
+    _ln_n_idx = flags_add_bool(s, 110, "no-dereference", 0, "treat symlink-to-directory destination as a name to replace");
+    _ln_v_idx = flags_add_bool(s, 118, "verbose",        0, "print each link as it is created");
+    _ln_spec = s;
+    return 0;
+}
+
+fn _ln_report(operand, errno): i64 {
+    syscall(1, 2, "kriya ln: ", 10);
+    syscall(1, 2, operand, strlen(operand));
+    syscall(1, 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        syscall(1, 2, m, strlen(m));
+    } else {
+        syscall(1, 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        syscall(1, 2, &buf + i + 1, 6 - i);
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+# lstat-based "is `path` a directory?" — symlinks to directories are
+# NOT counted as directories so the `-n` no-dereference policy works.
+#
+# Raw fstatat(AT_FDCWD=-100, path, &buf, AT_SYMLINK_NOFOLLOW=256).
+# SYS_NEWFSTATAT = 262 on x86_64. (Lives behind the pending stdlib
+# proposal `2026-05-17-syscalls-at-family-stdlib.md` — when sys_lstat
+# lands, swap this for that.)
+fn _ln_is_real_dir(path): i64 {
+    var buf[144];
+    var r = syscall(262, 0 - 100, path, &buf, 256);
+    if (r != 0) { return 0; }
+    var st_mode = load64(&buf + 24);
+    if ((st_mode & 61440) == 16384) { return 1; }  # S_IFMT/S_IFDIR
+    return 0;
+}
+
+# Plain stat (follows symlinks). Used when `-n` is NOT set and we need
+# the GNU/POSIX "if destination resolves to a directory, link into it"
+# behavior.
+fn _ln_resolved_dir(path): i64 {
+    var buf[144];
+    var r = sys_stat(path, &buf);
+    if (r != 0) { return 0; }
+    var st_mode = load64(&buf + 24);
+    if ((st_mode & 61440) == 16384) { return 1; }
+    return 0;
+}
+
+# Compose the final destination path for a (target, dest_arg) pair
+# under the current flag state. Returns a heap-allocated cstring.
+fn _ln_resolve_dest(target, dest_arg, no_deref): i64 {
+    # If dest is an existing directory (or symlink-to-dir when not -n),
+    # append basename(target).
+    var into_dir: i64 = 0;
+    if (no_deref == 1) {
+        into_dir = _ln_is_real_dir(dest_arg);
+    } else {
+        into_dir = _ln_resolved_dir(dest_arg);
+    }
+    if (into_dir == 1) {
+        var base = path_basename_ptr(target);
+        return path_join(dest_arg, base);
+    }
+    # Otherwise dest_arg IS the link name. Copy so the caller can
+    # treat all returns uniformly.
+    var dlen = strlen(dest_arg);
+    var out = alloc(dlen + 1);
+    memcpy(out, dest_arg, dlen);
+    store8(out + dlen, 0);
+    return out;
+}
+
+# Make one link. Returns 0 on success, negative errno on failure.
+# `symbolic`: -s flag.  `physical`: -P (no-follow for hard link).
+# `force`: -f (unlink existing dest first if needed).
+fn _ln_make(target, link, symbolic, physical, force, verbose): i64 {
+    if (force == 1) {
+        # Best-effort unlink. We don't care about ENOENT; any other
+        # errno will be surfaced by the link call below.
+        sys_unlink(link);
+    }
+    var r: i64 = 0;
+    if (symbolic == 1) {
+        r = sys_symlink(target, link);
+    } else {
+        # Hard link via linkat for explicit policy control.
+        # SYS_LINKAT = 265. AT_FDCWD = -100. AT_SYMLINK_FOLLOW = 1024.
+        # Default (no -P): follow source symlink — POSIX ln behavior.
+        # -P: do not follow.
+        var flags: i64 = 1024;
+        if (physical == 1) { flags = 0; }
+        r = syscall(265, 0 - 100, target, 0 - 100, link, flags);
+    }
+    if (r != 0) {
+        _ln_report(link, 0 - r);
+        return r;
+    }
+    if (verbose == 1) {
+        syscall(1, 1, "kriya ln: '", 11);
+        syscall(1, 1, link, strlen(link));
+        if (symbolic == 1) {
+            syscall(1, 1, "' -> '", 6);
+        } else {
+            syscall(1, 1, "' => '", 6);  # => for hard, -> for symbolic
+        }
+        syscall(1, 1, target, strlen(target));
+        syscall(1, 1, "'\n", 2);
+    }
+    return 0;
+}
+
+fn cmd_ln(start: i64): i64 {
+    _ln_init_spec();
+    if (kriya_args_parse(_ln_spec, start) != 0) {
+        syscall(1, 2, "kriya ln: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        return EXIT_USAGE;
+    }
+
+    var npos = flags_positional_count(_ln_spec);
+    if (npos < 1) {
+        syscall(1, 2, "kriya ln: error: missing operand\n", 33);
+        return EXIT_USAGE;
+    }
+
+    var symbolic: i64 = 0;
+    if (flags_get_bool(_ln_spec, _ln_s_idx) == 1) { symbolic = 1; }
+    var force: i64 = 0;
+    if (flags_get_bool(_ln_spec, _ln_f_idx) == 1) { force = 1; }
+    var physical: i64 = 0;
+    if (flags_get_bool(_ln_spec, _ln_P_idx) == 1) { physical = 1; }
+    var no_deref: i64 = 0;
+    if (flags_get_bool(_ln_spec, _ln_n_idx) == 1) { no_deref = 1; }
+    var verbose: i64 = 0;
+    if (flags_get_bool(_ln_spec, _ln_v_idx) == 1) { verbose = 1; }
+
+    var any_failed: i64 = 0;
+
+    if (npos == 1) {
+        # ln TARGET — create basename(TARGET) in cwd.
+        var target = flags_positional(_ln_spec, 0);
+        var base = path_basename_ptr(target);
+        # Materialise a stable cstring for `base` (it points into
+        # `target`'s buffer; safe for our usage since we don't mutate).
+        var r = _ln_make(target, base, symbolic, physical, force, verbose);
+        if (r != 0) { any_failed = 1; }
+    } else {
+        # 2+ args. Last is dest_arg. If it resolves to a directory (or
+        # is a real directory under -n), all prior args are sources to
+        # link into it. Else exactly 2 args is required (target, link).
+        var dest_arg = flags_positional(_ln_spec, npos - 1);
+        var dest_is_dir: i64 = 0;
+        if (no_deref == 1) {
+            dest_is_dir = _ln_is_real_dir(dest_arg);
+        } else {
+            dest_is_dir = _ln_resolved_dir(dest_arg);
+        }
+
+        if (dest_is_dir == 0) {
+            if (npos != 2) {
+                syscall(1, 2, "kriya ln: error: with multiple sources, the last operand must be a directory\n", 76);
+                return EXIT_USAGE;
+            }
+            var target = flags_positional(_ln_spec, 0);
+            var r = _ln_make(target, dest_arg, symbolic, physical, force, verbose);
+            if (r != 0) { any_failed = 1; }
+        } else {
+            # Multi-source-into-dir form.
+            var i: i64 = 0;
+            while (i < npos - 1) {
+                var target = flags_positional(_ln_spec, i);
+                var base = path_basename_ptr(target);
+                var link = path_join(dest_arg, base);
+                var r = _ln_make(target, link, symbolic, physical, force, verbose);
+                if (r != 0) { any_failed = 1; }
+                i = i + 1;
+            }
+        }
+    }
+
+    if (any_failed == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}
