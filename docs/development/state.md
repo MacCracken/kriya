@@ -26,7 +26,7 @@ M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both
 | `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
 | `src/lib/errmsg.cyr` | implemented — errnos 1..40 + `errmsg_is_known` |
 | `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
-| `src/cmd/*.cyr` | 8 of ~40 — `true.cyr`, `false.cyr`, `echo.cyr`, `pwd.cyr`, `yes.cyr`, `sleep.cyr`, `mkdir.cyr`, `rmdir.cyr` |
+| `src/cmd/*.cyr` | 9 of ~40 — `true.cyr`, `false.cyr`, `echo.cyr`, `pwd.cyr`, `yes.cyr`, `sleep.cyr`, `mkdir.cyr`, `rmdir.cyr`, `touch.cyr` |
 
 ## Per-utility status (will grow with each milestone)
 
@@ -40,7 +40,7 @@ M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both
 | `sleep` | `src/cmd/sleep.cyr` | **implemented** (integer seconds; fractional + suffixes deferred) | M1 |
 | `mkdir` | `src/cmd/mkdir.cyr` | **implemented** (`-p`, `-m` octal, `-v`; symbolic-mode deferred to chmod) | M2 |
 | `rmdir` | `src/cmd/rmdir.cyr` | **implemented** (`-p`, `-v`, `--ignore-fail-on-non-empty`) | M2 |
-| `touch` | `src/cmd/touch.cyr` | not started | M2 |
+| `touch` | `src/cmd/touch.cyr` | **implemented** (`-a`, `-m`, `-c`; `-r`/`-t`/`-d` deferred to chrono helpers) | M2 |
 | `cp` | `src/cmd/cp.cyr` | not started | M2 |
 | `mv` | `src/cmd/mv.cyr` | not started | M2 |
 | `rm` | `src/cmd/rm.cyr` | not started | M2 |
@@ -90,6 +90,7 @@ M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both
 - `scripts/bench-coldstart.sh` — process-spawn timing. `RUNS=30` baseline: min 1.010ms, **median 1.185ms**, max 1.374ms — under the 2ms v1.0 target.
 - `scripts/smoke-mkdir.sh` — behavioural test for `mkdir` (24/24 passing — happy path, `-p` recursion, EEXIST split, `-m` mode bits, partial-failure exit, root operand). Pattern carries forward as each M2 utility ships.
 - `scripts/smoke-rmdir.sh` — behavioural test for `rmdir` (24/24 — happy path, `-p` cascade with sibling-halt, `--ignore-fail-on-non-empty`, ENOTEMPTY/ENOENT/ENOTDIR, kernel-EBUSY on `/`, `-v` output).
+- `scripts/smoke-touch.sh` — behavioural test for `touch` (26/26 — create, multi-operand, update-existing, `-a`/`-m`/`-a -m`, `-c` on missing-vs-existing, ENOENT on missing parent, partial-failure exit code).
 - `tests/kriya.fcyr` — fuzz stub (lands when M2 destructive utilities arrive).
 
 ## Dependencies
@@ -112,7 +113,7 @@ _None yet._ Expected consumers once M1 ships:
 - M1 closed; v0.2.0 cut. M2 policy lead-in **landed 2026-05-17**: ADR 0003 (symlink-follow policy) and ADR 0004 (`rm` refuses `/`, no escape hatch — stronger than the GNU `--no-preserve-root` model). M2 code in progress. Ship order:
   1. ✅ `mkdir` (2026-05-17) — `-p`/`-m`/`-v`, octal mode parser, EEXIST split, smoke-mkdir.sh pattern established.
   2. ✅ `rmdir` (2026-05-17) — `-p`/`-v`/`--ignore-fail-on-non-empty`; first destructive utility shipped, kernel-EBUSY suffices for `/`.
-  3. `touch` — pure-create / metadata-update; no traversal.
+  3. ✅ `touch` (2026-05-17) — `-a`/`-m`/`-c`; raw `utimensat(280)` syscall (no stdlib wrapper yet). `-r`/`-t`/`-d` deferred to chrono helpers.
   4. `ln` — symlink + hard-link; the first user-facing surface of ADR 0003's `-P` semantics for `ln`.
   5. `cp` — recursive copy under ADR 0003's preserve-by-default policy; `O_NOFOLLOW` on destinations.
   6. `mv` — rename / cross-FS copy+unlink; symlink-to-dir refusal from ADR 0003.
@@ -122,6 +123,8 @@ _None yet._ Expected consumers once M1 ships:
   - echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
   - pwd `$PWD` inode-match — waits on `fs.cyr` stat-compare.
   - sleep fractional + suffix (`1.5s`, `1m`, `1h`) — waits on `lib/chrono.cyr` duration-parser.
+  - touch `-r REF` / `-t STAMP` / `-d STR` — same `lib/chrono.cyr` dependency; `-h` (no-dereference) deferred until symlink-aware utimensat wrapper.
+  - mkdir / touch decimal POSIX-mode constants (`511 # 0o777`, `1073741823 # UTIME_NOW`) — sweep to octal once Cyrius proposal `2026-05-17-octal-literal-syntax` lands.
   - Option-parser short clustering `-rfv` and attached short values `-n10` — waits on stdlib `lib/flags.cyr` upgrade. ADR 0002 honoured end-to-end after that.
   - `--help` / `--help=json` / `kriya --list` per ADR 0002 — waits on the spec-renderer on top of `flags.cyr`.
   - CI / release / build-script review — flagged 2026-05-17 against kindred Cyrius repos (`agnos`, `vidya`, `owl`, `cyim`, `sit`).
