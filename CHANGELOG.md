@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-17
+
+Closes M3 — seven listing + path-manipulation utilities (`basename`, `dirname`, `realpath`, `readlink`, `which`, `stat`, `ls`) on top of M2's filesystem foundation. New shared canonicalization helper `fs_realpath` in `src/lib/fs.cyr` (3 modes: `REQUIRE_ALL` / `REQUIRE_PARENT` / `ALLOW_MISSING`) backs both `realpath` and `readlink -f`/`-e`/`-m`. `ls -l` mtime renders via `chrono.epoch_to_date` (the stdlib helper discovered mid-M3 — let us promote ISO-formatted human-readable mtime instead of raw epoch). **441 behavioural smoke cases pass across the 14 M2+M3 utilities** (mkdir 24 + rmdir 24 + touch 26 + ln 30 + cp 26 + cp-recursive 39 + mv 43 + rm 53 + basename-dirname 26 + realpath 30 + readlink 24 + which 23 + stat 37 + ls 36); 86/86 unit assertions remain green. Cold-start at v0.4.0: median **1.208ms** (RUNS=30; ~50µs slower than v0.3.0's 1.159ms — 7 new dispatcher table entries + larger text segment; still well under the 2ms v1.0 target).
+
+After M3, the kriya surface covers every POSIX-essential path/listing tool a shell needs to bootstrap. Next milestone is M4 (text-stream utilities — `wc`, `head`, `tail`, `cut`, `tr`, `tee`, `sort`, `uniq`, `nl`, `printf` — 10 utilities, the largest milestone by count). Cross-FS directory `mv` (the one outstanding M2 follow-up) is also unblocked now that `rm -r`'s tree-walk exists.
+
 ### Added
 
 - **`basename`** (`src/cmd/basename.cyr`) — POSIX `basename(1)`. Single-pair shape `basename PATH [SUFFIX]` strips the directory and an optional trailing suffix; suffix is only applied when at least one byte remains after the strip (POSIX). GNU `-a`/`--multiple` accepts multiple paths and emits one per line; `-s SUFFIX`/`--suffix=SUFFIX` implies `-a`. `-z`/`--zero` switches the line terminator from `\n` to `\0` for `find -print0` pipelines. Pure text — no filesystem access.

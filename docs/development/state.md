@@ -5,7 +5,7 @@
 
 ## Version
 
-**0.3.0** — released 2026-05-17. Closes M2: seven file-operation utilities (`mkdir`, `rmdir`, `touch`, `ln`, `cp` with full `-R` matrix, `mv`, `rm`) on top of two new shared libs (`src/lib/fs.cyr` for `*at()`-family traversal, `src/lib/protected.cyr` for ADR-0004 root refusal) and two M2 policy ADRs (0003 symlink-follow, 0004 `rm` refuses `/`). All ADR safety properties verified by behavioural smoke scripts (265 total cases across the M2 utilities).
+**0.4.0** — released 2026-05-17. Closes M3: seven listing + path-manipulation utilities (`basename`, `dirname`, `realpath`, `readlink`, `which`, `stat`, `ls`) built on top of M2's filesystem foundation. New shared canonicalization helper `fs_realpath` (3 modes — REQUIRE_ALL / REQUIRE_PARENT / ALLOW_MISSING) backs both `realpath` and `readlink -f`/`-e`/`-m`. `ls -l` mtime renders via `chrono.epoch_to_date`. **441 behavioural smoke cases pass across the 14 M2+M3 utilities** (24+24+26+30+26+39+43+53+26+30+24+23+37+36); 86/86 unit assertions; cold-start median **1.208ms** at M3 close (~50µs uptick from v0.3.0's 1.159ms — attributable to 7 more dispatcher `if (streq …)` lines and a marginally larger text segment; still well under the 2ms v1.0 target).
 
 ## Role
 
@@ -17,7 +17,7 @@ Coreutils-equivalent for AGNOS — the small POSIX-style utilities (`cp`, `mv`, 
 
 ## Source
 
-M1 closed at v0.2.0; M2 closed at v0.3.0. All thirteen shipped utilities (six from M1 + seven from M2) are live; six shared lib modules in place (`exit`, `path`, `errmsg`, `args`, `fs`, `protected`); four ADRs accepted (0001–0004); two architecture notes (signal model + errno policy). Cold-start re-benched at M2 close: median **1.159ms** over 30 runs (was 1.185ms at v0.2.0 — slight improvement despite seven new utilities + two shared libs; the `true` dispatcher path is unchanged in structure, only its sibling `if (streq …)` lines grew).
+M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shipped utilities (six from M1 + seven from M2 + seven from M3) are live; six shared lib modules in place (`exit`, `path`, `errmsg`, `args`, `fs`, `protected`); four ADRs accepted (0001–0004); two architecture notes (signal model + errno policy). Cold-start re-benched at each release boundary: 1.185ms (v0.2.0) → 1.159ms (v0.3.0) → **1.208ms (v0.4.0)** — 7 new dispatcher table entries + a slightly larger binary cost ~50µs vs v0.3.0; runs sampled in a tight range across 4×30-run trials (1.199 / 1.222 / 1.208 / 1.205ms medians).
 
 | Module | Status |
 |---|---|
@@ -89,7 +89,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0. All thirteen shipped utilities (six fr
   - `path/normalize_simple` / `_messy` — 336ns / 515ns
   - `errmsg/for_known` — 6ns
   - `args/parse_octal_mode` — 20ns
-- `scripts/bench-coldstart.sh` — process-spawn timing. `RUNS=30` at v0.3.0: min 1.040ms, **median 1.159ms**, max 1.253ms — under the 2ms v1.0 target. (v0.2.0 baseline was 1.010 / 1.185 / 1.374ms; M2 didn't regress.)
+- `scripts/bench-coldstart.sh` — process-spawn timing at each release boundary. v0.4.0 (RUNS=30): min 1.030ms, **median 1.208ms**, max 1.292ms — still under the 2ms v1.0 target. History: v0.2.0 1.185ms / v0.3.0 1.159ms / v0.4.0 1.208ms (median of 30 runs each; ~50µs uptick this cycle from 7 new dispatcher entries + larger text segment).
 - `scripts/smoke-mkdir.sh` — behavioural test for `mkdir` (24/24 passing — happy path, `-p` recursion, EEXIST split, `-m` mode bits, partial-failure exit, root operand). Pattern carries forward as each M2 utility ships.
 - `scripts/smoke-rmdir.sh` — behavioural test for `rmdir` (24/24 — happy path, `-p` cascade with sibling-halt, `--ignore-fail-on-non-empty`, ENOTEMPTY/ENOENT/ENOTDIR, kernel-EBUSY on `/`, `-v` output).
 - `scripts/smoke-touch.sh` — behavioural test for `touch` (26/26 — create, multi-operand, update-existing, `-a`/`-m`/`-a -m`, `-c` on missing-vs-existing, ENOENT on missing parent, partial-failure exit code).
