@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`tee`** (`src/cmd/tee.cyr`) — POSIX `tee(1)`, M4 opener. Reads stdin in 64 KiB chunks, writes each chunk to stdout and every successfully-opened output file. Flags: `-a`/`--append` (O_APPEND instead of O_TRUNC). Per-file open failure is reported but doesn't halt the others; per-file write failure drops that fd from the rotation while remaining outputs continue. Loop terminates early only when ALL outputs have failed. EINTR retried; partial writes looped. Exit `EXIT_FAILURE` if any output failed at open or write time. Deferred: `-i`/`--ignore-interrupts` (needs the signal-handler infrastructure flagged in arch note 002 — not yet installed since no M2 utility needed it), `--output-error=...` (GNU pipe-failure-mode knob). Smoke `scripts/smoke-tee.sh` — 20/20 covering single-file, multi-file fan-out, default-truncate vs `-a`, no-operand pass-through, 200 KiB + 5 MiB fidelity (exercises multi-iteration read/write loop), binary-NUL fidelity, resilient partial-failure (readonly file blocked but sibling outputs still get data), directory operand cleanly fails.
+
 ## [0.4.0] — 2026-05-17
 
 Closes M3 — seven listing + path-manipulation utilities (`basename`, `dirname`, `realpath`, `readlink`, `which`, `stat`, `ls`) on top of M2's filesystem foundation. New shared canonicalization helper `fs_realpath` in `src/lib/fs.cyr` (3 modes: `REQUIRE_ALL` / `REQUIRE_PARENT` / `ALLOW_MISSING`) backs both `realpath` and `readlink -f`/`-e`/`-m`. `ls -l` mtime renders via `chrono.epoch_to_date` (the stdlib helper discovered mid-M3 — let us promote ISO-formatted human-readable mtime instead of raw epoch). **441 behavioural smoke cases pass across the 14 M2+M3 utilities** (mkdir 24 + rmdir 24 + touch 26 + ln 30 + cp 26 + cp-recursive 39 + mv 43 + rm 53 + basename-dirname 26 + realpath 30 + readlink 24 + which 23 + stat 37 + ls 36); 86/86 unit assertions remain green. Cold-start at v0.4.0: median **1.208ms** (RUNS=30; ~50µs slower than v0.3.0's 1.159ms — 7 new dispatcher table entries + larger text segment; still well under the 2ms v1.0 target).

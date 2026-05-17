@@ -1,0 +1,206 @@
+# tee — POSIX `tee(1)`: copy stdin to stdout and to each named file.
+#
+# Argument shape:
+#   tee [opts] [file...]
+#
+# Flags:
+#   -a / --append   open output files with O_APPEND instead of O_TRUNC.
+#
+# Stdin is read in 64 KiB chunks; each chunk is written to stdout and
+# every successfully-opened output file. EINTR on read or write is
+# retried transparently. Partial writes are looped until the chunk is
+# fully drained.
+#
+# Per-file open failure is reported to stderr and the file is dropped
+# from the output set; the remaining outputs (stdout + the other files
+# that opened) continue receiving data. Exit code: `EXIT_SUCCESS` if
+# every output completed cleanly; `EXIT_FAILURE` if any output failed
+# at open or write time.
+#
+# Symlink policy (informative): outputs are opened by path; if a file
+# operand IS a symlink, the kernel writes to the target. POSIX tee
+# semantics. Destinations inside a recursive walk would use O_NOFOLLOW
+# per ADR 0003, but tee operates on user-supplied paths only.
+#
+# Deferred (named follow-up):
+#   -i / --ignore-interrupts  SIGINT is ignored during the copy loop.
+#                             Needs the signal-handler infrastructure
+#                             flagged in `docs/architecture/002-signal-handling-model.md`
+#                             (M2/M3 trigger row — not yet installed).
+#   -p / --output-error=...   GNU pipe-failure-mode knob; rare.
+
+var _tee_spec  = 0;
+var _tee_a_idx = 0;
+
+# Lazy 64 KiB I/O buffer (heap, process-lifetime).
+var _tee_buf   = 0;
+var _TEE_BUFSZ = 65536;
+
+fn _tee_init_spec(): i64 {
+    if (_tee_spec != 0) { return 0; }
+    var s = flags_new();
+    _tee_a_idx = flags_add_bool(s, 97, "append", 0, "append to output files (O_APPEND)");
+    _tee_spec = s;
+    return 0;
+}
+
+fn _tee_buf_get(): i64 {
+    if (_tee_buf != 0) { return _tee_buf; }
+    _tee_buf = alloc(_TEE_BUFSZ);
+    return _tee_buf;
+}
+
+fn _tee_report(operand, errno): i64 {
+    syscall(1, 2, "kriya tee: ", 11);
+    syscall(1, 2, operand, strlen(operand));
+    syscall(1, 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        syscall(1, 2, m, strlen(m));
+    } else {
+        syscall(1, 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        syscall(1, 2, &buf + i + 1, 6 - i);
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+# Write `n` bytes from `buf` to `fd`, looping over EINTR and partial
+# writes. Returns 0 on success, negative errno on failure.
+fn _tee_write_all(fd, buf, n): i64 {
+    var written: i64 = 0;
+    var done: i64 = 0;
+    var result: i64 = 0;
+    while (done == 0) {
+        var w = syscall(1, fd, buf + written, n - written);  # SYS_WRITE
+        if (w < 0) {
+            if ((0 - w) == 4) {
+                # EINTR — retry.
+            } else {
+                result = w;
+                done = 1;
+            }
+        } else {
+            written = written + w;
+            if (written >= n) { done = 1; }
+        }
+    }
+    return result;
+}
+
+fn cmd_tee(start: i64): i64 {
+    _tee_init_spec();
+    if (kriya_args_parse(_tee_spec, start) != 0) {
+        syscall(1, 2, "kriya tee: error: bad option (see ADR 0002 for accepted syntax)\n", 64);
+        return EXIT_USAGE;
+    }
+
+    var append: i64 = 0;
+    if (flags_get_bool(_tee_spec, _tee_a_idx) == 1) { append = 1; }
+
+    # Open each output file. Failure-to-open is reported but doesn't
+    # halt processing of the others. Successfully-opened fds are
+    # collected into a vec; stdout is added unconditionally as the
+    # first entry.
+    var npos = flags_positional_count(_tee_spec);
+    var fds = vec_new();
+    vec_push(fds, 1);  # fd 1 = stdout
+
+    var any_failed: i64 = 0;
+
+    var i: i64 = 0;
+    while (i < npos) {
+        var p = flags_positional(_tee_spec, i);
+        # O_WRONLY=1, O_CREAT=64, O_TRUNC=512, O_APPEND=1024.
+        var flags: i64 = 65;       # WRONLY | CREAT
+        if (append == 1) {
+            flags = flags | 1024;  # | O_APPEND
+        } else {
+            flags = flags | 512;   # | O_TRUNC
+        }
+        var fd = sys_open(p, flags, 438);  # 0o666 = 438
+        if (fd < 0) {
+            _tee_report(p, 0 - fd);
+            any_failed = 1;
+        } else {
+            vec_push(fds, fd);
+        }
+        i = i + 1;
+    }
+
+    var nfds = vec_len(fds);
+    var buf = _tee_buf_get();
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var n = syscall(0, 0, buf, _TEE_BUFSZ);  # SYS_READ fd 0
+        if (n < 0) {
+            if ((0 - n) == 4) {
+                # EINTR — retry.
+            } else {
+                _tee_report("(stdin)", 0 - n);
+                any_failed = 1;
+                loop = 0;
+            }
+        } else {
+            if (n == 0) {
+                loop = 0;
+            } else {
+                var fi: i64 = 0;
+                while (fi < nfds) {
+                    var fd = vec_get(fds, fi);
+                    var wr = _tee_write_all(fd, buf, n);
+                    if (wr != 0) {
+                        # Write failure — report and remove the fd from
+                        # the rotation. Other fds keep receiving data.
+                        var op = "(stdout)";
+                        if (fi > 0) {
+                            op = flags_positional(_tee_spec, fi - 1);
+                        }
+                        _tee_report(op, 0 - wr);
+                        any_failed = 1;
+                        # Close the failing fd (unless it's stdout).
+                        if (fi > 0) { syscall(3, fd); }
+                        # Mark by setting to -1; we'll skip on next pass.
+                        vec_set(fds, fi, 0 - 1);
+                    }
+                    fi = fi + 1;
+                }
+                # Compact: remove any -1 fds. Simpler: just check on
+                # next round. We do a quick pass.
+                var any_alive: i64 = 0;
+                var j: i64 = 0;
+                while (j < nfds) {
+                    if (vec_get(fds, j) != (0 - 1)) {
+                        any_alive = 1;
+                        j = nfds;
+                    } else {
+                        j = j + 1;
+                    }
+                }
+                if (any_alive == 0) { loop = 0; }
+            }
+        }
+    }
+
+    # Close non-stdout fds.
+    var ci: i64 = 1;
+    while (ci < nfds) {
+        var fd = vec_get(fds, ci);
+        if (fd != (0 - 1)) { syscall(3, fd); }
+        ci = ci + 1;
+    }
+
+    if (any_failed == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}

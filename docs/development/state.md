@@ -26,7 +26,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 | `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
 | `src/lib/errmsg.cyr` | implemented — errnos 1..40 + `errmsg_is_known` |
 | `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
-| `src/cmd/*.cyr` | 20 of ~40 — M1 + M2 (13) + M3 (7: `basename`, `dirname`, `realpath`, `readlink`, `which`, `stat`, `ls`) |
+| `src/cmd/*.cyr` | 21 of ~40 — M1 + M2 (13) + M3 (7) + `tee.cyr` (M4 start) |
 | `src/lib/fs.cyr` | implemented — `*at()`-family wrappers, `getdents64` iteration, type predicates, AT/S_IF/DT constants. Foundation for cp -R / mv / rm -r per ADR 0003. Adds `fs_rename`/`fs_renameat`/`fs_realpath` (3-mode canonicalization). |
 | `src/lib/protected.cyr` | implemented — `protected_paths[]` table with `/`, canonicalization via `path_normalize` + getcwd, `is_protected_path()` membership check. Per ADR 0004, only consumed by `rm` today. |
 
@@ -59,7 +59,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 | `tail` | `src/cmd/tail.cyr` | not started | M4 |
 | `cut` | `src/cmd/cut.cyr` | not started | M4 |
 | `tr` | `src/cmd/tr.cyr` | not started | M4 |
-| `tee` | `src/cmd/tee.cyr` | not started | M4 |
+| `tee` | `src/cmd/tee.cyr` | **implemented** (`-a`; resilient per-file failure; `-i` SIGINT-ignore deferred to signal-handler infra) | M4 |
 | `sort` | `src/cmd/sort.cyr` | not started | M4 |
 | `uniq` | `src/cmd/uniq.cyr` | not started | M4 |
 | `nl` | `src/cmd/nl.cyr` | not started | M4 |
@@ -104,6 +104,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 - `scripts/smoke-which.sh` — behavioural test for `which` (23/23 — controlled-PATH first-match-wins, `-a` shadowing in PATH order, non-executable + directory entries skipped, empty PATH and empty-entry-means-cwd, slash-literal-bypasses-PATH, partial-failure exit + stdout preserved, `-s`/`-z` modifiers).
 - `scripts/smoke-stat.sh` — behavioural test for `stat` (37/37 — every shipped specifier compared against GNU `stat`, `-c` vs `--printf` escape handling, `-L` vs default lstat, `-t` 16-column terse parity, partial-failure exit, unknown-specifier literal emission).
 - `scripts/smoke-ls.sh` — behavioural test for `ls` (36/36 — default sort, `-a`/`-A` hidden-file split, `-r` reverse, `-F` type-suffix matrix, `-i` inode column, `-l` 8-column layout with ISO mtime, `-l` symlink target rendering, `-l -h` human-size matrix at 1K/5K/1.4M boundaries, `-d` directory-as-entry, `-R` recursion without symlink-follow, multi-operand layout, partial-failure exit).
+- `scripts/smoke-tee.sh` — behavioural test for `tee` (20/20 — single-file, multi-file fan-out, default truncate vs `-a` append, no-operand pass-through, 200KiB + 5MiB fidelity, binary-NUL fidelity, resilient partial-failure with surviving outputs, directory operand cleanly fails).
 - `tests/kriya.fcyr` — fuzz stub (lands when M2 destructive utilities arrive).
 
 ## Dependencies
@@ -141,6 +142,18 @@ _None yet._ Expected consumers once M1 ships:
   4. ✅ `which` (2026-05-17) — `$PATH` walk with `-a`/`-s`/`-z`; slash-literal bypasses PATH.
   5. ✅ `stat` (2026-05-17) — printf-style format engine, `-c`/`--printf`/`-L`/`-t`; 22 specifiers verified cell-by-cell against GNU.
   6. ✅ `ls` (2026-05-17) — `-a`/`-A`/`-l`/`-h`/`-r`/`-1`/`-F`/`-i`/`-d`/`-R`; two-pass long-form with right-justified column alignment; ISO mtime via `chrono.epoch_to_date`. **Closes M3.**
+- **M3 closed 2026-05-17 at v0.4.0.** All seven planned utilities ship. Cold-start at v0.4.0 median 1.208ms (~50µs uptick from v0.3.0 — still well under the 2ms v1.0 target).
+- **M4 in progress** (text-stream utilities; 10 utilities — largest milestone by count). Order (simplest → biggest):
+  1. ✅ `tee` (2026-05-17) — pass-through fan-out; `-a` append; resilient per-file failure. M4 opener.
+  2. `wc` — line/word/byte/char counts. Next.
+  3. `head` / `tail` (no `-f`) — first/last N lines or bytes.
+  4. `nl` — line numbering.
+  5. `uniq` — adjacent-line dedup.
+  6. `tr` — character translation (no regex).
+  7. `cut` — column extraction by char range / field.
+  8. `tail -f` — follow mode (inotify-driven).
+  9. `sort` — line sort; in-memory + external-sort fallback.
+  10. `printf` — printf-style format engine (largest M4 utility; reuses concepts from `stat`'s format parser).
 - Deferred features tracked against future enablers (each a known-named follow-up, not "TBD"):
   - echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
   - pwd `$PWD` inode-match — waits on `fs.cyr` stat-compare.
