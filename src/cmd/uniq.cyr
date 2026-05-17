@@ -1,0 +1,449 @@
+# uniq — POSIX `uniq(1)`: filter adjacent matching lines.
+#
+# Argument shape:
+#   uniq [opts] [INPUT [OUTPUT]]
+#
+# Flags:
+#   -c / --count       prefix each output line with the run-length.
+#   -d / --repeated    only output lines that appeared at least twice.
+#   -u / --unique      only output lines that appeared exactly once.
+#   -i / --ignore-case case-fold ASCII letters during comparison.
+#   -f N / --skip-fields=N    skip the first N blank-separated fields
+#                              when comparing.
+#   -s N / --skip-chars=N     skip the first N chars (after -f) when
+#                              comparing.
+#   -w N / --check-chars=N    compare at most N chars (after -f -s).
+#   -z / --zero-terminated    NUL-separated lines on both input and output.
+#
+# **Adjacent only**: uniq compares each line to its immediate
+# predecessor. To collapse non-adjacent duplicates, pipe `sort | uniq`
+# (this is POSIX-defined behaviour, not a kriya limitation).
+#
+# `-d` and `-u` are mutually exclusive in spirit; combining them
+# produces no output (matches GNU).
+#
+# Output line semantics: the OUTPUT is always the full unmodified line
+# from the input. The comparison-key transformations (`-f`/`-s`/`-w`/`-i`)
+# only decide equality, never what gets written.
+#
+# Positional arguments: zero, one, or two operands. With one operand
+# it is the input file (stdin reads if no operand or operand `-`). With
+# two operands the second is the output file (truncated, mode 0666).
+#
+# Deferred (named follow-ups):
+#   --all-repeated[=METHOD]  emit every repeated line, optionally grouped.
+#   --group[=METHOD]         emit groups of adjacent equal lines with separators.
+#   Multi-byte case-folding   the current `-i` is ASCII-only.
+
+var _uq_spec   = 0;
+var _uq_c_idx  = 0;
+var _uq_d_idx  = 0;
+var _uq_u_idx  = 0;
+var _uq_i_idx  = 0;
+var _uq_f_idx  = 0;
+var _uq_s_idx  = 0;
+var _uq_w_idx  = 0;
+var _uq_z_idx  = 0;
+
+var _uq_read_buf = 0;
+var _UQ_READ_SZ  = 65536;
+var _UQ_LINE_SZ  = 65536;
+
+fn _uq_init_spec(): i64 {
+    if (_uq_spec != 0) { return 0; }
+    var s = flags_new();
+    _uq_c_idx = flags_add_bool(s, 99,  "count",            0, "prefix each line with its run count");
+    _uq_d_idx = flags_add_bool(s, 100, "repeated",         0, "only repeated lines");
+    _uq_u_idx = flags_add_bool(s, 117, "unique",           0, "only unique lines");
+    _uq_i_idx = flags_add_bool(s, 105, "ignore-case",      0, "case-fold ASCII letters");
+    _uq_f_idx = flags_add_str(s,  102, "skip-fields",      0, "skip N blank-separated fields");
+    _uq_s_idx = flags_add_str(s,  115, "skip-chars",       0, "skip N chars (after -f)");
+    _uq_w_idx = flags_add_str(s,  119, "check-chars",      0, "compare at most N chars");
+    _uq_z_idx = flags_add_bool(s, 122, "zero-terminated",  0, "NUL-separated lines");
+    _uq_spec = s;
+    return 0;
+}
+
+fn _uq_read_buf_get(): i64 {
+    if (_uq_read_buf == 0) { _uq_read_buf = alloc(_UQ_READ_SZ); }
+    return _uq_read_buf;
+}
+
+fn _uq_report(operand, errno): i64 {
+    syscall(1, 2, "kriya uniq: ", 12);
+    syscall(1, 2, operand, strlen(operand));
+    syscall(1, 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        syscall(1, 2, m, strlen(m));
+    } else {
+        syscall(1, 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        syscall(1, 2, &buf + i + 1, 6 - i);
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+fn _uq_render_dec(v, buf): i64 {
+    if (v == 0) { store8(buf, 48); return 1; }
+    var tmp[32];
+    var n: i64 = 0;
+    var rem = v;
+    while (rem > 0) {
+        store8(&tmp + n, 48 + (rem - (rem / 10) * 10));
+        rem = rem / 10;
+        n = n + 1;
+    }
+    var i: i64 = 0;
+    while (i < n) {
+        store8(buf + i, load8(&tmp + n - 1 - i));
+        i = i + 1;
+    }
+    return n;
+}
+
+# ASCII case-fold byte. Upper → lower; everything else passes through.
+fn _uq_fold(b): i64 {
+    if (b >= 65) {
+        if (b <= 90) { return b + 32; }
+    }
+    return b;
+}
+
+# Locate the comparison-key window within `line[0..len)`:
+#   - Skip `skip_f` blank-separated fields from the start.
+#   - Then skip `skip_s` chars.
+#   - Cap the remaining window at `cw` chars (or full remainder if cw < 0).
+# Returns the start offset; writes the comparison length into `out_len_p`.
+fn _uq_key_window(line, len, skip_f, skip_s, cw, out_len_p): i64 {
+    var pos: i64 = 0;
+    # Skip skip_f fields. A "field" per POSIX is "a non-empty sequence
+    # of non-blank characters, preceded by zero or more blanks". So
+    # the parse is: skip leading blanks, consume non-blanks, repeat.
+    # (Cyrius break-in-while is unreliable per CLAUDE.md, so each
+    # inner loop uses a done-flag.)
+    var fields_skipped: i64 = 0;
+    while (fields_skipped < skip_f) {
+        # Skip blanks.
+        var done_blanks: i64 = 0;
+        while (done_blanks == 0) {
+            if (pos >= len) { done_blanks = 1; }
+            else {
+                var b = load8(line + pos);
+                if (b == 32) { pos = pos + 1; }
+                else {
+                    if (b == 9) { pos = pos + 1; }
+                    else { done_blanks = 1; }
+                }
+            }
+        }
+        if (pos >= len) {
+            fields_skipped = skip_f;  # nothing more to skip
+        } else {
+            # Consume non-blanks.
+            var done_field: i64 = 0;
+            while (done_field == 0) {
+                if (pos >= len) { done_field = 1; }
+                else {
+                    var b = load8(line + pos);
+                    if (b == 32)      { done_field = 1; }
+                    else { if (b == 9) { done_field = 1; }
+                    else                { pos = pos + 1; } }
+                }
+            }
+            fields_skipped = fields_skipped + 1;
+        }
+    }
+
+    # Skip skip_s chars.
+    var sc: i64 = 0;
+    while (sc < skip_s) {
+        if (pos >= len) { sc = skip_s; }
+        else { pos = pos + 1; sc = sc + 1; }
+    }
+
+    var remaining = len - pos;
+    if (cw >= 0) {
+        if (remaining > cw) { remaining = cw; }
+    }
+    store64(out_len_p, remaining);
+    return pos;
+}
+
+# Compare two comparison-key windows. Returns 0 if equal, non-zero
+# otherwise. `case_fold` 1 applies ASCII tolower to both before
+# byte-compare.
+fn _uq_keys_equal(a, alen, b, blen, case_fold): i64 {
+    if (alen != blen) { return 0; }
+    var i: i64 = 0;
+    while (i < alen) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (case_fold == 1) {
+            ca = _uq_fold(ca);
+            cb = _uq_fold(cb);
+        }
+        if (ca != cb) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Emit a previously-buffered group. `show_d`/`show_u` decide whether
+# duplicates / uniques pass the filter; `show_c` prepends the count.
+fn _uq_emit_group(out_fd, prev, prev_len, count, show_c, show_d, show_u, term_byte): i64 {
+    var is_dup: i64 = 0;
+    if (count > 1) { is_dup = 1; }
+    var emit: i64 = 1;
+    if (show_d == 1) {
+        if (is_dup == 0) { emit = 0; }
+    }
+    if (show_u == 1) {
+        if (is_dup == 1) { emit = 0; }
+    }
+    if (emit == 0) { return 0; }
+
+    if (show_c == 1) {
+        # GNU format: right-justify count in width 7, then 1 space, then line.
+        var nb[32];
+        var nlen = _uq_render_dec(count, &nb);
+        var pad = 7 - nlen;
+        var sp[2];
+        store8(&sp, 32);
+        while (pad > 0) {
+            syscall(1, out_fd, &sp, 1);
+            pad = pad - 1;
+        }
+        syscall(1, out_fd, &nb, nlen);
+        syscall(1, out_fd, " ", 1);
+    }
+    if (prev_len > 0) { syscall(1, out_fd, prev, prev_len); }
+    var tb[2];
+    store8(&tb, term_byte);
+    syscall(1, out_fd, &tb, 1);
+    return 0;
+}
+
+fn _uq_run(in_fd, out_fd, skip_f, skip_s, cw, ic, show_c, show_d, show_u, term_byte): i64 {
+    var read_buf = _uq_read_buf_get();
+    var prev_buf = alloc(_UQ_LINE_SZ);
+    var cur_buf  = alloc(_UQ_LINE_SZ);
+    var prev_len: i64 = 0;
+    var cur_len:  i64 = 0;
+    var prev_key_off: i64 = 0;
+    var prev_key_len: i64 = 0;
+    var count: i64 = 0;  # 0 means "no previous group buffered yet"
+    var truncated_warned: i64 = 0;
+
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var n = syscall(0, in_fd, read_buf, _UQ_READ_SZ);
+        if (n < 0) {
+            if ((0 - n) == 4) {
+                # EINTR retry.
+            } else { return n; }
+        } else {
+            if (n == 0) {
+                # EOF — flush trailing partial line if any.
+                if (cur_len > 0) {
+                    # Treat as a line.
+                    var klen_box[8];
+                    var key_off = _uq_key_window(cur_buf, cur_len, skip_f, skip_s, cw, &klen_box);
+                    var klen = load64(&klen_box);
+                    var equal: i64 = 0;
+                    if (count > 0) {
+                        equal = _uq_keys_equal(prev_buf + prev_key_off, prev_key_len, cur_buf + key_off, klen, ic);
+                    }
+                    if (count > 0) {
+                        if (equal == 1) {
+                            count = count + 1;
+                        } else {
+                            _uq_emit_group(out_fd, prev_buf, prev_len, count, show_c, show_d, show_u, term_byte);
+                            memcpy(prev_buf, cur_buf, cur_len);
+                            prev_len = cur_len;
+                            prev_key_off = key_off;
+                            prev_key_len = klen;
+                            count = 1;
+                        }
+                    } else {
+                        memcpy(prev_buf, cur_buf, cur_len);
+                        prev_len = cur_len;
+                        prev_key_off = key_off;
+                        prev_key_len = klen;
+                        count = 1;
+                    }
+                    cur_len = 0;
+                }
+                # Final flush.
+                if (count > 0) {
+                    _uq_emit_group(out_fd, prev_buf, prev_len, count, show_c, show_d, show_u, term_byte);
+                }
+                loop = 0;
+            } else {
+                var i: i64 = 0;
+                while (i < n) {
+                    var b = load8(read_buf + i);
+                    if (b == term_byte) {
+                        # Line complete.
+                        var klen_box[8];
+                        var key_off = _uq_key_window(cur_buf, cur_len, skip_f, skip_s, cw, &klen_box);
+                        var klen = load64(&klen_box);
+                        if (count > 0) {
+                            var equal = _uq_keys_equal(prev_buf + prev_key_off, prev_key_len, cur_buf + key_off, klen, ic);
+                            if (equal == 1) {
+                                count = count + 1;
+                            } else {
+                                _uq_emit_group(out_fd, prev_buf, prev_len, count, show_c, show_d, show_u, term_byte);
+                                memcpy(prev_buf, cur_buf, cur_len);
+                                prev_len = cur_len;
+                                prev_key_off = key_off;
+                                prev_key_len = klen;
+                                count = 1;
+                            }
+                        } else {
+                            memcpy(prev_buf, cur_buf, cur_len);
+                            prev_len = cur_len;
+                            prev_key_off = key_off;
+                            prev_key_len = klen;
+                            count = 1;
+                        }
+                        cur_len = 0;
+                    } else {
+                        if (cur_len < _UQ_LINE_SZ - 1) {
+                            store8(cur_buf + cur_len, b);
+                            cur_len = cur_len + 1;
+                        } else {
+                            if (truncated_warned == 0) {
+                                syscall(1, 2, "kriya uniq: warning: line exceeds 64 KiB; truncating\n", 53);
+                                truncated_warned = 1;
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+fn cmd_uniq(start: i64): i64 {
+    _uq_init_spec();
+    if (kriya_args_parse(_uq_spec, start) != 0) {
+        syscall(1, 2, "kriya uniq: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
+        return EXIT_USAGE;
+    }
+
+    var show_c: i64 = 0;
+    if (flags_get_bool(_uq_spec, _uq_c_idx) == 1) { show_c = 1; }
+    var show_d: i64 = 0;
+    if (flags_get_bool(_uq_spec, _uq_d_idx) == 1) { show_d = 1; }
+    var show_u: i64 = 0;
+    if (flags_get_bool(_uq_spec, _uq_u_idx) == 1) { show_u = 1; }
+    var ic: i64 = 0;
+    if (flags_get_bool(_uq_spec, _uq_i_idx) == 1) { ic = 1; }
+    var zero_term: i64 = 0;
+    if (flags_get_bool(_uq_spec, _uq_z_idx) == 1) { zero_term = 1; }
+
+    var skip_f: i64 = 0;
+    var f_arg = flags_get_str(_uq_spec, _uq_f_idx);
+    if (f_arg != 0) {
+        if (load8(f_arg) != 0) {
+            var v = kriya_parse_nonneg_int(f_arg);
+            if (v < 0) {
+                syscall(1, 2, "kriya uniq: error: --skip-fields requires a non-negative integer\n", 65);
+                return EXIT_USAGE;
+            }
+            skip_f = v;
+        }
+    }
+    var skip_s: i64 = 0;
+    var s_arg = flags_get_str(_uq_spec, _uq_s_idx);
+    if (s_arg != 0) {
+        if (load8(s_arg) != 0) {
+            var v = kriya_parse_nonneg_int(s_arg);
+            if (v < 0) {
+                syscall(1, 2, "kriya uniq: error: --skip-chars requires a non-negative integer\n", 64);
+                return EXIT_USAGE;
+            }
+            skip_s = v;
+        }
+    }
+    var cw: i64 = 0 - 1;  # -1 = no cap
+    var w_arg = flags_get_str(_uq_spec, _uq_w_idx);
+    if (w_arg != 0) {
+        if (load8(w_arg) != 0) {
+            var v = kriya_parse_nonneg_int(w_arg);
+            if (v < 0) {
+                syscall(1, 2, "kriya uniq: error: --check-chars requires a non-negative integer\n", 65);
+                return EXIT_USAGE;
+            }
+            cw = v;
+        }
+    }
+
+    var term_byte: i64 = 10;
+    if (zero_term == 1) { term_byte = 0; }
+
+    var npos = flags_positional_count(_uq_spec);
+    if (npos > 2) {
+        syscall(1, 2, "kriya uniq: error: at most two positional operands (INPUT [OUTPUT])\n", 67);
+        return EXIT_USAGE;
+    }
+
+    var in_fd: i64 = 0;
+    var out_fd: i64 = 1;
+    var in_opened: i64 = 0;
+    var out_opened: i64 = 0;
+    var any_failed: i64 = 0;
+
+    if (npos >= 1) {
+        var p = flags_positional(_uq_spec, 0);
+        var is_stdin: i64 = 0;
+        if (load8(p) == 45) {
+            if (load8(p + 1) == 0) { is_stdin = 1; }
+        }
+        if (is_stdin == 0) {
+            in_fd = sys_open(p, 0, 0);
+            if (in_fd < 0) {
+                _uq_report(p, 0 - in_fd);
+                return EXIT_FAILURE;
+            }
+            in_opened = 1;
+        }
+    }
+    if (npos == 2) {
+        var p = flags_positional(_uq_spec, 1);
+        # O_WRONLY | O_CREAT | O_TRUNC = 577. Mode 0666 = 438.
+        out_fd = sys_open(p, 577, 438);
+        if (out_fd < 0) {
+            _uq_report(p, 0 - out_fd);
+            if (in_opened == 1) { syscall(3, in_fd); }
+            return EXIT_FAILURE;
+        }
+        out_opened = 1;
+    }
+
+    var r = _uq_run(in_fd, out_fd, skip_f, skip_s, cw, ic, show_c, show_d, show_u, term_byte);
+    if (r != 0) {
+        _uq_report("(read)", 0 - r);
+        any_failed = 1;
+    }
+
+    if (in_opened == 1)  { syscall(3, in_fd); }
+    if (out_opened == 1) { syscall(3, out_fd); }
+
+    if (any_failed == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}

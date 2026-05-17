@@ -26,7 +26,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 | `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
 | `src/lib/errmsg.cyr` | implemented — errnos 1..40 + `errmsg_is_known` |
 | `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
-| `src/cmd/*.cyr` | 25 of ~40 — M1 + M2 (13) + M3 (7) + M4 (5: `tee`, `wc`, `head`, `tail`, `nl`) |
+| `src/cmd/*.cyr` | 26 of ~40 — M1 + M2 (13) + M3 (7) + M4 (6: `tee`, `wc`, `head`, `tail`, `nl`, `uniq`) |
 | `src/lib/fs.cyr` | implemented — `*at()`-family wrappers, `getdents64` iteration, type predicates, AT/S_IF/DT constants. Foundation for cp -R / mv / rm -r per ADR 0003. Adds `fs_rename`/`fs_renameat`/`fs_realpath` (3-mode canonicalization). |
 | `src/lib/protected.cyr` | implemented — `protected_paths[]` table with `/`, canonicalization via `path_normalize` + getcwd, `is_protected_path()` membership check. Per ADR 0004, only consumed by `rm` today. |
 
@@ -61,7 +61,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 | `tr` | `src/cmd/tr.cyr` | not started | M4 |
 | `tee` | `src/cmd/tee.cyr` | **implemented** (`-a`; resilient per-file failure; `-i` SIGINT-ignore deferred to signal-handler infra) | M4 |
 | `sort` | `src/cmd/sort.cyr` | not started | M4 |
-| `uniq` | `src/cmd/uniq.cyr` | not started | M4 |
+| `uniq` | `src/cmd/uniq.cyr` | **implemented** (`-c`/`-d`/`-u`/`-i`/`-f`/`-s`/`-w`/`-z`; 2-op input/output; defer `--all-repeated`/`--group`) | M4 |
 | `nl` | `src/cmd/nl.cyr` | **implemented** (single-section; `-b`/`-i`/`-n`/`-s`/`-v`/`-w`; defer `-d`/`-h`/`-f`/`-l`/`-p` sections + `-b p REGEX`) | M4 |
 | `printf` | `src/cmd/printf.cyr` | not started | M4 |
 | `grep` | `src/cmd/grep.cyr` | not started | M5 |
@@ -108,6 +108,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 - `scripts/smoke-wc.sh` — behavioural test for `wc` (23/23 — every flag combo compared cell-by-cell against GNU `wc`; empty file, no-trailing-newline, UTF-8 codepoints, 200KiB input, 1000-line file, multi-file total + column-width rules, stdin, partial-failure).
 - `scripts/smoke-head-tail.sh` — paired behavioural test for `head` + `tail` (38/38 — every shipped flag combo compared cell-by-cell against GNU `head`/`tail`; empty / no-newline / 1000-line files, `-c 0` and `-n 0` edges, stdin, `-` literal-stdin, multi-file headers, `-q`/`-v` overrides, partial failure).
 - `scripts/smoke-nl.sh` — behavioural test for `nl` (23/23 — every flag combo compared cell-by-cell against GNU `nl`; default `-b t` empty-line skip, `-b a` number all, `-b n` number none, `-n` format matrix `ln`/`rn`/`rz`, `-w` width, `-s SEP` with 1/2/3-byte separators exercising the `width + sep_len` unnumbered-padding rule, `-v`/`-i`, stdin, multi-file continuous numbering, partial failure).
+- `scripts/smoke-uniq.sh` — behavioural test for `uniq` (27/27 — every shipped flag cell-by-cell against GNU; `-c` count prefix at width 7, `-d`/`-u` mutually-exclusive filters, `-i` case-fold, `-f`/`-s`/`-w` comparison-key permutations, 2-operand input/output mode, NUL-separated I/O via `-z`, partial failure).
 - `tests/kriya.fcyr` — fuzz stub (lands when M2 destructive utilities arrive).
 
 ## Dependencies
@@ -151,8 +152,8 @@ _None yet._ Expected consumers once M1 ships:
   2. ✅ `wc` (2026-05-17) — streaming `-l`/`-w`/`-c`/`-m`/`-L`; GNU-compatible column-width matrix verified cell-by-cell.
   3. ✅ `head` + `tail` (2026-05-17, paired) — `-n`/`-c`/`-q`/`-v`; head streams forward, tail buffers up to 16 MiB and back-walks. `-f` follow mode deferred.
   4. ✅ `nl` (2026-05-17) — single-section line numbering; `-b`/`-i`/`-n`/`-s`/`-v`/`-w`. GNU's `width + sep_len` unnumbered-padding quirk matched and tested.
-  5. `uniq` — adjacent-line dedup. Next.
-  6. `tr` — character translation (no regex).
+  5. ✅ `uniq` (2026-05-17) — adjacent-line dedup; `-c`/`-d`/`-u`/`-i`/`-f`/`-s`/`-w`/`-z`; 2-op INPUT OUTPUT.
+  6. `tr` — character translation (no regex). Next.
   7. `cut` — column extraction by char range / field.
   8. `tail -f` — follow mode (inotify-driven).
   9. `sort` — line sort; in-memory + external-sort fallback.
