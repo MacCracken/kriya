@@ -1,0 +1,652 @@
+# tr — POSIX `tr(1)`: translate, squeeze, or delete characters.
+#
+# Argument shape:
+#   tr [opts] SET1 [SET2]
+#
+# Modes (determined by the flag combination):
+#   tr SET1 SET2            translate chars in SET1 to corresponding
+#                           chars in SET2 (positional pairing).
+#   tr -d SET1              delete chars in SET1 (no SET2).
+#   tr -s SET1              squeeze runs of chars in SET1 to one.
+#   tr -s SET1 SET2         translate then squeeze SET2 runs.
+#   tr -d -s SET1 SET2      delete SET1 chars then squeeze SET2 runs.
+#   tr -c SET1 [SET2]       work on the COMPLEMENT of SET1.
+#   tr -t SET1 SET2         truncate SET1 to length of SET2 before
+#                           building the translation table.
+#
+# Set grammar:
+#   - literal byte (anything not special)
+#   - range  a-z  → all bytes from a..z inclusive
+#   - backslash escapes  \\  \a (07)  \b (08)  \f (0c)  \n (0a)
+#                        \r (0d)  \t (09)  \v (0b)
+#   - octal escape  \NNN  (1-3 octal digits)
+#   - char class  [:alpha:] [:alnum:] [:digit:] [:lower:] [:upper:]
+#                 [:space:] [:blank:] [:punct:] [:print:] [:graph:]
+#                 [:cntrl:] [:xdigit:]
+#
+# Deferred (named follow-ups):
+#   [=c=]   equivalence classes (locale-dependent).
+#   [c*N]   character repetition (handy for padding SET2 explicitly).
+#   Locale-aware case folding (current classes are ASCII-only).
+#
+# When SET2 is shorter than SET1 in translate mode, GNU pads SET2
+# with its last character (matches our behaviour). POSIX leaves this
+# undefined; kriya matches GNU.
+
+var _tr_spec  = 0;
+var _tr_d_idx = 0;
+var _tr_s_idx = 0;
+var _tr_c_idx = 0;
+var _tr_t_idx = 0;
+
+var _tr_buf   = 0;
+var _TR_BUFSZ = 65536;
+
+fn _tr_init_spec(): i64 {
+    if (_tr_spec != 0) { return 0; }
+    var s = flags_new();
+    _tr_d_idx = flags_add_bool(s, 100, "delete",     0, "delete characters in SET1");
+    _tr_s_idx = flags_add_bool(s, 115, "squeeze-repeats", 0, "collapse runs of the squeeze set");
+    _tr_c_idx = flags_add_bool(s, 99,  "complement", 0, "use the complement of SET1");
+    _tr_t_idx = flags_add_bool(s, 116, "truncate-set1", 0, "truncate SET1 to len(SET2)");
+    _tr_spec = s;
+    return 0;
+}
+
+fn _tr_buf_get(): i64 {
+    if (_tr_buf == 0) { _tr_buf = alloc(_TR_BUFSZ); }
+    return _tr_buf;
+}
+
+fn _tr_report(operand, errno): i64 {
+    syscall(1, 2, "kriya tr: ", 10);
+    syscall(1, 2, operand, strlen(operand));
+    syscall(1, 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        syscall(1, 2, m, strlen(m));
+    } else {
+        syscall(1, 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        syscall(1, 2, &buf + i + 1, 6 - i);
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+# --- character-class membership predicates (ASCII) ---
+
+fn _tr_is_alpha(c): i64 {
+    if (c >= 65) { if (c <= 90)  { return 1; } }
+    if (c >= 97) { if (c <= 122) { return 1; } }
+    return 0;
+}
+fn _tr_is_digit(c): i64 {
+    if (c >= 48) { if (c <= 57) { return 1; } }
+    return 0;
+}
+fn _tr_is_lower(c): i64 {
+    if (c >= 97) { if (c <= 122) { return 1; } }
+    return 0;
+}
+fn _tr_is_upper(c): i64 {
+    if (c >= 65) { if (c <= 90) { return 1; } }
+    return 0;
+}
+fn _tr_is_blank(c): i64 {
+    if (c == 32) { return 1; }
+    if (c == 9)  { return 1; }
+    return 0;
+}
+fn _tr_is_space(c): i64 {
+    if (c == 32) { return 1; }
+    if (c >= 9)  { if (c <= 13) { return 1; } }
+    return 0;
+}
+fn _tr_is_cntrl(c): i64 {
+    if (c < 32) { return 1; }
+    if (c == 127) { return 1; }
+    return 0;
+}
+fn _tr_is_print(c): i64 {
+    if (c >= 32) { if (c < 127) { return 1; } }
+    return 0;
+}
+fn _tr_is_graph(c): i64 {
+    if (c > 32) { if (c < 127) { return 1; } }
+    return 0;
+}
+fn _tr_is_punct(c): i64 {
+    if (_tr_is_graph(c) == 0) { return 0; }
+    if (_tr_is_alpha(c) == 1) { return 0; }
+    if (_tr_is_digit(c) == 1) { return 0; }
+    return 1;
+}
+fn _tr_is_xdigit(c): i64 {
+    if (_tr_is_digit(c) == 1) { return 1; }
+    if (c >= 65) { if (c <= 70)  { return 1; } }
+    if (c >= 97) { if (c <= 102) { return 1; } }
+    return 0;
+}
+fn _tr_is_alnum(c): i64 {
+    if (_tr_is_alpha(c) == 1) { return 1; }
+    if (_tr_is_digit(c) == 1) { return 1; }
+    return 0;
+}
+
+# Returns 1 if `s` starting at offset `off` matches the literal class
+# tag `tag` (e.g. "alpha"); the trailing `:]` must follow. `tag_len`
+# is the length of `tag`.
+fn _tr_match_class_tag(s, slen, off, tag, tag_len): i64 {
+    if (off + tag_len + 2 > slen) { return 0; }
+    var i: i64 = 0;
+    while (i < tag_len) {
+        if (load8(s + off + i) != load8(tag + i)) { return 0; }
+        i = i + 1;
+    }
+    if (load8(s + off + tag_len) != 58) { return 0; }     # ':'
+    if (load8(s + off + tag_len + 1) != 93) { return 0; } # ']'
+    return 1;
+}
+
+# --- set parsing ---
+#
+# Parse the set string `s` (length `slen`) into a 256-byte presence
+# table `mem[256]` (1 if byte is in set, 0 otherwise) AND an ORDERED
+# expansion buffer `seq` written as a sequence of bytes. The ordered
+# form is needed for translate-mode pairing (SET1 position i maps to
+# SET2 position i); the presence table is for delete/squeeze/complement.
+#
+# Returns the length written into `seq`, or -1 on parse error.
+# The caller has provisioned `seq` with enough room (we use 1024 bytes
+# which is plenty — any reasonable set expands to less than that).
+
+# Append byte b to the seq buffer + mark in the presence table.
+fn _tr_append(seq, len_p, mem, b): i64 {
+    var l = load64(len_p);
+    store8(seq + l, b & 255);
+    store64(len_p, l + 1);
+    store8(mem + (b & 255), 1);
+    return 0;
+}
+
+# Append the range [lo..hi] inclusive.
+fn _tr_append_range(seq, len_p, mem, lo, hi): i64 {
+    var c = lo;
+    while (c <= hi) {
+        _tr_append(seq, len_p, mem, c);
+        c = c + 1;
+    }
+    return 0;
+}
+
+# Parse a single byte starting at `s[off]`, honoring backslash escapes
+# and octal. Writes the decoded byte to `out_byte_p`, returns the
+# number of input chars consumed.
+fn _tr_parse_byte(s, slen, off, out_byte_p): i64 {
+    var b = load8(s + off);
+    if (b != 92) {  # not '\'
+        store64(out_byte_p, b);
+        return 1;
+    }
+    if (off + 1 >= slen) {
+        # Trailing backslash — emit as literal '\'.
+        store64(out_byte_p, 92);
+        return 1;
+    }
+    var nx = load8(s + off + 1);
+    # Octal: \NNN (1-3 digits)
+    if (nx >= 48) {
+        if (nx <= 55) {
+            var val: i64 = nx - 48;
+            var consumed: i64 = 2;
+            if (off + 2 < slen) {
+                var n2 = load8(s + off + 2);
+                if (n2 >= 48) { if (n2 <= 55) {
+                    val = val * 8 + (n2 - 48);
+                    consumed = 3;
+                    if (off + 3 < slen) {
+                        var n3 = load8(s + off + 3);
+                        if (n3 >= 48) { if (n3 <= 55) {
+                            var v3 = val * 8 + (n3 - 48);
+                            if (v3 <= 255) {
+                                val = v3;
+                                consumed = 4;
+                            }
+                        } }
+                    }
+                } }
+            }
+            store64(out_byte_p, val & 255);
+            return consumed;
+        }
+    }
+    # Named escapes.
+    var out: i64 = nx;
+    if (nx == 97)  { out = 7;  }   # \a
+    if (nx == 98)  { out = 8;  }   # \b
+    if (nx == 102) { out = 12; }   # \f
+    if (nx == 110) { out = 10; }   # \n
+    if (nx == 114) { out = 13; }   # \r
+    if (nx == 116) { out = 9;  }   # \t
+    if (nx == 118) { out = 11; }   # \v
+    if (nx == 92)  { out = 92; }   # \\
+    if (nx == 47)  { out = 47; }   # \/  (literal '/' — some implementations)
+    store64(out_byte_p, out);
+    return 2;
+}
+
+# Parse a set string `s` (length `slen`) into `seq` (ordered bytes)
+# and `mem[256]` (presence). Returns seq length, or -1 on error.
+fn _tr_parse_set(s, slen, seq, mem): i64 {
+    var len_box[8];
+    store64(&len_box, 0);
+    var off: i64 = 0;
+    # Wipe mem first.
+    var i: i64 = 0;
+    while (i < 256) { store8(mem + i, 0); i = i + 1; }
+
+    while (off < slen) {
+        var b = load8(s + off);
+
+        # Character class [:name:]
+        if (b == 91) {  # '['
+            if (off + 1 < slen) {
+                if (load8(s + off + 1) == 58) {  # ':'
+                    var class_off = off + 2;
+                    # Match one of the known classes.
+                    var matched: i64 = 0;
+                    var consumed: i64 = 0;
+
+                    if (matched == 0) { if (_tr_match_class_tag(s, slen, class_off, "alpha", 5) == 1) {
+                        var c: i64 = 0;
+                        while (c < 256) {
+                            if (_tr_is_alpha(c) == 1) { _tr_append(seq, &len_box, mem, c); }
+                            c = c + 1;
+                        }
+                        matched = 1; consumed = 2 + 5 + 2;
+                    } }
+                    if (matched == 0) { if (_tr_match_class_tag(s, slen, class_off, "alnum", 5) == 1) {
+                        var c: i64 = 0;
+                        while (c < 256) {
+                            if (_tr_is_alnum(c) == 1) { _tr_append(seq, &len_box, mem, c); }
+                            c = c + 1;
+                        }
+                        matched = 1; consumed = 2 + 5 + 2;
+                    } }
+                    if (matched == 0) { if (_tr_match_class_tag(s, slen, class_off, "digit", 5) == 1) {
+                        var c: i64 = 0;
+                        while (c < 256) {
+                            if (_tr_is_digit(c) == 1) { _tr_append(seq, &len_box, mem, c); }
+                            c = c + 1;
+                        }
+                        matched = 1; consumed = 2 + 5 + 2;
+                    } }
+                    if (matched == 0) { if (_tr_match_class_tag(s, slen, class_off, "lower", 5) == 1) {
+                        var c: i64 = 0;
+                        while (c < 256) {
+                            if (_tr_is_lower(c) == 1) { _tr_append(seq, &len_box, mem, c); }
+                            c = c + 1;
+                        }
+                        matched = 1; consumed = 2 + 5 + 2;
+                    } }
+                    if (matched == 0) { if (_tr_match_class_tag(s, slen, class_off, "upper", 5) == 1) {
+                        var c: i64 = 0;
+                        while (c < 256) {
+                            if (_tr_is_upper(c) == 1) { _tr_append(seq, &len_box, mem, c); }
+                            c = c + 1;
+                        }
+                        matched = 1; consumed = 2 + 5 + 2;
+                    } }
+                    if (matched == 0) { if (_tr_match_class_tag(s, slen, class_off, "space", 5) == 1) {
+                        var c: i64 = 0;
+                        while (c < 256) {
+                            if (_tr_is_space(c) == 1) { _tr_append(seq, &len_box, mem, c); }
+                            c = c + 1;
+                        }
+                        matched = 1; consumed = 2 + 5 + 2;
+                    } }
+                    if (matched == 0) { if (_tr_match_class_tag(s, slen, class_off, "blank", 5) == 1) {
+                        var c: i64 = 0;
+                        while (c < 256) {
+                            if (_tr_is_blank(c) == 1) { _tr_append(seq, &len_box, mem, c); }
+                            c = c + 1;
+                        }
+                        matched = 1; consumed = 2 + 5 + 2;
+                    } }
+                    if (matched == 0) { if (_tr_match_class_tag(s, slen, class_off, "cntrl", 5) == 1) {
+                        var c: i64 = 0;
+                        while (c < 256) {
+                            if (_tr_is_cntrl(c) == 1) { _tr_append(seq, &len_box, mem, c); }
+                            c = c + 1;
+                        }
+                        matched = 1; consumed = 2 + 5 + 2;
+                    } }
+                    if (matched == 0) { if (_tr_match_class_tag(s, slen, class_off, "print", 5) == 1) {
+                        var c: i64 = 0;
+                        while (c < 256) {
+                            if (_tr_is_print(c) == 1) { _tr_append(seq, &len_box, mem, c); }
+                            c = c + 1;
+                        }
+                        matched = 1; consumed = 2 + 5 + 2;
+                    } }
+                    if (matched == 0) { if (_tr_match_class_tag(s, slen, class_off, "graph", 5) == 1) {
+                        var c: i64 = 0;
+                        while (c < 256) {
+                            if (_tr_is_graph(c) == 1) { _tr_append(seq, &len_box, mem, c); }
+                            c = c + 1;
+                        }
+                        matched = 1; consumed = 2 + 5 + 2;
+                    } }
+                    if (matched == 0) { if (_tr_match_class_tag(s, slen, class_off, "punct", 5) == 1) {
+                        var c: i64 = 0;
+                        while (c < 256) {
+                            if (_tr_is_punct(c) == 1) { _tr_append(seq, &len_box, mem, c); }
+                            c = c + 1;
+                        }
+                        matched = 1; consumed = 2 + 5 + 2;
+                    } }
+                    if (matched == 0) { if (_tr_match_class_tag(s, slen, class_off, "xdigit", 6) == 1) {
+                        var c: i64 = 0;
+                        while (c < 256) {
+                            if (_tr_is_xdigit(c) == 1) { _tr_append(seq, &len_box, mem, c); }
+                            c = c + 1;
+                        }
+                        matched = 1; consumed = 2 + 6 + 2;
+                    } }
+
+                    if (matched == 1) {
+                        off = off + consumed;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        # Single byte (possibly escaped), possibly followed by '-' range.
+        var byte_box[8];
+        var n = _tr_parse_byte(s, slen, off, &byte_box);
+        var lo = load64(&byte_box);
+        off = off + n;
+
+        # Check for range.
+        if (off < slen) {
+            if (load8(s + off) == 45) {  # '-'
+                if (off + 1 < slen) {
+                    var n2 = _tr_parse_byte(s, slen, off + 1, &byte_box);
+                    var hi = load64(&byte_box);
+                    if (hi >= lo) {
+                        _tr_append_range(seq, &len_box, mem, lo, hi);
+                        off = off + 1 + n2;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        _tr_append(seq, &len_box, mem, lo);
+    }
+    return load64(&len_box);
+}
+
+# --- core run ---
+#
+# Builds the 256-byte tables once from the parsed sets, then streams
+# the input.
+
+fn _tr_run(in_fd, set1_seq, set1_seq_len, set1_mem, set2_seq, set2_seq_len, set2_mem, has_set2, del_mode, sq_mode, comp_mode, trunc_mode): i64 {
+    # Build translation map[256] when in translate mode.
+    var xmap: i64 = 0;
+    if (del_mode == 0) {
+        if (has_set2 == 1) {
+            xmap = alloc(256);
+            # Default: identity.
+            var c: i64 = 0;
+            while (c < 256) { store8(xmap + c, c); c = c + 1; }
+            # Build effective SET1 ordering (apply complement; apply -t).
+            var s1_seq = set1_seq;
+            var s1_len = set1_seq_len;
+            var comp_seq: i64 = 0;
+            if (comp_mode == 1) {
+                comp_seq = alloc(256);
+                var clen: i64 = 0;
+                var i: i64 = 0;
+                while (i < 256) {
+                    if (load8(set1_mem + i) == 0) {
+                        store8(comp_seq + clen, i);
+                        clen = clen + 1;
+                    }
+                    i = i + 1;
+                }
+                s1_seq = comp_seq;
+                s1_len = clen;
+            }
+            if (trunc_mode == 1) {
+                if (s1_len > set2_seq_len) { s1_len = set2_seq_len; }
+            }
+            # Pad SET2 with its last char to match SET1 length (GNU).
+            var i: i64 = 0;
+            while (i < s1_len) {
+                var src_c = load8(s1_seq + i) & 255;
+                var dst_c: i64 = 0;
+                if (i < set2_seq_len) {
+                    dst_c = load8(set2_seq + i) & 255;
+                } else {
+                    if (set2_seq_len > 0) {
+                        dst_c = load8(set2_seq + set2_seq_len - 1) & 255;
+                    } else {
+                        dst_c = src_c;  # empty SET2 → identity
+                    }
+                }
+                store8(xmap + src_c, dst_c);
+                i = i + 1;
+            }
+        }
+    }
+
+    # Determine which set drives delete and which drives squeeze.
+    # Modes:
+    #   -d alone: delete set1 (or complement if -c)
+    #   -d -s: delete set1, squeeze set2
+    #   -s alone: squeeze set1 (or complement)
+    #   -s with translate: squeeze applies to set2 (post-translation)
+    var delete_mem: i64 = 0;
+    var squeeze_mem: i64 = 0;
+
+    if (del_mode == 1) {
+        # Build delete table from set1 (apply complement).
+        delete_mem = alloc(256);
+        var i: i64 = 0;
+        while (i < 256) {
+            var in_set = load8(set1_mem + i);
+            if (comp_mode == 1) {
+                if (in_set == 0) { store8(delete_mem + i, 1); }
+                else             { store8(delete_mem + i, 0); }
+            } else {
+                store8(delete_mem + i, in_set);
+            }
+            i = i + 1;
+        }
+        if (sq_mode == 1) {
+            # Squeeze set2 (post-delete; -c does not apply to set2 squeeze).
+            squeeze_mem = alloc(256);
+            var i: i64 = 0;
+            while (i < 256) { store8(squeeze_mem + i, load8(set2_mem + i)); i = i + 1; }
+        }
+    } else {
+        if (sq_mode == 1) {
+            # Squeeze set: with translate it's set2, otherwise set1
+            # (possibly complemented).
+            squeeze_mem = alloc(256);
+            if (has_set2 == 1) {
+                var i: i64 = 0;
+                while (i < 256) { store8(squeeze_mem + i, load8(set2_mem + i)); i = i + 1; }
+            } else {
+                var i: i64 = 0;
+                while (i < 256) {
+                    var in_set = load8(set1_mem + i);
+                    if (comp_mode == 1) {
+                        if (in_set == 0) { store8(squeeze_mem + i, 1); }
+                        else             { store8(squeeze_mem + i, 0); }
+                    } else {
+                        store8(squeeze_mem + i, in_set);
+                    }
+                    i = i + 1;
+                }
+            }
+        }
+    }
+
+    var in_buf = _tr_buf_get();
+    var out_buf = alloc(_TR_BUFSZ);
+    var prev_byte: i64 = 0 - 1;  # nothing emitted yet
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var n = syscall(0, in_fd, in_buf, _TR_BUFSZ);
+        if (n < 0) {
+            if ((0 - n) == 4) {
+                # EINTR retry.
+            } else { return n; }
+        } else {
+            if (n == 0) { loop = 0; }
+            else {
+                var out_len: i64 = 0;
+                var i: i64 = 0;
+                while (i < n) {
+                    var b = load8(in_buf + i) & 255;
+                    var emit_byte: i64 = b;
+                    var skip: i64 = 0;
+                    if (del_mode == 1) {
+                        if (load8(delete_mem + b) == 1) { skip = 1; }
+                    }
+                    if (skip == 0) {
+                        if (xmap != 0) {
+                            emit_byte = load8(xmap + b) & 255;
+                        }
+                        if (squeeze_mem != 0) {
+                            if (load8(squeeze_mem + emit_byte) == 1) {
+                                if (emit_byte == prev_byte) { skip = 1; }
+                            }
+                        }
+                    }
+                    if (skip == 0) {
+                        store8(out_buf + out_len, emit_byte);
+                        out_len = out_len + 1;
+                        prev_byte = emit_byte;
+                    }
+                    i = i + 1;
+                }
+                if (out_len > 0) {
+                    var written: i64 = 0;
+                    while (written < out_len) {
+                        var w = syscall(1, 1, out_buf + written, out_len - written);
+                        if (w < 0) {
+                            if ((0 - w) == 4) {
+                                # EINTR retry.
+                            } else { return w; }
+                        } else {
+                            written = written + w;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+fn cmd_tr(start: i64): i64 {
+    _tr_init_spec();
+    if (kriya_args_parse(_tr_spec, start) != 0) {
+        syscall(1, 2, "kriya tr: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        return EXIT_USAGE;
+    }
+
+    var del_mode: i64 = 0;
+    if (flags_get_bool(_tr_spec, _tr_d_idx) == 1) { del_mode = 1; }
+    var sq_mode: i64 = 0;
+    if (flags_get_bool(_tr_spec, _tr_s_idx) == 1) { sq_mode = 1; }
+    var comp_mode: i64 = 0;
+    if (flags_get_bool(_tr_spec, _tr_c_idx) == 1) { comp_mode = 1; }
+    var trunc_mode: i64 = 0;
+    if (flags_get_bool(_tr_spec, _tr_t_idx) == 1) { trunc_mode = 1; }
+
+    var npos = flags_positional_count(_tr_spec);
+    if (npos < 1) {
+        syscall(1, 2, "kriya tr: error: missing operand\n", 33);
+        return EXIT_USAGE;
+    }
+
+    # Validate operand count for the chosen mode.
+    if (del_mode == 1) {
+        if (sq_mode == 0) {
+            if (npos != 1) {
+                syscall(1, 2, "kriya tr: error: -d takes exactly one set (SET1)\n", 50);
+                return EXIT_USAGE;
+            }
+        } else {
+            if (npos != 2) {
+                syscall(1, 2, "kriya tr: error: -d -s takes two sets (SET1 delete, SET2 squeeze)\n", 67);
+                return EXIT_USAGE;
+            }
+        }
+    } else {
+        if (sq_mode == 1) {
+            # With -s alone, 1 set; -s + translate, 2 sets. Both allowed.
+            if (npos > 2) {
+                syscall(1, 2, "kriya tr: error: too many operands\n", 35);
+                return EXIT_USAGE;
+            }
+        } else {
+            # Translate: requires exactly 2 sets.
+            if (npos != 2) {
+                syscall(1, 2, "kriya tr: error: translate mode requires SET1 and SET2\n", 56);
+                return EXIT_USAGE;
+            }
+        }
+    }
+
+    var set1 = flags_positional(_tr_spec, 0);
+    var set1_len = strlen(set1);
+    var set1_seq = alloc(1024);
+    var set1_mem = alloc(256);
+    var s1_seq_len = _tr_parse_set(set1, set1_len, set1_seq, set1_mem);
+    if (s1_seq_len < 0) {
+        syscall(1, 2, "kriya tr: error: bad SET1\n", 26);
+        return EXIT_USAGE;
+    }
+
+    var has_set2: i64 = 0;
+    var set2_seq: i64 = 0;
+    var set2_mem: i64 = 0;
+    var s2_seq_len: i64 = 0;
+    if (npos == 2) {
+        has_set2 = 1;
+        var set2 = flags_positional(_tr_spec, 1);
+        var set2_len = strlen(set2);
+        set2_seq = alloc(1024);
+        set2_mem = alloc(256);
+        s2_seq_len = _tr_parse_set(set2, set2_len, set2_seq, set2_mem);
+        if (s2_seq_len < 0) {
+            syscall(1, 2, "kriya tr: error: bad SET2\n", 26);
+            return EXIT_USAGE;
+        }
+    }
+
+    var r = _tr_run(0, set1_seq, s1_seq_len, set1_mem, set2_seq, s2_seq_len, set2_mem, has_set2, del_mode, sq_mode, comp_mode, trunc_mode);
+    if (r != 0) {
+        _tr_report("(stdin)", 0 - r);
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+}

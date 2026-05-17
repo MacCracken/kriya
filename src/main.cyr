@@ -40,6 +40,7 @@ include "src/cmd/head.cyr"
 include "src/cmd/tail.cyr"
 include "src/cmd/nl.cyr"
 include "src/cmd/uniq.cyr"
+include "src/cmd/tr.cyr"
 
 fn print_usage() {
     syscall(1, 2, "usage: kriya <utility> [args...]\n", 33);
@@ -84,6 +85,7 @@ fn dispatch(name, start: i64): i64 {
     if (streq(name, "tail"))     { return cmd_tail(start); }
     if (streq(name, "nl"))       { return cmd_nl(start); }
     if (streq(name, "uniq"))     { return cmd_uniq(start); }
+    if (streq(name, "tr"))       { return cmd_tr(start); }
     print_unknown(name);
     return EXIT_USAGE;
 }
