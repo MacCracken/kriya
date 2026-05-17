@@ -5,7 +5,7 @@
 
 ## Version
 
-**0.4.0** — released 2026-05-17. Closes M3: seven listing + path-manipulation utilities (`basename`, `dirname`, `realpath`, `readlink`, `which`, `stat`, `ls`) built on top of M2's filesystem foundation. New shared canonicalization helper `fs_realpath` (3 modes — REQUIRE_ALL / REQUIRE_PARENT / ALLOW_MISSING) backs both `realpath` and `readlink -f`/`-e`/`-m`. `ls -l` mtime renders via `chrono.epoch_to_date`. **441 behavioural smoke cases pass across the 14 M2+M3 utilities** (24+24+26+30+26+39+43+53+26+30+24+23+37+36); 86/86 unit assertions; cold-start median **1.208ms** at M3 close (~50µs uptick from v0.3.0's 1.159ms — attributable to 7 more dispatcher `if (streq …)` lines and a marginally larger text segment; still well under the 2ms v1.0 target).
+**0.5.0** — released 2026-05-17. **Closes M4** (text-stream utilities): ten new utilities (`tee`, `wc`, `head`, `tail` incl. `-f`, `nl`, `uniq`, `tr`, `cut`, `sort`, `printf`) built on streaming-bounded-memory or stable-merge-sort foundations. `tail -f` adds the first poll-loop in kriya (200ms stat cadence, single-file only); `sort` adds an in-memory stable merge sort with a 256 MiB cap; `tr`'s set parser covers all 12 POSIX character classes plus ranges/octal/escapes; `printf` ships the full format engine (every conversion except floating-point — `%e`/`%f`/`%g` named as a deferred follow-up). **710 behavioural smoke cases across all 23 shipped utilities**, every one compared cell-by-cell against GNU coreutils where applicable. 86/86 unit assertions. Cold-start median **1.198ms** (RUNS=30, sampled across 4 trials at 1.225/1.175/1.202/1.193ms; essentially flat from v0.4.0's 1.208ms despite 10 new dispatcher entries — the `true` hot path remains unaffected since matches resolve before the new entries).
 
 ## Role
 
@@ -17,7 +17,7 @@ Coreutils-equivalent for AGNOS — the small POSIX-style utilities (`cp`, `mv`, 
 
 ## Source
 
-M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shipped utilities (six from M1 + seven from M2 + seven from M3) are live; six shared lib modules in place (`exit`, `path`, `errmsg`, `args`, `fs`, `protected`); four ADRs accepted (0001–0004); two architecture notes (signal model + errno policy). Cold-start re-benched at each release boundary: 1.185ms (v0.2.0) → 1.159ms (v0.3.0) → **1.208ms (v0.4.0)** — 7 new dispatcher table entries + a slightly larger binary cost ~50µs vs v0.3.0; runs sampled in a tight range across 4×30-run trials (1.199 / 1.222 / 1.208 / 1.205ms medians).
+M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0; **M4 closed at v0.5.0**. All thirty shipped utilities (six M1 + seven M2 + seven M3 + ten M4) are live; six shared lib modules in place (`exit`, `path`, `errmsg`, `args`, `fs`, `protected`); four ADRs accepted (0001–0004); two architecture notes (signal model + errno policy). Cold-start re-benched at each release boundary: 1.185ms (v0.2.0) → 1.159ms (v0.3.0) → 1.208ms (v0.4.0) → **1.198ms (v0.5.0)** — the M4 additions cost essentially nothing since the dispatcher's `true` hot path resolves before any new entries.
 
 | Module | Status |
 |---|---|
@@ -26,7 +26,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 | `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
 | `src/lib/errmsg.cyr` | implemented — errnos 1..40 + `errmsg_is_known` |
 | `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
-| `src/cmd/*.cyr` | 29 of ~40 — M1 + M2 (13) + M3 (7) + M4 (9: `tee`, `wc`, `head`, `tail`, `nl`, `uniq`, `tr`, `cut`, `sort`) |
+| `src/cmd/*.cyr` | 30 of ~40 — M1 (6) + M2 (7) + M3 (7) + M4 (10: `tee`, `wc`, `head`, `tail`, `nl`, `uniq`, `tr`, `cut`, `sort`, `printf`) |
 | `src/lib/fs.cyr` | implemented — `*at()`-family wrappers, `getdents64` iteration, type predicates, AT/S_IF/DT constants. Foundation for cp -R / mv / rm -r per ADR 0003. Adds `fs_rename`/`fs_renameat`/`fs_realpath` (3-mode canonicalization). |
 | `src/lib/protected.cyr` | implemented — `protected_paths[]` table with `/`, canonicalization via `path_normalize` + getcwd, `is_protected_path()` membership check. Per ADR 0004, only consumed by `rm` today. |
 
@@ -63,7 +63,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 | `sort` | `src/cmd/sort.cyr` | **implemented** (`-n`/`-r`/`-u`/`-f`/`-b`/`-t`/`-k`/`-c`/`-o`/`-z`/`-s`; in-memory stable merge sort, 256 MiB cap; defer `-h`/`-V`/`-g`/`-M`/`-R`/`-m`/`-d`/`-i`, multi-key, external sort) | M4 |
 | `uniq` | `src/cmd/uniq.cyr` | **implemented** (`-c`/`-d`/`-u`/`-i`/`-f`/`-s`/`-w`/`-z`; 2-op input/output; defer `--all-repeated`/`--group`) | M4 |
 | `nl` | `src/cmd/nl.cyr` | **implemented** (single-section; `-b`/`-i`/`-n`/`-s`/`-v`/`-w`; defer `-d`/`-h`/`-f`/`-l`/`-p` sections + `-b p REGEX`) | M4 |
-| `printf` | `src/cmd/printf.cyr` | not started | M4 |
+| `printf` | `src/cmd/printf.cyr` | **implemented** (every POSIX conversion except float `%e`/`%f`/`%g`; full flag matrix `- + space # 0`; width + precision with `*`; arg reuse; format escapes incl. octal `\NNN`) | M4 |
 | `grep` | `src/cmd/grep.cyr` | not started | M5 |
 | `find` | `src/cmd/find.cyr` | not started | M5 |
 | `xargs` | `src/cmd/xargs.cyr` | not started | M5 |
@@ -160,7 +160,8 @@ _None yet._ Expected consumers once M1 ships:
   7. ✅ `cut` (2026-05-17) — `-b`/`-c`/`-f` with full LIST grammar; `--complement`/`--output-delimiter`/`-z`.
   8. ✅ `tail -f` (2026-05-17) — single-file follow via 200ms stat-poll; truncation detection (size shrink) emits warning and lseeks to 0. Multi-file follow + same-size-rewrite detection deferred.
   9. ✅ `sort` (2026-05-17) — in-memory stable merge sort O(n log n) with full POSIX flag set; 256 MiB input cap; external-sort fallback deferred.
-  10. `printf` — printf-style format engine (largest M4 utility; reuses concepts from `stat`'s format parser). **Closes M4.**
+  10. ✅ `printf` (2026-05-17) — full POSIX format engine sans floating-point; **closes M4**.
+- **M4 closed 2026-05-17 at v0.5.0.** All 10 planned text-stream utilities ship. 710 behavioural smoke cases across the 23 shipped utilities (M2+M3+M4); 86/86 unit. Cold-start median 1.198ms (flat from v0.4.0). Next milestone: M5 (filtering/search) — `grep`, `find`, `xargs`.
 - Deferred features tracked against future enablers (each a known-named follow-up, not "TBD"):
   - echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
   - pwd `$PWD` inode-match — waits on `fs.cyr` stat-compare.

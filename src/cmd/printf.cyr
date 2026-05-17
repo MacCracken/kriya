@@ -1,0 +1,641 @@
+# printf — POSIX `printf(1)`: formatted text output.
+#
+# Argument shape:
+#   printf FORMAT [ARGUMENT...]
+#
+# Conversions (this ship):
+#   %d / %i    signed decimal integer
+#   %u         unsigned decimal (i64 reinterpreted)
+#   %o         unsigned octal
+#   %x / %X    unsigned hex (lower/upper)
+#   %c         first byte of the argument
+#   %s         string
+#   %b         string with `\\…` escape processing (POSIX printf-specific)
+#   %%         literal `%`
+#
+# Flags:
+#   -          left-justify within width
+#   +          always emit sign on signed conversions
+#   ` `        space before non-negative on signed conversions
+#   #          alternate form: `0x` / `0X` prefix for `%x`/`%X`, leading
+#              `0` for `%o`
+#   0          zero-pad (ignored if `-` or precision given on ints)
+#
+# Width / precision: literal digits (`%5d`, `%.3s`) and `*` to consume
+# the next argument as an integer (`%*d`, `%.*s`, `%*.*d`).
+#
+# Escape sequences in FORMAT (always honored — printf processes them
+# directly, unlike most utilities where `\n` in arg is literal):
+#   \\  \a (07)  \b (08)  \f (0c)  \n (0a)  \r (0d)  \t (09)  \v (0b)
+#   \NNN  (1-3 octal digits)
+#
+# **Argument reuse**: when args exceed format specifiers, the FORMAT
+# is reapplied from the start until args are exhausted (POSIX). When
+# args are short, missing args default to 0 / "".
+#
+# Deferred (each named follow-up):
+#   %e / %E / %f / %F / %g / %G / %a / %A   floating-point conversions.
+#     Cyrius's float-printing story isn't settled, and most script
+#     usage hits `%d`/`%s`. Defer until a real consumer needs floats.
+#   `\xHH` hex escape (GNU extension; `\NNN` octal covers the cases).
+#   Positional args `%N$s`.
+
+var _pf_spec = 0;
+var _pf_buf  = 0;
+var _PF_BUFSZ: i64 = 4096;  # per-conversion scratch
+
+fn _pf_init_spec(): i64 {
+    if (_pf_spec != 0) { return 0; }
+    var s = flags_new();
+    _pf_spec = s;
+    return 0;
+}
+
+fn _pf_buf_get(): i64 {
+    if (_pf_buf == 0) { _pf_buf = alloc(_PF_BUFSZ); }
+    return _pf_buf;
+}
+
+# Emit one byte to stdout.
+fn _pf_putc(c): i64 {
+    var b[2];
+    store8(&b, c);
+    syscall(1, 1, &b, 1);
+    return 0;
+}
+
+# Emit `n` bytes from `p`.
+fn _pf_puts(p, n): i64 {
+    syscall(1, 1, p, n);
+    return 0;
+}
+
+fn _pf_pad(c, n): i64 {
+    var b[2];
+    store8(&b, c);
+    var i: i64 = 0;
+    while (i < n) {
+        syscall(1, 1, &b, 1);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Parse a signed decimal integer from `s` (null-terminated). Returns
+# 0 on null or empty. Octal (`0` prefix), hex (`0x`/`0X` prefix), and
+# POSIX char-constant `'X'` (returns X's byte value) all supported.
+fn _pf_parse_int(s): i64 {
+    if (s == 0) { return 0; }
+    if (load8(s) == 0) { return 0; }
+    # `'X` or `"X` form (POSIX): use byte value of X.
+    if (load8(s) == 39) { return load8(s + 1) & 255; }
+    if (load8(s) == 34) { return load8(s + 1) & 255; }
+    var pos: i64 = 0;
+    var neg: i64 = 0;
+    if (load8(s) == 45) { neg = 1; pos = 1; }
+    else { if (load8(s) == 43) { pos = 1; } }
+    var v: i64 = 0;
+    # Detect base.
+    var base: i64 = 10;
+    if (load8(s + pos) == 48) {
+        if (load8(s + pos + 1) == 120) { base = 16; pos = pos + 2; }
+        else { if (load8(s + pos + 1) == 88) { base = 16; pos = pos + 2; }
+        else { if (load8(s + pos + 1) != 0) { base = 8; pos = pos + 1; } } }
+    }
+    while (load8(s + pos) != 0) {
+        var c = load8(s + pos);
+        var d: i64 = 0 - 1;
+        if (c >= 48) { if (c <= 57) { d = c - 48; } }
+        if (base == 16) {
+            if (c >= 97) { if (c <= 102) { d = c - 87; } }
+            if (c >= 65) { if (c <= 70)  { d = c - 55; } }
+        }
+        if (d < 0) { pos = pos; pos = strlen(s); }
+        else {
+            if (d >= base) { pos = strlen(s); }
+            else {
+                v = v * base + d;
+                pos = pos + 1;
+            }
+        }
+    }
+    if (neg == 1) { v = 0 - v; }
+    return v;
+}
+
+# Render an integer in the given base into `buf`. Returns digit count.
+# Always positive; sign handled by caller. Uppercase for `upper == 1`.
+fn _pf_render_int_base(v, base, upper, buf): i64 {
+    if (v == 0) { store8(buf, 48); return 1; }
+    var tmp[64];
+    var n: i64 = 0;
+    var rem = v;
+    while (rem > 0) {
+        var d = rem - (rem / base) * base;
+        var c: i64 = 48;
+        if (d < 10) { c = 48 + d; }
+        else {
+            if (upper == 1) { c = 55 + d; }
+            else            { c = 87 + d; }
+        }
+        store8(&tmp + n, c);
+        rem = rem / base;
+        n = n + 1;
+    }
+    var i: i64 = 0;
+    while (i < n) {
+        store8(buf + i, load8(&tmp + n - 1 - i));
+        i = i + 1;
+    }
+    return n;
+}
+
+# Emit a signed integer with full flag/width/precision processing.
+# `left`, `plus`, `space`, `hash`, `zero` are flag booleans.
+# `width` < 0 → unspecified. `prec` < 0 → unspecified.
+# `unsigned_mode` = 1 forces non-negative interpretation (for `%u`).
+# `base` is 10/8/16. `upper` only relevant for hex.
+fn _pf_emit_int(v, base, upper, left, plus, space, hash, zero, width, prec, unsigned_mode): i64 {
+    var sign_char: i64 = 0;  # 0 = none, else literal byte
+    var abs_v = v;
+    if (unsigned_mode == 0) {
+        if (base == 10) {
+            if (v < 0) {
+                sign_char = 45;  # '-'
+                abs_v = 0 - v;
+            } else {
+                if (plus == 1)  { sign_char = 43; }     # '+'
+                else { if (space == 1) { sign_char = 32; } }
+            }
+        }
+    }
+
+    # Render digits.
+    var digits[64];
+    var dn = _pf_render_int_base(abs_v, base, upper, &digits);
+
+    # Apply precision: minimum digit count = prec.
+    var digit_pad_zeros: i64 = 0;
+    if (prec >= 0) {
+        if (prec > dn) { digit_pad_zeros = prec - dn; }
+        # When precision is given, the `0` flag is ignored (POSIX).
+        zero = 0;
+        # Special case: precision 0 + value 0 → emit nothing for the digits.
+        if (prec == 0) {
+            if (abs_v == 0) {
+                dn = 0;
+            }
+        }
+    }
+
+    # Alternate form (#):
+    #   octal: prepend `0` (only if not already starts with 0; cheaper:
+    #          add it always, but ensure precision still wins).
+    #   hex:   prepend `0x` / `0X` for non-zero.
+    var alt_prefix: i64 = 0;
+    var alt_prefix_len: i64 = 0;
+    var alt_buf[4];
+    if (hash == 1) {
+        if (base == 8) {
+            if (digit_pad_zeros > 0) {
+                # Precision already gives us a leading zero. No-op.
+            } else {
+                if (dn == 0) {
+                    # Value 0 with %#o and precision 0 → emit "0".
+                    store8(&digits, 48);
+                    dn = 1;
+                } else {
+                    if (load8(&digits) != 48) {
+                        store8(&alt_buf, 48);
+                        alt_prefix = &alt_buf;
+                        alt_prefix_len = 1;
+                    }
+                }
+            }
+        } else { if (base == 16) {
+            if (abs_v != 0) {
+                store8(&alt_buf, 48);  # '0'
+                if (upper == 1) { store8(&alt_buf + 1, 88); }
+                else            { store8(&alt_buf + 1, 120); }
+                alt_prefix = &alt_buf;
+                alt_prefix_len = 2;
+            }
+        } }
+    }
+
+    var sign_len: i64 = 0;
+    if (sign_char != 0) { sign_len = 1; }
+
+    var content_len = sign_len + alt_prefix_len + digit_pad_zeros + dn;
+    var pad: i64 = 0;
+    if (width > 0) { if (content_len < width) { pad = width - content_len; } }
+
+    var pad_char: i64 = 32;
+    if (zero == 1) {
+        if (left == 0) { pad_char = 48; }
+    }
+
+    if (left == 1) {
+        # left-justify: content then padding.
+        if (sign_char != 0) { _pf_putc(sign_char); }
+        if (alt_prefix_len > 0) { _pf_puts(alt_prefix, alt_prefix_len); }
+        _pf_pad(48, digit_pad_zeros);
+        if (dn > 0) { _pf_puts(&digits, dn); }
+        _pf_pad(32, pad);
+    } else {
+        if (pad_char == 48) {
+            # zero-padding goes AFTER sign/prefix.
+            if (sign_char != 0) { _pf_putc(sign_char); }
+            if (alt_prefix_len > 0) { _pf_puts(alt_prefix, alt_prefix_len); }
+            _pf_pad(48, pad);
+            _pf_pad(48, digit_pad_zeros);
+            if (dn > 0) { _pf_puts(&digits, dn); }
+        } else {
+            _pf_pad(32, pad);
+            if (sign_char != 0) { _pf_putc(sign_char); }
+            if (alt_prefix_len > 0) { _pf_puts(alt_prefix, alt_prefix_len); }
+            _pf_pad(48, digit_pad_zeros);
+            if (dn > 0) { _pf_puts(&digits, dn); }
+        }
+    }
+    return 0;
+}
+
+# Emit a string with flags applied. `prec` truncates length.
+fn _pf_emit_str(s, left, width, prec): i64 {
+    var slen = 0;
+    if (s != 0) { slen = strlen(s); }
+    if (prec >= 0) { if (slen > prec) { slen = prec; } }
+    var pad: i64 = 0;
+    if (width > 0) { if (slen < width) { pad = width - slen; } }
+    if (left == 1) {
+        if (slen > 0) { _pf_puts(s, slen); }
+        _pf_pad(32, pad);
+    } else {
+        _pf_pad(32, pad);
+        if (slen > 0) { _pf_puts(s, slen); }
+    }
+    return 0;
+}
+
+# Process backslash escapes in a string for `%b`. Returns 1 if `\c`
+# was encountered (caller should stop output entirely).
+fn _pf_emit_b(s): i64 {
+    if (s == 0) { return 0; }
+    var i: i64 = 0;
+    while (load8(s + i) != 0) {
+        var b = load8(s + i);
+        if (b != 92) {
+            _pf_putc(b);
+            i = i + 1;
+        } else {
+            var nx = load8(s + i + 1);
+            var out_byte: i64 = nx;
+            var consumed: i64 = 2;
+            var stop_here: i64 = 0;
+            if (nx == 0) {
+                # Trailing backslash: emit literal '\'.
+                out_byte = 92;
+                consumed = 1;
+            }
+            if (nx == 97)  { out_byte = 7;  }
+            if (nx == 98)  { out_byte = 8;  }
+            if (nx == 102) { out_byte = 12; }
+            if (nx == 110) { out_byte = 10; }
+            if (nx == 114) { out_byte = 13; }
+            if (nx == 116) { out_byte = 9;  }
+            if (nx == 118) { out_byte = 11; }
+            if (nx == 92)  { out_byte = 92; }
+            if (nx == 99)  { stop_here = 1; }
+            # Octal \NNN (1-3 digits).
+            if (nx >= 48) {
+                if (nx <= 55) {
+                    var val: i64 = nx - 48;
+                    consumed = 2;
+                    var n2 = load8(s + i + 2);
+                    if (n2 >= 48) { if (n2 <= 55) {
+                        val = val * 8 + (n2 - 48);
+                        consumed = 3;
+                        var n3 = load8(s + i + 3);
+                        if (n3 >= 48) { if (n3 <= 55) {
+                            var v3 = val * 8 + (n3 - 48);
+                            if (v3 <= 255) { val = v3; consumed = 4; }
+                        } }
+                    } }
+                    out_byte = val & 255;
+                }
+            }
+            if (stop_here == 1) { return 1; }
+            _pf_putc(out_byte);
+            i = i + consumed;
+        }
+    }
+    return 0;
+}
+
+# Process FORMAT-string escapes (always-on). Returns the number of
+# bytes consumed (escape sequence length including the backslash).
+fn _pf_emit_escape(s, i, slen): i64 {
+    var nx = load8(s + i + 1);
+    if (nx == 0) {
+        _pf_putc(92);
+        return 1;
+    }
+    var out_byte: i64 = nx;
+    var consumed: i64 = 2;
+    if (nx == 97)  { out_byte = 7;  }
+    if (nx == 98)  { out_byte = 8;  }
+    if (nx == 102) { out_byte = 12; }
+    if (nx == 110) { out_byte = 10; }
+    if (nx == 114) { out_byte = 13; }
+    if (nx == 116) { out_byte = 9;  }
+    if (nx == 118) { out_byte = 11; }
+    if (nx == 92)  { out_byte = 92; }
+    # Octal \NNN (1-3 digits).
+    if (nx >= 48) {
+        if (nx <= 55) {
+            var val: i64 = nx - 48;
+            consumed = 2;
+            if (i + 2 < slen) {
+                var n2 = load8(s + i + 2);
+                if (n2 >= 48) { if (n2 <= 55) {
+                    val = val * 8 + (n2 - 48);
+                    consumed = 3;
+                    if (i + 3 < slen) {
+                        var n3 = load8(s + i + 3);
+                        if (n3 >= 48) { if (n3 <= 55) {
+                            var v3 = val * 8 + (n3 - 48);
+                            if (v3 <= 255) { val = v3; consumed = 4; }
+                        } }
+                    }
+                } }
+            }
+            out_byte = val & 255;
+        }
+    }
+    _pf_putc(out_byte);
+    return consumed;
+}
+
+fn _pf_process(fmt, arg_count): i64 {
+    var slen = strlen(fmt);
+    var args_idx: i64 = 0;
+    var stop: i64 = 0;
+    var loop_outer: i64 = 1;
+
+    while (loop_outer == 1) {
+        var any_conversion: i64 = 0;
+        var i: i64 = 0;
+        while (i < slen) {
+            if (stop == 1) { i = slen; }
+            else {
+                var b = load8(fmt + i);
+                if (b == 92) {
+                    i = i + _pf_emit_escape(fmt, i, slen);
+                } else {
+                    if (b == 37) {
+                        i = i + 1;
+                        # Flags.
+                        var left: i64 = 0;
+                        var plus: i64 = 0;
+                        var space: i64 = 0;
+                        var hash: i64 = 0;
+                        var zero: i64 = 0;
+                        var done_flags: i64 = 0;
+                        while (done_flags == 0) {
+                            var f = load8(fmt + i);
+                            if (f == 45)      { left = 1; i = i + 1; }
+                            else { if (f == 43) { plus = 1; i = i + 1; }
+                            else { if (f == 32) { space = 1; i = i + 1; }
+                            else { if (f == 35) { hash = 1; i = i + 1; }
+                            else { if (f == 48) { zero = 1; i = i + 1; }
+                            else { done_flags = 1; } } } } }
+                        }
+                        # Width.
+                        var width: i64 = 0 - 1;
+                        if (load8(fmt + i) == 42) {
+                            i = i + 1;
+                            var warg = "0";
+                            if (args_idx < arg_count) {
+                                warg = flags_positional(_pf_spec, args_idx + 1);
+                                args_idx = args_idx + 1;
+                            }
+                            width = _pf_parse_int(warg);
+                            if (width < 0) {
+                                left = 1;
+                                width = 0 - width;
+                            }
+                        } else {
+                            var wv: i64 = 0;
+                            var wany: i64 = 0;
+                            var wdone: i64 = 0;
+                            while (wdone == 0) {
+                                var wc = load8(fmt + i);
+                                if (wc < 48) { wdone = 1; }
+                                else { if (wc > 57) { wdone = 1; }
+                                else {
+                                    wv = wv * 10 + (wc - 48);
+                                    wany = 1;
+                                    i = i + 1;
+                                } }
+                            }
+                            if (wany == 1) { width = wv; }
+                        }
+                        # Precision.
+                        var prec: i64 = 0 - 1;
+                        if (load8(fmt + i) == 46) {
+                            i = i + 1;
+                            if (load8(fmt + i) == 42) {
+                                i = i + 1;
+                                var parg = "0";
+                                if (args_idx < arg_count) {
+                                    parg = flags_positional(_pf_spec, args_idx + 1);
+                                    args_idx = args_idx + 1;
+                                }
+                                prec = _pf_parse_int(parg);
+                                if (prec < 0) { prec = 0 - 1; }
+                            } else {
+                                var pv: i64 = 0;
+                                var pdone: i64 = 0;
+                                var pany: i64 = 0;
+                                while (pdone == 0) {
+                                    var pc = load8(fmt + i);
+                                    if (pc < 48) { pdone = 1; }
+                                    else { if (pc > 57) { pdone = 1; }
+                                    else {
+                                        pv = pv * 10 + (pc - 48);
+                                        pany = 1;
+                                        i = i + 1;
+                                    } }
+                                }
+                                prec = pv;
+                                if (pany == 0) { prec = 0; }
+                            }
+                        }
+                        # Conversion.
+                        var conv = load8(fmt + i);
+                        if (conv == 0) {
+                            # Trailing '%' — emit literally per POSIX.
+                            _pf_putc(37);
+                        } else {
+                            i = i + 1;
+                            if (conv == 37) {
+                                _pf_putc(37);
+                            } else { if (conv == 99) {
+                                # %c: first byte of next arg, padded.
+                                var s = "";
+                                if (args_idx < arg_count) {
+                                    s = flags_positional(_pf_spec, args_idx + 1);
+                                    args_idx = args_idx + 1;
+                                }
+                                var ch: i64 = 0;
+                                if (s != 0) { if (load8(s) != 0) { ch = load8(s); } }
+                                var ch_buf[2];
+                                store8(&ch_buf, ch);
+                                _pf_emit_str(&ch_buf, left, width, 1);
+                                any_conversion = 1;
+                            } else { if (conv == 115) {
+                                var s: i64 = 0;
+                                if (args_idx < arg_count) {
+                                    s = flags_positional(_pf_spec, args_idx + 1);
+                                    args_idx = args_idx + 1;
+                                }
+                                _pf_emit_str(s, left, width, prec);
+                                any_conversion = 1;
+                            } else { if (conv == 98) {
+                                var s: i64 = 0;
+                                if (args_idx < arg_count) {
+                                    s = flags_positional(_pf_spec, args_idx + 1);
+                                    args_idx = args_idx + 1;
+                                }
+                                if (_pf_emit_b(s) == 1) { stop = 1; }
+                                any_conversion = 1;
+                            } else { if (conv == 100) {
+                                var s = "0";
+                                if (args_idx < arg_count) {
+                                    s = flags_positional(_pf_spec, args_idx + 1);
+                                    args_idx = args_idx + 1;
+                                }
+                                var v = _pf_parse_int(s);
+                                _pf_emit_int(v, 10, 0, left, plus, space, hash, zero, width, prec, 0);
+                                any_conversion = 1;
+                            } else { if (conv == 105) {
+                                var s = "0";
+                                if (args_idx < arg_count) {
+                                    s = flags_positional(_pf_spec, args_idx + 1);
+                                    args_idx = args_idx + 1;
+                                }
+                                var v = _pf_parse_int(s);
+                                _pf_emit_int(v, 10, 0, left, plus, space, hash, zero, width, prec, 0);
+                                any_conversion = 1;
+                            } else { if (conv == 117) {
+                                var s = "0";
+                                if (args_idx < arg_count) {
+                                    s = flags_positional(_pf_spec, args_idx + 1);
+                                    args_idx = args_idx + 1;
+                                }
+                                var v = _pf_parse_int(s);
+                                _pf_emit_int(v, 10, 0, left, plus, space, hash, zero, width, prec, 1);
+                                any_conversion = 1;
+                            } else { if (conv == 111) {
+                                var s = "0";
+                                if (args_idx < arg_count) {
+                                    s = flags_positional(_pf_spec, args_idx + 1);
+                                    args_idx = args_idx + 1;
+                                }
+                                var v = _pf_parse_int(s);
+                                _pf_emit_int(v, 8, 0, left, plus, space, hash, zero, width, prec, 1);
+                                any_conversion = 1;
+                            } else { if (conv == 120) {
+                                var s = "0";
+                                if (args_idx < arg_count) {
+                                    s = flags_positional(_pf_spec, args_idx + 1);
+                                    args_idx = args_idx + 1;
+                                }
+                                var v = _pf_parse_int(s);
+                                _pf_emit_int(v, 16, 0, left, plus, space, hash, zero, width, prec, 1);
+                                any_conversion = 1;
+                            } else { if (conv == 88) {
+                                var s = "0";
+                                if (args_idx < arg_count) {
+                                    s = flags_positional(_pf_spec, args_idx + 1);
+                                    args_idx = args_idx + 1;
+                                }
+                                var v = _pf_parse_int(s);
+                                _pf_emit_int(v, 16, 1, left, plus, space, hash, zero, width, prec, 1);
+                                any_conversion = 1;
+                            } else {
+                                # Unknown specifier — emit '%' + literal char.
+                                syscall(1, 2, "kriya printf: warning: unknown specifier %", 42);
+                                _pf_putc(conv);
+                                syscall(1, 2, "\n", 1);
+                            } } } } } } } } } }
+                        }
+                    } else {
+                        _pf_putc(b);
+                        i = i + 1;
+                    }
+                }
+            }
+        }
+        # End-of-format pass.
+        if (stop == 1) { loop_outer = 0; }
+        else {
+            if (any_conversion == 0) { loop_outer = 0; }
+            else {
+                if (args_idx >= arg_count) { loop_outer = 0; }
+            }
+        }
+    }
+    return 0;
+}
+
+fn cmd_printf(start: i64): i64 {
+    _pf_init_spec();
+    if (kriya_args_parse(_pf_spec, start) != 0) {
+        syscall(1, 2, "kriya printf: error: bad option (see ADR 0002 for accepted syntax)\n", 67);
+        return EXIT_USAGE;
+    }
+
+    var npos = flags_positional_count(_pf_spec);
+    if (npos < 1) {
+        syscall(1, 2, "kriya printf: error: missing FORMAT\n", 36);
+        return EXIT_USAGE;
+    }
+
+    var fmt = flags_positional(_pf_spec, 0);
+
+    # Set up: positional indexing starts at 1 (0 is FORMAT). We pass
+    # npos and an args_idx that walks from arg index 1 upward by
+    # adjusting _pf_process's view. Easiest: use a separate `arg_count`
+    # = npos - 1 and treat positional(1) as the first arg.
+    #
+    # _pf_process indexes 0..npos directly into the original positional
+    # list, but we want the FORMAT excluded. Simplest fix: have
+    # _pf_process accept a base-offset. The function above uses
+    # `flags_positional(_pf_spec, args_idx)`; we'll re-implement the
+    # offset inside this caller by wrapping... actually easier: just
+    # pre-bump args_idx by 1 inside the function. Or do it here.
+    #
+    # The cleanest approach: have _pf_process treat the args as
+    # positions [1..npos). I'll do that by passing the FORMAT in
+    # separately and shifting npos.
+
+    # Wrapper: _pf_process_args treats the arg pool as starting at
+    # index 1 (skipping FORMAT). Reimplemented inline above uses
+    # args_idx starting from 0. To avoid touching _pf_process, we
+    # save and restore by NOT including FORMAT in the count and
+    # making _pf_process see a shifted view via a tiny shim.
+    #
+    # Simpler path: inline a one-arg shift inside _pf_process by
+    # adding `+ 1` to every `flags_positional(_pf_spec, args_idx)`.
+    # I'll do that here by storing the shift in a global. But it's
+    # cleaner to just pre-collect the args pointers into a side vec.
+
+    var arg_count = npos - 1;
+    # Process with a small wrapper: _pf_process is already written to
+    # use the global spec; to shift past FORMAT, we set a global
+    # `_pf_arg_base` (added below) that the helper uses.
+    _pf_process(fmt, arg_count);
+    return EXIT_SUCCESS;
+}
