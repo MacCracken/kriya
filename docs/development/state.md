@@ -26,7 +26,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0. All thirteen shipped utilities (six fr
 | `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
 | `src/lib/errmsg.cyr` | implemented — errnos 1..40 + `errmsg_is_known` |
 | `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
-| `src/cmd/*.cyr` | 16 of ~40 — M1 + M2 (13) + `basename.cyr`, `dirname.cyr`, `realpath.cyr` (M3) |
+| `src/cmd/*.cyr` | 17 of ~40 — M1 + M2 (13) + `basename.cyr`, `dirname.cyr`, `realpath.cyr`, `readlink.cyr` (M3) |
 | `src/lib/fs.cyr` | implemented — `*at()`-family wrappers, `getdents64` iteration, type predicates, AT/S_IF/DT constants. Foundation for cp -R / mv / rm -r per ADR 0003. Adds `fs_rename`/`fs_renameat`/`fs_realpath` (3-mode canonicalization). |
 | `src/lib/protected.cyr` | implemented — `protected_paths[]` table with `/`, canonicalization via `path_normalize` + getcwd, `is_protected_path()` membership check. Per ADR 0004, only consumed by `rm` today. |
 
@@ -52,7 +52,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0. All thirteen shipped utilities (six fr
 | `basename` | `src/cmd/basename.cyr` | **implemented** (POSIX single-pair, `-a`/`-s`/`-z`) | M3 |
 | `dirname` | `src/cmd/dirname.cyr` | **implemented** (multi-operand, `-z`) | M3 |
 | `realpath` | `src/cmd/realpath.cyr` | **implemented** (`-e`/`-m`/`-q`/`-z`; cycle ELOOP at 40 hops) | M3 |
-| `readlink` | `src/cmd/readlink.cyr` | not started | M3 |
+| `readlink` | `src/cmd/readlink.cyr` | **implemented** (POSIX raw + `-f`/`-e`/`-m` via fs_realpath + `-n`/`-z`/`-q`) | M3 |
 | `which` | `src/cmd/which.cyr` | not started | M3 |
 | `wc` | `src/cmd/wc.cyr` | not started | M4 |
 | `head` | `src/cmd/head.cyr` | not started | M4 |
@@ -100,6 +100,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0. All thirteen shipped utilities (six fr
 - `scripts/smoke-rm.sh` — behavioural test for `rm` (53/53 — every ADR-0004 canonicalization escape (`/`, `/.`, `/tmp/..`, `////`, `/../../../`, relative `../../`), no `--no-preserve-root` flag, no env-var bypass, multi-op atomicity preserved; ADR-0003 symlink-to-dir `rm` leaves target intact, `rm -r` of dir-containing-symlink-to-dir never descends; `-f` silences ENOENT; `-r`/`-R`/`-d`/`-v`; partial-failure exit; `-i`-on-pipe usage error).
 - `scripts/smoke-basename-dirname.sh` — paired behavioural test (26/26 — POSIX single-pair, suffix-strip matching + non-matching, `-a`/`-s`/`-z`, multi-operand dirname, NUL-termination, error paths).
 - `scripts/smoke-realpath.sh` — behavioural test for `realpath` + the underlying `fs_realpath` helper (30/30 — absolute/relative, `.`/`..`/duplicate-slash collapse, symlink chains, `-e` default, `-m` text completion through missing components, cycle ELOOP, multi-operand partial-failure exit, `-q` silent mode, `-z` NUL termination).
+- `scripts/smoke-readlink.sh` — behavioural test for `readlink` (24/24 — POSIX raw read-link + EINVAL on non-symlink; `-f` REQUIRE_PARENT boundary; `-e` REQUIRE_ALL; `-m` ALLOW_MISSING; `-q` silences both surfaces; `-n` newline-on-final-only; `-z` overrides `-n`; precedence `-m > -e > -f`).
 - `tests/kriya.fcyr` — fuzz stub (lands when M2 destructive utilities arrive).
 
 ## Dependencies
@@ -133,8 +134,8 @@ _None yet._ Expected consumers once M1 ships:
 - **M3 in progress.** Order (simplest → biggest):
   1. ✅ `basename` + `dirname` (2026-05-17) — paired commit, pure-text utilities. Added `path_basename_len` to fix a latent trailing-slash bug in `path_basename_ptr`'s usage pattern.
   2. ✅ `realpath` (2026-05-17) — built on a new `fs_realpath` helper (3-mode canonicalization) in `src/lib/fs.cyr`. Default `-e` requires every component, `-m` allows missing tails, `-q` silent, `-z` NUL. Cycle ELOOP at 40 hops.
-  3. `readlink` — trivial follow-up: POSIX read-link + `-f`/`-e`/`-m` modes reuse `fs_realpath`; plus `-n`/`-z` display modifiers. Next.
-  4. `which` — `$PATH` iteration + `sys_access(X_OK)`.
+  3. ✅ `readlink` (2026-05-17) — POSIX raw read-link + canonicalize via shared `fs_realpath`. Display modifiers `-n`/`-z`/`-q`.
+  4. `which` — `$PATH` iteration + `sys_access(X_OK)`. Next.
   5. `stat` — formatted output of stat struct fields (format-string parser).
   6. `ls` — biggest M3 utility; getdents64 + sort + `-l` columns + `-h` human sizes.
 - Deferred features tracked against future enablers (each a known-named follow-up, not "TBD"):
