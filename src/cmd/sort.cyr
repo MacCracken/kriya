@@ -1,0 +1,726 @@
+# sort — POSIX `sort(1)`: line-oriented sort.
+#
+# Argument shape:
+#   sort [opts] [file...]
+#
+# Flags:
+#   -n / --numeric-sort       compare leading numeric strings.
+#   -r / --reverse            reverse the sort.
+#   -u / --unique             output only the first of equal lines.
+#   -f / --ignore-case        case-fold ASCII letters in comparisons.
+#   -b / --ignore-leading-blanks  skip leading spaces/tabs in keys.
+#   -t SEP / --field-separator=SEP   single-byte field delimiter.
+#   -k F  / --key=F           sort by field F (1-indexed) only.
+#   -c / --check              verify input is already sorted; exit 1
+#                             on first out-of-order line.
+#   -o FILE / --output=FILE   write output to FILE (truncate, mode 0666)
+#                             instead of stdout.
+#   -z / --zero-terminated    NUL-separated lines on input and output.
+#   -s / --stable             stable sort (default — our merge sort
+#                             is stable by construction).
+#
+# **Stable merge sort** in heap-allocated record arrays. The input is
+# read into one contiguous buffer; each line becomes a 16-byte record
+# (offset + length pointing into the buffer). Comparison receives the
+# raw line bytes and applies `-b`/`-f`/`-k`/`-t` transformations on
+# the fly without materialising key copies.
+#
+# Memory cap: a single 256 MiB input buffer (`_SORT_INPUT_CAP`). If
+# the input exceeds the cap, a stderr warning is emitted and the
+# input is truncated to the cap. **External-sort fallback for files
+# larger than this is a clear follow-up**; for typical script use,
+# 256 MiB covers the vast majority of cases.
+#
+# Deferred (each a named follow-up):
+#   -h / --human-numeric-sort    K/M/G suffix-aware numeric sort.
+#   -V / --version-sort          natural-version-string ordering.
+#   -g / --general-numeric-sort  full strtod-style numeric (scientific).
+#   -M / --month-sort            locale month-name ordering.
+#   -R / --random-sort           shuffle.
+#   -m / --merge                 merge already-sorted inputs.
+#   -d / --dictionary-order      only blanks + alnums compared.
+#   -i / --ignore-nonprinting    skip non-printable bytes.
+#   Multi-key sorting (-k F1 -k F2 ...) — first ship supports one key.
+#   `-k F1,F2` end-field key range.
+#   External-sort fallback for inputs larger than 256 MiB.
+#   `-S SIZE` and `-T DIR` (only relevant under external-sort).
+
+var _so_spec = 0;
+var _so_n_idx = 0;
+var _so_r_idx = 0;
+var _so_u_idx = 0;
+var _so_f_idx = 0;
+var _so_b_idx = 0;
+var _so_t_idx = 0;
+var _so_k_idx = 0;
+var _so_c_idx = 0;
+var _so_o_idx = 0;
+var _so_z_idx = 0;
+var _so_s_idx = 0;
+
+var _SORT_INPUT_CAP: i64 = 268435456;  # 256 MiB
+var _SORT_READ_BUFSZ: i64 = 65536;
+
+fn _so_init_spec(): i64 {
+    if (_so_spec != 0) { return 0; }
+    var s = flags_new();
+    _so_n_idx = flags_add_bool(s, 110, "numeric-sort",         0, "numeric compare");
+    _so_r_idx = flags_add_bool(s, 114, "reverse",              0, "reverse the sort");
+    _so_u_idx = flags_add_bool(s, 117, "unique",               0, "output only unique lines");
+    _so_f_idx = flags_add_bool(s, 102, "ignore-case",          0, "case-fold ASCII");
+    _so_b_idx = flags_add_bool(s, 98,  "ignore-leading-blanks", 0, "skip leading blanks in key");
+    _so_t_idx = flags_add_str(s,  116, "field-separator",      0, "field separator (1 byte)");
+    _so_k_idx = flags_add_str(s,  107, "key",                  0, "sort key field (1-indexed)");
+    _so_c_idx = flags_add_bool(s, 99,  "check",                0, "verify input is sorted");
+    _so_o_idx = flags_add_str(s,  111, "output",               0, "write output to FILE");
+    _so_z_idx = flags_add_bool(s, 122, "zero-terminated",      0, "NUL-separated lines");
+    _so_s_idx = flags_add_bool(s, 115, "stable",               0, "stable sort (default)");
+    _so_spec = s;
+    return 0;
+}
+
+fn _so_report(operand, errno): i64 {
+    syscall(1, 2, "kriya sort: ", 12);
+    syscall(1, 2, operand, strlen(operand));
+    syscall(1, 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        syscall(1, 2, m, strlen(m));
+    } else {
+        syscall(1, 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        syscall(1, 2, &buf + i + 1, 6 - i);
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+# Line record layout (16 bytes):
+#   offset 0 : byte offset into the input buffer
+#   offset 8 : line length (excluding terminator)
+fn _so_rec_off(r): i64 { return load64(r); }
+fn _so_rec_len(r): i64 { return load64(r + 8); }
+
+# Slurp `fd` into `buf` up to `cap` bytes. Returns total bytes read.
+# On overflow, sets `*overflow_p` to 1 and truncates.
+fn _so_slurp(fd, buf, cap, overflow_p): i64 {
+    var have: i64 = 0;
+    var read_buf = alloc(_SORT_READ_BUFSZ);
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var room = cap - have;
+        if (room <= 0) {
+            # Drain remaining bytes (so we know if there was more).
+            var n = syscall(0, fd, read_buf, _SORT_READ_BUFSZ);
+            if (n <= 0) { loop = 0; }
+            else { store64(overflow_p, 1); }
+        } else {
+            var n = syscall(0, fd, read_buf, _SORT_READ_BUFSZ);
+            if (n < 0) {
+                if ((0 - n) == 4) {
+                    # EINTR retry.
+                } else { return n; }
+            } else {
+                if (n == 0) { loop = 0; }
+                else {
+                    var copy_n = n;
+                    if (copy_n > room) {
+                        copy_n = room;
+                        store64(overflow_p, 1);
+                    }
+                    memcpy(buf + have, read_buf, copy_n);
+                    have = have + copy_n;
+                }
+            }
+        }
+    }
+    return have;
+}
+
+# Build a vec of line records from `buf[0..size)`. Term byte is the
+# line terminator (10 or 0). A trailing partial line (no terminator)
+# still becomes a record.
+fn _so_build_records(buf, size, term): i64 {
+    var v = vec_new();
+    var line_start: i64 = 0;
+    var i: i64 = 0;
+    while (i < size) {
+        if (load8(buf + i) == term) {
+            var rec = alloc(16);
+            store64(rec, line_start);
+            store64(rec + 8, i - line_start);
+            vec_push(v, rec);
+            line_start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (line_start < size) {
+        var rec = alloc(16);
+        store64(rec, line_start);
+        store64(rec + 8, size - line_start);
+        vec_push(v, rec);
+    }
+    return v;
+}
+
+fn _so_fold(b): i64 {
+    if (b >= 65) {
+        if (b <= 90) { return b + 32; }
+    }
+    return b;
+}
+
+# Resolve the comparison key window within a line:
+#   start at line offset; if -b, skip leading blanks; if -k FN, walk
+#   to the FN-th field (using `delim`; if no delim flag, use whitespace
+#   transitions).
+# Returns the start offset and writes `*len_p` = effective length.
+fn _so_key_window(buf, line_off, line_len, ignore_blanks, has_key, key_field, has_delim, delim, out_len_p): i64 {
+    var pos = line_off;
+    var endp = line_off + line_len;
+
+    if (has_key == 1) {
+        # Walk to field key_field (1-indexed). With a delim flag:
+        # fields are separated by exactly one delim byte. Without:
+        # POSIX rule — a key field begins at the FIRST non-blank
+        # after a blank (so leading blanks belong to the field).
+        if (has_delim == 1) {
+            var fnum: i64 = 1;
+            while (fnum < key_field) {
+                # Skip until we find a delim byte.
+                var done: i64 = 0;
+                while (done == 0) {
+                    if (pos >= endp) { done = 1; }
+                    else {
+                        if (load8(buf + pos) == delim) { pos = pos + 1; done = 1; }
+                        else { pos = pos + 1; }
+                    }
+                }
+                fnum = fnum + 1;
+                if (pos >= endp) { fnum = key_field; }
+            }
+            # Now `pos` is at the start of field key_field.
+            # Compute end: up to next delim (or endp).
+            var fend = pos;
+            var done2: i64 = 0;
+            while (done2 == 0) {
+                if (fend >= endp) { done2 = 1; }
+                else {
+                    if (load8(buf + fend) == delim) { done2 = 1; }
+                    else { fend = fend + 1; }
+                }
+            }
+            line_off = pos;
+            endp = fend;
+        } else {
+            # Whitespace-delimited fields. POSIX: skip leading blanks,
+            # then non-blank run = field 1; for field N, skip (N-1)
+            # blank-then-nonblank transitions.
+            var fnum: i64 = 1;
+            # Position to start of field 1.
+            while (pos < endp) {
+                var b = load8(buf + pos);
+                if (b == 32) { pos = pos + 1; }
+                else { if (b == 9) { pos = pos + 1; }
+                else { pos = endp + 1; } }
+            }
+            # Re-do as a flag-loop (the pseudo-break above set pos to
+            # endp+1 just to terminate; reset).
+            pos = line_off;
+            var done: i64 = 0;
+            while (done == 0) {
+                if (pos >= endp) { done = 1; }
+                else {
+                    var b = load8(buf + pos);
+                    if (b == 32) { pos = pos + 1; }
+                    else { if (b == 9) { pos = pos + 1; }
+                    else { done = 1; } }
+                }
+            }
+            # Walk to field key_field.
+            while (fnum < key_field) {
+                # Skip non-blanks (rest of current field).
+                var done_run: i64 = 0;
+                while (done_run == 0) {
+                    if (pos >= endp) { done_run = 1; }
+                    else {
+                        var b = load8(buf + pos);
+                        if (b == 32) { done_run = 1; }
+                        else { if (b == 9) { done_run = 1; }
+                        else { pos = pos + 1; } }
+                    }
+                }
+                # Skip blanks (separators).
+                var done_blk: i64 = 0;
+                while (done_blk == 0) {
+                    if (pos >= endp) { done_blk = 1; }
+                    else {
+                        var b = load8(buf + pos);
+                        if (b == 32) { pos = pos + 1; }
+                        else { if (b == 9) { pos = pos + 1; }
+                        else { done_blk = 1; } }
+                    }
+                }
+                fnum = fnum + 1;
+                if (pos >= endp) { fnum = key_field; }
+            }
+            # Field end: until next blank.
+            var fend = pos;
+            var done3: i64 = 0;
+            while (done3 == 0) {
+                if (fend >= endp) { done3 = 1; }
+                else {
+                    var b = load8(buf + fend);
+                    if (b == 32) { done3 = 1; }
+                    else { if (b == 9) { done3 = 1; }
+                    else { fend = fend + 1; } }
+                }
+            }
+            line_off = pos;
+            endp = fend;
+        }
+    }
+
+    if (ignore_blanks == 1) {
+        var done: i64 = 0;
+        while (done == 0) {
+            if (line_off >= endp) { done = 1; }
+            else {
+                var b = load8(buf + line_off);
+                if (b == 32) { line_off = line_off + 1; }
+                else { if (b == 9) { line_off = line_off + 1; }
+                else { done = 1; } }
+            }
+        }
+    }
+
+    store64(out_len_p, endp - line_off);
+    return line_off;
+}
+
+# Numeric compare: parse leading integer from each key, compare.
+# Skips leading blanks (always — POSIX rule for numeric). Negative
+# values handled with a leading '-'. Returns -1 / 0 / +1.
+fn _so_cmp_numeric(buf, a_off, a_len, b_off, b_len): i64 {
+    # Skip leading blanks.
+    var ap = a_off;
+    var ae = a_off + a_len;
+    while (ap < ae) {
+        var c = load8(buf + ap);
+        if (c == 32) { ap = ap + 1; }
+        else { if (c == 9) { ap = ap + 1; } else { ap = ae + 1; } }
+    }
+    ap = a_off;
+    var done: i64 = 0;
+    while (done == 0) {
+        if (ap >= ae) { done = 1; }
+        else {
+            var c = load8(buf + ap);
+            if (c == 32) { ap = ap + 1; }
+            else { if (c == 9) { ap = ap + 1; } else { done = 1; } }
+        }
+    }
+    var bp = b_off;
+    var be = b_off + b_len;
+    done = 0;
+    while (done == 0) {
+        if (bp >= be) { done = 1; }
+        else {
+            var c = load8(buf + bp);
+            if (c == 32) { bp = bp + 1; }
+            else { if (c == 9) { bp = bp + 1; } else { done = 1; } }
+        }
+    }
+    # Parse signed int from a.
+    var a_neg: i64 = 0;
+    if (ap < ae) {
+        if (load8(buf + ap) == 45) { a_neg = 1; ap = ap + 1; }
+    }
+    var a_val: i64 = 0;
+    var a_any: i64 = 0;
+    while (ap < ae) {
+        var c = load8(buf + ap);
+        if (c >= 48) { if (c <= 57) {
+            a_val = a_val * 10 + (c - 48);
+            a_any = 1;
+            ap = ap + 1;
+        } else { ap = ae; } }
+        else { ap = ae; }
+    }
+    if (a_neg == 1) { a_val = 0 - a_val; }
+    var b_neg: i64 = 0;
+    if (bp < be) {
+        if (load8(buf + bp) == 45) { b_neg = 1; bp = bp + 1; }
+    }
+    var b_val: i64 = 0;
+    var b_any: i64 = 0;
+    while (bp < be) {
+        var c = load8(buf + bp);
+        if (c >= 48) { if (c <= 57) {
+            b_val = b_val * 10 + (c - 48);
+            b_any = 1;
+            bp = bp + 1;
+        } else { bp = be; } }
+        else { bp = be; }
+    }
+    if (b_neg == 1) { b_val = 0 - b_val; }
+    if (a_val < b_val) { return 0 - 1; }
+    if (a_val > b_val) { return 1; }
+    return 0;
+}
+
+# Byte / case-fold compare.
+fn _so_cmp_bytes(buf, a_off, a_len, b_off, b_len, fold): i64 {
+    var i: i64 = 0;
+    var minlen = a_len;
+    if (b_len < minlen) { minlen = b_len; }
+    while (i < minlen) {
+        var ca = load8(buf + a_off + i);
+        var cb = load8(buf + b_off + i);
+        if (fold == 1) {
+            ca = _so_fold(ca);
+            cb = _so_fold(cb);
+        }
+        if (ca != cb) { return ca - cb; }
+        i = i + 1;
+    }
+    if (a_len < b_len) { return 0 - 1; }
+    if (a_len > b_len) { return 1; }
+    return 0;
+}
+
+fn _so_compare(buf, a_rec, b_rec, numeric, reverse, fold, ignore_blanks, has_key, key_field, has_delim, delim): i64 {
+    var a_len_box[8];
+    var a_off = _so_key_window(buf, _so_rec_off(a_rec), _so_rec_len(a_rec), ignore_blanks, has_key, key_field, has_delim, delim, &a_len_box);
+    var a_len = load64(&a_len_box);
+    var b_len_box[8];
+    var b_off = _so_key_window(buf, _so_rec_off(b_rec), _so_rec_len(b_rec), ignore_blanks, has_key, key_field, has_delim, delim, &b_len_box);
+    var b_len = load64(&b_len_box);
+
+    var r: i64 = 0;
+    if (numeric == 1) {
+        r = _so_cmp_numeric(buf, a_off, a_len, b_off, b_len);
+        # Tiebreak with full-line lex compare for stable behaviour
+        # on equal numeric keys (matches GNU when -k isn't used).
+        if (r == 0) {
+            if (has_key == 0) {
+                r = _so_cmp_bytes(buf, _so_rec_off(a_rec), _so_rec_len(a_rec),
+                                       _so_rec_off(b_rec), _so_rec_len(b_rec), 0);
+            }
+        }
+    } else {
+        r = _so_cmp_bytes(buf, a_off, a_len, b_off, b_len, fold);
+        if (r == 0) {
+            if (has_key == 1) {
+                # GNU: after key compare equal, fall back to full-line
+                # lex (no fold).
+                r = _so_cmp_bytes(buf, _so_rec_off(a_rec), _so_rec_len(a_rec),
+                                       _so_rec_off(b_rec), _so_rec_len(b_rec), 0);
+            }
+        }
+    }
+    if (reverse == 1) { r = 0 - r; }
+    return r;
+}
+
+# Stable bottom-up iterative merge sort on a vec of records. Uses one
+# auxiliary heap array of same length. The comparator state is passed
+# as a single context pointer (24 bytes: buf + flag word + key field + delim word).
+fn _so_merge_sort(records, buf, numeric, reverse, fold, ignore_blanks, has_key, key_field, has_delim, delim): i64 {
+    var n = vec_len(records);
+    if (n < 2) { return 0; }
+    # Allocate aux + a flat record-pointer array view of `records` for
+    # easier in-place merging.
+    var src = alloc(n * 8);
+    var dst = alloc(n * 8);
+    var i: i64 = 0;
+    while (i < n) {
+        store64(src + i * 8, vec_get(records, i));
+        i = i + 1;
+    }
+
+    var width: i64 = 1;
+    while (width < n) {
+        var start: i64 = 0;
+        while (start < n) {
+            var mid = start + width;
+            if (mid > n) { mid = n; }
+            var end = start + 2 * width;
+            if (end > n) { end = n; }
+            # Merge [start..mid) and [mid..end) into dst[start..end).
+            var l = start;
+            var r = mid;
+            var k = start;
+            while (k < end) {
+                var take_left: i64 = 0;
+                if (l >= mid) {
+                    take_left = 0;
+                } else {
+                    if (r >= end) {
+                        take_left = 1;
+                    } else {
+                        var a = load64(src + l * 8);
+                        var b = load64(src + r * 8);
+                        var cmp = _so_compare(buf, a, b, numeric, reverse, fold, ignore_blanks, has_key, key_field, has_delim, delim);
+                        if (cmp <= 0) { take_left = 1; }
+                    }
+                }
+                if (take_left == 1) {
+                    store64(dst + k * 8, load64(src + l * 8));
+                    l = l + 1;
+                } else {
+                    store64(dst + k * 8, load64(src + r * 8));
+                    r = r + 1;
+                }
+                k = k + 1;
+            }
+            start = end;
+        }
+        # Swap src and dst.
+        var tmp = src;
+        src = dst;
+        dst = tmp;
+        width = width * 2;
+    }
+
+    # Final result is in `src`; write back into the vec.
+    i = 0;
+    while (i < n) {
+        vec_set(records, i, load64(src + i * 8));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _so_write_all(fd, buf, n): i64 {
+    var w: i64 = 0;
+    while (w < n) {
+        var wr = syscall(1, fd, buf + w, n - w);
+        if (wr < 0) {
+            if ((0 - wr) == 4) {
+                # EINTR retry.
+            } else { return wr; }
+        } else { w = w + wr; }
+    }
+    return 0;
+}
+
+fn cmd_sort(start: i64): i64 {
+    _so_init_spec();
+    if (kriya_args_parse(_so_spec, start) != 0) {
+        syscall(1, 2, "kriya sort: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
+        return EXIT_USAGE;
+    }
+
+    var numeric: i64 = 0;
+    if (flags_get_bool(_so_spec, _so_n_idx) == 1) { numeric = 1; }
+    var reverse: i64 = 0;
+    if (flags_get_bool(_so_spec, _so_r_idx) == 1) { reverse = 1; }
+    var unique: i64 = 0;
+    if (flags_get_bool(_so_spec, _so_u_idx) == 1) { unique = 1; }
+    var fold: i64 = 0;
+    if (flags_get_bool(_so_spec, _so_f_idx) == 1) { fold = 1; }
+    var ignore_blanks: i64 = 0;
+    if (flags_get_bool(_so_spec, _so_b_idx) == 1) { ignore_blanks = 1; }
+    var check_mode: i64 = 0;
+    if (flags_get_bool(_so_spec, _so_c_idx) == 1) { check_mode = 1; }
+    var zero_term: i64 = 0;
+    if (flags_get_bool(_so_spec, _so_z_idx) == 1) { zero_term = 1; }
+
+    var term_byte: i64 = 10;
+    if (zero_term == 1) { term_byte = 0; }
+
+    var has_delim: i64 = 0;
+    var delim: i64 = 0;
+    var t_arg = flags_get_str(_so_spec, _so_t_idx);
+    if (t_arg != 0) {
+        if (load8(t_arg) != 0) {
+            if (load8(t_arg + 1) != 0) {
+                syscall(1, 2, "kriya sort: error: --field-separator must be a single byte\n", 59);
+                return EXIT_USAGE;
+            }
+            has_delim = 1;
+            delim = load8(t_arg);
+        }
+    }
+    var has_key: i64 = 0;
+    var key_field: i64 = 1;
+    var k_arg = flags_get_str(_so_spec, _so_k_idx);
+    if (k_arg != 0) {
+        if (load8(k_arg) != 0) {
+            # Accept either "F" or "F,F" (we use first field only;
+            # multi-field keys are deferred).
+            var v = kriya_parse_nonneg_int(k_arg);
+            # If there's a comma, parse up to it.
+            if (v < 0) {
+                # Try comma-separated form.
+                var p: i64 = 0;
+                var n: i64 = 0;
+                while (load8(k_arg + p) != 0) {
+                    var c = load8(k_arg + p);
+                    if (c == 44) { p = strlen(k_arg); }
+                    else { if (c < 48) { p = strlen(k_arg); }
+                    else { if (c > 57) { p = strlen(k_arg); }
+                    else { n = n * 10 + (c - 48); p = p + 1; } } }
+                }
+                if (n > 0) { v = n; }
+            }
+            if (v < 1) {
+                syscall(1, 2, "kriya sort: error: --key must be a positive integer\n", 52);
+                return EXIT_USAGE;
+            }
+            has_key = 1;
+            key_field = v;
+        }
+    }
+
+    var npos = flags_positional_count(_so_spec);
+
+    # Slurp all inputs into one buffer.
+    var buf = alloc(_SORT_INPUT_CAP);
+    var have: i64 = 0;
+    var overflow_box[8];
+    store64(&overflow_box, 0);
+
+    if (npos < 1) {
+        var n = _so_slurp(0, buf, _SORT_INPUT_CAP, &overflow_box);
+        if (n < 0) {
+            _so_report("(stdin)", 0 - n);
+            return EXIT_FAILURE;
+        }
+        have = n;
+    } else {
+        var i: i64 = 0;
+        while (i < npos) {
+            var p = flags_positional(_so_spec, i);
+            var fd: i64 = 0;
+            var is_stdin: i64 = 0;
+            if (load8(p) == 45) {
+                if (load8(p + 1) == 0) { is_stdin = 1; }
+            }
+            if (is_stdin == 0) {
+                fd = sys_open(p, 0, 0);
+                if (fd < 0) {
+                    _so_report(p, 0 - fd);
+                    return EXIT_FAILURE;
+                }
+            }
+            var room = _SORT_INPUT_CAP - have;
+            var n = _so_slurp(fd, buf + have, room, &overflow_box);
+            if (is_stdin == 0) { syscall(3, fd); }
+            if (n < 0) {
+                _so_report(p, 0 - n);
+                return EXIT_FAILURE;
+            }
+            have = have + n;
+            i = i + 1;
+        }
+    }
+
+    if (load64(&overflow_box) == 1) {
+        syscall(1, 2, "kriya sort: warning: input exceeds 256 MiB; external-sort fallback deferred — truncating\n", 90);
+    }
+
+    var records = _so_build_records(buf, have, term_byte);
+    var nrec = vec_len(records);
+
+    # -c check mode: walk pairs.
+    if (check_mode == 1) {
+        var i: i64 = 1;
+        while (i < nrec) {
+            var a = vec_get(records, i - 1);
+            var b = vec_get(records, i);
+            var cmp = _so_compare(buf, a, b, numeric, reverse, fold, ignore_blanks, has_key, key_field, has_delim, delim);
+            if (cmp > 0) {
+                syscall(1, 2, "kriya sort: disorder at line ", 29);
+                # Render i+1.
+                var nb[32];
+                var nlen: i64 = 0;
+                if (i + 1 == 0) { store8(&nb, 48); nlen = 1; }
+                else {
+                    var tmp[32];
+                    var t: i64 = 0;
+                    var rem = i + 1;
+                    while (rem > 0) {
+                        store8(&tmp + t, 48 + (rem - (rem / 10) * 10));
+                        rem = rem / 10;
+                        t = t + 1;
+                    }
+                    var k: i64 = 0;
+                    while (k < t) {
+                        store8(&nb + k, load8(&tmp + t - 1 - k));
+                        k = k + 1;
+                    }
+                    nlen = t;
+                }
+                syscall(1, 2, &nb, nlen);
+                syscall(1, 2, "\n", 1);
+                return EXIT_FAILURE;
+            }
+            i = i + 1;
+        }
+        return EXIT_SUCCESS;
+    }
+
+    _so_merge_sort(records, buf, numeric, reverse, fold, ignore_blanks, has_key, key_field, has_delim, delim);
+
+    # Determine output fd.
+    var out_fd: i64 = 1;
+    var out_opened: i64 = 0;
+    var o_arg = flags_get_str(_so_spec, _so_o_idx);
+    if (o_arg != 0) {
+        if (load8(o_arg) != 0) {
+            # O_WRONLY | O_CREAT | O_TRUNC = 577, mode 0666 = 438.
+            out_fd = sys_open(o_arg, 577, 438);
+            if (out_fd < 0) {
+                _so_report(o_arg, 0 - out_fd);
+                return EXIT_FAILURE;
+            }
+            out_opened = 1;
+        }
+    }
+
+    var tb[2];
+    store8(&tb, term_byte);
+
+    var prev_rec: i64 = 0;
+    var i: i64 = 0;
+    while (i < nrec) {
+        var rec = vec_get(records, i);
+        var emit: i64 = 1;
+        if (unique == 1) {
+            if (prev_rec != 0) {
+                var cmp = _so_compare(buf, prev_rec, rec, numeric, 0, fold, ignore_blanks, has_key, key_field, has_delim, delim);
+                # Note: reverse=0 here so we test equality, not order.
+                if (cmp == 0) { emit = 0; }
+            }
+        }
+        if (emit == 1) {
+            var rlen = _so_rec_len(rec);
+            if (rlen > 0) {
+                var wr = _so_write_all(out_fd, buf + _so_rec_off(rec), rlen);
+                if (wr != 0) {
+                    _so_report("(write)", 0 - wr);
+                    if (out_opened == 1) { syscall(3, out_fd); }
+                    return EXIT_FAILURE;
+                }
+            }
+            _so_write_all(out_fd, &tb, 1);
+            prev_rec = rec;
+        }
+        i = i + 1;
+    }
+
+    if (out_opened == 1) { syscall(3, out_fd); }
+    return EXIT_SUCCESS;
+}

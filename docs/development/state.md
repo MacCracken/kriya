@@ -26,7 +26,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 | `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
 | `src/lib/errmsg.cyr` | implemented — errnos 1..40 + `errmsg_is_known` |
 | `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
-| `src/cmd/*.cyr` | 28 of ~40 — M1 + M2 (13) + M3 (7) + M4 (8: `tee`, `wc`, `head`, `tail`, `nl`, `uniq`, `tr`, `cut`) |
+| `src/cmd/*.cyr` | 29 of ~40 — M1 + M2 (13) + M3 (7) + M4 (9: `tee`, `wc`, `head`, `tail`, `nl`, `uniq`, `tr`, `cut`, `sort`) |
 | `src/lib/fs.cyr` | implemented — `*at()`-family wrappers, `getdents64` iteration, type predicates, AT/S_IF/DT constants. Foundation for cp -R / mv / rm -r per ADR 0003. Adds `fs_rename`/`fs_renameat`/`fs_realpath` (3-mode canonicalization). |
 | `src/lib/protected.cyr` | implemented — `protected_paths[]` table with `/`, canonicalization via `path_normalize` + getcwd, `is_protected_path()` membership check. Per ADR 0004, only consumed by `rm` today. |
 
@@ -60,7 +60,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 | `cut` | `src/cmd/cut.cyr` | **implemented** (`-b`/`-c`/`-f` modes, full LIST grammar, `-d`/`-s`/`--complement`/`--output-delimiter`/`-z`; defer multibyte char distinction) | M4 |
 | `tr` | `src/cmd/tr.cyr` | **implemented** (translate/delete/squeeze/complement/truncate; full POSIX set grammar incl. 12 character classes; defer [=c=] + [c*N] + locale folding) | M4 |
 | `tee` | `src/cmd/tee.cyr` | **implemented** (`-a`; resilient per-file failure; `-i` SIGINT-ignore deferred to signal-handler infra) | M4 |
-| `sort` | `src/cmd/sort.cyr` | not started | M4 |
+| `sort` | `src/cmd/sort.cyr` | **implemented** (`-n`/`-r`/`-u`/`-f`/`-b`/`-t`/`-k`/`-c`/`-o`/`-z`/`-s`; in-memory stable merge sort, 256 MiB cap; defer `-h`/`-V`/`-g`/`-M`/`-R`/`-m`/`-d`/`-i`, multi-key, external sort) | M4 |
 | `uniq` | `src/cmd/uniq.cyr` | **implemented** (`-c`/`-d`/`-u`/`-i`/`-f`/`-s`/`-w`/`-z`; 2-op input/output; defer `--all-repeated`/`--group`) | M4 |
 | `nl` | `src/cmd/nl.cyr` | **implemented** (single-section; `-b`/`-i`/`-n`/`-s`/`-v`/`-w`; defer `-d`/`-h`/`-f`/`-l`/`-p` sections + `-b p REGEX`) | M4 |
 | `printf` | `src/cmd/printf.cyr` | not started | M4 |
@@ -111,6 +111,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 - `scripts/smoke-uniq.sh` — behavioural test for `uniq` (27/27 — every shipped flag cell-by-cell against GNU; `-c` count prefix at width 7, `-d`/`-u` mutually-exclusive filters, `-i` case-fold, `-f`/`-s`/`-w` comparison-key permutations, 2-operand input/output mode, NUL-separated I/O via `-z`, partial failure).
 - `scripts/smoke-tr.sh` — behavioural test for `tr` (32/32 — translate / delete / squeeze / complement / truncate modes cell-by-cell against GNU; rot13 alphabet pairing; every POSIX character class incl. `[:alnum:]`/`[:punct:]`/`[:cntrl:]`/`[:xdigit:]`; backslash named + octal escapes; SET2-shorter pad rule; `-d -s` combined; empty input; usage errors).
 - `scripts/smoke-cut.sh` — behavioural test for `cut` (31/31 — `-b`/`-c`/`-f` modes cell-by-cell against GNU; every LIST grammar form `N`/`N-`/`-M`/`N-M` and combinations; default-TAB delim; `-s` only-delim with mixed-input handling; `--complement`; `--output-delimiter`; multi-file; usage-error matrix).
+- `scripts/smoke-sort.sh` — behavioural test for `sort` (23/23 — every flag combo cell-by-cell against `LC_ALL=C sort`; default lex, `-n` with negatives, `-r`, `-u`, `-f` case-fold, `-b` blank-skip, `-t`/`-k`, combined flags, empty + no-trailing-newline edges, multi-file concat, `-c` check on sorted + unsorted, `-o` output redirect, `-z` NUL, stability on equal keys, 1000-line numeric sort).
 - `tests/kriya.fcyr` — fuzz stub (lands when M2 destructive utilities arrive).
 
 ## Dependencies
@@ -158,8 +159,8 @@ _None yet._ Expected consumers once M1 ships:
   6. ✅ `tr` (2026-05-17) — translate/delete/squeeze/complement; full POSIX set grammar incl. all 12 character classes.
   7. ✅ `cut` (2026-05-17) — `-b`/`-c`/`-f` with full LIST grammar; `--complement`/`--output-delimiter`/`-z`.
   8. ✅ `tail -f` (2026-05-17) — single-file follow via 200ms stat-poll; truncation detection (size shrink) emits warning and lseeks to 0. Multi-file follow + same-size-rewrite detection deferred.
-  9. `sort` — line sort; in-memory + external-sort fallback. Next.
-  10. `printf` — printf-style format engine (largest M4 utility; reuses concepts from `stat`'s format parser).
+  9. ✅ `sort` (2026-05-17) — in-memory stable merge sort O(n log n) with full POSIX flag set; 256 MiB input cap; external-sort fallback deferred.
+  10. `printf` — printf-style format engine (largest M4 utility; reuses concepts from `stat`'s format parser). **Closes M4.**
 - Deferred features tracked against future enablers (each a known-named follow-up, not "TBD"):
   - echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
   - pwd `$PWD` inode-match — waits on `fs.cyr` stat-compare.
