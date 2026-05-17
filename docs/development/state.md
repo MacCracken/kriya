@@ -5,7 +5,7 @@
 
 ## Version
 
-**0.2.0** — released 2026-05-17. Closes M1: dispatcher + six utilities (`true`/`false`/`echo`/`pwd`/`yes`/`sleep`), four shared lib modules, two architecture notes, dispatcher cold-start benchmark (1.185ms median).
+**0.3.0** — released 2026-05-17. Closes M2: seven file-operation utilities (`mkdir`, `rmdir`, `touch`, `ln`, `cp` with full `-R` matrix, `mv`, `rm`) on top of two new shared libs (`src/lib/fs.cyr` for `*at()`-family traversal, `src/lib/protected.cyr` for ADR-0004 root refusal) and two M2 policy ADRs (0003 symlink-follow, 0004 `rm` refuses `/`). All ADR safety properties verified by behavioural smoke scripts (265 total cases across the M2 utilities).
 
 ## Role
 
@@ -17,7 +17,7 @@ Coreutils-equivalent for AGNOS — the small POSIX-style utilities (`cp`, `mv`, 
 
 ## Source
 
-M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both M1 architecture notes, and the dispatcher cold-start benchmark have shipped. Cold-start median 1.185ms (target ≤2ms per v1.0 acceptance).
+M1 closed at v0.2.0; M2 closed at v0.3.0. All thirteen shipped utilities (six from M1 + seven from M2) are live; six shared lib modules in place (`exit`, `path`, `errmsg`, `args`, `fs`, `protected`); four ADRs accepted (0001–0004); two architecture notes (signal model + errno policy). Cold-start re-benched at M2 close: median **1.159ms** over 30 runs (was 1.185ms at v0.2.0 — slight improvement despite seven new utilities + two shared libs; the `true` dispatcher path is unchanged in structure, only its sibling `if (streq …)` lines grew).
 
 | Module | Status |
 |---|---|
@@ -89,7 +89,7 @@ M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both
   - `path/normalize_simple` / `_messy` — 336ns / 515ns
   - `errmsg/for_known` — 6ns
   - `args/parse_octal_mode` — 20ns
-- `scripts/bench-coldstart.sh` — process-spawn timing. `RUNS=30` baseline: min 1.010ms, **median 1.185ms**, max 1.374ms — under the 2ms v1.0 target.
+- `scripts/bench-coldstart.sh` — process-spawn timing. `RUNS=30` at v0.3.0: min 1.040ms, **median 1.159ms**, max 1.253ms — under the 2ms v1.0 target. (v0.2.0 baseline was 1.010 / 1.185 / 1.374ms; M2 didn't regress.)
 - `scripts/smoke-mkdir.sh` — behavioural test for `mkdir` (24/24 passing — happy path, `-p` recursion, EEXIST split, `-m` mode bits, partial-failure exit, root operand). Pattern carries forward as each M2 utility ships.
 - `scripts/smoke-rmdir.sh` — behavioural test for `rmdir` (24/24 — happy path, `-p` cascade with sibling-halt, `--ignore-fail-on-non-empty`, ENOTEMPTY/ENOENT/ENOTDIR, kernel-EBUSY on `/`, `-v` output).
 - `scripts/smoke-touch.sh` — behavioural test for `touch` (26/26 — create, multi-operand, update-existing, `-a`/`-m`/`-a -m`, `-c` on missing-vs-existing, ENOENT on missing parent, partial-failure exit code).

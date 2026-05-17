@@ -6,6 +6,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-17
+
+Closes M2 — seven file-operation utilities (`mkdir`, `rmdir`, `touch`, `ln`, `cp` with the full ADR-0003 `-P`/`-H`/`-L` recursive matrix, `mv`, `rm`) on top of two new shared libs (`src/lib/fs.cyr` for `*at()`-family traversal, `src/lib/protected.cyr` for ADR-0004 root refusal) and two M2 policy ADRs. **265 behavioural smoke cases pass across the M2 utilities** (mkdir 24 + rmdir 24 + touch 26 + ln 30 + cp 26 + cp-recursive 39 + mv 43 + rm 53), with 78/78 unit assertions still green. Cold-start median 1.185ms held (re-bench at M3 close).
+
+Two cross-repo proposals filed during M2 — both await stdlib slot:
+- `cyrius/docs/development/proposals/2026-05-17-octal-literal-syntax` — `0o755`-style integer literals (lexer-only ~30 LOC).
+- `cyrius/docs/development/proposals/2026-05-17-syscalls-at-family-stdlib` — bundle missing `sys_link`/`sys_lstat`/`sys_rename` + full `*at()`-family wrappers + `AtFlag`/`Utime` enums.
+
 ### Added
 
 #### M2 policy lead-in (destructive utilities ship behind these decisions)
