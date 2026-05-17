@@ -68,3 +68,31 @@ fn kriya_parse_nonneg_int(s): i64 {
     }
     return n;
 }
+
+# Parse a null-terminated cstring as an octal file mode (POSIX
+# `-m` argument shape for mkdir/install/chmod). Accepts 1-4 digit
+# strings of 0..7, with or without a leading `0`. Returns the
+# integer mode in the low 12 bits (setuid/setgid/sticky + rwx
+# triplet), or -1 on any of: null pointer, empty string, non-octal
+# digit, value >= 010000 (4096).
+#
+# Symbolic forms (`u+rwx`, `g-w`, …) are NOT accepted. They land
+# when the symbolic-mode parser ships in M3 (`chmod`-driven).
+fn kriya_parse_octal_mode(s): i64 {
+    if (s == 0) { return 0 - 1; }
+    if (load8(s) == 0) { return 0 - 1; }
+    var n: i64 = 0;
+    var i: i64 = 0;
+    var digits: i64 = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c < 48) { return 0 - 1; }
+        if (c > 55) { return 0 - 1; }
+        n = n * 8 + (c - 48);
+        if (n > 4095) { return 0 - 1; }
+        digits = digits + 1;
+        i = i + 1;
+    }
+    if (digits > 5) { return 0 - 1; }
+    return n;
+}

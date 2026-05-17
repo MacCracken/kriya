@@ -60,6 +60,11 @@ fn bench_errmsg_for() {
     return 0;
 }
 
+fn bench_parse_octal_mode() {
+    var r = kriya_parse_octal_mode("0755");
+    return 0;
+}
+
 # ---- runner --------------------------------------------------------------
 
 fn main() {
@@ -96,6 +101,10 @@ fn main() {
     var b8 = bench_new("errmsg/for_known");
     bench_run_batch(b8, &bench_errmsg_for, 10000, 100);
     bench_report(b8);
+
+    var b9 = bench_new("args/parse_octal_mode");
+    bench_run_batch(b9, &bench_parse_octal_mode, 10000, 100);
+    bench_report(b9);
 
     return 0;
 }

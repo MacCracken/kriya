@@ -18,6 +18,7 @@ include "src/cmd/echo.cyr"
 include "src/cmd/pwd.cyr"
 include "src/cmd/yes.cyr"
 include "src/cmd/sleep.cyr"
+include "src/cmd/mkdir.cyr"
 
 fn print_usage() {
     syscall(1, 2, "usage: kriya <utility> [args...]\n", 33);
@@ -42,6 +43,7 @@ fn dispatch(name, start: i64): i64 {
     if (streq(name, "pwd"))   { return cmd_pwd(start); }
     if (streq(name, "yes"))   { return cmd_yes(start); }
     if (streq(name, "sleep")) { return cmd_sleep(start); }
+    if (streq(name, "mkdir")) { return cmd_mkdir(start); }
     print_unknown(name);
     return EXIT_USAGE;
 }

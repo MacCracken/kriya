@@ -26,7 +26,7 @@ M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both
 | `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
 | `src/lib/errmsg.cyr` | implemented — errnos 1..40 + `errmsg_is_known` |
 | `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
-| `src/cmd/*.cyr` | 6 of ~40 — `true.cyr`, `false.cyr`, `echo.cyr`, `pwd.cyr`, `yes.cyr`, `sleep.cyr` |
+| `src/cmd/*.cyr` | 7 of ~40 — `true.cyr`, `false.cyr`, `echo.cyr`, `pwd.cyr`, `yes.cyr`, `sleep.cyr`, `mkdir.cyr` |
 
 ## Per-utility status (will grow with each milestone)
 
@@ -38,7 +38,7 @@ M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both
 | `false` | `src/cmd/false.cyr` | **implemented** | M1 |
 | `yes` | `src/cmd/yes.cyr` | **implemented** | M1 |
 | `sleep` | `src/cmd/sleep.cyr` | **implemented** (integer seconds; fractional + suffixes deferred) | M1 |
-| `mkdir` | `src/cmd/mkdir.cyr` | not started | M2 |
+| `mkdir` | `src/cmd/mkdir.cyr` | **implemented** (`-p`, `-m` octal, `-v`; symbolic-mode deferred to chmod) | M2 |
 | `rmdir` | `src/cmd/rmdir.cyr` | not started | M2 |
 | `touch` | `src/cmd/touch.cyr` | not started | M2 |
 | `cp` | `src/cmd/cp.cyr` | not started | M2 |
@@ -79,14 +79,16 @@ M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both
 
 ## Tests
 
-- `tests/kriya.tcyr` — primary unit suite (61/61 passing — exit codes, cmd routes, path primitives, errmsg table, integer parser).
+- `tests/kriya.tcyr` — primary unit suite (78/78 passing — exit codes, cmd routes, path primitives, errmsg table, integer parser, octal-mode parser).
 - `tests/kriya.bcyr` — in-process hot-path bench (stdlib `lib/bench.cyr`). Steady-state numbers (Cyrius 5.11.54, x86_64):
-  - `dispatch/path_basename_ptr` — 62ns
-  - `dispatch/streq_hit` / `_miss` — 33ns / 29ns
-  - `util/cmd_true` / `cmd_false` — 5ns / 6ns
-  - `path/normalize_simple` / `_messy` — 322ns / 498ns
+  - `dispatch/path_basename_ptr` — 65ns
+  - `dispatch/streq_hit` / `_miss` — 34ns / 31ns
+  - `util/cmd_true` / `cmd_false` — 6ns / 6ns
+  - `path/normalize_simple` / `_messy` — 336ns / 515ns
   - `errmsg/for_known` — 6ns
+  - `args/parse_octal_mode` — 20ns
 - `scripts/bench-coldstart.sh` — process-spawn timing. `RUNS=30` baseline: min 1.010ms, **median 1.185ms**, max 1.374ms — under the 2ms v1.0 target.
+- `scripts/smoke-mkdir.sh` — behavioural test for `mkdir` (24/24 passing — happy path, `-p` recursion, EEXIST split, `-m` mode bits, partial-failure exit, root operand). Pattern carries forward as each M2 utility ships.
 - `tests/kriya.fcyr` — fuzz stub (lands when M2 destructive utilities arrive).
 
 ## Dependencies
@@ -106,8 +108,8 @@ _None yet._ Expected consumers once M1 ships:
 
 ## In-flight work
 
-- M1 closed; v0.2.0 cut. M2 policy lead-in **landed 2026-05-17**: ADR 0003 (symlink-follow policy) and ADR 0004 (`rm` refuses `/`, no escape hatch — stronger than the GNU `--no-preserve-root` model). M2 code now unblocked. Recommended ship order:
-  1. `mkdir` — pure-create, simplest, exercises `*at()` + `path_normalize` end-to-end. Lays the M2 ground.
+- M1 closed; v0.2.0 cut. M2 policy lead-in **landed 2026-05-17**: ADR 0003 (symlink-follow policy) and ADR 0004 (`rm` refuses `/`, no escape hatch — stronger than the GNU `--no-preserve-root` model). M2 code in progress. Ship order:
+  1. ✅ `mkdir` (2026-05-17) — `-p`/`-m`/`-v`, octal mode parser, EEXIST split, smoke-mkdir.sh pattern established.
   2. `rmdir` — empty-dir delete; first destructive utility but with the safest possible payload (empty-only).
   3. `touch` — pure-create / metadata-update; no traversal.
   4. `ln` — symlink + hard-link; the first user-facing surface of ADR 0003's `-P` semantics for `ln`.

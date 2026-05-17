@@ -97,6 +97,27 @@ fn main() {
     assert_eq(kriya_parse_nonneg_int("-1"),   0 - 1,    "leading sign -> -1");
     assert_eq(kriya_parse_nonneg_int(0),      0 - 1,    "null pointer -> -1");
 
+    test_group("kriya_parse_octal_mode");
+    # Comparisons are decimal: 0o755=493, 0o700=448, 0o644=420,
+    # 0o777=511, 0o7=7, 0o70=56, 0o1000=512 (out of range).
+    assert_eq(kriya_parse_octal_mode("0"),     0,      "\"0\" -> 0");
+    assert_eq(kriya_parse_octal_mode("7"),     7,      "\"7\" -> 7");
+    assert_eq(kriya_parse_octal_mode("70"),    56,     "\"70\" -> 56");
+    assert_eq(kriya_parse_octal_mode("755"),   493,    "\"755\" -> 0o755");
+    assert_eq(kriya_parse_octal_mode("0755"),  493,    "\"0755\" -> 0o755");
+    assert_eq(kriya_parse_octal_mode("700"),   448,    "\"700\" -> 0o700");
+    assert_eq(kriya_parse_octal_mode("0644"),  420,    "\"0644\" -> 0o644");
+    assert_eq(kriya_parse_octal_mode("777"),   511,    "\"777\" -> 0o777");
+    assert_eq(kriya_parse_octal_mode("7777"),  4095,   "\"7777\" -> 0o7777 (full 12-bit)");
+    assert_eq(kriya_parse_octal_mode(""),      0 - 1,  "empty -> -1");
+    assert_eq(kriya_parse_octal_mode("8"),     0 - 1,  "non-octal digit 8 -> -1");
+    assert_eq(kriya_parse_octal_mode("9"),     0 - 1,  "non-octal digit 9 -> -1");
+    assert_eq(kriya_parse_octal_mode("u+x"),   0 - 1,  "symbolic mode -> -1 (deferred to chmod)");
+    assert_eq(kriya_parse_octal_mode("10000"), 0 - 1,  "value 0o10000 overflows 12 bits -> -1");
+    assert_eq(kriya_parse_octal_mode("755a"),  0 - 1,  "trailing non-digit -> -1");
+    assert_eq(kriya_parse_octal_mode("-1"),    0 - 1,  "leading sign -> -1");
+    assert_eq(kriya_parse_octal_mode(0),       0 - 1,  "null pointer -> -1");
+
     return assert_summary();
 }
 
