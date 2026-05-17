@@ -4,6 +4,9 @@
 # independent of the dispatcher entry point in src/main.cyr.
 
 include "src/lib/exit.cyr"
+include "src/lib/errmsg.cyr"
+include "src/lib/path.cyr"
+include "src/lib/args.cyr"
 include "src/cmd/true.cyr"
 include "src/cmd/false.cyr"
 
@@ -18,6 +21,81 @@ fn main() {
     test_group("cmd_true / cmd_false");
     assert_eq(cmd_true(1),  EXIT_SUCCESS, "cmd_true returns EXIT_SUCCESS");
     assert_eq(cmd_false(1), EXIT_FAILURE, "cmd_false returns EXIT_FAILURE");
+
+    test_group("path_basename_ptr");
+    assert_eq(streq(path_basename_ptr("/usr/bin/cp"),   "cp"),    1, "/usr/bin/cp -> cp");
+    assert_eq(streq(path_basename_ptr("cp"),            "cp"),    1, "cp -> cp");
+    assert_eq(streq(path_basename_ptr("/cp"),           "cp"),    1, "/cp -> cp");
+    assert_eq(streq(path_basename_ptr("./cp"),          "cp"),    1, "./cp -> cp");
+    assert_eq(streq(path_basename_ptr("/"),             "/"),     1, "/ -> /");
+    assert_eq(streq(path_basename_ptr(""),              ""),      1, "empty -> empty");
+    # Trailing slashes are a caller-must-trim invariant for this fast
+    # pointer-only function — see path.cyr header. `path_normalize`
+    # produces canonical input.
+
+    test_group("path_is_absolute");
+    assert_eq(path_is_absolute("/foo"),  1, "/foo is absolute");
+    assert_eq(path_is_absolute("foo"),   0, "foo is relative");
+    assert_eq(path_is_absolute("./foo"), 0, "./foo is relative");
+    assert_eq(path_is_absolute(""),      0, "empty is not absolute");
+    assert_eq(path_is_absolute(0),       0, "null is not absolute");
+
+    test_group("path_dirname");
+    assert_eq(streq(path_dirname("/a/b/c"), "/a/b"), 1, "/a/b/c -> /a/b");
+    assert_eq(streq(path_dirname("a/b"),    "a"),    1, "a/b -> a");
+    assert_eq(streq(path_dirname("a"),      "."),    1, "a -> .");
+    assert_eq(streq(path_dirname("/a"),     "/"),    1, "/a -> /");
+    assert_eq(streq(path_dirname("/"),      "/"),    1, "/ -> /");
+    assert_eq(streq(path_dirname(""),       "."),    1, "empty -> .");
+
+    test_group("path_normalize");
+    assert_eq(streq(path_normalize(""),               "."),    1, "empty -> .");
+    assert_eq(streq(path_normalize("."),              "."),    1, ". -> .");
+    assert_eq(streq(path_normalize("/"),              "/"),    1, "/ -> /");
+    assert_eq(streq(path_normalize("/a/./b"),         "/a/b"), 1, "collapse .");
+    assert_eq(streq(path_normalize("/a/b/../c"),      "/a/c"), 1, ".. pops segment");
+    assert_eq(streq(path_normalize("/../../a"),       "/a"),   1, "root absorbs ..");
+    assert_eq(streq(path_normalize("a/../../b"),      "../b"), 1, "relative keeps leading ..");
+    assert_eq(streq(path_normalize("/a/b/"),          "/a/b"), 1, "trailing slash dropped");
+    assert_eq(streq(path_normalize("//a//b"),         "/a/b"), 1, "duplicate slashes collapsed");
+
+    test_group("path_join");
+    assert_eq(streq(path_join("/a/b", "c"),    "/a/b/c"), 1, "simple join");
+    assert_eq(streq(path_join("/a/b/", "c"),   "/a/b/c"), 1, "trailing slash on a");
+    assert_eq(streq(path_join("/a", "/b"),     "/b"),     1, "absolute b wins");
+    assert_eq(streq(path_join("", "b"),        "b"),      1, "empty a");
+    assert_eq(streq(path_join("a", ""),        "a/"),     1, "empty b appends slash");
+
+    test_group("path_is_under");
+    assert_eq(path_is_under("/a/b",   "/a/b/c"),       1, "child is under parent");
+    assert_eq(path_is_under("/a/b",   "/a/b"),         1, "self is under self");
+    assert_eq(path_is_under("/a/b",   "/a/bb"),        0, "prefix-name mismatch");
+    assert_eq(path_is_under("/a/b",   "/a/b/../c"),    0, ".. escapes");
+    assert_eq(path_is_under("/a",     "/b"),           0, "different root");
+
+    test_group("errmsg_for");
+    assert_eq(streq(errmsg_for(1),  "operation not permitted"),       1, "EPERM");
+    assert_eq(streq(errmsg_for(2),  "no such file or directory"),     1, "ENOENT");
+    assert_eq(streq(errmsg_for(13), "permission denied"),             1, "EACCES");
+    assert_eq(streq(errmsg_for(17), "file exists"),                   1, "EEXIST");
+    assert_eq(streq(errmsg_for(21), "is a directory"),                1, "EISDIR");
+    assert_eq(streq(errmsg_for(32), "broken pipe"),                   1, "EPIPE");
+    assert_eq(streq(errmsg_for(999), "unknown error"),                1, "unmapped errno");
+    assert_eq(errmsg_is_known(1),   1, "EPERM is known");
+    assert_eq(errmsg_is_known(40),  1, "ELOOP boundary");
+    assert_eq(errmsg_is_known(0),   0, "0 is not known");
+    assert_eq(errmsg_is_known(41),  0, "41 above table");
+
+    test_group("kriya_parse_nonneg_int");
+    assert_eq(kriya_parse_nonneg_int("0"),    0,        "\"0\" -> 0");
+    assert_eq(kriya_parse_nonneg_int("1"),    1,        "\"1\" -> 1");
+    assert_eq(kriya_parse_nonneg_int("42"),   42,       "\"42\" -> 42");
+    assert_eq(kriya_parse_nonneg_int("1000"), 1000,     "\"1000\" -> 1000");
+    assert_eq(kriya_parse_nonneg_int(""),     0 - 1,    "empty string -> -1");
+    assert_eq(kriya_parse_nonneg_int("abc"),  0 - 1,    "non-digit -> -1");
+    assert_eq(kriya_parse_nonneg_int("12a"),  0 - 1,    "trailing non-digit -> -1");
+    assert_eq(kriya_parse_nonneg_int("-1"),   0 - 1,    "leading sign -> -1");
+    assert_eq(kriya_parse_nonneg_int(0),      0 - 1,    "null pointer -> -1");
 
     return assert_summary();
 }

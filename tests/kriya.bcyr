@@ -1,13 +1,104 @@
-# kriya benchmarks
-# Stdlib auto-included via cyrius.cyml
+# kriya — dispatcher and lib hot-path benchmarks.
+#
+# Measured here (warm, in-process — see arch note 002 for cold-start
+# discussion):
+#   - path_basename_ptr over a typical $PATH-shaped argv[0]
+#   - streq against the utility name (the dispatch comparison)
+#   - cmd_true / cmd_false (the cheapest full utility roundtrip)
+#   - path_normalize on a path that exercises `.`, `..` and dupes
+#
+# These are the per-step costs that compose the dispatcher hot path.
+# True process-spawn cold-start needs `time ./build/kriya true`-style
+# external timing — covered by `scripts/bench-coldstart.sh`.
 
-fn bench_noop() { return 0; }
+include "src/lib/exit.cyr"
+include "src/lib/errmsg.cyr"
+include "src/lib/path.cyr"
+include "src/lib/args.cyr"
+include "src/cmd/true.cyr"
+include "src/cmd/false.cyr"
+
+# ---- benchmark fixtures --------------------------------------------------
+
+fn bench_basename_ptr() {
+    var r = path_basename_ptr("/usr/local/bin/cp");
+    return 0;
+}
+
+fn bench_streq_dispatch_hit() {
+    var r = streq("true", "true");
+    return 0;
+}
+
+fn bench_streq_dispatch_miss() {
+    var r = streq("xyz123notinanything", "true");
+    return 0;
+}
+
+fn bench_cmd_true() {
+    var r = cmd_true(1);
+    return 0;
+}
+
+fn bench_cmd_false() {
+    var r = cmd_false(1);
+    return 0;
+}
+
+fn bench_path_normalize_simple() {
+    var r = path_normalize("/usr/local/bin");
+    return 0;
+}
+
+fn bench_path_normalize_messy() {
+    var r = path_normalize("/a/./b/../c//d/e/../../f");
+    return 0;
+}
+
+fn bench_errmsg_for() {
+    var r = errmsg_for(2);
+    return 0;
+}
+
+# ---- runner --------------------------------------------------------------
 
 fn main() {
     alloc_init();
-    bench("noop", &bench_noop, 1000000);
+
+    var b1 = bench_new("dispatch/path_basename_ptr");
+    bench_run_batch(b1, &bench_basename_ptr, 10000, 100);
+    bench_report(b1);
+
+    var b2 = bench_new("dispatch/streq_hit");
+    bench_run_batch(b2, &bench_streq_dispatch_hit, 10000, 100);
+    bench_report(b2);
+
+    var b3 = bench_new("dispatch/streq_miss");
+    bench_run_batch(b3, &bench_streq_dispatch_miss, 10000, 100);
+    bench_report(b3);
+
+    var b4 = bench_new("util/cmd_true");
+    bench_run_batch(b4, &bench_cmd_true, 10000, 100);
+    bench_report(b4);
+
+    var b5 = bench_new("util/cmd_false");
+    bench_run_batch(b5, &bench_cmd_false, 10000, 100);
+    bench_report(b5);
+
+    var b6 = bench_new("path/normalize_simple");
+    bench_run_batch(b6, &bench_path_normalize_simple, 1000, 100);
+    bench_report(b6);
+
+    var b7 = bench_new("path/normalize_messy");
+    bench_run_batch(b7, &bench_path_normalize_messy, 1000, 100);
+    bench_report(b7);
+
+    var b8 = bench_new("errmsg/for_known");
+    bench_run_batch(b8, &bench_errmsg_for, 10000, 100);
+    bench_report(b8);
+
     return 0;
 }
 
 var r = main();
-syscall(60, r);
+syscall(SYS_EXIT, r);

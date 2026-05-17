@@ -1,0 +1,43 @@
+# yes — POSIX `yes(1)`: repeatedly print `y\n`, or args joined with
+# spaces and terminated with `\n`, until the write fails (broken pipe).
+#
+# POSIX yes takes no flags. All argv operands form the line; if there
+# are none, the line is `y`. We cap the line at 8 KiB — long enough
+# for any reasonable shell pipeline, short enough that the buffer
+# stays in L1.
+
+fn cmd_yes(start: i64): i64 {
+    var n = kriya_argv_count();
+    var buf = alloc(8192);
+    var blen: i64 = 0;
+
+    if (start >= n) {
+        store8(buf, 121);
+        store8(buf + 1, 10);
+        blen = 2;
+    }
+    var i = start;
+    while (i < n) {
+        var arg = argv(i);
+        var alen = strlen(arg);
+        if (blen + alen + 1 < 8192) {
+            memcpy(buf + blen, arg, alen);
+            blen = blen + alen;
+            if (i + 1 < n) {
+                store8(buf + blen, 32);
+                blen = blen + 1;
+            } else {
+                store8(buf + blen, 10);
+                blen = blen + 1;
+            }
+        }
+        i = i + 1;
+    }
+
+    var go: i64 = 1;
+    while (go == 1) {
+        var w = syscall(1, 1, buf, blen);
+        if (w <= 0) { go = 0; }
+    }
+    return EXIT_SUCCESS;
+}

@@ -1,0 +1,29 @@
+# sleep — POSIX `sleep(1)`: pause for the given number of seconds.
+#
+# kriya accepts a single non-negative integer-seconds operand. GNU
+# `sleep` extends this with fractional seconds and suffixes
+# (`1.5`, `1s`, `1m`, `1h`, `1d`); both extensions are deferred until
+# the wider duration-parser lands in `lib/chrono.cyr`. POSIX `sleep N`
+# (one integer) is the intersection that ships today.
+
+fn cmd_sleep(start: i64): i64 {
+    var n = kriya_argv_count();
+    if (start >= n) {
+        syscall(1, 2, "kriya sleep: error: expected 1 positional argument(s), got 0\n", 62);
+        return EXIT_USAGE;
+    }
+    if (start + 1 < n) {
+        syscall(1, 2, "kriya sleep: error: too many operands (POSIX sleep takes one integer)\n", 71);
+        return EXIT_USAGE;
+    }
+    var arg = argv(start);
+    var secs = kriya_parse_nonneg_int(arg);
+    if (secs < 0) {
+        syscall(1, 2, "kriya sleep: error: SECONDS must be a non-negative integer\n", 60);
+        return EXIT_USAGE;
+    }
+    if (secs > 0) {
+        sleep_ms(secs * 1000);
+    }
+    return EXIT_SUCCESS;
+}

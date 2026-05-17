@@ -7,25 +7,17 @@
 # Stdlib (string, fmt, alloc, io, vec, str, syscalls, assert) is
 # auto-included via cyrius.cyml [deps].stdlib.
 
+include "src/version_str.cyr"
 include "src/lib/exit.cyr"
+include "src/lib/errmsg.cyr"
+include "src/lib/path.cyr"
+include "src/lib/args.cyr"
 include "src/cmd/true.cyr"
 include "src/cmd/false.cyr"
-
-# Return pointer to the basename within a null-terminated path.
-# Scans for the last '/'; result is a pointer into the original buffer
-# (still null-terminated by virtue of the source).
-fn kriya_basename(p): i64 {
-    var len = strlen(p);
-    var start: i64 = 0;
-    var i: i64 = 0;
-    while (i < len) {
-        if (load8(p + i) == 47) {
-            start = i + 1;
-        }
-        i = i + 1;
-    }
-    return p + start;
-}
+include "src/cmd/echo.cyr"
+include "src/cmd/pwd.cyr"
+include "src/cmd/yes.cyr"
+include "src/cmd/sleep.cyr"
 
 fn print_usage() {
     syscall(1, 2, "usage: kriya <utility> [args...]\n", 33);
@@ -46,6 +38,10 @@ fn print_unknown(name) {
 fn dispatch(name, start: i64): i64 {
     if (streq(name, "true"))  { return cmd_true(start); }
     if (streq(name, "false")) { return cmd_false(start); }
+    if (streq(name, "echo"))  { return cmd_echo(start); }
+    if (streq(name, "pwd"))   { return cmd_pwd(start); }
+    if (streq(name, "yes"))   { return cmd_yes(start); }
+    if (streq(name, "sleep")) { return cmd_sleep(start); }
     print_unknown(name);
     return EXIT_USAGE;
 }
@@ -55,7 +51,7 @@ fn main(): i64 {
     args_init();
 
     var arg0 = argv(0);
-    var name = kriya_basename(arg0);
+    var name = path_basename_ptr(arg0);
     var start: i64 = 1;
 
     if (streq(name, "kriya") == 1) {

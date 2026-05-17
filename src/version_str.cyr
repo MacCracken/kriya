@@ -1,0 +1,20 @@
+# src/version_str.cyr — AUTO-GENERATED from `VERSION` by
+# `scripts/version-bump.sh`. Do NOT edit by hand; the next bump
+# will overwrite. To regenerate without bumping, run:
+#
+#   sh scripts/version-bump.sh "$(cat VERSION)"
+#
+# Single source of truth for the kriya version string. Consumers
+# (`kriya --version`, dispatcher banner, future help-text headers)
+# reference these vars instead of baking the literal in. Mirrors the
+# cyrius `src/version_str.cyr` pattern (which exists because
+# pre-v5.6.39 the per-binary literals drifted across hotfix bumps).
+#
+# `_VERSION_LEN_KRIYA` is the BYTE length of `_VERSION_STR_KRIYA`
+# including the trailing `\n` — used directly with `syscall(1, fd,
+# &str, len)` so the writer never needs `strlen()` at the version
+# print site.
+
+var _VERSION_STR_KRIYA = "kriya 0.2.0\n";
+var _VERSION_LEN_KRIYA = 12;
+var _VERSION_KRIYA     = "0.2.0";

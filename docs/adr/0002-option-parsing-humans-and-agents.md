@@ -161,6 +161,20 @@ The spec is built at startup (gvar bump-allocated, no `gvar_toks` cost — the s
 
 Fields are required unless explicitly nullable. Unknown fields are reserved (agents must tolerate forward-additive changes within v1).
 
+## Implementation status (as of v0.2.0 cut)
+
+The first consumer (`src/lib/args.cyr`, used by `pwd` and any future flag-taking utility) wraps stdlib `lib/flags.cyr`. Stdlib `flags.cyr` covers the bulk of this ADR: long flags, `--key=value`, the `--` terminator, positional collection, bool / int / str kinds, error reporting. The following ADR commitments are **not yet implemented** because stdlib `flags.cyr` does not yet support them:
+
+- **Short flag clustering** (`-rfv` = `-r -f -v`). Each short flag must currently be a separate token.
+- **Attached short values** (`-n10` = `-n 10`). Short value-taking flags require a separated token.
+- **`--help` (human form)** auto-rendered from the spec.
+- **`--help=json`** schema emission per Appendix A.
+- **`kriya --list`** top-level utility enumeration.
+- **`--dry-run` cross-utility enforcement** (lands when the first destructive utility ships in M2).
+- **`isatty(0)` check for `-i` flags** (lands with M2 cp/mv/rm).
+
+Each of the above is a separate, named follow-up — not a vague "TBD". The path to closing them: upstream the short-cluster and attached-value features into stdlib `lib/flags.cyr` (one PR against `cyrius`), then re-fit `src/lib/args.cyr` to expose `--help` / `--help=json` rendering on top of the spec.
+
 ## Appendix B — error message shape
 
 Every parser error follows:

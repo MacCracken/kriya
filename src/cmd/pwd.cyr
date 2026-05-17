@@ -1,0 +1,61 @@
+# pwd — POSIX `pwd(1)`: print the working directory.
+#
+# Flags:
+#   -L / --logical   (default) if $PWD is set and absolute, print it;
+#                    else fall through to getcwd.
+#   -P / --physical  always print getcwd (resolves symlinks).
+#
+# Default behavior is -L per POSIX and GNU. The strict POSIX rule
+# also requires that $PWD name the same directory as `.`; we don't
+# do the inode-equality check yet (lands when fs.cyr exposes a
+# stat-compare helper). Until then, -L trusts an absolute $PWD.
+
+var _pwd_spec  = 0;
+var _pwd_L_idx = 0;
+var _pwd_P_idx = 0;
+
+fn _pwd_init_spec(): i64 {
+    if (_pwd_spec != 0) { return 0; }
+    var s = flags_new();
+    _pwd_L_idx = flags_add_bool(s, 76, "logical",  0, "use $PWD if absolute (default)");
+    _pwd_P_idx = flags_add_bool(s, 80, "physical", 0, "always resolve via getcwd");
+    _pwd_spec = s;
+    return 0;
+}
+
+fn cmd_pwd(start: i64): i64 {
+    _pwd_init_spec();
+    if (kriya_args_parse(_pwd_spec, start) != 0) {
+        syscall(1, 2, "kriya pwd: error: bad option (see ADR 0002 for accepted syntax)\n", 64);
+        return EXIT_USAGE;
+    }
+    if (flags_positional_count(_pwd_spec) > 0) {
+        syscall(1, 2, "kriya pwd: error: takes no positional arguments\n", 48);
+        return EXIT_USAGE;
+    }
+
+    var use_pwd_env: i64 = 1;
+    if (flags_get_bool(_pwd_spec, _pwd_P_idx) == 1) { use_pwd_env = 0; }
+    if (flags_get_bool(_pwd_spec, _pwd_L_idx) == 1) { use_pwd_env = 1; }
+
+    if (use_pwd_env == 1) {
+        var pwd_env = getenv("PWD");
+        if (pwd_env != 0) {
+            if (load8(pwd_env) == 47) {
+                syscall(1, 1, pwd_env, strlen(pwd_env));
+                syscall(1, 1, "\n", 1);
+                return EXIT_SUCCESS;
+            }
+        }
+    }
+
+    var buf[4096];
+    var len = syscall(SYS_GETCWD, &buf, 4096);
+    if (len < 0) {
+        syscall(1, 2, "kriya pwd: error: getcwd failed\n", 32);
+        return EXIT_FAILURE;
+    }
+    syscall(1, 1, &buf, len - 1);
+    syscall(1, 1, "\n", 1);
+    return EXIT_SUCCESS;
+}

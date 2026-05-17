@@ -1,0 +1,68 @@
+# errmsg.cyr — errno → human message table for kriya utilities.
+#
+# Returns a static cstring (no alloc, no caller free) for the
+# Linux/POSIX errnos kriya cares about. Unmapped errnos fall through
+# to the caller-visible numeric form via `errmsg_for_unknown` — a
+# 14-byte rendered "errno NNN\n" — so messages stay shaped even when
+# the kernel hands us something exotic.
+#
+# Policy lives in `docs/architecture/001-errno-message-policy.md`:
+# how utilities prefix the message, how operands are included, how
+# stderr framing works. This module owns only the table.
+#
+# Coverage: POSIX errnos 1..40 (Linux numbering — these are stable
+# across libc-free callers since the kernel ABI fixes them). Higher
+# numbers (EWOULDBLOCK, network errnos, etc.) land when a utility
+# actually needs them.
+
+fn errmsg_for(errno): i64 {
+    if (errno == 1)  { return "operation not permitted"; }
+    if (errno == 2)  { return "no such file or directory"; }
+    if (errno == 3)  { return "no such process"; }
+    if (errno == 4)  { return "interrupted system call"; }
+    if (errno == 5)  { return "input/output error"; }
+    if (errno == 6)  { return "no such device or address"; }
+    if (errno == 7)  { return "argument list too long"; }
+    if (errno == 8)  { return "exec format error"; }
+    if (errno == 9)  { return "bad file descriptor"; }
+    if (errno == 10) { return "no child processes"; }
+    if (errno == 11) { return "resource temporarily unavailable"; }
+    if (errno == 12) { return "cannot allocate memory"; }
+    if (errno == 13) { return "permission denied"; }
+    if (errno == 14) { return "bad address"; }
+    if (errno == 15) { return "block device required"; }
+    if (errno == 16) { return "device or resource busy"; }
+    if (errno == 17) { return "file exists"; }
+    if (errno == 18) { return "invalid cross-device link"; }
+    if (errno == 19) { return "no such device"; }
+    if (errno == 20) { return "not a directory"; }
+    if (errno == 21) { return "is a directory"; }
+    if (errno == 22) { return "invalid argument"; }
+    if (errno == 23) { return "too many open files in system"; }
+    if (errno == 24) { return "too many open files"; }
+    if (errno == 25) { return "inappropriate ioctl for device"; }
+    if (errno == 26) { return "text file busy"; }
+    if (errno == 27) { return "file too large"; }
+    if (errno == 28) { return "no space left on device"; }
+    if (errno == 29) { return "illegal seek"; }
+    if (errno == 30) { return "read-only file system"; }
+    if (errno == 31) { return "too many links"; }
+    if (errno == 32) { return "broken pipe"; }
+    if (errno == 33) { return "numerical argument out of domain"; }
+    if (errno == 34) { return "numerical result out of range"; }
+    if (errno == 35) { return "resource deadlock avoided"; }
+    if (errno == 36) { return "file name too long"; }
+    if (errno == 37) { return "no locks available"; }
+    if (errno == 38) { return "function not implemented"; }
+    if (errno == 39) { return "directory not empty"; }
+    if (errno == 40) { return "too many levels of symbolic links"; }
+    return "unknown error";
+}
+
+# 1 if `errno` is in the known table (1..40), 0 otherwise. Lets the
+# caller pick between the named message and a "errno NNN" fallback.
+fn errmsg_is_known(errno): i64 {
+    if (errno < 1)  { return 0; }
+    if (errno > 40) { return 0; }
+    return 1;
+}

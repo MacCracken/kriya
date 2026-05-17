@@ -1,0 +1,348 @@
+# path.cyr — kriya path primitives.
+#
+# Pure string operations: nothing here touches the filesystem.
+# Filesystem-aware path resolution (`realpath`, `readlink`) ships as
+# its own utility in M3.
+#
+# Functions split into two memory classes:
+#   - Read-only (return a pointer into the input or an integer):
+#     path_basename_ptr, path_is_absolute, path_starts_with_segments.
+#   - Allocating (return a heap-allocated null-terminated cstring;
+#     caller does NOT free — kriya is one-shot, bump-alloc lives for
+#     the lifetime of the process): path_dirname, path_normalize,
+#     path_join, path_is_under.
+#
+# Boundary commitments (No-Gos):
+#   - No path is silently truncated. Inputs up to Linux PATH_MAX
+#     (4096 bytes) are normalized correctly; longer inputs error
+#     out via the caller's bounds check before reaching these
+#     primitives (path.cyr trusts its input).
+#   - No `..` walks above an absolute path's root (`/../` → `/`).
+#   - No backslash interpretation. POSIX paths only; this is AGNOS.
+
+# Return a pointer to the basename within `p` (a null-terminated path).
+# Result points into the original buffer — still null-terminated by
+# virtue of pointing into a cstring. Behaviour for trailing slashes
+# matches POSIX `basename(3)` lite: `/a/b/` returns `b`, not "".
+fn path_basename_ptr(p): i64 {
+    if (p == 0) { return 0; }
+    var len = strlen(p);
+    var end = len;
+    var trimming: i64 = 1;
+    while (trimming == 1) {
+        if (end == 0) { trimming = 0; }
+        else {
+            if (load8(p + end - 1) == 47) { end = end - 1; }
+            else { trimming = 0; }
+        }
+    }
+    if (end == 0) {
+        if (len == 0) { return p; }
+        return p + len - 1;
+    }
+    var start: i64 = 0;
+    var i: i64 = 0;
+    while (i < end) {
+        if (load8(p + i) == 47) { start = i + 1; }
+        i = i + 1;
+    }
+    return p + start;
+}
+
+# 1 if `p` starts with '/', 0 otherwise. p==0 → 0.
+fn path_is_absolute(p): i64 {
+    if (p == 0) { return 0; }
+    if (load8(p) == 47) { return 1; }
+    return 0;
+}
+
+# Return a heap-allocated copy of `p`'s directory portion.
+# `/a/b/c` → `/a/b`, `a/b` → `a`, `a` → `.`, `/a` → `/`, `/` → `/`,
+# `""` → `.`. Mirrors POSIX `dirname(3)`.
+fn path_dirname(p): i64 {
+    if (p == 0) {
+        var z = alloc(2);
+        store8(z, 46);
+        store8(z + 1, 0);
+        return z;
+    }
+    var len = strlen(p);
+    if (len == 0) {
+        var d = alloc(2);
+        store8(d, 46);
+        store8(d + 1, 0);
+        return d;
+    }
+    # Strip trailing slashes for the basename find, but remember
+    # whether the path was absolute.
+    var end = len;
+    var trimming: i64 = 1;
+    while (trimming == 1) {
+        if (end == 0) { trimming = 0; }
+        else {
+            if (load8(p + end - 1) == 47) { end = end - 1; }
+            else { trimming = 0; }
+        }
+    }
+    if (end == 0) {
+        # All slashes — input was "/...". dirname is "/".
+        var root = alloc(2);
+        store8(root, 47);
+        store8(root + 1, 0);
+        return root;
+    }
+    var last_slash: i64 = 0 - 1;
+    var i: i64 = 0;
+    while (i < end) {
+        if (load8(p + i) == 47) { last_slash = i; }
+        i = i + 1;
+    }
+    if (last_slash < 0) {
+        # No slash at all — relative single segment. dirname is ".".
+        var dot = alloc(2);
+        store8(dot, 46);
+        store8(dot + 1, 0);
+        return dot;
+    }
+    if (last_slash == 0) {
+        # /single — dirname is "/".
+        var rroot = alloc(2);
+        store8(rroot, 47);
+        store8(rroot + 1, 0);
+        return rroot;
+    }
+    var out = alloc(last_slash + 1);
+    memcpy(out, p, last_slash);
+    store8(out + last_slash, 0);
+    return out;
+}
+
+# Normalise a path: collapse `.`, resolve `..` against earlier
+# segments, drop duplicate slashes. Returns a heap-allocated
+# null-terminated cstring. Pure-string operation — does NOT consult
+# the filesystem, so symlinks are NOT followed. Use this before any
+# `path_is_under` safety check.
+#
+# Canonical forms:
+#   ""           → "."
+#   "."          → "."
+#   "/"          → "/"
+#   "/a/./b"     → "/a/b"
+#   "/a/b/../c"  → "/a/c"
+#   "/../../a"   → "/a"          (root absorbs all leading ..)
+#   "a/../../b"  → "../b"        (relative path keeps leading ..)
+#   "/a/b/"      → "/a/b"        (trailing slash dropped)
+fn path_normalize(p): i64 {
+    if (p == 0) {
+        var nz = alloc(2);
+        store8(nz, 46);
+        store8(nz + 1, 0);
+        return nz;
+    }
+    var plen = strlen(p);
+    if (plen == 0) {
+        var nempty = alloc(2);
+        store8(nempty, 46);
+        store8(nempty + 1, 0);
+        return nempty;
+    }
+
+    var absolute: i64 = 0;
+    if (load8(p) == 47) { absolute = 1; }
+
+    var max_segs = plen + 1;
+    var seg_start = alloc(max_segs * 8);
+    var seg_end   = alloc(max_segs * 8);
+    var nseg: i64 = 0;
+
+    var i: i64 = 0;
+    while (i < plen) {
+        if (load8(p + i) == 47) {
+            i = i + 1;
+        } else {
+            var s = i;
+            var scanning: i64 = 1;
+            while (scanning == 1) {
+                if (i >= plen) { scanning = 0; }
+                else {
+                    if (load8(p + i) == 47) { scanning = 0; }
+                    else { i = i + 1; }
+                }
+            }
+            store64(seg_start + nseg * 8, s);
+            store64(seg_end + nseg * 8, i);
+            nseg = nseg + 1;
+        }
+    }
+
+    var keep = alloc(max_segs * 8);
+    var nkeep: i64 = 0;
+    var si: i64 = 0;
+    while (si < nseg) {
+        var s = load64(seg_start + si * 8);
+        var e = load64(seg_end + si * 8);
+        var sl = e - s;
+        var is_dot: i64 = 0;
+        var is_dotdot: i64 = 0;
+        if (sl == 1) {
+            if (load8(p + s) == 46) { is_dot = 1; }
+        }
+        if (sl == 2) {
+            if (load8(p + s) == 46) {
+                if (load8(p + s + 1) == 46) { is_dotdot = 1; }
+            }
+        }
+
+        if (is_dot == 1) {
+            # skip
+        } else {
+            if (is_dotdot == 1) {
+                if (nkeep > 0) {
+                    var top_si = load64(keep + (nkeep - 1) * 8);
+                    var top_s = load64(seg_start + top_si * 8);
+                    var top_e = load64(seg_end + top_si * 8);
+                    var top_l = top_e - top_s;
+                    var top_dotdot: i64 = 0;
+                    if (top_l == 2) {
+                        if (load8(p + top_s) == 46) {
+                            if (load8(p + top_s + 1) == 46) { top_dotdot = 1; }
+                        }
+                    }
+                    if (top_dotdot == 1) {
+                        store64(keep + nkeep * 8, si);
+                        nkeep = nkeep + 1;
+                    } else {
+                        nkeep = nkeep - 1;
+                    }
+                } else {
+                    if (absolute == 0) {
+                        store64(keep + nkeep * 8, si);
+                        nkeep = nkeep + 1;
+                    }
+                }
+            } else {
+                store64(keep + nkeep * 8, si);
+                nkeep = nkeep + 1;
+            }
+        }
+        si = si + 1;
+    }
+
+    var out_len: i64 = 0;
+    if (absolute == 1) { out_len = 1; }
+    var ki: i64 = 0;
+    while (ki < nkeep) {
+        var ksi = load64(keep + ki * 8);
+        var ks = load64(seg_start + ksi * 8);
+        var ke = load64(seg_end + ksi * 8);
+        out_len = out_len + (ke - ks);
+        if (ki + 1 < nkeep) { out_len = out_len + 1; }
+        ki = ki + 1;
+    }
+    if (out_len == 0) {
+        var z2 = alloc(2);
+        if (absolute == 1) { store8(z2, 47); }
+        else               { store8(z2, 46); }
+        store8(z2 + 1, 0);
+        return z2;
+    }
+
+    var out = alloc(out_len + 1);
+    var op: i64 = 0;
+    if (absolute == 1) {
+        store8(out + op, 47);
+        op = op + 1;
+    }
+    ki = 0;
+    while (ki < nkeep) {
+        var ksi = load64(keep + ki * 8);
+        var ks = load64(seg_start + ksi * 8);
+        var ke = load64(seg_end + ksi * 8);
+        var sl2 = ke - ks;
+        memcpy(out + op, p + ks, sl2);
+        op = op + sl2;
+        if (ki + 1 < nkeep) {
+            store8(out + op, 47);
+            op = op + 1;
+        }
+        ki = ki + 1;
+    }
+    store8(out + op, 0);
+    return out;
+}
+
+# Join two path components with a single separator. Returns a
+# heap-allocated cstring. If `b` is absolute, returns a copy of `b`
+# (POSIX-style: the right operand wins when it's absolute).
+fn path_join(a, b): i64 {
+    if (a == 0) {
+        if (b == 0) {
+            var jz = alloc(1);
+            store8(jz, 0);
+            return jz;
+        }
+        var bl0 = strlen(b);
+        var jb = alloc(bl0 + 1);
+        memcpy(jb, b, bl0);
+        store8(jb + bl0, 0);
+        return jb;
+    }
+    if (b == 0) {
+        var al0 = strlen(a);
+        var ja = alloc(al0 + 1);
+        memcpy(ja, a, al0);
+        store8(ja + al0, 0);
+        return ja;
+    }
+    if (path_is_absolute(b) == 1) {
+        var bl = strlen(b);
+        var jba = alloc(bl + 1);
+        memcpy(jba, b, bl);
+        store8(jba + bl, 0);
+        return jba;
+    }
+    var al = strlen(a);
+    var bl = strlen(b);
+    if (al == 0) {
+        var jb0 = alloc(bl + 1);
+        memcpy(jb0, b, bl);
+        store8(jb0 + bl, 0);
+        return jb0;
+    }
+    var trail_slash: i64 = 0;
+    if (load8(a + al - 1) == 47) { trail_slash = 1; }
+    var sep: i64 = 1;
+    if (trail_slash == 1) { sep = 0; }
+    var out = alloc(al + sep + bl + 1);
+    memcpy(out, a, al);
+    if (sep == 1) {
+        store8(out + al, 47);
+    }
+    memcpy(out + al + sep, b, bl);
+    store8(out + al + sep + bl, 0);
+    return out;
+}
+
+# Is `p` contained beneath `root`, after both have been normalised?
+# Returns 1 if yes, 0 otherwise. Used by destructive utilities to
+# refuse operations that escape a sandbox root via `..`.
+fn path_is_under(root, p): i64 {
+    if (root == 0) { return 0; }
+    if (p == 0) { return 0; }
+    var nr = path_normalize(root);
+    var np = path_normalize(p);
+    var rl = strlen(nr);
+    var pl = strlen(np);
+    if (pl < rl) { return 0; }
+    var i: i64 = 0;
+    while (i < rl) {
+        if (load8(nr + i) != load8(np + i)) { return 0; }
+        i = i + 1;
+    }
+    if (pl == rl) { return 1; }
+    # Either root ended with '/' (rare after normalize), or the next
+    # char in p must be '/' so we didn't match a prefix mid-name.
+    if (load8(nr + rl - 1) == 47) { return 1; }
+    if (load8(np + rl) == 47) { return 1; }
+    return 0;
+}

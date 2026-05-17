@@ -5,7 +5,7 @@
 
 ## Version
 
-**0.1.0** — scaffolded 2026-05-15 via `cyrius init`. No releases yet.
+**0.2.0** — released 2026-05-17. Closes M1: dispatcher + six utilities (`true`/`false`/`echo`/`pwd`/`yes`/`sleep`), four shared lib modules, two architecture notes, dispatcher cold-start benchmark (1.185ms median).
 
 ## Role
 
@@ -17,27 +17,27 @@ Coreutils-equivalent for AGNOS — the small POSIX-style utilities (`cp`, `mv`, 
 
 ## Source
 
-M1 walking skeleton landed — dispatcher routes `argv[0]` basename (or `kriya <util>`) to the registered `cmd_*` functions. Two utilities wired; the remaining M1 utilities and lib modules are pending.
+M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both M1 architecture notes, and the dispatcher cold-start benchmark have shipped. Cold-start median 1.185ms (target ≤2ms per v1.0 acceptance).
 
 | Module | Status |
 |---|---|
-| `src/main.cyr` | implemented — dispatch by `argv[0]` basename, fallback to `argv[1]` when invoked as `kriya` |
-| `src/lib/path.cyr` | not started — path manipulation primitives |
+| `src/main.cyr` | implemented — dispatch by `argv[0]` basename via `path_basename_ptr`, fallback to `argv[1]` when invoked as `kriya` |
+| `src/lib/path.cyr` | implemented — `path_basename_ptr`, `path_dirname`, `path_is_absolute`, `path_normalize`, `path_join`, `path_is_under` |
 | `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
-| `src/lib/errmsg.cyr` | not started — errno → message |
-| `src/lib/args.cyr` | not started — POSIX-style argument parsing (on top of stdlib `lib/args.cyr`) |
-| `src/cmd/*.cyr` | 2 of ~40 — `true.cyr`, `false.cyr` |
+| `src/lib/errmsg.cyr` | implemented — errnos 1..40 + `errmsg_is_known` |
+| `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
+| `src/cmd/*.cyr` | 6 of ~40 — `true.cyr`, `false.cyr`, `echo.cyr`, `pwd.cyr`, `yes.cyr`, `sleep.cyr` |
 
 ## Per-utility status (will grow with each milestone)
 
 | Utility | Module | Status | Roadmap milestone |
 |---|---|---|---|
-| `echo` | `src/cmd/echo.cyr` | not started | M1 |
-| `pwd` | `src/cmd/pwd.cyr` | not started | M1 (note: agnoshi has a builtin; kriya provides the binary form) |
-| `true` | `src/cmd/true.cyr` | **implemented** (walking skeleton) | M1 |
-| `false` | `src/cmd/false.cyr` | **implemented** (walking skeleton) | M1 |
-| `yes` | `src/cmd/yes.cyr` | not started | M1 |
-| `sleep` | `src/cmd/sleep.cyr` | not started | M1 |
+| `echo` | `src/cmd/echo.cyr` | **implemented** (POSIX + leading `-n`; `-e`/`-E` deferred) | M1 |
+| `pwd` | `src/cmd/pwd.cyr` | **implemented** (`-L`/`-P`; `$PWD` inode-match deferred) | M1 (note: agnoshi has a builtin; kriya provides the binary form) |
+| `true` | `src/cmd/true.cyr` | **implemented** | M1 |
+| `false` | `src/cmd/false.cyr` | **implemented** | M1 |
+| `yes` | `src/cmd/yes.cyr` | **implemented** | M1 |
+| `sleep` | `src/cmd/sleep.cyr` | **implemented** (integer seconds; fractional + suffixes deferred) | M1 |
 | `mkdir` | `src/cmd/mkdir.cyr` | not started | M2 |
 | `rmdir` | `src/cmd/rmdir.cyr` | not started | M2 |
 | `touch` | `src/cmd/touch.cyr` | not started | M2 |
@@ -79,15 +79,21 @@ M1 walking skeleton landed — dispatcher routes `argv[0]` basename (or `kriya <
 
 ## Tests
 
-- `tests/kriya.tcyr` — primary suite (scaffold stub)
-- `tests/kriya.bcyr` — benchmark stub
-- `tests/kriya.fcyr` — fuzz stub
+- `tests/kriya.tcyr` — primary unit suite (61/61 passing — exit codes, cmd routes, path primitives, errmsg table, integer parser).
+- `tests/kriya.bcyr` — in-process hot-path bench (stdlib `lib/bench.cyr`). Steady-state numbers (Cyrius 5.11.54, x86_64):
+  - `dispatch/path_basename_ptr` — 62ns
+  - `dispatch/streq_hit` / `_miss` — 33ns / 29ns
+  - `util/cmd_true` / `cmd_false` — 5ns / 6ns
+  - `path/normalize_simple` / `_messy` — 322ns / 498ns
+  - `errmsg/for_known` — 6ns
+- `scripts/bench-coldstart.sh` — process-spawn timing. `RUNS=30` baseline: min 1.010ms, **median 1.185ms**, max 1.374ms — under the 2ms v1.0 target.
+- `tests/kriya.fcyr` — fuzz stub (lands when M2 destructive utilities arrive).
 
 ## Dependencies
 
 Direct (declared in `cyrius.cyml`):
 
-- stdlib — `string`, `fmt`, `alloc`, `io`, `vec`, `str`, `syscalls`, `args`, `assert`
+- stdlib — `string`, `fmt`, `alloc`, `io`, `vec`, `str`, `syscalls`, `args`, `flags`, `chrono`, `fnptr`, `bench`, `assert`
 
 External: none (and none planned for v1.0).
 
@@ -100,7 +106,14 @@ _None yet._ Expected consumers once M1 ships:
 
 ## In-flight work
 
-- Roadmap M1 (v0.2.0) — walking skeleton landed (dispatcher + `src/lib/exit.cyr` + `true`/`false`). Remaining: `src/lib/{path,errmsg,args}.cyr`, utilities `echo`/`pwd`/`yes`/`sleep`, ADR 0002 (option-parsing), arch notes 001 (errno→message) and 002 (signal handling), benchmark for dispatcher cold-start. See [`roadmap.md`](roadmap.md).
+- M1 closed; v0.2.0 cut. Next milestone: M2 (file operations — `mkdir`, `rmdir`, `touch`, `cp`, `mv`, `rm`, `ln`). M2 is the high-risk milestone (destructive ops, TOCTOU, symlink policy) and gets its own batch of ADRs (0003 symlink-follow, 0004 `rm -rf /` semantics) before any code lands. See [`roadmap.md`](roadmap.md).
+- Deferred features tracked against future enablers (each a known-named follow-up, not "TBD"):
+  - echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
+  - pwd `$PWD` inode-match — waits on `fs.cyr` stat-compare.
+  - sleep fractional + suffix (`1.5s`, `1m`, `1h`) — waits on `lib/chrono.cyr` duration-parser.
+  - Option-parser short clustering `-rfv` and attached short values `-n10` — waits on stdlib `lib/flags.cyr` upgrade. ADR 0002 honoured end-to-end after that.
+  - `--help` / `--help=json` / `kriya --list` per ADR 0002 — waits on the spec-renderer on top of `flags.cyr`.
+  - CI / release / build-script review — flagged 2026-05-17 against kindred Cyrius repos (`agnos`, `vidya`, `owl`, `cyim`, `sit`).
 
 ## Next
 

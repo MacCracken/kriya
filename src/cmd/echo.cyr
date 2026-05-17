@@ -1,0 +1,45 @@
+# echo — POSIX `echo(1)`: print operands separated by spaces, then \n.
+#
+# kriya recognises a leading `-n` operand as "suppress trailing newline"
+# (BSD / GNU / bash convention). Only the literal token `-n` counts;
+# `-nn`, `-en`, `--` and friends are data, not flags. This matches GNU
+# echo's quirk: option scanning stops at the first non-`-n` operand.
+#
+# POSIX itself marks the meaning of a leading `-n` as
+# implementation-defined; we document this as the kriya choice. `-e`
+# / `-E` (escape interpretation) are not implemented yet — they will
+# come with an ADR once the C-string escape table lands in `lib/str.cyr`.
+
+fn cmd_echo(start: i64): i64 {
+    var n = kriya_argv_count();
+    var i = start;
+    var omit_newline: i64 = 0;
+    var scanning: i64 = 1;
+
+    while (scanning == 1) {
+        var consumed: i64 = 0;
+        if (i < n) {
+            var tok = argv(i);
+            if (load8(tok) == 45) {
+                if (load8(tok + 1) == 110) {
+                    if (load8(tok + 2) == 0) {
+                        omit_newline = 1;
+                        i = i + 1;
+                        consumed = 1;
+                    }
+                }
+            }
+        }
+        if (consumed == 0) { scanning = 0; }
+    }
+
+    var first = i;
+    while (i < n) {
+        var arg = argv(i);
+        if (i > first) { syscall(1, 1, " ", 1); }
+        syscall(1, 1, arg, strlen(arg));
+        i = i + 1;
+    }
+    if (omit_newline == 0) { syscall(1, 1, "\n", 1); }
+    return EXIT_SUCCESS;
+}

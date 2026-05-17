@@ -1,0 +1,70 @@
+# args.cyr — kriya-side argv helpers and option-parser wrapper.
+#
+# Bridges two stdlib layers:
+#   - `lib/args.cyr`  exposes argv as a function: `argv(n)` walks
+#     /proc/self/cmdline.
+#   - `lib/flags.cyr` expects argv as a flat C-style array of
+#     `cstr*` pointers (`argc`, `argv` parameters).
+#
+# We build the flat array once (cached) and offer a `start`-aware
+# `args_parse` wrapper so each `cmd_<util>` can use stdlib `flags_*`
+# without re-deriving the dispatcher offset every time. See
+# docs/adr/0002-option-parsing-humans-and-agents.md.
+
+var _kriya_argv_flat = 0;
+var _kriya_argv_n    = 0;
+
+# Build (once) and return a pointer to argv as a flat array of cstr*.
+# Length is kriya_argv_count(). The array is allocated on the heap on
+# first call; subsequent calls are O(1).
+fn kriya_argv_flat(): i64 {
+    if (_kriya_argv_flat != 0) { return _kriya_argv_flat; }
+    var n = argc();
+    var buf = alloc(n * 8);
+    var i: i64 = 0;
+    while (i < n) {
+        store64(buf + i * 8, argv(i));
+        i = i + 1;
+    }
+    _kriya_argv_flat = buf;
+    _kriya_argv_n = n;
+    return buf;
+}
+
+fn kriya_argv_count(): i64 {
+    if (_kriya_argv_flat == 0) { kriya_argv_flat(); }
+    return _kriya_argv_n;
+}
+
+# Parse argv[start..] against `spec` using stdlib `flags_parse`.
+# `start` is the dispatcher offset (1 for symlink form, 2 for
+# `kriya <util>` form). We slice argv so `flags_parse` sees its
+# conventional layout: argv[0] is the utility name (treated as
+# program name and otherwise ignored), argv[1..] are the args.
+# Returns 0 on success, non-zero on parse error.
+fn kriya_args_parse(spec, start: i64): i64 {
+    var flat = kriya_argv_flat();
+    var n = kriya_argv_count();
+    var head = start - 1;
+    var slice_argc = n - head;
+    var slice_argv = flat + head * 8;
+    return flags_parse(spec, slice_argc, slice_argv);
+}
+
+# Parse a null-terminated cstring as a non-negative base-10 integer.
+# Returns the value, or -1 on any of: null pointer, empty string,
+# non-digit character, leading sign. Used by sleep/seq/sort/head/tail.
+fn kriya_parse_nonneg_int(s): i64 {
+    if (s == 0) { return 0 - 1; }
+    if (load8(s) == 0) { return 0 - 1; }
+    var n: i64 = 0;
+    var i: i64 = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c < 48) { return 0 - 1; }
+        if (c > 57) { return 0 - 1; }
+        n = n * 10 + (c - 48);
+        i = i + 1;
+    }
+    return n;
+}

@@ -1,6 +1,6 @@
 [package]
 name = "kriya"
-version = "0.1.0"
+version = "${file:VERSION}"
 description = "kriya — coreutils-equivalent: cp/mv/rm/mkdir/echo/wc/find/grep and friends, in Cyrius"
 license = "GPL-3.0-only"
 language = "cyrius"
@@ -12,5 +12,5 @@ test = "src/test.cyr"
 output = "kriya"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "args", "assert"]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "args", "flags", "chrono", "fnptr", "bench", "assert"]
 ---

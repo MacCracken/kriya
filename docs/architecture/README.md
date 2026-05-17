@@ -6,4 +6,5 @@ Not decisions (those live in [`../adr/`](../adr/)) and not guides (those live in
 
 ## Items
 
-_Empty. Add a numbered entry (`001-kebab-case-title.md`) the first time the code has a non-obvious invariant a reader can't derive. Do not write entries for decisions — those are ADRs._
+- [001 — errno → message policy](001-errno-message-policy.md) — every kriya error line is `kriya <util>: <message>: <operand>\n` to stderr; the table lives in `src/lib/errmsg.cyr`.
+- [002 — Signal handling model](002-signal-handling-model.md) — kernel defaults at M1 (SIGPIPE → 141, SIGINT → 130); M2 destructive utilities install a flag-based SIGINT handler.
