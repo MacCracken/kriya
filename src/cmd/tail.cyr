@@ -38,9 +38,11 @@ var _tail_n_idx = 0;
 var _tail_c_idx = 0;
 var _tail_q_idx = 0;
 var _tail_v_idx = 0;
+var _tail_f_idx = 0;
 
 var _TAIL_CAP_BYTES: i64 = 16777216;  # 16 MiB
 var _TAIL_READ_BUFSZ: i64 = 65536;
+var _TAIL_FOLLOW_POLL_MS: i64 = 200;   # poll interval for -f (200ms)
 
 fn _tail_init_spec(): i64 {
     if (_tail_spec != 0) { return 0; }
@@ -49,6 +51,7 @@ fn _tail_init_spec(): i64 {
     _tail_c_idx = flags_add_str(s,  99,  "bytes",   0, "emit last N bytes");
     _tail_q_idx = flags_add_bool(s, 113, "quiet",   0, "suppress filename headers");
     _tail_v_idx = flags_add_bool(s, 118, "verbose", 0, "always emit filename headers");
+    _tail_f_idx = flags_add_bool(s, 102, "follow",  0, "output new lines as the file grows");
     _tail_spec = s;
     return 0;
 }
@@ -193,6 +196,97 @@ fn _tail_line_start(buf, size, n): i64 {
     return 0;
 }
 
+# --- follow mode (-f) ------------------------------------------------
+#
+# After the initial "last N" output, this loop polls the file every
+# `_TAIL_FOLLOW_POLL_MS` ms via path-based `sys_stat`. When the size
+# grows, the new bytes are read from the open fd (whose position is
+# at the previous EOF after `_tail_emit_one`'s slurp) and emitted.
+# When the size shrinks (truncation), we emit a `truncated` warning
+# and lseek the fd back to 0 so the rewritten content shows up on
+# the next read.
+#
+# Single-file -f only at first ship. Multi-file -f (with header
+# switching) is a clear follow-up; stdin -f is silently downgraded
+# to non-follow because we cannot seek/stat a pipe meaningfully.
+#
+# Termination: SIGINT (Ctrl-C) exits via the kernel default (exit
+# 130) per arch note 002 — no handler installed.
+
+fn _tail_follow(fd, name): i64 {
+    # Initial size = current file size at this point. Anything past
+    # this is "new content".
+    var st[144];
+    var sr = sys_stat(name, &st);
+    if (sr != 0) {
+        _tail_report(name, 0 - sr);
+        return sr;
+    }
+    var last_size = load64(&st + 48);  # st_size
+
+    var buf = alloc(_TAIL_READ_BUFSZ);
+    var loop: i64 = 1;
+    while (loop == 1) {
+        sleep_ms(_TAIL_FOLLOW_POLL_MS);
+
+        var st2[144];
+        var sr2 = sys_stat(name, &st2);
+        if (sr2 != 0) {
+            # File vanished. Keep waiting; GNU's default tail -f
+            # behaviour is to ignore disappearance until --retry/-F.
+            # We do the same: continue polling.
+        } else {
+            var cur_size = load64(&st2 + 48);
+            if (cur_size < last_size) {
+                # Truncation. Emit warning to stderr and seek to 0.
+                syscall(1, 2, "kriya tail: ", 12);
+                syscall(1, 2, name, strlen(name));
+                syscall(1, 2, ": file truncated\n", 17);
+                # lseek(fd, 0, SEEK_SET).  SYS_LSEEK = 8.
+                syscall(8, fd, 0, 0);
+                last_size = 0;
+                # Fall through to the "read new bytes" path with cur_size.
+            }
+            if (cur_size > last_size) {
+                var to_read = cur_size - last_size;
+                var done: i64 = 0;
+                while (done == 0) {
+                    var chunk = _TAIL_READ_BUFSZ;
+                    if (to_read < chunk) { chunk = to_read; }
+                    var n = syscall(0, fd, buf, chunk);
+                    if (n < 0) {
+                        if ((0 - n) == 4) {
+                            # EINTR retry.
+                        } else {
+                            _tail_report(name, 0 - n);
+                            done = 1;
+                            loop = 0;
+                        }
+                    } else {
+                        if (n == 0) {
+                            # File grew per stat but read returns 0 —
+                            # could be a race; just stop this round.
+                            done = 1;
+                        } else {
+                            var wr = _tail_write_all(buf, n);
+                            if (wr != 0) {
+                                _tail_report(name, 0 - wr);
+                                done = 1;
+                                loop = 0;
+                            } else {
+                                to_read = to_read - n;
+                                if (to_read <= 0) { done = 1; }
+                            }
+                        }
+                    }
+                }
+                last_size = cur_size;
+            }
+        }
+    }
+    return 0;
+}
+
 fn _tail_emit_one(fd, name, mode_bytes, limit): i64 {
     var slurp[24];
     var r = _tail_slurp(fd, name, &slurp);
@@ -232,6 +326,8 @@ fn cmd_tail(start: i64): i64 {
     if (flags_get_bool(_tail_spec, _tail_q_idx) == 1) { quiet = 1; }
     var verbose: i64 = 0;
     if (flags_get_bool(_tail_spec, _tail_v_idx) == 1) { verbose = 1; }
+    var follow: i64 = 0;
+    if (flags_get_bool(_tail_spec, _tail_f_idx) == 1) { follow = 1; }
 
     var mode_bytes: i64 = 0;
     var limit: i64 = 10;
@@ -265,6 +361,15 @@ fn cmd_tail(start: i64): i64 {
     var npos = flags_positional_count(_tail_spec);
     var any_failed: i64 = 0;
 
+    # Multi-file follow is a separate codepath (per-file polling + header
+    # switching). First ship rejects it cleanly; single-file -f works.
+    if (follow == 1) {
+        if (npos > 1) {
+            syscall(1, 2, "kriya tail: error: multi-file --follow not yet supported (single file only)\n", 76);
+            return EXIT_USAGE;
+        }
+    }
+
     if (npos < 1) {
         if (verbose == 1) { _tail_emit_header("standard input", 1); }
         var r = _tail_emit_one(0, "standard input", mode_bytes, limit);
@@ -272,6 +377,9 @@ fn cmd_tail(start: i64): i64 {
             _tail_report("(stdin)", 0 - r);
             any_failed = 1;
         }
+        # -f on stdin: silently downgrade. We can't sys_stat a pipe
+        # by path, and tail -f on stdin is a no-op once the writer
+        # closes (POSIX behaviour).
         if (any_failed == 1) { return EXIT_FAILURE; }
         return EXIT_SUCCESS;
     }
@@ -309,6 +417,15 @@ fn cmd_tail(start: i64): i64 {
         if (r != 0) {
             _tail_report(name, 0 - r);
             any_failed = 1;
+        }
+        # Follow mode: after the initial output, poll for growth.
+        # Skipped for stdin since pipes don't have a stat-able path.
+        if (follow == 1) {
+            if (is_stdin == 0) {
+                _tail_follow(fd, name);
+                # _tail_follow only returns on read/write error or
+                # SIGINT (handled by kernel default → exit 130).
+            }
         }
         if (is_stdin == 0) { syscall(3, fd); }
         first = 0;

@@ -124,6 +124,36 @@ if echo "$out" | grep -q "nums";  then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1
 # --- "-" operand = stdin ---
 expect_eq "head - stdin"        "$(head -n 2 - < nums)"  "$($BIN head -n 2 - < nums)"
 
+# --- tail -f follow mode ---
+follow_dir=$(mktemp -d)
+
+# Single-file follow: initial output + appended lines.
+printf "line1\nline2\nline3\n" > "$follow_dir/log"
+( sleep 0.4; echo "line4" >> "$follow_dir/log"; sleep 0.4; echo "line5" >> "$follow_dir/log" ) &
+writer_pid=$!
+out=$(timeout 1.4 "$BIN" tail -f -n 2 "$follow_dir/log" 2>/dev/null || true)
+wait "$writer_pid" 2>/dev/null
+expect_eq "tail -f appends" \
+    "line2
+line3
+line4
+line5" \
+    "$out"
+
+# Truncation detection: shrinking write emits the warning + new content.
+printf "line-A\nline-B\nline-C\n" > "$follow_dir/big"
+( sleep 0.4; printf "tiny\n" > "$follow_dir/big" ) &
+writer_pid=$!
+out_err=$(timeout 1.2 "$BIN" tail -f -n 1 "$follow_dir/big" 2>&1 || true)
+wait "$writer_pid" 2>/dev/null
+if echo "$out_err" | grep -q "file truncated"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL truncate warning missing" >&2; fi
+if echo "$out_err" | grep -q "tiny"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL truncate new content missing" >&2; fi
+
+# Multi-file follow is currently rejected with usage error.
+expect_exit "tail -f multi-file rejected" 2 "$BIN" tail -f "$follow_dir/log" "$follow_dir/big"
+
+rm -rf "$follow_dir"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

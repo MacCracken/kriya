@@ -56,7 +56,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 | `which` | `src/cmd/which.cyr` | **implemented** (`-a`/`-s`/`-z`; PATH-walk + slash-literal bypass; deferred shell-state flags) | M3 |
 | `wc` | `src/cmd/wc.cyr` | **implemented** (`-l`/`-w`/`-c`/`-m`/`-L`; GNU-compatible column-width matrix verified cell-by-cell) | M4 |
 | `head` | `src/cmd/head.cyr` | **implemented** (`-n`/`-c`/`-q`/`-v`; streaming bounded-RAM; defer GNU `-N` "all but last" + k/M suffixes) | M4 |
-| `tail` | `src/cmd/tail.cyr` | **implemented** (`-n`/`-c`/`-q`/`-v`; buffer-and-back-walk up to 16 MiB cap; defer `-f`/`-F`/`+N` start-from + suffixes) | M4 |
+| `tail` | `src/cmd/tail.cyr` | **implemented** (`-n`/`-c`/`-q`/`-v`/`-f`; buffer-and-back-walk up to 16 MiB cap; single-file `-f` via 200ms stat-poll; defer multi-file `-f`, `-F`, `+N` start-from, suffixes) | M4 |
 | `cut` | `src/cmd/cut.cyr` | **implemented** (`-b`/`-c`/`-f` modes, full LIST grammar, `-d`/`-s`/`--complement`/`--output-delimiter`/`-z`; defer multibyte char distinction) | M4 |
 | `tr` | `src/cmd/tr.cyr` | **implemented** (translate/delete/squeeze/complement/truncate; full POSIX set grammar incl. 12 character classes; defer [=c=] + [c*N] + locale folding) | M4 |
 | `tee` | `src/cmd/tee.cyr` | **implemented** (`-a`; resilient per-file failure; `-i` SIGINT-ignore deferred to signal-handler infra) | M4 |
@@ -157,8 +157,8 @@ _None yet._ Expected consumers once M1 ships:
   5. ✅ `uniq` (2026-05-17) — adjacent-line dedup; `-c`/`-d`/`-u`/`-i`/`-f`/`-s`/`-w`/`-z`; 2-op INPUT OUTPUT.
   6. ✅ `tr` (2026-05-17) — translate/delete/squeeze/complement; full POSIX set grammar incl. all 12 character classes.
   7. ✅ `cut` (2026-05-17) — `-b`/`-c`/`-f` with full LIST grammar; `--complement`/`--output-delimiter`/`-z`.
-  8. `tail -f` — follow mode (inotify-driven). Next.
-  9. `sort` — line sort; in-memory + external-sort fallback.
+  8. ✅ `tail -f` (2026-05-17) — single-file follow via 200ms stat-poll; truncation detection (size shrink) emits warning and lseeks to 0. Multi-file follow + same-size-rewrite detection deferred.
+  9. `sort` — line sort; in-memory + external-sort fallback. Next.
   10. `printf` — printf-style format engine (largest M4 utility; reuses concepts from `stat`'s format parser).
 - Deferred features tracked against future enablers (each a known-named follow-up, not "TBD"):
   - echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
