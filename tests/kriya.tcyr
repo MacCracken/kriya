@@ -33,6 +33,16 @@ fn main() {
     # pointer-only function — see path.cyr header. `path_normalize`
     # produces canonical input.
 
+    test_group("path_basename_len");
+    assert_eq(path_basename_len("/usr/bin/cp"), 2, "/usr/bin/cp -> 2");
+    assert_eq(path_basename_len("cp"),          2, "cp -> 2");
+    assert_eq(path_basename_len("/a/b/"),       1, "/a/b/ -> 1 (b, trim trailing)");
+    assert_eq(path_basename_len("/"),           1, "/ -> 1");
+    assert_eq(path_basename_len(""),            0, "empty -> 0");
+    assert_eq(path_basename_len("foo.log"),     7, "foo.log -> 7");
+    assert_eq(path_basename_len("/path/to/foo.log"), 7, "/path/to/foo.log -> 7");
+    assert_eq(path_basename_len(0),             0, "null -> 0");
+
     test_group("path_is_absolute");
     assert_eq(path_is_absolute("/foo"),  1, "/foo is absolute");
     assert_eq(path_is_absolute("foo"),   0, "foo is relative");

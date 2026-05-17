@@ -21,9 +21,17 @@
 #   - No backslash interpretation. POSIX paths only; this is AGNOS.
 
 # Return a pointer to the basename within `p` (a null-terminated path).
-# Result points into the original buffer — still null-terminated by
-# virtue of pointing into a cstring. Behaviour for trailing slashes
-# matches POSIX `basename(3)` lite: `/a/b/` returns `b`, not "".
+# Result points into the original buffer. **Trailing-slash inputs are a
+# trap**: the returned pointer correctly identifies where the basename
+# starts (`/a/b/` → pointer at `b`), but the buffer past that pointer
+# still carries the trailing slashes. Callers that need the basename's
+# *length* (e.g. for `write(fd, ptr, len)`) MUST use `path_basename_len`,
+# not `strlen` on the returned pointer.
+#
+# The pointer-only design is intentional (zero-alloc, suited to
+# dispatch-time `argv[0]` parsing where the input has no trailing
+# slashes). The two-call pattern `path_basename_ptr(p) + path_basename_len(p)`
+# is the right shape for utility-side consumers (`basename`, `stat`, etc.).
 fn path_basename_ptr(p): i64 {
     if (p == 0) { return 0; }
     var len = strlen(p);
@@ -47,6 +55,44 @@ fn path_basename_ptr(p): i64 {
         i = i + 1;
     }
     return p + start;
+}
+
+# Length of the basename of `p`, with trailing slashes trimmed. The
+# canonical pairing is `path_basename_ptr(p)` for the start address +
+# `path_basename_len(p)` for the byte count.
+#
+#   path_basename_len("/usr/bin/cp")  → 2
+#   path_basename_len("/a/b/")        → 1   (just `b`)
+#   path_basename_len("/")            → 1   (the `/` itself, matching
+#                                            path_basename_ptr's POSIX
+#                                            `basename(3)` lite)
+#   path_basename_len("")             → 0
+fn path_basename_len(p): i64 {
+    if (p == 0) { return 0; }
+    var len = strlen(p);
+    if (len == 0) { return 0; }
+    # Trim trailing slashes (same as path_basename_ptr's first loop).
+    var end = len;
+    var trimming: i64 = 1;
+    while (trimming == 1) {
+        if (end == 0) { trimming = 0; }
+        else {
+            if (load8(p + end - 1) == 47) { end = end - 1; }
+            else { trimming = 0; }
+        }
+    }
+    if (end == 0) {
+        # All slashes — basename is "/" (one byte).
+        return 1;
+    }
+    # Find the last slash inside [0, end).
+    var start: i64 = 0;
+    var i: i64 = 0;
+    while (i < end) {
+        if (load8(p + i) == 47) { start = i + 1; }
+        i = i + 1;
+    }
+    return end - start;
 }
 
 # 1 if `p` starts with '/', 0 otherwise. p==0 → 0.

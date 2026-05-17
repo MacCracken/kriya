@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`basename`** (`src/cmd/basename.cyr`) — POSIX `basename(1)`. Single-pair shape `basename PATH [SUFFIX]` strips the directory and an optional trailing suffix; suffix is only applied when at least one byte remains after the strip (POSIX). GNU `-a`/`--multiple` accepts multiple paths and emits one per line; `-s SUFFIX`/`--suffix=SUFFIX` implies `-a`. `-z`/`--zero` switches the line terminator from `\n` to `\0` for `find -print0` pipelines. Pure text — no filesystem access.
+- **`dirname`** (`src/cmd/dirname.cyr`) — POSIX `dirname(1)`. Accepts one or more paths (GNU/BSD extension; POSIX is strict-one) and emits the directory component of each on its own line. `-z`/`--zero` for NUL termination. Pure text — wraps `path_dirname` from `src/lib/path.cyr`.
+- **`path_basename_len`** (`src/lib/path.cyr`) — companion to `path_basename_ptr` that returns the trimmed basename length. Closes a latent trap: `path_basename_ptr("/a/b/")` returned a pointer to `b` but the buffer past it still held the trailing slash, so `strlen` on the result yielded `2` not `1`. Callers that need a byte count for `write(2)` should use the new helper; the existing dispatcher path (`argv[0]` without trailing slashes) is unaffected. `path_basename_ptr`'s comment now flags the pairing requirement explicitly.
+- **Tests**: `tests/kriya.tcyr` gains 8 `path_basename_len` assertions (86/86 passing total). `scripts/smoke-basename-dirname.sh` covers POSIX single-pair, suffix-strip (matching and non-matching), `-a`/`-s`/`-z`, dirname with multiple operands, `-z` NUL-termination, error paths, and the `-` dash-literal edge — 26/26 passing.
+
 ## [0.3.0] — 2026-05-17
 
 Closes M2 — seven file-operation utilities (`mkdir`, `rmdir`, `touch`, `ln`, `cp` with the full ADR-0003 `-P`/`-H`/`-L` recursive matrix, `mv`, `rm`) on top of two new shared libs (`src/lib/fs.cyr` for `*at()`-family traversal, `src/lib/protected.cyr` for ADR-0004 root refusal) and two M2 policy ADRs. **265 behavioural smoke cases pass across the M2 utilities** (mkdir 24 + rmdir 24 + touch 26 + ln 30 + cp 26 + cp-recursive 39 + mv 43 + rm 53), with 78/78 unit assertions still green. Cold-start median 1.185ms held (re-bench at M3 close).

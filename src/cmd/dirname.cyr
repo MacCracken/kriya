@@ -1,0 +1,66 @@
+# dirname — POSIX `dirname(1)`: strip non-directory suffix from a path.
+#
+# Argument shapes:
+#   dirname PATH...           — emit dirname of each PATH on its own line
+#
+# Flags:
+#   -z / --zero               NUL-terminate each output instead of \n
+#
+# Pure text — no filesystem access. Reuses `path_dirname` from
+# `src/lib/path.cyr`:
+#   /a/b/c → /a/b
+#   a/b    → a
+#   a      → .
+#   /a     → /
+#   /      → /
+#   ""     → .
+#
+# POSIX accepts exactly one PATH operand; GNU and BSD accept multiple
+# (each on its own line). kriya matches GNU.
+
+var _dn_spec  = 0;
+var _dn_z_idx = 0;
+
+fn _dn_init_spec(): i64 {
+    if (_dn_spec != 0) { return 0; }
+    var s = flags_new();
+    _dn_z_idx = flags_add_bool(s, 122, "zero", 0, "NUL-terminate each output");
+    _dn_spec = s;
+    return 0;
+}
+
+fn _dn_emit(path, term_byte): i64 {
+    var d = path_dirname(path);
+    syscall(1, 1, d, strlen(d));
+    var term_buf[2];
+    store8(&term_buf, term_byte);
+    syscall(1, 1, &term_buf, 1);
+    return 0;
+}
+
+fn cmd_dirname(start: i64): i64 {
+    _dn_init_spec();
+    if (kriya_args_parse(_dn_spec, start) != 0) {
+        syscall(1, 2, "kriya dirname: error: bad option (see ADR 0002 for accepted syntax)\n", 68);
+        return EXIT_USAGE;
+    }
+
+    var zero: i64 = 0;
+    if (flags_get_bool(_dn_spec, _dn_z_idx) == 1) { zero = 1; }
+    var term_byte: i64 = 10;
+    if (zero == 1) { term_byte = 0; }
+
+    var npos = flags_positional_count(_dn_spec);
+    if (npos < 1) {
+        syscall(1, 2, "kriya dirname: error: missing operand\n", 38);
+        return EXIT_USAGE;
+    }
+
+    var i: i64 = 0;
+    while (i < npos) {
+        var p = flags_positional(_dn_spec, i);
+        _dn_emit(p, term_byte);
+        i = i + 1;
+    }
+    return EXIT_SUCCESS;
+}

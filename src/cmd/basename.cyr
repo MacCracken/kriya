@@ -1,0 +1,122 @@
+# basename — POSIX `basename(1)`: strip directory and suffix from a path.
+#
+# Argument shapes:
+#   basename PATH [SUFFIX]              — POSIX (one path, optional suffix)
+#   basename -a PATH...                 — GNU (multiple paths, no suffix)
+#   basename -s SUFFIX PATH...          — GNU (multiple paths + suffix)
+#
+# Flags:
+#   -a / --multiple        treat every positional as a path; suffix not
+#                          accepted as a positional. Required when more
+#                          than one path follows the option block.
+#   -s / --suffix=SUFFIX   suffix to strip; implies -a.
+#   -z / --zero            terminate each output with NUL instead of \n
+#                          (pairs with `find -print0`).
+#
+# Pure text — no filesystem access. Reuses `path_basename_ptr` from
+# `src/lib/path.cyr`; the suffix-strip is local.
+#
+# Empty path → empty output. Path "/" → "/". POSIX is implementation-
+# defined on these edges; kriya matches GNU.
+
+var _bn_spec  = 0;
+var _bn_a_idx = 0;
+var _bn_s_idx = 0;
+var _bn_z_idx = 0;
+
+fn _bn_init_spec(): i64 {
+    if (_bn_spec != 0) { return 0; }
+    var s = flags_new();
+    _bn_a_idx = flags_add_bool(s, 97,  "multiple", 0, "treat every positional as a path");
+    _bn_s_idx = flags_add_str(s,  115, "suffix",   0, "suffix to strip (implies -a)");
+    _bn_z_idx = flags_add_bool(s, 122, "zero",     0, "NUL-terminate each output");
+    _bn_spec = s;
+    return 0;
+}
+
+# Emit `path`'s basename to stdout, with `SUFFIX` stripped from the
+# tail if the result still has at least one byte left after the strip.
+# `term_byte` is '\n' (10) or '\0' (0) per `-z`.
+fn _bn_emit(path, suffix, term_byte): i64 {
+    var bn = path_basename_ptr(path);
+    var bn_len = path_basename_len(path);
+
+    if (suffix != 0) {
+        var sl = strlen(suffix);
+        if (sl > 0) {
+            if (sl < bn_len) {
+                var off = bn_len - sl;
+                var matched: i64 = 1;
+                var i: i64 = 0;
+                while (i < sl) {
+                    if (load8(bn + off + i) != load8(suffix + i)) {
+                        matched = 0;
+                        i = sl;
+                    } else {
+                        i = i + 1;
+                    }
+                }
+                if (matched == 1) { bn_len = off; }
+            }
+        }
+    }
+
+    syscall(1, 1, bn, bn_len);
+    var term_buf[2];
+    store8(&term_buf, term_byte);
+    syscall(1, 1, &term_buf, 1);
+    return 0;
+}
+
+fn cmd_basename(start: i64): i64 {
+    _bn_init_spec();
+    if (kriya_args_parse(_bn_spec, start) != 0) {
+        syscall(1, 2, "kriya basename: error: bad option (see ADR 0002 for accepted syntax)\n", 69);
+        return EXIT_USAGE;
+    }
+
+    var multiple: i64 = 0;
+    if (flags_get_bool(_bn_spec, _bn_a_idx) == 1) { multiple = 1; }
+    var zero: i64 = 0;
+    if (flags_get_bool(_bn_spec, _bn_z_idx) == 1) { zero = 1; }
+
+    var suffix = flags_get_str(_bn_spec, _bn_s_idx);
+    if (suffix != 0) {
+        if (load8(suffix) == 0) { suffix = 0; }
+    }
+    if (suffix != 0) { multiple = 1; }  # -s implies -a per GNU
+
+    var term_byte: i64 = 10;
+    if (zero == 1) { term_byte = 0; }
+
+    var npos = flags_positional_count(_bn_spec);
+    if (npos < 1) {
+        syscall(1, 2, "kriya basename: error: missing operand\n", 39);
+        return EXIT_USAGE;
+    }
+
+    if (multiple == 1) {
+        var i: i64 = 0;
+        while (i < npos) {
+            var p = flags_positional(_bn_spec, i);
+            _bn_emit(p, suffix, term_byte);
+            i = i + 1;
+        }
+    } else {
+        # POSIX single-pair: basename PATH [SUFFIX]
+        if (npos > 2) {
+            syscall(1, 2, "kriya basename: error: too many operands (POSIX: basename PATH [SUFFIX]; use -a for multiple paths)\n", 99);
+            return EXIT_USAGE;
+        }
+        var p = flags_positional(_bn_spec, 0);
+        var sfx: i64 = suffix;
+        if (sfx == 0) {
+            if (npos == 2) {
+                sfx = flags_positional(_bn_spec, 1);
+            }
+        }
+        _bn_emit(p, sfx, term_byte);
+    }
+
+    return EXIT_SUCCESS;
+}
