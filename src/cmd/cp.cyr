@@ -1,56 +1,91 @@
-# cp — POSIX `cp(1)`: copy files (non-recursive intersection at M2.5).
+# cp — POSIX `cp(1)`: copy files and (with -R/-r) directory trees.
 #
-# This is the first ship of `cp`. Argument shapes covered:
+# Argument shapes:
 #   cp [opts] SRC DST                — copy SRC to DST
 #   cp [opts] SRC... DIRECTORY       — copy each SRC into DIRECTORY
+#   cp -R [opts] SRC DST             — recursive: copy tree at SRC to DST
+#   cp -R [opts] SRC... DIRECTORY    — recursive multi-source-into-dir
 #
 # Flags:
 #   -f / --force        overwrite existing destination without prompt.
-#   -i / --interactive  prompt before overwrite. Per ADR 0002, when
-#                       stdin is not a tty this is a usage error
-#                       (exit 2), not a hang.
-#   -p / --preserve     preserve mode + atime/mtime (POSIX subset of
-#                       `-p`'s usual mode-ownership-times triple;
-#                       ownership preservation needs uid 0 to be
-#                       meaningful and is deferred).
+#   -i / --interactive  prompt before overwrite. Per ADR 0002, on
+#                       non-tty stdin this is a usage error (exit 2),
+#                       not a hang.
+#   -p / --preserve     preserve mode + atime/mtime (POSIX subset).
 #   -v / --verbose      print "'src' -> 'dst'" per file.
+#   -R / -r             recursive copy of directory contents.
+#   -P / --no-deref     preserve all symlinks (DEFAULT under -R per
+#                       ADR 0003 — kriya choice closing the POSIX
+#                       implementation-defined gap in the safer direction).
+#   -H                  follow only command-line symlinks during -R;
+#                       preserve those discovered by the walk.
+#   -L / --dereference  follow all symlinks during -R.
 #
-# Deferred to the recursive ship (next commit, with `src/lib/fs.cyr`):
-#   -R / -r             recursive copy.
-#   -P / -H / -L        ADR 0003 symlink-policy matrix during recursion.
+# Symlink policy (ADR 0003):
+#   - Non-R single source: follow (POSIX). `cp link file` copies the
+#     target's bytes.
+#   - -R default = -P:    preserve symlinks. `cp -R a b` copies the
+#     same link names; targets are not dereferenced.
+#   - -R -H:              follow ONLY the command-line operands.
+#   - -R -L:              follow everywhere; the destination is a
+#     pure-content tree.
 #
-# Symlink policy at this ship (ADR 0003, non-recursive single source):
-# the source is opened O_RDONLY, which follows symlinks — POSIX cp's
-# default. To copy a symlink itself (rather than its target), wait for
-# `-P` to ship with the recursive surface. Destinations are opened
-# O_WRONLY | O_CREAT | O_TRUNC, which also follows symlinks at the
-# destination name — POSIX. When the recursive ship adds traversal,
-# destination opens inside a walked directory will use O_NOFOLLOW per
-# ADR 0003; that's a recursion-only refinement.
+# Recursive walks use `openat(O_NOFOLLOW | O_DIRECTORY)` from an
+# explicit parent dirfd at every descent (ADR 0003 hard rule). A
+# directory entry replaced by a symlink between the lstat that
+# classified it and the open that descends fails with ELOOP — no
+# silent follow. Destination opens during recursion use O_NOFOLLOW;
+# under -f an existing symlink at the destination is unlinked first
+# and the open retried.
 #
 # Root protection (ADR 0004): cp is non-destructive of unnamed data;
 # the protected_paths check is rm-only.
 #
-# Each (SRC, DST) pair is attempted independently. Exit EXIT_FAILURE
-# if any failed, EXIT_SUCCESS otherwise.
+# Hard-link preservation across same-inode source entries: GNU cp
+# preserves them with `--preserve=links`. M2 cp does not preserve
+# them by default and does not yet take that flag. Multiple paths
+# to the same inode become independent copies in the destination tree.
+# Deferred follow-up.
+#
+# Each top-level (SRC, DST) pair is attempted independently. Exit
+# EXIT_FAILURE if any failed.
 
-var _cp_spec = 0;
+var _cp_spec  = 0;
 var _cp_f_idx = 0;
 var _cp_i_idx = 0;
 var _cp_p_idx = 0;
 var _cp_v_idx = 0;
+var _cp_R_idx = 0;
+var _cp_r_idx = 0;
+var _cp_BIG_P_idx = 0;
+var _cp_BIG_H_idx = 0;
+var _cp_BIG_L_idx = 0;
 
-# Lazy 64KiB I/O buffer (heap, process-lifetime).
-var _cp_buf    = 0;
-var _CP_BUFSZ  = 65536;
+var _cp_buf   = 0;
+var _CP_BUFSZ = 65536;
+
+# Symlink policy enum encoded as small integers.
+#   POLICY_P = 0: preserve everywhere (default with -R).
+#   POLICY_H = 1: follow command-line operands, preserve in-walk.
+#   POLICY_L = 2: follow everywhere.
+enum CpPolicy {
+    CP_POLICY_P = 0;
+    CP_POLICY_H = 1;
+    CP_POLICY_L = 2;
+}
 
 fn _cp_init_spec(): i64 {
     if (_cp_spec != 0) { return 0; }
     var s = flags_new();
-    _cp_f_idx = flags_add_bool(s, 102, "force",       0, "overwrite existing destination");
-    _cp_i_idx = flags_add_bool(s, 105, "interactive", 0, "prompt before overwrite");
-    _cp_p_idx = flags_add_bool(s, 112, "preserve",    0, "preserve mode and timestamps");
-    _cp_v_idx = flags_add_bool(s, 118, "verbose",     0, "print each copy");
+    _cp_f_idx     = flags_add_bool(s, 102, "force",       0, "overwrite existing destination");
+    _cp_i_idx     = flags_add_bool(s, 105, "interactive", 0, "prompt before overwrite");
+    _cp_p_idx     = flags_add_bool(s, 112, "preserve",    0, "preserve mode and timestamps");
+    _cp_v_idx     = flags_add_bool(s, 118, "verbose",     0, "print each copy");
+    _cp_R_idx     = flags_add_bool(s, 82,  "recursive",   0, "copy directories recursively");
+    _cp_r_idx     = flags_add_bool(s, 114, "",            0, "alias for -R");
+    _cp_BIG_P_idx = flags_add_bool(s, 80,  "no-deref",    0, "preserve all symlinks (-R default)");
+    _cp_BIG_H_idx = flags_add_bool(s, 72,  "",            0, "follow command-line symlinks only (-R)");
+    _cp_BIG_L_idx = flags_add_bool(s, 76,  "dereference", 0, "follow all symlinks (-R)");
     _cp_spec = s;
     return 0;
 }
@@ -87,19 +122,13 @@ fn _cp_report(operand, errno): i64 {
     return 0;
 }
 
-# Is fd a tty? `ioctl(fd, TCGETS=0x5401, &buf)` returns 0 on a tty,
-# negative errno (typically -ENOTTY = -25) otherwise. struct termios
-# is 60 bytes on Linux x86_64 — use 96 to be safe across libc/kernel
-# minor differences.
 fn _cp_isatty(fd): i64 {
     var tio[96];
-    var r = syscall(16, fd, 21505, &tio);  # SYS_IOCTL=16, TCGETS=0x5401=21505
+    var r = syscall(16, fd, 21505, &tio);  # SYS_IOCTL, TCGETS
     if (r == 0) { return 1; }
     return 0;
 }
 
-# Prompt the user: "kriya cp: overwrite 'dst'? ". Returns 1 if the
-# response begins with 'y' or 'Y', 0 otherwise.
 fn _cp_prompt(dst): i64 {
     syscall(1, 2, "kriya cp: overwrite '", 21);
     syscall(1, 2, dst, strlen(dst));
@@ -108,114 +137,44 @@ fn _cp_prompt(dst): i64 {
     var n = syscall(0, 0, &c, 8);
     if (n < 1) { return 0; }
     var ch = load8(&c);
-    if (ch == 121) { return 1; }  # 'y'
-    if (ch == 89)  { return 1; }  # 'Y'
+    if (ch == 121) { return 1; }
+    if (ch == 89)  { return 1; }
     return 0;
 }
 
-# Stat-based "is `path` an existing directory" (follows symlinks).
-fn _cp_is_dir(path): i64 {
+fn _cp_is_dir_path(path): i64 {
     var buf[144];
     var r = sys_stat(path, &buf);
     if (r != 0) { return 0; }
-    var st_mode = load64(&buf + 24);
-    if ((st_mode & 61440) == 16384) { return 1; }
+    if (fs_is_dir(&buf) == 1) { return 1; }
     return 0;
 }
 
-# Copy SRC to DST. SRC must be a regular file (caller checks for dirs).
-# Returns 0 on success, negative errno on failure.
-fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
-    # Stat SRC for type-check, mode, and (if -p) times.
-    var src_stat[144];
-    var sr = sys_stat(src, &src_stat);
-    if (sr != 0) {
-        _cp_report(src, 0 - sr);
-        return sr;
-    }
-    var src_mode = load64(&src_stat + 24);
-    if ((src_mode & 61440) == 16384) {
-        # Directory without -R: POSIX/GNU emit "omitting directory" with
-        # exit 1. Use the errmsg table entry for EISDIR (21).
-        _cp_report(src, 21);
-        return 0 - 21;
-    }
+fn _cp_verbose(src_display, dst_display): i64 {
+    syscall(1, 1, "'", 1);
+    syscall(1, 1, src_display, strlen(src_display));
+    syscall(1, 1, "' -> '", 6);
+    syscall(1, 1, dst_display, strlen(dst_display));
+    syscall(1, 1, "'\n", 2);
+    return 0;
+}
 
-    # If DST already exists, gate on -f / -i.
-    var dst_stat[144];
-    var dr = sys_stat(dst, &dst_stat);
-    if (dr == 0) {
-        # Refuse self-copy: same inode + device means we'd truncate the
-        # source. POSIX behaviour. Compare st_dev (offset 0) + st_ino (8).
-        if (load64(&src_stat + 0) == load64(&dst_stat + 0)) {
-            if (load64(&src_stat + 8) == load64(&dst_stat + 8)) {
-                _cp_report(dst, 17);  # render as EEXIST; specific message later
-                syscall(1, 2, "kriya cp: '", 11);
-                syscall(1, 2, src, strlen(src));
-                syscall(1, 2, "' and '", 7);
-                syscall(1, 2, dst, strlen(dst));
-                syscall(1, 2, "' are the same file\n", 20);
-                return 0 - 17;
-            }
-        }
-        if (force == 0) {
-            if (interactive == 1) {
-                if (_cp_isatty(0) == 0) {
-                    syscall(1, 2, "kriya cp: error: -i requires stdin to be a terminal\n", 53);
-                    return 0 - 9999;  # sentinel for invocation-wide usage failure
-                }
-                if (_cp_prompt(dst) == 0) {
-                    return 0;  # user declined; not an error
-                }
-            } else {
-                _cp_report(dst, 17);
-                return 0 - 17;
-            }
-        }
-    } else {
-        # If -i is set but stdin is not a tty, we'd still be hostile to
-        # pipelines if a later operand triggered a prompt. Catch it
-        # upfront — per ADR 0002 the policy is invocation-wide.
-        if (interactive == 1) {
-            if (_cp_isatty(0) == 0) {
-                syscall(1, 2, "kriya cp: error: -i requires stdin to be a terminal\n", 53);
-                return 0 - 9999;
-            }
-        }
-    }
-
-    # Open source (O_RDONLY follows symlinks — POSIX cp default).
-    var src_fd = sys_open(src, 0, 0);
-    if (src_fd < 0) {
-        _cp_report(src, 0 - src_fd);
-        return src_fd;
-    }
-
-    # Open dest. Permissions: copy SRC's mode bits (low 12). When -p is
-    # NOT set, POSIX allows the destination mode to be filtered by the
-    # caller's umask — but we pass the source mode directly to mirror
-    # GNU's behaviour and keep the test surface predictable.
-    var perms = src_mode & 4095;
-    # O_WRONLY=1, O_CREAT=64, O_TRUNC=512 → 577.
-    var dst_fd = sys_open(dst, 577, perms);
-    if (dst_fd < 0) {
-        syscall(3, src_fd);
-        _cp_report(dst, 0 - dst_fd);
-        return dst_fd;
-    }
-
-    # Copy loop. Retry EINTR transparently; surface other errors.
+# Read/write loop. Both fds are already open. Returns 0 on success,
+# negative errno on failure (and emits the error report).
+fn _cp_copy_loop(src_fd, dst_fd, src_display, dst_display): i64 {
     var buf = _cp_buf_get();
     var bufsz = _CP_BUFSZ;
     var loop: i64 = 1;
     var failed: i64 = 0;
+    var first_errno: i64 = 0;
     while (loop == 1) {
-        var n = syscall(0, src_fd, buf, bufsz);  # SYS_READ
+        var n = syscall(0, src_fd, buf, bufsz);
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR — retry.
             } else {
-                _cp_report(src, 0 - n);
+                _cp_report(src_display, 0 - n);
+                first_errno = 0 - n;
                 failed = 1;
                 loop = 0;
             }
@@ -223,17 +182,14 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
             if (n == 0) {
                 loop = 0;
             } else {
-                # Write the full block; partial writes are rare on files
-                # but possible. Loop until done.
                 var written: i64 = 0;
                 var write_done: i64 = 0;
                 while (write_done == 0) {
-                    var w = syscall(1, dst_fd, buf + written, n - written);  # SYS_WRITE
+                    var w = syscall(1, dst_fd, buf + written, n - written);
                     if (w < 0) {
-                        if ((0 - w) == 4) {
-                            # EINTR — retry the same window.
-                        } else {
-                            _cp_report(dst, 0 - w);
+                        if ((0 - w) != 4) {
+                            _cp_report(dst_display, 0 - w);
+                            first_errno = 0 - w;
                             failed = 1;
                             write_done = 1;
                             loop = 0;
@@ -246,40 +202,401 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
             }
         }
     }
+    if (failed == 1) { return 0 - first_errno; }
+    return 0;
+}
 
-    syscall(3, src_fd);   # SYS_CLOSE
-    syscall(3, dst_fd);
-
-    if (failed == 1) {
-        # Best-effort cleanup of a half-written destination. We made it;
-        # leaving it would mislead callers about success.
-        sys_unlink(dst);
-        return 0 - 5;
+# Single-file copy (path-based). Used by both the non-recursive and
+# the top-level recursive entry when the source is a regular file.
+# Source open is path-based (POSIX: follows symlinks).
+fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
+    var src_stat[144];
+    var sr = sys_stat(src, &src_stat);
+    if (sr != 0) {
+        _cp_report(src, 0 - sr);
+        return sr;
+    }
+    if (fs_is_dir(&src_stat) == 1) {
+        _cp_report(src, 21);
+        return 0 - 21;
     }
 
-    # -p: preserve mode + times. Mode was already used as the open mode,
-    # but umask may have masked bits — chmod sets the exact value.
+    var dst_stat[144];
+    var dr = sys_stat(dst, &dst_stat);
+    if (dr == 0) {
+        if (load64(&src_stat + 0) == load64(&dst_stat + 0)) {
+            if (load64(&src_stat + 8) == load64(&dst_stat + 8)) {
+                syscall(1, 2, "kriya cp: '", 11);
+                syscall(1, 2, src, strlen(src));
+                syscall(1, 2, "' and '", 7);
+                syscall(1, 2, dst, strlen(dst));
+                syscall(1, 2, "' are the same file\n", 20);
+                return 0 - 17;
+            }
+        }
+        if (force == 0) {
+            if (interactive == 1) {
+                if (_cp_isatty(0) == 0) {
+                    syscall(1, 2, "kriya cp: error: -i requires stdin to be a terminal\n", 53);
+                    return 0 - 9999;
+                }
+                if (_cp_prompt(dst) == 0) { return 0; }
+            } else {
+                _cp_report(dst, 17);
+                return 0 - 17;
+            }
+        }
+    } else {
+        if (interactive == 1) {
+            if (_cp_isatty(0) == 0) {
+                syscall(1, 2, "kriya cp: error: -i requires stdin to be a terminal\n", 53);
+                return 0 - 9999;
+            }
+        }
+    }
+
+    var src_fd = sys_open(src, 0, 0);
+    if (src_fd < 0) {
+        _cp_report(src, 0 - src_fd);
+        return src_fd;
+    }
+
+    var perms = fs_perms(&src_stat);
+    var dst_fd = sys_open(dst, 577, perms);
+    if (dst_fd < 0) {
+        syscall(3, src_fd);
+        _cp_report(dst, 0 - dst_fd);
+        return dst_fd;
+    }
+
+    var r = _cp_copy_loop(src_fd, dst_fd, src, dst);
+    syscall(3, src_fd);
+    syscall(3, dst_fd);
+
+    if (r != 0) {
+        sys_unlink(dst);
+        return r;
+    }
+
     if (preserve == 1) {
         sys_chmod(dst, perms);
-        # Build a timespec[2] from src_stat: atime @ +72, atime_nsec @ +80,
-        # mtime @ +88, mtime_nsec @ +96.
         var ts[32];
-        store64(&ts + 0,  load64(&src_stat + 72));   # times[0].tv_sec  = src atime
-        store64(&ts + 8,  load64(&src_stat + 80));   # times[0].tv_nsec
-        store64(&ts + 16, load64(&src_stat + 88));   # times[1].tv_sec  = src mtime
-        store64(&ts + 24, load64(&src_stat + 96));   # times[1].tv_nsec
-        # utimensat(AT_FDCWD=-100, dst, &ts, 0). SYS_UTIMENSAT=280.
+        store64(&ts + 0,  load64(&src_stat + 72));
+        store64(&ts + 8,  load64(&src_stat + 80));
+        store64(&ts + 16, load64(&src_stat + 88));
+        store64(&ts + 24, load64(&src_stat + 96));
         syscall(280, 0 - 100, dst, &ts, 0);
     }
 
-    if (verbose == 1) {
-        syscall(1, 1, "'", 1);
-        syscall(1, 1, src, strlen(src));
-        syscall(1, 1, "' -> '", 6);
-        syscall(1, 1, dst, strlen(dst));
-        syscall(1, 1, "'\n", 2);
+    if (verbose == 1) { _cp_verbose(src, dst); }
+    return 0;
+}
+
+# Decide whether to follow a symlink found at the current position.
+#   POLICY_P: never follow.
+#   POLICY_H: follow only when top_level == 1.
+#   POLICY_L: always follow.
+fn _cp_should_follow(policy, top_level): i64 {
+    if (policy == CP_POLICY_L) { return 1; }
+    if (policy == CP_POLICY_H) {
+        if (top_level == 1) { return 1; }
     }
     return 0;
+}
+
+# Copy a symlink: read its target text, recreate at the destination
+# under the same name. fd-based to keep TOCTOU windows tight.
+fn _cp_symlink_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, verbose): i64 {
+    var link_buf = alloc(4096);
+    var n = fs_readlinkat(src_dirfd, src_name, link_buf, 4095);
+    if (n < 0) {
+        _cp_report(src_display, 0 - n);
+        return n;
+    }
+    store8(link_buf + n, 0);
+
+    if (force == 1) { fs_unlinkat(dst_dirfd, dst_name, 0); }
+
+    var r = fs_symlinkat(link_buf, dst_dirfd, dst_name);
+    if (r != 0) {
+        _cp_report(dst_display, 0 - r);
+        return r;
+    }
+    if (verbose == 1) { _cp_verbose(src_display, dst_display); }
+    return 0;
+}
+
+# fd-based regular-file copy used during recursion. Source is opened
+# from the parent dirfd; destination is opened with O_NOFOLLOW per
+# ADR 0003 (under -f, an existing dest symlink is unlinked first).
+fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, preserve, verbose, src_st): i64 {
+    var src_fd = fs_openat(src_dirfd, src_name, 0, 0);  # O_RDONLY
+    if (src_fd < 0) {
+        _cp_report(src_display, 0 - src_fd);
+        return src_fd;
+    }
+
+    var perms = fs_perms(src_st);
+    # O_WRONLY=1, O_CREAT=64, O_TRUNC=512, O_NOFOLLOW=131072 → 131649.
+    var dst_flags = 131649;
+    var dst_fd = fs_openat(dst_dirfd, dst_name, dst_flags, perms);
+    if (dst_fd < 0) {
+        var derrno = 0 - dst_fd;
+        # ELOOP (40) means dst was a symlink (O_NOFOLLOW refused). Under
+        # -f, replace it. Under EEXIST somehow (O_CREAT|O_TRUNC shouldn't
+        # but defensive), same path.
+        var recovered: i64 = 0;
+        if (force == 1) {
+            if (derrno == 40) {
+                fs_unlinkat(dst_dirfd, dst_name, 0);
+                dst_fd = fs_openat(dst_dirfd, dst_name, dst_flags, perms);
+                if (dst_fd >= 0) { recovered = 1; }
+            }
+        } else {
+            if (derrno == 17) {
+                _cp_report(dst_display, 17);
+                fs_close(src_fd);
+                return dst_fd;
+            }
+        }
+        if (recovered == 0) {
+            if (dst_fd < 0) {
+                fs_close(src_fd);
+                _cp_report(dst_display, 0 - dst_fd);
+                return dst_fd;
+            }
+        }
+    }
+
+    var r = _cp_copy_loop(src_fd, dst_fd, src_display, dst_display);
+    fs_close(src_fd);
+    fs_close(dst_fd);
+
+    if (r != 0) {
+        fs_unlinkat(dst_dirfd, dst_name, 0);
+        return r;
+    }
+
+    if (preserve == 1) {
+        fs_fchmodat(dst_dirfd, dst_name, perms, 0);
+        var ts[32];
+        store64(&ts + 0,  load64(src_st + 72));
+        store64(&ts + 8,  load64(src_st + 80));
+        store64(&ts + 16, load64(src_st + 88));
+        store64(&ts + 24, load64(src_st + 96));
+        fs_utimensat(dst_dirfd, dst_name, &ts, 0);
+    }
+
+    if (verbose == 1) { _cp_verbose(src_display, dst_display); }
+    return 0;
+}
+
+# Descend into an existing source directory whose mode is in `src_st`.
+# This is the only recursive function in the cp implementation —
+# per-entry dispatch (file / symlink / sub-directory) is inlined
+# below into the iteration loop, so we don't need a separate
+# `_cp_recurse_at` (Cyrius has no forward declarations).
+#
+# `allow_follow` is 1 when we got here via a stat (policy said follow)
+# and 0 when we got here via lstat (real directory). Under follow, the
+# source open omits O_NOFOLLOW so a symlink-to-directory is honored.
+# Under no-follow, the source open uses O_NOFOLLOW so a swapped-in
+# symlink fails ELOOP per ADR 0003.
+fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, policy, allow_follow, force, preserve, verbose, src_st): i64 {
+    var src_fd: i64 = 0;
+    if (allow_follow == 1) {
+        # O_RDONLY | O_DIRECTORY = 65536. No NOFOLLOW: policy-driven follow.
+        src_fd = fs_openat(src_dirfd, src_name, 65536, 0);
+    } else {
+        src_fd = fs_opendir_nofollow(src_dirfd, src_name);
+    }
+    if (src_fd < 0) {
+        _cp_report(src_display, 0 - src_fd);
+        return src_fd;
+    }
+
+    # Ensure destination exists as a directory.
+    var perms = fs_perms(src_st);
+    var mr = fs_mkdirat(dst_dirfd, dst_name, perms);
+    if (mr != 0) {
+        var derrno = 0 - mr;
+        if (derrno == 17) {
+            # Already exists — must be a directory.
+            var dst_check[144];
+            var dchk = fs_lstat_at(dst_dirfd, dst_name, &dst_check);
+            if (dchk != 0) {
+                fs_close(src_fd);
+                _cp_report(dst_display, 0 - dchk);
+                return dchk;
+            }
+            if (fs_is_dir(&dst_check) == 0) {
+                fs_close(src_fd);
+                _cp_report(dst_display, 20);  # ENOTDIR
+                return 0 - 20;
+            }
+        } else {
+            fs_close(src_fd);
+            _cp_report(dst_display, derrno);
+            return mr;
+        }
+    }
+
+    var dst_fd = fs_opendir_nofollow(dst_dirfd, dst_name);
+    if (dst_fd < 0) {
+        fs_close(src_fd);
+        _cp_report(dst_display, 0 - dst_fd);
+        return dst_fd;
+    }
+
+    var any_failed: i64 = 0;
+    var ent_buf = alloc(4096);
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var nb = fs_getdents64(src_fd, ent_buf, 4096);
+        if (nb < 0) {
+            if ((0 - nb) == 4) {
+                # EINTR — retry.
+            } else {
+                _cp_report(src_display, 0 - nb);
+                any_failed = 1;
+                loop = 0;
+            }
+        } else {
+            if (nb == 0) {
+                loop = 0;
+            } else {
+                var off: i64 = 0;
+                while (off < nb) {
+                    var ent = ent_buf + off;
+                    var reclen = fs_dent_reclen(ent);
+                    if (fs_dent_is_dotdot(ent) == 0) {
+                        var name = fs_dent_name(ent);
+                        var child_src_disp = path_join(src_display, name);
+                        var child_dst_disp = path_join(dst_display, name);
+                        # Classify the child. policy + top_level=0 →
+                        # follow only under POLICY_L.
+                        var child_st[144];
+                        var follow = _cp_should_follow(policy, 0);
+                        var csr: i64 = 0;
+                        if (follow == 1) {
+                            csr = fs_fstatat(src_fd, name, &child_st, 0);
+                        } else {
+                            csr = fs_lstat_at(src_fd, name, &child_st);
+                        }
+                        if (csr != 0) {
+                            _cp_report(child_src_disp, 0 - csr);
+                            any_failed = 1;
+                        } else {
+                            var rr: i64 = 0;
+                            if (fs_is_lnk(&child_st) == 1) {
+                                rr = _cp_symlink_at(src_fd, name, child_src_disp,
+                                                    dst_fd, name, child_dst_disp,
+                                                    force, verbose);
+                            } else {
+                                if (fs_is_dir(&child_st) == 1) {
+                                    # `follow` carries the lstat-vs-stat decision
+                                    # into the descend: if we stat'd to get here,
+                                    # the dir open must also follow.
+                                    rr = _cp_dir_descend_at(src_fd, name, child_src_disp,
+                                                            dst_fd, name, child_dst_disp,
+                                                            policy, follow, force, preserve, verbose, &child_st);
+                                } else {
+                                    if (fs_is_reg(&child_st) == 1) {
+                                        rr = _cp_file_at(src_fd, name, child_src_disp,
+                                                         dst_fd, name, child_dst_disp,
+                                                         force, preserve, verbose, &child_st);
+                                    } else {
+                                        syscall(1, 2, "kriya cp: ", 10);
+                                        syscall(1, 2, child_src_disp, strlen(child_src_disp));
+                                        syscall(1, 2, ": unsupported file type (FIFO/socket/device)\n", 45);
+                                        rr = 0 - 22;
+                                    }
+                                }
+                            }
+                            if (rr != 0) { any_failed = 1; }
+                        }
+                    }
+                    off = off + reclen;
+                }
+            }
+        }
+    }
+
+    fs_close(src_fd);
+    fs_close(dst_fd);
+
+    # Apply -p restoration after content is written so the directory's
+    # mtime isn't bumped by the writes inside it.
+    if (preserve == 1) {
+        fs_fchmodat(dst_dirfd, dst_name, perms, 0);
+        var ts[32];
+        store64(&ts + 0,  load64(src_st + 72));
+        store64(&ts + 8,  load64(src_st + 80));
+        store64(&ts + 16, load64(src_st + 88));
+        store64(&ts + 24, load64(src_st + 96));
+        fs_utimensat(dst_dirfd, dst_name, &ts, 0);
+    }
+
+    if (any_failed == 1) { return 0 - 5; }
+    return 0;
+}
+
+# Top-level recursive entry. Called when -R is set and the source's
+# resolved (or unresolved per policy) type is a directory. The
+# `allow_follow_top` flag carries the lstat-vs-stat decision that the
+# caller (`_cp_recursive_one`) already made.
+fn _cp_dir_top(src_path, dst_path, policy, allow_follow_top, force, preserve, verbose, src_st): i64 {
+    return _cp_dir_descend_at(0 - 100, src_path, src_path,
+                              0 - 100, dst_path, dst_path,
+                              policy, allow_follow_top, force, preserve, verbose, src_st);
+}
+
+# Recursive entry from the per-operand loop. Classifies src and
+# dispatches to file/symlink/directory copy.
+fn _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose): i64 {
+    # Top-level lstat (or stat if policy follows top).
+    var st[144];
+    var sr: i64 = 0;
+    var follow = _cp_should_follow(policy, 1);
+    if (follow == 1) {
+        sr = sys_stat(src, &st);
+    } else {
+        sr = syscall(262, 0 - 100, src, &st, 256);  # fstatat AT_SYMLINK_NOFOLLOW
+    }
+    if (sr != 0) {
+        _cp_report(src, 0 - sr);
+        return sr;
+    }
+
+    if (fs_is_lnk(&st) == 1) {
+        # Reachable only when not following — copy the symlink itself.
+        var link_buf = alloc(4096);
+        var n = sys_readlink(src, link_buf, 4095);
+        if (n < 0) {
+            _cp_report(src, 0 - n);
+            return n;
+        }
+        store8(link_buf + n, 0);
+        if (force == 1) { sys_unlink(dst); }
+        var lr = sys_symlink(link_buf, dst);
+        if (lr != 0) {
+            _cp_report(dst, 0 - lr);
+            return lr;
+        }
+        if (verbose == 1) { _cp_verbose(src, dst); }
+        return 0;
+    }
+    if (fs_is_dir(&st) == 1) {
+        # follow already reflects whether we stat'd (1) or lstat'd (0).
+        return _cp_dir_top(src, dst, policy, follow, force, preserve, verbose, &st);
+    }
+    if (fs_is_reg(&st) == 1) {
+        return _cp_one(src, dst, force, interactive, preserve, verbose);
+    }
+    syscall(1, 2, "kriya cp: ", 10);
+    syscall(1, 2, src, strlen(src));
+    syscall(1, 2, ": unsupported file type (FIFO/socket/device)\n", 45);
+    return 0 - 22;
 }
 
 fn cmd_cp(start: i64): i64 {
@@ -303,12 +620,20 @@ fn cmd_cp(start: i64): i64 {
     if (flags_get_bool(_cp_spec, _cp_p_idx) == 1) { preserve = 1; }
     var verbose: i64 = 0;
     if (flags_get_bool(_cp_spec, _cp_v_idx) == 1) { verbose = 1; }
+    var recursive: i64 = 0;
+    if (flags_get_bool(_cp_spec, _cp_R_idx) == 1) { recursive = 1; }
+    if (flags_get_bool(_cp_spec, _cp_r_idx) == 1) { recursive = 1; }
 
-    # Last positional decides shape: if it's a directory, copy each
-    # prior operand into it. Else exactly two operands and we copy
-    # SRC to DST.
+    # Policy resolution: -P / -H / -L are mutually exclusive in spirit
+    # but the parser accepts any subset; last-one-wins by precedence
+    # L > H > P (matches GNU cp).
+    var policy: i64 = CP_POLICY_P;
+    if (flags_get_bool(_cp_spec, _cp_BIG_P_idx) == 1) { policy = CP_POLICY_P; }
+    if (flags_get_bool(_cp_spec, _cp_BIG_H_idx) == 1) { policy = CP_POLICY_H; }
+    if (flags_get_bool(_cp_spec, _cp_BIG_L_idx) == 1) { policy = CP_POLICY_L; }
+
     var dst_arg = flags_positional(_cp_spec, npos - 1);
-    var dst_is_dir = _cp_is_dir(dst_arg);
+    var dst_is_dir = _cp_is_dir_path(dst_arg);
 
     var any_failed: i64 = 0;
     if (dst_is_dir == 0) {
@@ -317,9 +642,13 @@ fn cmd_cp(start: i64): i64 {
             return EXIT_USAGE;
         }
         var src = flags_positional(_cp_spec, 0);
-        var r = _cp_one(src, dst_arg, force, interactive, preserve, verbose);
+        var r: i64 = 0;
+        if (recursive == 1) {
+            r = _cp_recursive_one(src, dst_arg, policy, force, interactive, preserve, verbose);
+        } else {
+            r = _cp_one(src, dst_arg, force, interactive, preserve, verbose);
+        }
         if (r != 0) { any_failed = 1; }
-        # -i refusal-on-non-tty is exit 2 invocation-wide.
         if (r == (0 - 9999)) { return EXIT_USAGE; }
     } else {
         var i: i64 = 0;
@@ -327,7 +656,12 @@ fn cmd_cp(start: i64): i64 {
             var src = flags_positional(_cp_spec, i);
             var base = path_basename_ptr(src);
             var dst = path_join(dst_arg, base);
-            var r = _cp_one(src, dst, force, interactive, preserve, verbose);
+            var r: i64 = 0;
+            if (recursive == 1) {
+                r = _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose);
+            } else {
+                r = _cp_one(src, dst, force, interactive, preserve, verbose);
+            }
             if (r != 0) { any_failed = 1; }
             if (r == (0 - 9999)) { return EXIT_USAGE; }
             i = i + 1;

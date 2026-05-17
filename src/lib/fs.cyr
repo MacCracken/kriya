@@ -1,0 +1,223 @@
+# fs.cyr — kriya filesystem traversal primitives.
+#
+# Foundation for the TOCTOU-safe recursive walks in `cp -R`,
+# cross-FS `mv`, and `rm -r` per ADR 0003. Every traversal step is
+# `openat(parent_fd, name, O_NOFOLLOW | O_DIRECTORY)` from an explicit
+# dirfd — no chdir, no path-relative open. A directory entry replaced
+# by a symlink between the lstat that classified it and the open that
+# descends fails with `ELOOP`, never silently follows.
+#
+# Stdlib wrappers for the `*at()` family and the AT_* / UTIME_*
+# constants are pending Cyrius proposal
+# `2026-05-17-syscalls-at-family-stdlib`. Until they land, these
+# wrappers carry the Linux x86_64 syscall numbers inline as decimal
+# literals. When the proposal accepts, the file sweeps to use
+# `sys_openat` / `sys_unlinkat` / etc. — by name, no number magic.
+#
+# This file is filesystem-aware; pure path operations stay in
+# `src/lib/path.cyr` (no overlap).
+#
+# Bytes referenced as decimal-with-comment per the running practice
+# (no octal literal yet in Cyrius — see proposal
+# `2026-05-17-octal-literal-syntax`).
+
+# --- AT_* and related flag constants -------------------------------
+
+enum FsAt {
+    FS_AT_SYMLINK_NOFOLLOW = 256;     # 0x100
+    FS_AT_REMOVEDIR        = 512;     # 0x200
+    FS_AT_SYMLINK_FOLLOW   = 1024;    # 0x400
+}
+
+# AT_FDCWD = -100. Cyrius enum values don't accept the `0 - 100`
+# expression form (CLAUDE.md: "no negative literals"), so it lives
+# as a zero-cost function — every call site reads it by name.
+fn fs_at_fdcwd(): i64 {
+    return 0 - 100;
+}
+
+# Open flags pertinent to traversal. Subset of <fcntl.h>.
+enum FsOpen {
+    FS_O_RDONLY    = 0;
+    FS_O_WRONLY    = 1;
+    FS_O_TRUNC     = 512;        # 0o1000
+    FS_O_DIRECTORY = 65536;      # 0o200000  (0x10000)
+    FS_O_NOFOLLOW  = 131072;     # 0o400000  (0x20000)
+    FS_O_CLOEXEC   = 524288;     # 0o2000000 (0x80000)
+}
+
+# linux_dirent64.d_type values. The kernel returns these in the
+# `getdents64` stream and they short-circuit a per-entry lstat for
+# the common cases (regular file vs directory vs symlink). DT_UNKNOWN
+# means "fall back to lstat".
+enum FsDType {
+    FS_DT_UNKNOWN = 0;
+    FS_DT_FIFO    = 1;
+    FS_DT_CHR     = 2;
+    FS_DT_DIR     = 4;
+    FS_DT_BLK     = 6;
+    FS_DT_REG     = 8;
+    FS_DT_LNK     = 10;
+    FS_DT_SOCK    = 12;
+}
+
+# struct stat field offsets (Linux x86_64). Mirrors the stdlib `Stat`
+# enum in `syscalls_x86_64_linux.cyr` — duplicated here so fs.cyr's
+# callers don't need to include the lower-level enum.
+enum FsStat {
+    FS_STAT_DEV        = 0;
+    FS_STAT_INO        = 8;
+    FS_STAT_NLINK      = 16;
+    FS_STAT_MODE       = 24;
+    FS_STAT_UID        = 28;
+    FS_STAT_GID        = 32;
+    FS_STAT_SIZE       = 48;
+    FS_STAT_ATIME      = 72;
+    FS_STAT_ATIME_NSEC = 80;
+    FS_STAT_MTIME      = 88;
+    FS_STAT_MTIME_NSEC = 96;
+    FS_STAT_BUFSZ      = 144;
+}
+
+# S_IFMT mask + type values (subset).
+enum FsMode {
+    FS_S_IFMT   = 61440;   # 0o170000
+    FS_S_IFREG  = 32768;   # 0o100000
+    FS_S_IFDIR  = 16384;   # 0o040000
+    FS_S_IFLNK  = 40960;   # 0o120000
+    FS_S_IFCHR  = 8192;    # 0o020000
+    FS_S_IFBLK  = 24576;   # 0o060000
+    FS_S_IFIFO  = 4096;    # 0o010000
+    FS_S_IFSOCK = 49152;   # 0o140000
+}
+
+# --- type predicates on a 144-byte stat buffer ---------------------
+
+fn fs_is_reg(stat_buf): i64 {
+    var m = load64(stat_buf + 24);
+    if ((m & 61440) == 32768) { return 1; }
+    return 0;
+}
+
+fn fs_is_dir(stat_buf): i64 {
+    var m = load64(stat_buf + 24);
+    if ((m & 61440) == 16384) { return 1; }
+    return 0;
+}
+
+fn fs_is_lnk(stat_buf): i64 {
+    var m = load64(stat_buf + 24);
+    if ((m & 61440) == 40960) { return 1; }
+    return 0;
+}
+
+# Extract the low-12 mode bits (permission + setuid/gid/sticky).
+fn fs_perms(stat_buf): i64 {
+    return load64(stat_buf + 24) & 4095;
+}
+
+# --- syscall wrappers ----------------------------------------------
+#
+# All return Linux convention (`<0` is `-errno`).
+#
+# Numbers below are x86_64. When the stdlib at-family lands these
+# become per-arch-routed; until then, x86_64-only (the kriya build
+# target today).
+
+fn fs_openat(dirfd, path, flags, mode): i64 {
+    return syscall(257, dirfd, path, flags, mode);
+}
+
+# fstatat with explicit `flags`. Use AT_SYMLINK_NOFOLLOW (256) for
+# lstat-equivalent, 0 for stat-equivalent.
+fn fs_fstatat(dirfd, path, buf, flags): i64 {
+    return syscall(262, dirfd, path, buf, flags);
+}
+
+fn fs_lstat_at(dirfd, path, buf): i64 {
+    return syscall(262, dirfd, path, buf, 256);  # AT_SYMLINK_NOFOLLOW
+}
+
+# Open a directory for traversal in the safe shape required by
+# ADR 0003: O_RDONLY | O_DIRECTORY | O_NOFOLLOW. The mode argument
+# is unused for read-only opens but the syscall signature wants it.
+fn fs_opendir_nofollow(dirfd, name): i64 {
+    # 0 | 65536 | 131072 = 196608.
+    return syscall(257, dirfd, name, 196608, 0);
+}
+
+fn fs_mkdirat(dirfd, path, mode): i64 {
+    return syscall(258, dirfd, path, mode);
+}
+
+# unlinkat with flags: 0 for files, AT_REMOVEDIR=512 for empty dirs.
+fn fs_unlinkat(dirfd, path, flags): i64 {
+    return syscall(263, dirfd, path, flags);
+}
+
+fn fs_linkat(old_dirfd, old_path, new_dirfd, new_path, flags): i64 {
+    return syscall(265, old_dirfd, old_path, new_dirfd, new_path, flags);
+}
+
+fn fs_symlinkat(target, dirfd, link): i64 {
+    return syscall(266, target, dirfd, link);
+}
+
+fn fs_fchmodat(dirfd, path, mode, flags): i64 {
+    return syscall(268, dirfd, path, mode, flags);
+}
+
+fn fs_utimensat(dirfd, path, times, flags): i64 {
+    return syscall(280, dirfd, path, times, flags);
+}
+
+fn fs_readlinkat(dirfd, path, buf, bufsize): i64 {
+    return syscall(267, dirfd, path, buf, bufsize);
+}
+
+fn fs_close(fd): i64 {
+    return syscall(3, fd);
+}
+
+# --- directory entry iteration -------------------------------------
+#
+# Linux `getdents64(fd, buf, count)` fills `buf` with a stream of
+# `struct linux_dirent64`:
+#   d_ino:    offset 0,  i64
+#   d_off:    offset 8,  i64
+#   d_reclen: offset 16, u16  (total record length incl padding)
+#   d_type:   offset 18, u8
+#   d_name:   offset 19, null-terminated cstring (padded)
+
+fn fs_getdents64(fd, buf, bufsize): i64 {
+    return syscall(217, fd, buf, bufsize);
+}
+
+# Read d_reclen as a u16. Cyrius has no u16 load, so we assemble it
+# from two u8 loads. d_reclen sits at offset 16 within the record.
+fn fs_dent_reclen(ent): i64 {
+    var lo = load8(ent + 16);
+    var hi = load8(ent + 17);
+    return (hi << 8) | lo;
+}
+
+fn fs_dent_type(ent): i64 {
+    return load8(ent + 18);
+}
+
+# Pointer to the null-terminated name. Caller treats it as a cstring.
+fn fs_dent_name(ent): i64 {
+    return ent + 19;
+}
+
+# Is this dent named "." or ".."? The kernel always emits these as
+# the first two entries of a directory read.
+fn fs_dent_is_dotdot(ent): i64 {
+    var n = ent + 19;
+    if (load8(n) != 46) { return 0; }
+    if (load8(n + 1) == 0) { return 1; }  # "."
+    if (load8(n + 1) == 46) {
+        if (load8(n + 2) == 0) { return 1; }  # ".."
+    }
+    return 0;
+}

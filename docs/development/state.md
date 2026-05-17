@@ -26,7 +26,8 @@ M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both
 | `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
 | `src/lib/errmsg.cyr` | implemented — errnos 1..40 + `errmsg_is_known` |
 | `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
-| `src/cmd/*.cyr` | 11 of ~40 — `true.cyr`, `false.cyr`, `echo.cyr`, `pwd.cyr`, `yes.cyr`, `sleep.cyr`, `mkdir.cyr`, `rmdir.cyr`, `touch.cyr`, `ln.cyr`, `cp.cyr` (non-recursive) |
+| `src/cmd/*.cyr` | 11 of ~40 — `true.cyr`, `false.cyr`, `echo.cyr`, `pwd.cyr`, `yes.cyr`, `sleep.cyr`, `mkdir.cyr`, `rmdir.cyr`, `touch.cyr`, `ln.cyr`, `cp.cyr` (full) |
+| `src/lib/fs.cyr` | implemented — `*at()`-family wrappers, `getdents64` iteration, type predicates, AT/S_IF/DT constants. Foundation for cp -R / mv / rm -r per ADR 0003. |
 
 ## Per-utility status (will grow with each milestone)
 
@@ -41,7 +42,7 @@ M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both
 | `mkdir` | `src/cmd/mkdir.cyr` | **implemented** (`-p`, `-m` octal, `-v`; symbolic-mode deferred to chmod) | M2 |
 | `rmdir` | `src/cmd/rmdir.cyr` | **implemented** (`-p`, `-v`, `--ignore-fail-on-non-empty`) | M2 |
 | `touch` | `src/cmd/touch.cyr` | **implemented** (`-a`, `-m`, `-c`; `-r`/`-t`/`-d` deferred to chrono helpers) | M2 |
-| `cp` | `src/cmd/cp.cyr` | **partially implemented** — non-recursive (`-f`/`-i`/`-p`/`-v`); `-R`/`-r` + ADR-0003 `-P`/`-H`/`-L` matrix land with `src/lib/fs.cyr` | M2 |
+| `cp` | `src/cmd/cp.cyr` | **implemented** (`-f`/`-i`/`-p`/`-v`/`-R`/`-r`/`-P`/`-H`/`-L`; fd-rooted recursion with `O_NOFOLLOW` per ADR 0003; `--preserve=links` for hardlink dedup deferred) | M2 |
 | `mv` | `src/cmd/mv.cyr` | not started | M2 |
 | `rm` | `src/cmd/rm.cyr` | not started | M2 |
 | `ln` | `src/cmd/ln.cyr` | **implemented** (`-s`, `-f`, `-P`, `-n`, `-v`; `-r`/`-T`/`-t`/`-b` deferred) | M2 |
@@ -93,6 +94,7 @@ M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both
 - `scripts/smoke-touch.sh` — behavioural test for `touch` (26/26 — create, multi-operand, update-existing, `-a`/`-m`/`-a -m`, `-c` on missing-vs-existing, ENOENT on missing parent, partial-failure exit code).
 - `scripts/smoke-ln.sh` — behavioural test for `ln` (30/30 — symbolic + hard creation, `-f` overwrite, single-arg form, multi-into-dir, ADR-0003 deploy-retarget idiom `-s -f -n`, `-P` inode-match verification, dangling-symlink ok, hard-to-missing error, verbose).
 - `scripts/smoke-cp.sh` — behavioural test for non-recursive `cp` (26/26 — basic + 200 KiB multi-block, existing-dest gating with `-f`/`-i`, `-i`-on-pipe usage error, multi-into-dir, `-p` mode+mtime preservation, non-`-p` current-time, self-copy refusal, directory-without-R EISDIR, partial-failure exit, verbose).
+- `scripts/smoke-cp-recursive.sh` — behavioural test for `cp -R` (39/39 — full ADR-0003 `-P`/`-H`/`-L` matrix verified: `-P` default preserves symlinks, `-H` follows command-line operands and preserves inner links, `-L` materialises all link content; plus `-r` alias, into-existing-dir, `-p` mode/time preservation under recursion, error paths, symlink-to-`/etc` preserved by default).
 - `tests/kriya.fcyr` — fuzz stub (lands when M2 destructive utilities arrive).
 
 ## Dependencies
@@ -118,10 +120,10 @@ _None yet._ Expected consumers once M1 ships:
   3. ✅ `touch` (2026-05-17) — `-a`/`-m`/`-c`; raw `utimensat(280)` syscall (no stdlib wrapper yet). `-r`/`-t`/`-d` deferred to chrono helpers.
   4. ✅ `ln` (2026-05-17) — `-s`/`-f`/`-P`/`-n`/`-v`; raw `linkat(265)` for `-P` policy; ADR-0003 deploy-retarget idiom verified by `smoke-ln.sh`.
   5a. ✅ `cp` non-recursive (2026-05-17) — `-f`/`-i`/`-p`/`-v`. `-i`-on-pipe is a usage error (ADR 0002). Self-copy refused via `(st_dev,st_ino)` match.
-  5b. `cp` recursive — needs `src/lib/fs.cyr` (the openat-NOFOLLOW-DIRECTORY traversal lib). Adds `-R`/`-r` and the ADR-0003 `-P`/`-H`/`-L` matrix. Next M2 commit.
+  5b. ✅ `cp -R` recursive (2026-05-17) — `-R`/`-r`/`-P`/`-H`/`-L` matrix on top of `src/lib/fs.cyr`. Every descent uses `openat(parent_fd, name, O_NOFOLLOW | O_DIRECTORY)`; destination opens are `O_NOFOLLOW` with `-f`-driven unlink+retry. The lstat-vs-stat decision is carried into the descend as `allow_follow`. `--preserve=links` for hardlink dedup deferred.
   6. `mv` — rename / cross-FS copy+unlink; symlink-to-dir refusal from ADR 0003.
   7. `rm` — last, and most carefully — full ADR 0003 (`O_NOFOLLOW` traversal, no follow flag) and ADR 0004 (`protected_paths[]` check) enforcement.
-- M2 still needs to introduce `src/lib/fs.cyr` (the `*at()` traversal + `O_NOFOLLOW` discipline lives there, shared across `cp -R`/`mv`/`rm`) and `src/lib/protected.cyr` (the `protected_paths[]` table from ADR 0004). Both land with the recursive-cp commit.
+- M2 still needs to introduce `src/lib/protected.cyr` (the `protected_paths[]` table from ADR 0004). It lands with `rm`. `src/lib/fs.cyr` shipped with `cp -R` and is ready for `mv` and `rm` to consume.
 - Deferred features tracked against future enablers (each a known-named follow-up, not "TBD"):
   - echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
   - pwd `$PWD` inode-match — waits on `fs.cyr` stat-compare.
