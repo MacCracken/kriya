@@ -1,0 +1,383 @@
+# wc — POSIX `wc(1)`: count lines, words, bytes, and characters.
+#
+# Argument shape:
+#   wc [opts] [file...]
+#
+# Flags:
+#   -l / --lines      count newlines.
+#   -w / --words      count whitespace-separated word tokens.
+#   -c / --bytes      count bytes.
+#   -m / --chars      count UTF-8 codepoints (each non-continuation
+#                     byte starts a new char).
+#   -L / --max-line-length
+#                     longest line length (in chars; newline excluded).
+#
+# Defaults: when no count flag is given, `-l -w -c`. Once any flag is
+# explicitly set, ONLY those counts are emitted (GNU behaviour).
+#
+# Output: counts printed in the order `lines words chars-or-bytes
+# max-line-length`, right-justified to a per-column width (GNU's
+# layout). Single-file input gets the filename appended; stdin reads
+# omit the name. Multiple operands also get a trailing "total" line.
+#
+# Word detection: a "word" is a maximal run of non-whitespace bytes.
+# Whitespace = any byte ≤ 0x20 (space, tab, newline, VT, FF, CR, plus
+# the C0 controls — matches GNU's effective definition).
+#
+# Streaming: 64 KiB read chunks. No file is loaded into memory whole;
+# even huge inputs use bounded RAM.
+
+var _wc_spec  = 0;
+var _wc_l_idx = 0;
+var _wc_w_idx = 0;
+var _wc_c_idx = 0;
+var _wc_m_idx = 0;
+var _wc_L_idx = 0;
+
+var _wc_buf   = 0;
+var _WC_BUFSZ = 65536;
+
+fn _wc_init_spec(): i64 {
+    if (_wc_spec != 0) { return 0; }
+    var s = flags_new();
+    _wc_l_idx = flags_add_bool(s, 108, "lines",            0, "count newlines");
+    _wc_w_idx = flags_add_bool(s, 119, "words",            0, "count whitespace-separated words");
+    _wc_c_idx = flags_add_bool(s, 99,  "bytes",            0, "count bytes");
+    _wc_m_idx = flags_add_bool(s, 109, "chars",            0, "count UTF-8 codepoints");
+    _wc_L_idx = flags_add_bool(s, 76,  "max-line-length", 0, "longest line length in chars");
+    _wc_spec = s;
+    return 0;
+}
+
+fn _wc_buf_get(): i64 {
+    if (_wc_buf != 0) { return _wc_buf; }
+    _wc_buf = alloc(_WC_BUFSZ);
+    return _wc_buf;
+}
+
+fn _wc_report(operand, errno): i64 {
+    syscall(1, 2, "kriya wc: ", 10);
+    syscall(1, 2, operand, strlen(operand));
+    syscall(1, 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        syscall(1, 2, m, strlen(m));
+    } else {
+        syscall(1, 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        syscall(1, 2, &buf + i + 1, 6 - i);
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+# Render `v` as decimal digits into buf. Returns byte count.
+fn _wc_render_dec(v, buf): i64 {
+    if (v == 0) { store8(buf, 48); return 1; }
+    var tmp[32];
+    var n: i64 = 0;
+    var rem = v;
+    while (rem > 0) {
+        store8(&tmp + n, 48 + (rem - (rem / 10) * 10));
+        rem = rem / 10;
+        n = n + 1;
+    }
+    var i: i64 = 0;
+    while (i < n) {
+        store8(buf + i, load8(&tmp + n - 1 - i));
+        i = i + 1;
+    }
+    return n;
+}
+
+fn _wc_dec_width(v): i64 {
+    if (v == 0) { return 1; }
+    var w: i64 = 0;
+    var rem = v;
+    while (rem > 0) { w = w + 1; rem = rem / 10; }
+    return w;
+}
+
+fn _wc_emit_dec_padded(v, width): i64 {
+    var buf[32];
+    var n = _wc_render_dec(v, &buf);
+    var pad = width - n;
+    var sp[2];
+    store8(&sp, 32);
+    while (pad > 0) { syscall(1, 1, &sp, 1); pad = pad - 1; }
+    syscall(1, 1, &buf, n);
+    return 0;
+}
+
+# --- 5-slot counter layout (heap, 40 bytes):
+#   offset 0  : lines
+#   offset 8  : words
+#   offset 16 : bytes
+#   offset 24 : chars
+#   offset 32 : max line length
+
+fn _wc_counter_new(): i64 {
+    var c = alloc(40);
+    store64(c + 0, 0);
+    store64(c + 8, 0);
+    store64(c + 16, 0);
+    store64(c + 24, 0);
+    store64(c + 32, 0);
+    return c;
+}
+
+fn _wc_counter_add(dst, src): i64 {
+    store64(dst + 0,  load64(dst + 0)  + load64(src + 0));
+    store64(dst + 8,  load64(dst + 8)  + load64(src + 8));
+    store64(dst + 16, load64(dst + 16) + load64(src + 16));
+    store64(dst + 24, load64(dst + 24) + load64(src + 24));
+    # Max line length aggregates as max, not sum.
+    if (load64(src + 32) > load64(dst + 32)) {
+        store64(dst + 32, load64(src + 32));
+    }
+    return 0;
+}
+
+# Count from `fd` into `counter`. Returns 0 on success, negative errno
+# on read failure (counts up to the point of failure are still valid).
+fn _wc_count_fd(fd, counter): i64 {
+    var buf = _wc_buf_get();
+    var bufsz = _WC_BUFSZ;
+    var in_word: i64 = 0;
+    var cur_line_chars: i64 = 0;
+    var lines  = load64(counter + 0);
+    var words  = load64(counter + 8);
+    var bytes  = load64(counter + 16);
+    var chars  = load64(counter + 24);
+    var maxlen = load64(counter + 32);
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var n = syscall(0, fd, buf, bufsz);
+        if (n < 0) {
+            if ((0 - n) == 4) {
+                # EINTR — retry.
+            } else {
+                # Flush whatever we counted so far.
+                store64(counter + 0,  lines);
+                store64(counter + 8,  words);
+                store64(counter + 16, bytes);
+                store64(counter + 24, chars);
+                store64(counter + 32, maxlen);
+                return n;
+            }
+        } else {
+            if (n == 0) { loop = 0; }
+            else {
+                bytes = bytes + n;
+                var i: i64 = 0;
+                while (i < n) {
+                    var b = load8(buf + i);
+                    # UTF-8 codepoint count: each non-continuation byte
+                    # (top 2 bits != 10) starts a new char.
+                    if ((b & 192) != 128) {
+                        chars = chars + 1;
+                        cur_line_chars = cur_line_chars + 1;
+                    }
+                    if (b == 10) {
+                        # End-of-line: count line, reset run.
+                        lines = lines + 1;
+                        # Don't include the newline itself in line length.
+                        var ll = cur_line_chars - 1;
+                        if (ll > maxlen) { maxlen = ll; }
+                        cur_line_chars = 0;
+                        # Newline is also whitespace — end any word.
+                        in_word = 0;
+                    } else {
+                        if (b <= 32) {
+                            in_word = 0;
+                        } else {
+                            if (in_word == 0) {
+                                words = words + 1;
+                                in_word = 1;
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+            }
+        }
+    }
+    # Final line without trailing newline: still counts toward max-line-length.
+    if (cur_line_chars > maxlen) { maxlen = cur_line_chars; }
+    store64(counter + 0,  lines);
+    store64(counter + 8,  words);
+    store64(counter + 16, bytes);
+    store64(counter + 24, chars);
+    store64(counter + 32, maxlen);
+    return 0;
+}
+
+# Emit a counter line in `LINES WORDS BYTES_OR_CHARS [MAXLEN] [NAME]`
+# order, gated by the show_* flags and right-justified to col_width.
+fn _wc_emit(counter, show_l, show_w, show_c, show_m, show_L, col_width, name): i64 {
+    var emitted: i64 = 0;
+    if (show_l == 1) {
+        _wc_emit_dec_padded(load64(counter + 0), col_width);
+        emitted = 1;
+    }
+    if (show_w == 1) {
+        if (emitted == 1) { syscall(1, 1, " ", 1); }
+        _wc_emit_dec_padded(load64(counter + 8), col_width);
+        emitted = 1;
+    }
+    if (show_c == 1) {
+        if (emitted == 1) { syscall(1, 1, " ", 1); }
+        _wc_emit_dec_padded(load64(counter + 16), col_width);
+        emitted = 1;
+    }
+    if (show_m == 1) {
+        if (emitted == 1) { syscall(1, 1, " ", 1); }
+        _wc_emit_dec_padded(load64(counter + 24), col_width);
+        emitted = 1;
+    }
+    if (show_L == 1) {
+        if (emitted == 1) { syscall(1, 1, " ", 1); }
+        _wc_emit_dec_padded(load64(counter + 32), col_width);
+        emitted = 1;
+    }
+    if (name != 0) {
+        if (emitted == 1) { syscall(1, 1, " ", 1); }
+        syscall(1, 1, name, strlen(name));
+    }
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+# Compute the column width. Matches GNU's quirky three-rule layout:
+#   - Single file AND single count displayed: width = that value's
+#     digits (the bare number, no padding).
+#   - Otherwise (multi-file OR multi-count): width = max digit count
+#     across ALL counter fields (including bytes when -c isn't set),
+#     so consistent formatting survives flag combos and the total
+#     line aligns with per-file lines.
+fn _wc_max_width(counter, show_l, show_w, show_c, show_m, show_L, multi_file): i64 {
+    var nshown = show_l + show_w + show_c + show_m + show_L;
+    if (nshown == 1) {
+        if (multi_file == 0) {
+            if (show_l == 1) { return _wc_dec_width(load64(counter + 0)); }
+            if (show_w == 1) { return _wc_dec_width(load64(counter + 8)); }
+            if (show_c == 1) { return _wc_dec_width(load64(counter + 16)); }
+            if (show_m == 1) { return _wc_dec_width(load64(counter + 24)); }
+            if (show_L == 1) { return _wc_dec_width(load64(counter + 32)); }
+            return 1;
+        }
+    }
+    # Multi-column or multi-file: width = max digits across all fields.
+    var w: i64 = 1;
+    var wl = _wc_dec_width(load64(counter + 0));
+    if (wl > w) { w = wl; }
+    var ww = _wc_dec_width(load64(counter + 8));
+    if (ww > w) { w = ww; }
+    var wc = _wc_dec_width(load64(counter + 16));
+    if (wc > w) { w = wc; }
+    var wm = _wc_dec_width(load64(counter + 24));
+    if (wm > w) { w = wm; }
+    var wL = _wc_dec_width(load64(counter + 32));
+    if (wL > w) { w = wL; }
+    return w;
+}
+
+fn cmd_wc(start: i64): i64 {
+    _wc_init_spec();
+    if (kriya_args_parse(_wc_spec, start) != 0) {
+        syscall(1, 2, "kriya wc: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        return EXIT_USAGE;
+    }
+
+    var show_l: i64 = 0;
+    if (flags_get_bool(_wc_spec, _wc_l_idx) == 1) { show_l = 1; }
+    var show_w: i64 = 0;
+    if (flags_get_bool(_wc_spec, _wc_w_idx) == 1) { show_w = 1; }
+    var show_c: i64 = 0;
+    if (flags_get_bool(_wc_spec, _wc_c_idx) == 1) { show_c = 1; }
+    var show_m: i64 = 0;
+    if (flags_get_bool(_wc_spec, _wc_m_idx) == 1) { show_m = 1; }
+    var show_L: i64 = 0;
+    if (flags_get_bool(_wc_spec, _wc_L_idx) == 1) { show_L = 1; }
+
+    # No flags → default to -l -w -c.
+    var any_flag: i64 = show_l | show_w | show_c | show_m | show_L;
+    if (any_flag == 0) {
+        show_l = 1; show_w = 1; show_c = 1;
+    }
+
+    var npos = flags_positional_count(_wc_spec);
+    var any_failed: i64 = 0;
+
+    # Stdin-only mode: no operands.
+    if (npos < 1) {
+        var ctr = _wc_counter_new();
+        var r = _wc_count_fd(0, ctr);
+        if (r != 0) {
+            _wc_report("(stdin)", 0 - r);
+            any_failed = 1;
+        }
+        var width = _wc_max_width(ctr, show_l, show_w, show_c, show_m, show_L, 0);
+        _wc_emit(ctr, show_l, show_w, show_c, show_m, show_L, width, 0);
+        if (any_failed == 1) { return EXIT_FAILURE; }
+        return EXIT_SUCCESS;
+    }
+
+    # Pass 1: collect per-file counters + a running total. We need to
+    # collect first so the column width can be derived from the
+    # total's max counts (matches GNU's layout for multi-file output).
+    var counters = vec_new();
+    var names    = vec_new();
+    var total    = _wc_counter_new();
+    var i: i64 = 0;
+    while (i < npos) {
+        var p = flags_positional(_wc_spec, i);
+        var fd = sys_open(p, 0, 0);  # O_RDONLY
+        if (fd < 0) {
+            _wc_report(p, 0 - fd);
+            any_failed = 1;
+        } else {
+            var c = _wc_counter_new();
+            var r = _wc_count_fd(fd, c);
+            syscall(3, fd);
+            if (r != 0) {
+                _wc_report(p, 0 - r);
+                any_failed = 1;
+            }
+            vec_push(counters, c);
+            vec_push(names, p);
+            _wc_counter_add(total, c);
+        }
+        i = i + 1;
+    }
+
+    var nc = vec_len(counters);
+    # Column width: max needed across the total (its counts dominate).
+    var multi_file: i64 = 0;
+    if (nc > 1) { multi_file = 1; }
+    var width = _wc_max_width(total, show_l, show_w, show_c, show_m, show_L, multi_file);
+
+    # Emit per-file lines.
+    var fi: i64 = 0;
+    while (fi < nc) {
+        _wc_emit(vec_get(counters, fi), show_l, show_w, show_c, show_m, show_L, width, vec_get(names, fi));
+        fi = fi + 1;
+    }
+    # Emit total only if there were 2+ successful inputs.
+    if (nc >= 2) {
+        _wc_emit(total, show_l, show_w, show_c, show_m, show_L, width, "total");
+    }
+
+    if (any_failed == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}

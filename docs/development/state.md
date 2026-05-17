@@ -26,7 +26,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 | `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
 | `src/lib/errmsg.cyr` | implemented — errnos 1..40 + `errmsg_is_known` |
 | `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
-| `src/cmd/*.cyr` | 21 of ~40 — M1 + M2 (13) + M3 (7) + `tee.cyr` (M4 start) |
+| `src/cmd/*.cyr` | 22 of ~40 — M1 + M2 (13) + M3 (7) + M4 (2: `tee`, `wc`) |
 | `src/lib/fs.cyr` | implemented — `*at()`-family wrappers, `getdents64` iteration, type predicates, AT/S_IF/DT constants. Foundation for cp -R / mv / rm -r per ADR 0003. Adds `fs_rename`/`fs_renameat`/`fs_realpath` (3-mode canonicalization). |
 | `src/lib/protected.cyr` | implemented — `protected_paths[]` table with `/`, canonicalization via `path_normalize` + getcwd, `is_protected_path()` membership check. Per ADR 0004, only consumed by `rm` today. |
 
@@ -54,7 +54,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 | `realpath` | `src/cmd/realpath.cyr` | **implemented** (`-e`/`-m`/`-q`/`-z`; cycle ELOOP at 40 hops) | M3 |
 | `readlink` | `src/cmd/readlink.cyr` | **implemented** (POSIX raw + `-f`/`-e`/`-m` via fs_realpath + `-n`/`-z`/`-q`) | M3 |
 | `which` | `src/cmd/which.cyr` | **implemented** (`-a`/`-s`/`-z`; PATH-walk + slash-literal bypass; deferred shell-state flags) | M3 |
-| `wc` | `src/cmd/wc.cyr` | not started | M4 |
+| `wc` | `src/cmd/wc.cyr` | **implemented** (`-l`/`-w`/`-c`/`-m`/`-L`; GNU-compatible column-width matrix verified cell-by-cell) | M4 |
 | `head` | `src/cmd/head.cyr` | not started | M4 |
 | `tail` | `src/cmd/tail.cyr` | not started | M4 |
 | `cut` | `src/cmd/cut.cyr` | not started | M4 |
@@ -105,6 +105,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0. All twenty shippe
 - `scripts/smoke-stat.sh` — behavioural test for `stat` (37/37 — every shipped specifier compared against GNU `stat`, `-c` vs `--printf` escape handling, `-L` vs default lstat, `-t` 16-column terse parity, partial-failure exit, unknown-specifier literal emission).
 - `scripts/smoke-ls.sh` — behavioural test for `ls` (36/36 — default sort, `-a`/`-A` hidden-file split, `-r` reverse, `-F` type-suffix matrix, `-i` inode column, `-l` 8-column layout with ISO mtime, `-l` symlink target rendering, `-l -h` human-size matrix at 1K/5K/1.4M boundaries, `-d` directory-as-entry, `-R` recursion without symlink-follow, multi-operand layout, partial-failure exit).
 - `scripts/smoke-tee.sh` — behavioural test for `tee` (20/20 — single-file, multi-file fan-out, default truncate vs `-a` append, no-operand pass-through, 200KiB + 5MiB fidelity, binary-NUL fidelity, resilient partial-failure with surviving outputs, directory operand cleanly fails).
+- `scripts/smoke-wc.sh` — behavioural test for `wc` (23/23 — every flag combo compared cell-by-cell against GNU `wc`; empty file, no-trailing-newline, UTF-8 codepoints, 200KiB input, 1000-line file, multi-file total + column-width rules, stdin, partial-failure).
 - `tests/kriya.fcyr` — fuzz stub (lands when M2 destructive utilities arrive).
 
 ## Dependencies
@@ -145,8 +146,8 @@ _None yet._ Expected consumers once M1 ships:
 - **M3 closed 2026-05-17 at v0.4.0.** All seven planned utilities ship. Cold-start at v0.4.0 median 1.208ms (~50µs uptick from v0.3.0 — still well under the 2ms v1.0 target).
 - **M4 in progress** (text-stream utilities; 10 utilities — largest milestone by count). Order (simplest → biggest):
   1. ✅ `tee` (2026-05-17) — pass-through fan-out; `-a` append; resilient per-file failure. M4 opener.
-  2. `wc` — line/word/byte/char counts. Next.
-  3. `head` / `tail` (no `-f`) — first/last N lines or bytes.
+  2. ✅ `wc` (2026-05-17) — streaming `-l`/`-w`/`-c`/`-m`/`-L`; GNU-compatible column-width matrix verified cell-by-cell.
+  3. `head` / `tail` (no `-f`) — first/last N lines or bytes. Next.
   4. `nl` — line numbering.
   5. `uniq` — adjacent-line dedup.
   6. `tr` — character translation (no regex).
