@@ -1,0 +1,183 @@
+# which — search `$PATH` for an executable named after each operand.
+#
+# Argument shape:
+#   which [opts] PROGRAM...
+#
+# Flags:
+#   -a / --all      print every match found along `$PATH`, not just
+#                   the first. Useful for diagnosing shadowing.
+#   -s / --silent   print nothing; exit code reflects whether each
+#                   PROGRAM was found.
+#   -z / --zero     NUL-terminate each output instead of \n.
+#
+# For each PROGRAM:
+#   - If PROGRAM contains a '/', it is treated as a literal path —
+#     `$PATH` is not searched. The path itself must be an executable
+#     regular file.
+#   - Otherwise, each colon-separated entry of `$PATH` is examined
+#     in order. An empty entry means the current working directory
+#     (POSIX semantics; equivalent to `.`). The first match is
+#     printed; with `-a`, all matches are printed.
+#
+# "Executable" means: `sys_stat` succeeds, `S_ISREG`, and
+# `sys_access(path, X_OK)` returns 0. Symlinks are followed (POSIX
+# `which` semantics — what the shell would invoke from `$PATH`).
+#
+# Exit code: `EXIT_SUCCESS` if every PROGRAM was found at least
+# once; `EXIT_FAILURE` if any was missing.
+#
+# Symlink + root-protection policy (informative): which is purely
+# informational; ADR 0003 and ADR 0004 don't apply.
+#
+# Deferred (GNU `which` features not in scope at M3):
+#   --read-alias / --read-functions  — shell-state introspection.
+#   --show-dot / --show-tilde / --skip-tilde — interactive-shell display.
+#   --skip-dot / --skip-functions    — shell-state introspection.
+
+var _wh_spec  = 0;
+var _wh_a_idx = 0;
+var _wh_s_idx = 0;
+var _wh_z_idx = 0;
+
+fn _wh_init_spec(): i64 {
+    if (_wh_spec != 0) { return 0; }
+    var s = flags_new();
+    _wh_a_idx = flags_add_bool(s, 97,  "all",    0, "print all matches, not just the first");
+    _wh_s_idx = flags_add_bool(s, 115, "silent", 0, "no output; rely on exit code");
+    _wh_z_idx = flags_add_bool(s, 122, "zero",   0, "NUL-terminate each output");
+    _wh_spec = s;
+    return 0;
+}
+
+# Is `candidate` an executable regular file? Follows symlinks
+# (what the shell sees when invoking).
+fn _wh_is_exec(candidate): i64 {
+    var st[144];
+    var sr = sys_stat(candidate, &st);
+    if (sr != 0) { return 0; }
+    if (fs_is_reg(&st) == 0) { return 0; }
+    # X_OK = 1. sys_access follows symlinks (matches stat above).
+    var ar = sys_access(candidate, 1);
+    if (ar != 0) { return 0; }
+    return 1;
+}
+
+fn _wh_emit(path, term_byte): i64 {
+    syscall(1, 1, path, strlen(path));
+    var term_buf[2];
+    store8(&term_buf, term_byte);
+    syscall(1, 1, &term_buf, 1);
+    return 0;
+}
+
+# Search `$PATH` for `program`. Returns the number of matches printed.
+# When all_mode is 0, stops at the first match. When silent, no output;
+# matches are still counted so the caller can return the right exit
+# code.
+fn _wh_search_path(program, all_mode, silent, term_byte): i64 {
+    var path_env = getenv("PATH");
+    if (path_env == 0)        { return 0; }
+    if (load8(path_env) == 0) { return 0; }
+
+    var matches: i64 = 0;
+    var pp: i64 = 0;
+    var done: i64 = 0;
+    while (done == 0) {
+        # Find the next ':' or end of string.
+        var seg_start = pp;
+        var seg_end = pp;
+        var scanning: i64 = 1;
+        while (scanning == 1) {
+            var c = load8(path_env + seg_end);
+            if (c == 0) { scanning = 0; }
+            else {
+                if (c == 58) { scanning = 0; }  # ':'
+                else { seg_end = seg_end + 1; }
+            }
+        }
+        var slen = seg_end - seg_start;
+
+        # Build the entry as a fresh cstring (path_join needs a
+        # null-terminated input). Empty entry → ".".
+        var entry: i64 = 0;
+        if (slen == 0) {
+            entry = alloc(2);
+            store8(entry, 46);    # '.'
+            store8(entry + 1, 0);
+        } else {
+            entry = alloc(slen + 1);
+            memcpy(entry, path_env + seg_start, slen);
+            store8(entry + slen, 0);
+        }
+        var candidate = path_join(entry, program);
+
+        if (_wh_is_exec(candidate) == 1) {
+            matches = matches + 1;
+            if (silent == 0) { _wh_emit(candidate, term_byte); }
+            if (all_mode == 0) { done = 1; }
+        }
+
+        # Advance.
+        if (done == 0) {
+            if (load8(path_env + seg_end) == 0) { done = 1; }
+            else { pp = seg_end + 1; }
+        }
+    }
+    return matches;
+}
+
+# Is `program` a path (contains '/'?)
+fn _wh_has_slash(program): i64 {
+    var i: i64 = 0;
+    var found: i64 = 0;
+    while (load8(program + i) != 0) {
+        if (load8(program + i) == 47) { found = 1; }
+        i = i + 1;
+    }
+    return found;
+}
+
+fn cmd_which(start: i64): i64 {
+    _wh_init_spec();
+    if (kriya_args_parse(_wh_spec, start) != 0) {
+        syscall(1, 2, "kriya which: error: bad option (see ADR 0002 for accepted syntax)\n", 67);
+        return EXIT_USAGE;
+    }
+
+    var npos = flags_positional_count(_wh_spec);
+    if (npos < 1) {
+        syscall(1, 2, "kriya which: error: missing operand\n", 36);
+        return EXIT_USAGE;
+    }
+
+    var all_mode: i64 = 0;
+    if (flags_get_bool(_wh_spec, _wh_a_idx) == 1) { all_mode = 1; }
+    var silent: i64 = 0;
+    if (flags_get_bool(_wh_spec, _wh_s_idx) == 1) { silent = 1; }
+    var zero: i64 = 0;
+    if (flags_get_bool(_wh_spec, _wh_z_idx) == 1) { zero = 1; }
+
+    var term_byte: i64 = 10;
+    if (zero == 1) { term_byte = 0; }
+
+    var any_missing: i64 = 0;
+    var i: i64 = 0;
+    while (i < npos) {
+        var p = flags_positional(_wh_spec, i);
+        var matches: i64 = 0;
+        if (_wh_has_slash(p) == 1) {
+            # Literal-path mode: don't search $PATH.
+            if (_wh_is_exec(p) == 1) {
+                matches = 1;
+                if (silent == 0) { _wh_emit(p, term_byte); }
+            }
+        } else {
+            matches = _wh_search_path(p, all_mode, silent, term_byte);
+        }
+        if (matches == 0) { any_missing = 1; }
+        i = i + 1;
+    }
+
+    if (any_missing == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}

@@ -31,6 +31,7 @@ include "src/cmd/basename.cyr"
 include "src/cmd/dirname.cyr"
 include "src/cmd/realpath.cyr"
 include "src/cmd/readlink.cyr"
+include "src/cmd/which.cyr"
 
 fn print_usage() {
     syscall(1, 2, "usage: kriya <utility> [args...]\n", 33);
@@ -66,6 +67,7 @@ fn dispatch(name, start: i64): i64 {
     if (streq(name, "dirname"))  { return cmd_dirname(start); }
     if (streq(name, "realpath")) { return cmd_realpath(start); }
     if (streq(name, "readlink")) { return cmd_readlink(start); }
+    if (streq(name, "which"))    { return cmd_which(start); }
     print_unknown(name);
     return EXIT_USAGE;
 }
