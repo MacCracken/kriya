@@ -1,0 +1,380 @@
+# nl — POSIX `nl(1)`: number lines of input.
+#
+# Argument shape:
+#   nl [opts] [file]
+#
+# Flags:
+#   -b TYPE   body numbering: `a` number all, `t` number non-empty
+#             only (default), `n` number none. Regex form `p REGEX`
+#             deferred (waits on `lib/niyama.cyr` regex engine).
+#   -i N      number increment (default 1).
+#   -n FMT    number format: `ln` left-justified, `rn` right-justified
+#             unpadded (default), `rz` right-justified zero-padded.
+#   -s SEP    separator between number and line (default TAB).
+#   -v N      starting line number (default 1).
+#   -w N      number column width (default 6).
+#
+# Single-section model: kriya `nl` treats the entire input as one
+# body section. Header/footer parsing via the `-d`-controlled section
+# delimiter (default `\:`) is deferred — most consumers want simple
+# line numbering. When a real consumer asks, the work is local: add
+# `-h`/`-f`/`-d` and a delimiter-line classifier in front of the body
+# emitter.
+#
+# Symlink policy / root protection: informational utility; neither
+# ADR 0003 nor ADR 0004 applies. Default open follows symlinks.
+#
+# Streaming: lines are accumulated into a 64 KiB buffer; lines longer
+# than that are truncated with a stderr warning. (POSIX nl has no
+# defined limit, but 64 KiB covers anything sane; bump if a consumer
+# hits it.)
+
+var _nl_spec   = 0;
+var _nl_b_idx  = 0;
+var _nl_i_idx  = 0;
+var _nl_n_idx  = 0;
+var _nl_s_idx  = 0;
+var _nl_v_idx  = 0;
+var _nl_w_idx  = 0;
+
+var _nl_read_buf = 0;
+var _NL_READ_SZ  = 65536;
+
+var _nl_line_buf = 0;
+var _NL_LINE_SZ  = 65536;
+
+fn _nl_init_spec(): i64 {
+    if (_nl_spec != 0) { return 0; }
+    var s = flags_new();
+    _nl_b_idx = flags_add_str(s, 98,  "body-numbering",   0, "a|t|n (default t)");
+    _nl_i_idx = flags_add_str(s, 105, "line-increment",   0, "increment (default 1)");
+    _nl_n_idx = flags_add_str(s, 110, "number-format",    0, "ln|rn|rz (default rn)");
+    _nl_s_idx = flags_add_str(s, 115, "number-separator", 0, "separator (default TAB)");
+    _nl_v_idx = flags_add_str(s, 118, "starting-line-number", 0, "first line number (default 1)");
+    _nl_w_idx = flags_add_str(s, 119, "number-width",     0, "column width (default 6)");
+    _nl_spec = s;
+    return 0;
+}
+
+fn _nl_buf_get(): i64 {
+    if (_nl_read_buf == 0) { _nl_read_buf = alloc(_NL_READ_SZ); }
+    return _nl_read_buf;
+}
+
+fn _nl_line_get(): i64 {
+    if (_nl_line_buf == 0) { _nl_line_buf = alloc(_NL_LINE_SZ); }
+    return _nl_line_buf;
+}
+
+fn _nl_report(operand, errno): i64 {
+    syscall(1, 2, "kriya nl: ", 10);
+    syscall(1, 2, operand, strlen(operand));
+    syscall(1, 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        syscall(1, 2, m, strlen(m));
+    } else {
+        syscall(1, 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        syscall(1, 2, &buf + i + 1, 6 - i);
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+# Render `v` as decimal into `buf`. Returns byte count.
+fn _nl_render_dec(v, buf): i64 {
+    if (v == 0) { store8(buf, 48); return 1; }
+    var tmp[32];
+    var n: i64 = 0;
+    var rem = v;
+    while (rem > 0) {
+        store8(&tmp + n, 48 + (rem - (rem / 10) * 10));
+        rem = rem / 10;
+        n = n + 1;
+    }
+    var i: i64 = 0;
+    while (i < n) {
+        store8(buf + i, load8(&tmp + n - 1 - i));
+        i = i + 1;
+    }
+    return n;
+}
+
+# fmt encoded as small int: 0 = rn, 1 = ln, 2 = rz.
+fn _nl_emit_number(num, fmt, width): i64 {
+    var buf[32];
+    var n = _nl_render_dec(num, &buf);
+    if (n >= width) {
+        # Number is at least as wide as the column — print bare digits.
+        syscall(1, 1, &buf, n);
+        return 0;
+    }
+    var pad = width - n;
+    var pad_buf[1];
+    if (fmt == 1) {
+        # Left-justified: digits then spaces.
+        syscall(1, 1, &buf, n);
+        store8(&pad_buf, 32);
+        var i: i64 = 0;
+        while (i < pad) { syscall(1, 1, &pad_buf, 1); i = i + 1; }
+    } else {
+        # Right-justified. fmt 0 (rn) pads with space; fmt 2 (rz) with '0'.
+        var pad_char: i64 = 32;
+        if (fmt == 2) { pad_char = 48; }
+        store8(&pad_buf, pad_char);
+        var i: i64 = 0;
+        while (i < pad) { syscall(1, 1, &pad_buf, 1); i = i + 1; }
+        syscall(1, 1, &buf, n);
+    }
+    return 0;
+}
+
+# Emit `width` spaces (used for unnumbered lines).
+fn _nl_emit_blank_column(width): i64 {
+    var sp[2];
+    store8(&sp, 32);
+    var i: i64 = 0;
+    while (i < width) {
+        syscall(1, 1, &sp, 1);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Process one line. `body_type`: 0=all, 1=non-empty, 2=none.
+# `*counter_p` is a single-slot i64 cell at `counter_p` so the caller
+# sees increment side-effects.
+fn _nl_emit_line(line, len, body_type, counter_p, increment, fmt, width, sep, sep_len): i64 {
+    var should_number: i64 = 0;
+    if (body_type == 0) { should_number = 1; }
+    if (body_type == 1) {
+        if (len > 0) { should_number = 1; }
+    }
+    if (should_number == 1) {
+        var c = load64(counter_p);
+        _nl_emit_number(c, fmt, width);
+        store64(counter_p, c + increment);
+        syscall(1, 1, sep, sep_len);
+    } else {
+        # Unnumbered: GNU emits `width + sep_len` spaces of padding
+        # so the unnumbered-line content column-aligns with the
+        # numbered-line content column.
+        _nl_emit_blank_column(width + sep_len);
+    }
+    if (len > 0) { syscall(1, 1, line, len); }
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+fn _nl_run(fd, body_type, counter_p, increment, fmt, width, sep, sep_len): i64 {
+    var read_buf = _nl_buf_get();
+    var line_buf = _nl_line_get();
+    var line_len: i64 = 0;
+    var truncated_warned: i64 = 0;
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var n = syscall(0, fd, read_buf, _NL_READ_SZ);
+        if (n < 0) {
+            if ((0 - n) == 4) {
+                # EINTR — retry.
+            } else { return n; }
+        } else {
+            if (n == 0) {
+                # Flush a trailing partial line if any (file without
+                # final newline).
+                if (line_len > 0) {
+                    _nl_emit_line(line_buf, line_len, body_type, counter_p, increment, fmt, width, sep, sep_len);
+                }
+                loop = 0;
+            } else {
+                var i: i64 = 0;
+                while (i < n) {
+                    var b = load8(read_buf + i);
+                    if (b == 10) {
+                        _nl_emit_line(line_buf, line_len, body_type, counter_p, increment, fmt, width, sep, sep_len);
+                        line_len = 0;
+                    } else {
+                        if (line_len < _NL_LINE_SZ - 1) {
+                            store8(line_buf + line_len, b);
+                            line_len = line_len + 1;
+                        } else {
+                            if (truncated_warned == 0) {
+                                syscall(1, 2, "kriya nl: warning: line exceeds 64 KiB; truncating\n", 51);
+                                truncated_warned = 1;
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+fn cmd_nl(start: i64): i64 {
+    _nl_init_spec();
+    if (kriya_args_parse(_nl_spec, start) != 0) {
+        syscall(1, 2, "kriya nl: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        return EXIT_USAGE;
+    }
+
+    # Body type: a / t / n. Default t (non-empty).
+    var body_type: i64 = 1;
+    var b_arg = flags_get_str(_nl_spec, _nl_b_idx);
+    if (b_arg != 0) {
+        if (load8(b_arg) != 0) {
+            if (load8(b_arg) == 97) { body_type = 0; }      # a
+            else { if (load8(b_arg) == 116) { body_type = 1; }   # t
+            else { if (load8(b_arg) == 110) { body_type = 2; }   # n
+            else {
+                syscall(1, 2, "kriya nl: error: --body-numbering must be a, t, or n\n", 53);
+                return EXIT_USAGE;
+            } } }
+        }
+    }
+
+    # Increment.
+    var increment: i64 = 1;
+    var i_arg = flags_get_str(_nl_spec, _nl_i_idx);
+    if (i_arg != 0) {
+        if (load8(i_arg) != 0) {
+            var v = kriya_parse_nonneg_int(i_arg);
+            if (v < 0) {
+                syscall(1, 2, "kriya nl: error: --line-increment requires a non-negative integer\n", 65);
+                return EXIT_USAGE;
+            }
+            increment = v;
+        }
+    }
+
+    # Format. ln=1, rn=0, rz=2.
+    var fmt: i64 = 0;
+    var n_arg = flags_get_str(_nl_spec, _nl_n_idx);
+    if (n_arg != 0) {
+        if (load8(n_arg) != 0) {
+            # 2-char codes: l/n, r/n, r/z
+            var c0 = load8(n_arg);
+            var c1 = load8(n_arg + 1);
+            var c2 = load8(n_arg + 2);
+            if (c2 != 0) {
+                syscall(1, 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
+                return EXIT_USAGE;
+            }
+            if (c0 == 108) {
+                if (c1 == 110) { fmt = 1; }   # ln
+                else {
+                    syscall(1, 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
+                    return EXIT_USAGE;
+                }
+            } else { if (c0 == 114) {
+                if (c1 == 110)      { fmt = 0; }  # rn
+                else { if (c1 == 122) { fmt = 2; }  # rz
+                else {
+                    syscall(1, 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
+                    return EXIT_USAGE;
+                } }
+            } else {
+                syscall(1, 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
+                return EXIT_USAGE;
+            } }
+        }
+    }
+
+    # Separator. Default TAB.
+    var sep = "\t";
+    var sep_len: i64 = 1;
+    var s_arg = flags_get_str(_nl_spec, _nl_s_idx);
+    if (s_arg != 0) {
+        # POSIX: any string. Even empty is allowed; we honor that.
+        sep = s_arg;
+        sep_len = strlen(s_arg);
+    }
+
+    # Starting line number.
+    var start_num: i64 = 1;
+    var v_arg = flags_get_str(_nl_spec, _nl_v_idx);
+    if (v_arg != 0) {
+        if (load8(v_arg) != 0) {
+            var v = kriya_parse_nonneg_int(v_arg);
+            if (v < 0) {
+                syscall(1, 2, "kriya nl: error: --starting-line-number requires a non-negative integer\n", 71);
+                return EXIT_USAGE;
+            }
+            start_num = v;
+        }
+    }
+
+    # Width. Default 6.
+    var width: i64 = 6;
+    var w_arg = flags_get_str(_nl_spec, _nl_w_idx);
+    if (w_arg != 0) {
+        if (load8(w_arg) != 0) {
+            var v = kriya_parse_nonneg_int(w_arg);
+            if (v < 0) {
+                syscall(1, 2, "kriya nl: error: --number-width requires a non-negative integer\n", 63);
+                return EXIT_USAGE;
+            }
+            width = v;
+        }
+    }
+
+    # Counter lives in a single-slot heap cell so _nl_emit_line can mutate it.
+    var counter = alloc(8);
+    store64(counter, start_num);
+
+    var npos = flags_positional_count(_nl_spec);
+    var any_failed: i64 = 0;
+
+    if (npos < 1) {
+        var r = _nl_run(0, body_type, counter, increment, fmt, width, sep, sep_len);
+        if (r != 0) { _nl_report("(stdin)", 0 - r); any_failed = 1; }
+        if (any_failed == 1) { return EXIT_FAILURE; }
+        return EXIT_SUCCESS;
+    }
+
+    # Multi-file: GNU nl treats them as one continuous input (counter
+    # doesn't reset). We match that.
+    var i: i64 = 0;
+    while (i < npos) {
+        var p = flags_positional(_nl_spec, i);
+        var fd: i64 = 0;
+        var is_stdin: i64 = 0;
+        if (load8(p) == 45) {
+            if (load8(p + 1) == 0) {
+                fd = 0;
+                is_stdin = 1;
+            }
+        }
+        if (is_stdin == 0) {
+            fd = sys_open(p, 0, 0);
+            if (fd < 0) {
+                _nl_report(p, 0 - fd);
+                any_failed = 1;
+                i = i + 1;
+                continue;
+            }
+        }
+        var r = _nl_run(fd, body_type, counter, increment, fmt, width, sep, sep_len);
+        if (r != 0) {
+            _nl_report(p, 0 - r);
+            any_failed = 1;
+        }
+        if (is_stdin == 0) { syscall(3, fd); }
+        i = i + 1;
+    }
+
+    if (any_failed == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}
