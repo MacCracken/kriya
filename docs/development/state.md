@@ -26,8 +26,9 @@ M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both
 | `src/lib/exit.cyr` | implemented — `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` enum |
 | `src/lib/errmsg.cyr` | implemented — errnos 1..40 + `errmsg_is_known` |
 | `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
-| `src/cmd/*.cyr` | 12 of ~40 — `true.cyr`, `false.cyr`, `echo.cyr`, `pwd.cyr`, `yes.cyr`, `sleep.cyr`, `mkdir.cyr`, `rmdir.cyr`, `touch.cyr`, `ln.cyr`, `cp.cyr` (full), `mv.cyr` |
-| `src/lib/fs.cyr` | implemented — `*at()`-family wrappers, `getdents64` iteration, type predicates, AT/S_IF/DT constants. Foundation for cp -R / mv / rm -r per ADR 0003. Adds `fs_rename`/`fs_renameat` for mv's same-FS happy path. |
+| `src/cmd/*.cyr` | 13 of ~40 — `true.cyr`, `false.cyr`, `echo.cyr`, `pwd.cyr`, `yes.cyr`, `sleep.cyr`, `mkdir.cyr`, `rmdir.cyr`, `touch.cyr`, `ln.cyr`, `cp.cyr` (full), `mv.cyr`, `rm.cyr` |
+| `src/lib/fs.cyr` | implemented — `*at()`-family wrappers, `getdents64` iteration, type predicates, AT/S_IF/DT constants. Foundation for cp -R / mv / rm -r per ADR 0003. Adds `fs_rename`/`fs_renameat`. |
+| `src/lib/protected.cyr` | implemented — `protected_paths[]` table with `/`, canonicalization via `path_normalize` + getcwd, `is_protected_path()` membership check. Per ADR 0004, only consumed by `rm` today. |
 
 ## Per-utility status (will grow with each milestone)
 
@@ -44,7 +45,7 @@ M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both
 | `touch` | `src/cmd/touch.cyr` | **implemented** (`-a`, `-m`, `-c`; `-r`/`-t`/`-d` deferred to chrono helpers) | M2 |
 | `cp` | `src/cmd/cp.cyr` | **implemented** (`-f`/`-i`/`-p`/`-v`/`-R`/`-r`/`-P`/`-H`/`-L`; fd-rooted recursion with `O_NOFOLLOW` per ADR 0003; `--preserve=links` for hardlink dedup deferred) | M2 |
 | `mv` | `src/cmd/mv.cyr` | **implemented** (`-f`/`-i`/`-n`/`-v`; same-FS rename; cross-FS files+symlinks; ADR-0003 symlink-to-dir refusal; cross-FS dir mv lands with rm tree-walk) | M2 |
-| `rm` | `src/cmd/rm.cyr` | not started | M2 |
+| `rm` | `src/cmd/rm.cyr` | **implemented** (`-f`/`-i`/`-r`/`-R`/`-d`/`-v`; fd-rooted recursion with O_NOFOLLOW per ADR 0003; protected-paths refusal per ADR 0004) | M2 |
 | `ln` | `src/cmd/ln.cyr` | **implemented** (`-s`, `-f`, `-P`, `-n`, `-v`; `-r`/`-T`/`-t`/`-b` deferred) | M2 |
 | `ls` | `src/cmd/ls.cyr` | not started | M3 |
 | `stat` | `src/cmd/stat.cyr` | not started | M3 |
@@ -96,6 +97,7 @@ M1 fully closed. All six M1 utilities, all four planned `src/lib/` modules, both
 - `scripts/smoke-cp.sh` — behavioural test for non-recursive `cp` (26/26 — basic + 200 KiB multi-block, existing-dest gating with `-f`/`-i`, `-i`-on-pipe usage error, multi-into-dir, `-p` mode+mtime preservation, non-`-p` current-time, self-copy refusal, directory-without-R EISDIR, partial-failure exit, verbose).
 - `scripts/smoke-cp-recursive.sh` — behavioural test for `cp -R` (39/39 — full ADR-0003 `-P`/`-H`/`-L` matrix verified: `-P` default preserves symlinks, `-H` follows command-line operands and preserves inner links, `-L` materialises all link content; plus `-r` alias, into-existing-dir, `-p` mode/time preservation under recursion, error paths, symlink-to-`/etc` preserved by default).
 - `scripts/smoke-mv.sh` — behavioural test for `mv` (43/43 — same-FS rename, overwrite default, `-n` silent skip, `-i`-on-pipe usage error, multi-into-dir, dir rename, ADR-0003 symlink-to-dir refusal in both single-pair and multi-into-dir shapes, self-move detection, partial-failure paths, verbose. Cross-FS round-trips when `/tmp` and `/dev/shm` differ — file with inode-differs assertion, symlink with target preservation, cross-FS dir error path).
+- `scripts/smoke-rm.sh` — behavioural test for `rm` (53/53 — every ADR-0004 canonicalization escape (`/`, `/.`, `/tmp/..`, `////`, `/../../../`, relative `../../`), no `--no-preserve-root` flag, no env-var bypass, multi-op atomicity preserved; ADR-0003 symlink-to-dir `rm` leaves target intact, `rm -r` of dir-containing-symlink-to-dir never descends; `-f` silences ENOENT; `-r`/`-R`/`-d`/`-v`; partial-failure exit; `-i`-on-pipe usage error).
 - `tests/kriya.fcyr` — fuzz stub (lands when M2 destructive utilities arrive).
 
 ## Dependencies
@@ -122,9 +124,11 @@ _None yet._ Expected consumers once M1 ships:
   4. ✅ `ln` (2026-05-17) — `-s`/`-f`/`-P`/`-n`/`-v`; raw `linkat(265)` for `-P` policy; ADR-0003 deploy-retarget idiom verified by `smoke-ln.sh`.
   5a. ✅ `cp` non-recursive (2026-05-17) — `-f`/`-i`/`-p`/`-v`. `-i`-on-pipe is a usage error (ADR 0002). Self-copy refused via `(st_dev,st_ino)` match.
   5b. ✅ `cp -R` recursive (2026-05-17) — `-R`/`-r`/`-P`/`-H`/`-L` matrix on top of `src/lib/fs.cyr`. Every descent uses `openat(parent_fd, name, O_NOFOLLOW | O_DIRECTORY)`; destination opens are `O_NOFOLLOW` with `-f`-driven unlink+retry. The lstat-vs-stat decision is carried into the descend as `allow_follow`. `--preserve=links` for hardlink dedup deferred.
-  6. ✅ `mv` (2026-05-17) — same-FS `rename(2)`; cross-FS fallback for files + symlinks; cross-FS directory mv errors with a clear message (lands when `rm`'s tree-walk ships and mv can call it to unlink the source). ADR-0003 hard rule #3 enforced invocation-wide.
+  6. ✅ `mv` (2026-05-17) — same-FS `rename(2)`; cross-FS fallback for files + symlinks; cross-FS directory mv errors with a clear message (now unblocked — mv can use the rm tree-walk). ADR-0003 hard rule #3 enforced invocation-wide.
+  7. ✅ `rm` (2026-05-17) — `-f`/`-i`/`-r`/`-R`/`-d`/`-v`. ADR-0003 never-follow (no flag exists), ADR-0004 protected-paths refusal (no escape hatch). 53 behavioural cases covering every known canonicalization escape and the symlink-no-follow property. **Closes M2.**
   7. `rm` — last, and most carefully — full ADR 0003 (`O_NOFOLLOW` traversal, no follow flag) and ADR 0004 (`protected_paths[]` check) enforcement.
-- M2 still needs to introduce `src/lib/protected.cyr` (the `protected_paths[]` table from ADR 0004). It lands with `rm`. `src/lib/fs.cyr` shipped with `cp -R` and is ready for `mv` and `rm` to consume.
+- **M2 closed 2026-05-17.** All seven planned utilities ship; ADRs 0003 and 0004 verified end-to-end. Cross-repo proposals filed: `2026-05-17-octal-literal-syntax` and `2026-05-17-syscalls-at-family-stdlib` (sweep follow-ups when accepted). Cross-FS directory `mv` is the one remaining M2 follow-up — now unblocked since `rm -r` exists.
+- Next milestone: M3 (listing + path manipulation) — `ls`, `stat`, `basename`, `dirname`, `realpath`, `readlink`, `which`. Lighter milestone after the M2 destructive-op gauntlet; consumes `src/lib/fs.cyr` and `src/lib/path.cyr` rather than extending them.
 - Deferred features tracked against future enablers (each a known-named follow-up, not "TBD"):
   - echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
   - pwd `$PWD` inode-match — waits on `fs.cyr` stat-compare.

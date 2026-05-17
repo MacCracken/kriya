@@ -1,0 +1,86 @@
+# protected.cyr — ADR 0004 protected-paths refusal mechanism.
+#
+# Hard floor for `kriya rm`: every operand is absolute-path-resolved
+# and textually canonicalized (no symlink resolution); if the result
+# matches any entry in the protected list, the entire `rm` invocation
+# is refused with exit 2. There is no `--no-preserve-root` flag, no
+# `KRIYA_*` env var, and no build-time bypass — the table is the
+# only place to add or remove an entry, and any future expansion is
+# strictly tightening.
+#
+# The table ships with `/` only at v0.3.0. Per ADR 0004, future
+# maintainers can add entries (`/etc`, `/usr`, `/boot`, ...) without
+# a new ADR — strictly tightening the policy is in-charter. REMOVING
+# `/` requires a successor ADR and a major version bump.
+#
+# Mechanism (path-text only — no `realpath`, no symlink resolution):
+#   1. Convert operand to absolute by joining against `getcwd()` if
+#      relative.
+#   2. `path_normalize` to collapse `.`, `..`, duplicate slashes.
+#   3. String-equal compare against each entry in
+#      `_protected_path_at(i)` for i in 0..count.
+#
+# `rm` never follows symlinks (ADR 0003 hard rule #1). The text-only
+# canonicalization here mirrors that: a symlink-to-/ pointed at by
+# the user is canonicalized as the symlink's *name*, not its target;
+# `rm` would unlink the link, not touch `/`.
+
+# Count of protected paths. Used by `is_protected_path` to iterate.
+fn protected_path_count(): i64 {
+    return 1;
+}
+
+# Return the i-th protected path as a static cstring. Out-of-range
+# returns 0.
+fn protected_path_at(i): i64 {
+    if (i == 0) { return "/"; }
+    return 0;
+}
+
+# Canonicalize `operand` into an absolute, textually-normalized path
+# and return a heap-allocated cstring. No filesystem access — `..`
+# resolves textually, symlinks are not dereferenced.
+#
+# This is the form the refusal-check compares against the protected
+# list. It MUST match the semantics of `path_normalize` on an
+# absolute input; relative operands are joined against `getcwd()`
+# first.
+fn protected_canonicalize(operand): i64 {
+    if (operand == 0) {
+        var z = alloc(2);
+        store8(z, 47);     # '/'
+        store8(z + 1, 0);
+        return path_normalize(z);
+    }
+    if (path_is_absolute(operand) == 1) {
+        return path_normalize(operand);
+    }
+    # Relative — prepend cwd.
+    var cwd_buf[4096];
+    var n = syscall(SYS_GETCWD, &cwd_buf, 4096);
+    if (n < 0) {
+        # Can't get cwd. Best-effort: refuse the operand defensively
+        # would be too aggressive; return the operand normalized so
+        # a literal "/" still matches. Other relative operands fail
+        # the membership check (e.g. "../" doesn't match "/").
+        return path_normalize(operand);
+    }
+    var joined = path_join(&cwd_buf, operand);
+    return path_normalize(joined);
+}
+
+# 1 if `operand`'s canonical form matches any protected path, 0
+# otherwise. The caller decides what to do — `cmd_rm` refuses the
+# whole invocation with exit 2.
+fn is_protected_path(operand): i64 {
+    var canon = protected_canonicalize(operand);
+    var clen = strlen(canon);
+    var n = protected_path_count();
+    var i: i64 = 0;
+    while (i < n) {
+        var p = protected_path_at(i);
+        if (streq(canon, p) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
