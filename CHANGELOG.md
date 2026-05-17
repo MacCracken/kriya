@@ -8,6 +8,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **ADR 0002**: option-parsing approach for humans and agents — one parser (`src/lib/args.cyr`), POSIX-short + GNU-long, hard No-Gos on prefix matching, optional values, interactive prompts on non-tty stdin, and silent option deprecation. `--help` (human) and `--help=json` (machine schema, locked behind `KRIYA_HELP_SCHEMA_VERSION`) for capability discovery; `kriya --list` enumerates utilities as JSON. Implementation lands in a follow-up commit.
 - **Dispatcher**: `src/main.cyr` now reads `argv[0]`, basename-strips, and routes to the matching `cmd_*` function. Both symlink form (`./true`) and explicit form (`kriya true`) dispatch identically. Unknown utilities and missing utility names emit a usage message to stderr and exit `2`. Implements ADR 0001.
 - **Shared lib**: `src/lib/exit.cyr` defines `EXIT_SUCCESS=0` / `EXIT_FAILURE=1` / `EXIT_USAGE=2` as an enum (no `gvar_toks` cost per CLAUDE.md Cyrius Conventions).
 - **`true`** (`src/cmd/true.cyr`) — POSIX `true(1)`, always exits `0`.

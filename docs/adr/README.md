@@ -19,4 +19,5 @@ Decisions about kriya — what we chose, the context, and the consequences we ac
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+- [0001 — BusyBox-style dispatcher vs N independent binaries](0001-busybox-dispatcher-vs-n-binaries.md) — one binary, symlinks per utility; `argv[0]` selects the command.
+- [0002 — Option parsing for humans and agents](0002-option-parsing-humans-and-agents.md) — one parser, POSIX-short + GNU-long, agent-safe restrictions (no prefix matching, no optional values, no interactive hangs, `--help=json` for capability discovery).
