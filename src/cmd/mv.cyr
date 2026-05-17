@@ -1,0 +1,365 @@
+# mv — POSIX `mv(1)`: rename files / move across filesystems.
+#
+# Argument shapes:
+#   mv [opts] SRC DST                — rename SRC to DST
+#   mv [opts] SRC... DIRECTORY       — move each SRC into DIRECTORY
+#
+# Flags:
+#   -f / --force        overwrite without prompt (default — POSIX mv
+#                       silently overwrites; this flag is here so
+#                       scripts can be explicit and to override an
+#                       earlier `-i`).
+#   -i / --interactive  prompt before overwrite. Per ADR 0002, on
+#                       non-tty stdin this is a usage error (exit 2),
+#                       not a hang.
+#   -n / --no-clobber   refuse to overwrite an existing destination
+#                       (silently — not an error).
+#   -v / --verbose      print "renamed 'src' -> 'dst'" per move.
+#
+# Last-one-wins precedence for -f/-i/-n is GNU's behaviour but
+# requires order info the parser doesn't surface. Instead we apply:
+# -n beats -i; -f beats -i; -f beats -n. Practical effect: scripts
+# that want strict no-clobber pass -n alone; scripts that want
+# strict overwrite pass -f alone.
+#
+# Symlink policy (ADR 0003):
+#   - mv operates on the named entry. A source that IS a symlink is
+#     renamed as a link — its target is untouched.
+#   - Destination that is a symlink-to-directory is REFUSED (hard
+#     rule #3). The user must `rm linkdir && mv src linkdir` to be
+#     explicit, or use `ln -sfn target linkdir` for atomic retarget.
+#
+# Cross-filesystem moves (rename(2) returns -EXDEV / -18):
+#   - Regular file: fall back to `_cp_one` + `sys_unlink(src)`.
+#   - Symlink: readlink + sys_symlink at dst + sys_unlink(src).
+#   - Directory: NOT supported in this ship. Errors with a clear
+#     message. Lands when `rm`'s tree-walk ships and mv can call
+#     it to remove the source after cp -R.
+#
+# Root protection (ADR 0004): mv is not in the protected_paths scope
+# (that's rm-only). The kernel returns EBUSY on rename("/", ...) and
+# similar; we let that propagate.
+#
+# Each (SRC, DST) pair is attempted independently. Exit EXIT_FAILURE
+# if any failed.
+
+var _mv_spec  = 0;
+var _mv_f_idx = 0;
+var _mv_i_idx = 0;
+var _mv_n_idx = 0;
+var _mv_v_idx = 0;
+
+fn _mv_init_spec(): i64 {
+    if (_mv_spec != 0) { return 0; }
+    var s = flags_new();
+    _mv_f_idx = flags_add_bool(s, 102, "force",       0, "overwrite without prompting (default)");
+    _mv_i_idx = flags_add_bool(s, 105, "interactive", 0, "prompt before overwrite");
+    _mv_n_idx = flags_add_bool(s, 110, "no-clobber",  0, "refuse to overwrite existing dest");
+    _mv_v_idx = flags_add_bool(s, 118, "verbose",     0, "print each rename");
+    _mv_spec = s;
+    return 0;
+}
+
+fn _mv_report(operand, errno): i64 {
+    syscall(1, 2, "kriya mv: ", 10);
+    syscall(1, 2, operand, strlen(operand));
+    syscall(1, 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        syscall(1, 2, m, strlen(m));
+    } else {
+        syscall(1, 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        syscall(1, 2, &buf + i + 1, 6 - i);
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+fn _mv_isatty(fd): i64 {
+    var tio[96];
+    var r = syscall(16, fd, 21505, &tio);  # SYS_IOCTL, TCGETS
+    if (r == 0) { return 1; }
+    return 0;
+}
+
+fn _mv_prompt(dst): i64 {
+    syscall(1, 2, "kriya mv: overwrite '", 21);
+    syscall(1, 2, dst, strlen(dst));
+    syscall(1, 2, "'? ", 3);
+    var c[8];
+    var n = syscall(0, 0, &c, 8);
+    if (n < 1) { return 0; }
+    var ch = load8(&c);
+    if (ch == 121) { return 1; }
+    if (ch == 89)  { return 1; }
+    return 0;
+}
+
+fn _mv_is_dir_path(path): i64 {
+    var buf[144];
+    var r = sys_stat(path, &buf);
+    if (r != 0) { return 0; }
+    if (fs_is_dir(&buf) == 1) { return 1; }
+    return 0;
+}
+
+# Is `path` a symlink whose target is a directory? Used for the
+# ADR 0003 hard refusal: mv must not overwrite a symlink-to-dir.
+fn _mv_is_symlink_to_dir(path): i64 {
+    var l[144];
+    var lr = syscall(262, 0 - 100, path, &l, 256);  # lstat
+    if (lr != 0) { return 0; }
+    if (fs_is_lnk(&l) == 0) { return 0; }
+    var s[144];
+    var sr = sys_stat(path, &s);
+    if (sr != 0) { return 0; }
+    if (fs_is_dir(&s) == 1) { return 1; }
+    return 0;
+}
+
+fn _mv_verbose(src, dst): i64 {
+    syscall(1, 1, "renamed '", 9);
+    syscall(1, 1, src, strlen(src));
+    syscall(1, 1, "' -> '", 6);
+    syscall(1, 1, dst, strlen(dst));
+    syscall(1, 1, "'\n", 2);
+    return 0;
+}
+
+# Cross-FS regular-file move: lstat src (to decide between regular
+# file and symlink), copy + unlink. Returns 0 / negative errno.
+fn _mv_cross_fs(src, dst, src_st, verbose): i64 {
+    if (fs_is_lnk(src_st) == 1) {
+        # Symlink: replicate by reading the target text and recreating.
+        var link_buf = alloc(4096);
+        var n = sys_readlink(src, link_buf, 4095);
+        if (n < 0) {
+            _mv_report(src, 0 - n);
+            return n;
+        }
+        store8(link_buf + n, 0);
+        # If dst already exists as a symlink or regular file, we already
+        # would have handled the existence check. Symlink creation
+        # needs a clean target; remove whatever's there.
+        sys_unlink(dst);
+        var sr = sys_symlink(link_buf, dst);
+        if (sr != 0) {
+            _mv_report(dst, 0 - sr);
+            return sr;
+        }
+        # Unlink the source symlink.
+        var ur = sys_unlink(src);
+        if (ur != 0) {
+            _mv_report(src, 0 - ur);
+            return ur;
+        }
+        if (verbose == 1) { _mv_verbose(src, dst); }
+        return 0;
+    }
+
+    if (fs_is_dir(src_st) == 1) {
+        # Cross-FS directory move: not supported in this ship.
+        # Documented in the file header; lands with `rm`'s tree-walk.
+        syscall(1, 2, "kriya mv: '", 11);
+        syscall(1, 2, src, strlen(src));
+        syscall(1, 2, "' -> '", 6);
+        syscall(1, 2, dst, strlen(dst));
+        syscall(1, 2, "': cannot move directory across filesystems (cp -R + rm -r workaround until rm ships)\n", 86);
+        return 0 - 18;
+    }
+
+    if (fs_is_reg(src_st) == 0) {
+        # FIFO / sock / char / block: we don't synthesise these.
+        syscall(1, 2, "kriya mv: ", 10);
+        syscall(1, 2, src, strlen(src));
+        syscall(1, 2, ": cannot move across filesystems (unsupported file type)\n", 57);
+        return 0 - 22;
+    }
+
+    # Regular file: cp_one (which follows POSIX semantics: stats src,
+    # opens both, copies bytes, preserves mode and times when asked).
+    # We always pass preserve=1 for mv since the move should retain
+    # the file's identity/metadata.
+    var r = _cp_one(src, dst, 1, 0, 1, 0);  # force=1, interactive=0, preserve=1, verbose=0
+    if (r != 0) { return r; }
+
+    var ur = sys_unlink(src);
+    if (ur != 0) {
+        # cp succeeded but src couldn't be unlinked. Roll back the
+        # destination so the user doesn't end up with two copies that
+        # both look authoritative.
+        sys_unlink(dst);
+        _mv_report(src, 0 - ur);
+        return ur;
+    }
+    if (verbose == 1) { _mv_verbose(src, dst); }
+    return 0;
+}
+
+# Move one SRC to DST. Returns 0 or negative errno; 0 - 9999 is the
+# invocation-wide -i-on-non-tty sentinel (matches cp.cyr's pattern).
+fn _mv_one(src, dst, force, interactive, no_clobber, verbose): i64 {
+    # Stat source. We need to know its type and inode for the
+    # self-move and cross-FS checks. Use lstat so a source-symlink
+    # is treated as a link (POSIX).
+    var src_st[144];
+    var sr = syscall(262, 0 - 100, src, &src_st, 256);  # fstatat AT_SYMLINK_NOFOLLOW
+    if (sr != 0) {
+        _mv_report(src, 0 - sr);
+        return sr;
+    }
+
+    # Destination existence + ADR 0003 hard rule #3 check.
+    var dst_st[144];
+    var dr = syscall(262, 0 - 100, dst, &dst_st, 256);  # lstat dst
+    if (dr == 0) {
+        # Self-move: same dev + ino — silent no-op per POSIX/GNU.
+        if (load64(&src_st + 0) == load64(&dst_st + 0)) {
+            if (load64(&src_st + 8) == load64(&dst_st + 8)) {
+                syscall(1, 2, "kriya mv: '", 11);
+                syscall(1, 2, src, strlen(src));
+                syscall(1, 2, "' and '", 7);
+                syscall(1, 2, dst, strlen(dst));
+                syscall(1, 2, "' are the same file\n", 20);
+                return 0 - 17;
+            }
+        }
+        # ADR 0003 hard rule #3: refuse to overwrite a symlink-to-dir.
+        if (fs_is_lnk(&dst_st) == 1) {
+            if (_mv_is_symlink_to_dir(dst) == 1) {
+                syscall(1, 2, "kriya mv: ", 10);
+                syscall(1, 2, dst, strlen(dst));
+                syscall(1, 2, ": refusing to overwrite symbolic link to directory\n", 51);
+                return 0 - 1;
+            }
+        }
+        # Existing dest gating: -n silent skip, -i prompt, -f / default
+        # silent overwrite.
+        if (no_clobber == 1) {
+            # Silent skip — not an error.
+            return 0;
+        }
+        if (force == 0) {
+            if (interactive == 1) {
+                if (_mv_isatty(0) == 0) {
+                    syscall(1, 2, "kriya mv: error: -i requires stdin to be a terminal\n", 53);
+                    return 0 - 9999;
+                }
+                if (_mv_prompt(dst) == 0) { return 0; }
+            }
+        }
+    } else {
+        if (interactive == 1) {
+            if (_mv_isatty(0) == 0) {
+                syscall(1, 2, "kriya mv: error: -i requires stdin to be a terminal\n", 53);
+                return 0 - 9999;
+            }
+        }
+    }
+
+    # Try the cheap path: rename(2). Same-FS success in one syscall,
+    # atomic. EXDEV means cross-FS; fall back to copy+unlink.
+    var rr = fs_rename(src, dst);
+    if (rr == 0) {
+        if (verbose == 1) { _mv_verbose(src, dst); }
+        return 0;
+    }
+
+    var rerr = 0 - rr;
+    if (rerr == 18) {
+        # EXDEV — cross-filesystem move.
+        return _mv_cross_fs(src, dst, &src_st, verbose);
+    }
+
+    # Other failures: report and bail.
+    _mv_report(dst, rerr);
+    return rr;
+}
+
+fn cmd_mv(start: i64): i64 {
+    _mv_init_spec();
+    if (kriya_args_parse(_mv_spec, start) != 0) {
+        syscall(1, 2, "kriya mv: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        return EXIT_USAGE;
+    }
+
+    var npos = flags_positional_count(_mv_spec);
+    if (npos < 2) {
+        syscall(1, 2, "kriya mv: error: missing operand (need SRC and DST)\n", 53);
+        return EXIT_USAGE;
+    }
+
+    var force: i64 = 0;
+    if (flags_get_bool(_mv_spec, _mv_f_idx) == 1) { force = 1; }
+    var interactive: i64 = 0;
+    if (flags_get_bool(_mv_spec, _mv_i_idx) == 1) { interactive = 1; }
+    var no_clobber: i64 = 0;
+    if (flags_get_bool(_mv_spec, _mv_n_idx) == 1) { no_clobber = 1; }
+    var verbose: i64 = 0;
+    if (flags_get_bool(_mv_spec, _mv_v_idx) == 1) { verbose = 1; }
+
+    # ADR 0002 hard rule #4 enforcement is invocation-wide: if the
+    # user asked for interactive prompts and stdin is not a tty,
+    # the flag is misused regardless of whether any specific operand
+    # would have triggered a prompt.
+    if (interactive == 1) {
+        if (_mv_isatty(0) == 0) {
+            syscall(1, 2, "kriya mv: error: -i requires stdin to be a terminal\n", 53);
+            return EXIT_USAGE;
+        }
+    }
+
+    var dst_arg = flags_positional(_mv_spec, npos - 1);
+
+    # ADR 0003 hard rule #3 applies to the destination operand
+    # regardless of arg-shape. Refuse the whole invocation if the
+    # last operand is a symlink-to-directory — even in the
+    # multi-into-dir shape where the user might have meant "drop
+    # files into the link's target". The explicit path is to
+    # `rm linkdir && mv ...` or use `ln -sfn` for atomic retarget.
+    if (_mv_is_symlink_to_dir(dst_arg) == 1) {
+        syscall(1, 2, "kriya mv: ", 10);
+        syscall(1, 2, dst_arg, strlen(dst_arg));
+        syscall(1, 2, ": refusing to overwrite symbolic link to directory\n", 51);
+        return EXIT_FAILURE;
+    }
+
+    var dst_is_dir = _mv_is_dir_path(dst_arg);
+
+    var any_failed: i64 = 0;
+    if (dst_is_dir == 0) {
+        if (npos != 2) {
+            syscall(1, 2, "kriya mv: error: with multiple sources, the last operand must be a directory\n", 77);
+            return EXIT_USAGE;
+        }
+        var src = flags_positional(_mv_spec, 0);
+        var r = _mv_one(src, dst_arg, force, interactive, no_clobber, verbose);
+        if (r != 0) { any_failed = 1; }
+        if (r == (0 - 9999)) { return EXIT_USAGE; }
+    } else {
+        var i: i64 = 0;
+        while (i < npos - 1) {
+            var src = flags_positional(_mv_spec, i);
+            var base = path_basename_ptr(src);
+            var dst = path_join(dst_arg, base);
+            var r = _mv_one(src, dst, force, interactive, no_clobber, verbose);
+            if (r != 0) { any_failed = 1; }
+            if (r == (0 - 9999)) { return EXIT_USAGE; }
+            i = i + 1;
+        }
+    }
+
+    if (any_failed == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}

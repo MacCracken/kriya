@@ -175,6 +175,17 @@ fn fs_readlinkat(dirfd, path, buf, bufsize): i64 {
     return syscall(267, dirfd, path, buf, bufsize);
 }
 
+# rename(2): rename within a filesystem. Cross-FS returns -EXDEV (-18),
+# letting the caller fall back to copy+unlink. SYS_RENAME = 82 on x86_64.
+fn fs_rename(oldpath, newpath): i64 {
+    return syscall(82, oldpath, newpath);
+}
+
+# renameat(2): rename rooted at explicit dirfds. SYS_RENAMEAT = 264.
+fn fs_renameat(old_dirfd, oldpath, new_dirfd, newpath): i64 {
+    return syscall(264, old_dirfd, oldpath, new_dirfd, newpath);
+}
+
 fn fs_close(fd): i64 {
     return syscall(3, fd);
 }

@@ -624,6 +624,15 @@ fn cmd_cp(start: i64): i64 {
     if (flags_get_bool(_cp_spec, _cp_R_idx) == 1) { recursive = 1; }
     if (flags_get_bool(_cp_spec, _cp_r_idx) == 1) { recursive = 1; }
 
+    # ADR 0002 hard rule #4: -i on a non-tty stdin is a usage error,
+    # invocation-wide, even before any operand classification.
+    if (interactive == 1) {
+        if (_cp_isatty(0) == 0) {
+            syscall(1, 2, "kriya cp: error: -i requires stdin to be a terminal\n", 53);
+            return EXIT_USAGE;
+        }
+    }
+
     # Policy resolution: -P / -H / -L are mutually exclusive in spirit
     # but the parser accepts any subset; last-one-wins by precedence
     # L > H > P (matches GNU cp).
