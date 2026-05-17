@@ -36,6 +36,8 @@ include "src/cmd/stat.cyr"
 include "src/cmd/ls.cyr"
 include "src/cmd/tee.cyr"
 include "src/cmd/wc.cyr"
+include "src/cmd/head.cyr"
+include "src/cmd/tail.cyr"
 
 fn print_usage() {
     syscall(1, 2, "usage: kriya <utility> [args...]\n", 33);
@@ -76,6 +78,8 @@ fn dispatch(name, start: i64): i64 {
     if (streq(name, "ls"))       { return cmd_ls(start); }
     if (streq(name, "tee"))      { return cmd_tee(start); }
     if (streq(name, "wc"))       { return cmd_wc(start); }
+    if (streq(name, "head"))     { return cmd_head(start); }
+    if (streq(name, "tail"))     { return cmd_tail(start); }
     print_unknown(name);
     return EXIT_USAGE;
 }

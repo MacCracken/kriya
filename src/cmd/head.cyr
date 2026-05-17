@@ -1,0 +1,263 @@
+# head — POSIX `head(1)`: emit the first N lines/bytes of each input.
+#
+# Argument shape:
+#   head [opts] [file...]
+#
+# Flags:
+#   -n / --lines=N    emit the first N lines (default 10).
+#   -c / --bytes=N    emit the first N bytes.
+#   -q / --quiet      never emit the `==> FILE <==` header.
+#   -v / --verbose    always emit the header.
+#
+# When neither `-q` nor `-v` is set, the header is emitted iff there
+# is more than one file operand (POSIX/GNU default).
+#
+# Streaming: 64 KiB reads; stops as soon as the limit is hit. No
+# buffering of the file beyond the read window.
+#
+# Deferred (GNU extensions, each a named follow-up):
+#   -n -N / -c -N            "all but the last N" forms. Need a
+#                            single-buffer + tail-like backward scan.
+#   k/M/G/T/P/E suffixes     on N (e.g. `-c 5K`). Wait on a shared
+#                            byte-suffix parser; once head + tail +
+#                            dd want it, extract into args.cyr.
+#
+# Symlink policy: file operands are opened by path; default open
+# follows symlinks (POSIX head/tail semantics). ADR 0003's matrix is
+# about destructive ops; head is informational.
+
+var _head_spec  = 0;
+var _head_n_idx = 0;
+var _head_c_idx = 0;
+var _head_q_idx = 0;
+var _head_v_idx = 0;
+
+var _head_buf   = 0;
+var _HEAD_BUFSZ = 65536;
+
+fn _head_init_spec(): i64 {
+    if (_head_spec != 0) { return 0; }
+    var s = flags_new();
+    _head_n_idx = flags_add_str(s,  110, "lines",   0, "emit first N lines (default 10)");
+    _head_c_idx = flags_add_str(s,  99,  "bytes",   0, "emit first N bytes");
+    _head_q_idx = flags_add_bool(s, 113, "quiet",   0, "suppress filename headers");
+    _head_v_idx = flags_add_bool(s, 118, "verbose", 0, "always emit filename headers");
+    _head_spec = s;
+    return 0;
+}
+
+fn _head_buf_get(): i64 {
+    if (_head_buf != 0) { return _head_buf; }
+    _head_buf = alloc(_HEAD_BUFSZ);
+    return _head_buf;
+}
+
+fn _head_report(operand, errno): i64 {
+    syscall(1, 2, "kriya head: ", 12);
+    syscall(1, 2, operand, strlen(operand));
+    syscall(1, 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        syscall(1, 2, m, strlen(m));
+    } else {
+        syscall(1, 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        syscall(1, 2, &buf + i + 1, 6 - i);
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+fn _head_emit_header(name, first): i64 {
+    if (first == 0) { syscall(1, 1, "\n", 1); }
+    syscall(1, 1, "==> ", 4);
+    syscall(1, 1, name, strlen(name));
+    syscall(1, 1, " <==\n", 5);
+    return 0;
+}
+
+# Write `n` bytes from `buf`, looping over partial writes / EINTR.
+fn _head_write_all(buf, n): i64 {
+    var written: i64 = 0;
+    while (written < n) {
+        var w = syscall(1, 1, buf + written, n - written);
+        if (w < 0) {
+            if ((0 - w) == 4) {
+                # EINTR — retry.
+            } else { return w; }
+        } else {
+            written = written + w;
+        }
+    }
+    return 0;
+}
+
+# Stream `fd` to stdout, emitting at most `limit` bytes if `count_lines`
+# is 0, or at most `limit` newlines (with the data up through the Nth
+# newline) if `count_lines` is 1. Returns 0 on success, negative errno
+# on read/write failure.
+fn _head_emit(fd, limit, count_lines): i64 {
+    if (limit == 0) { return 0; }
+    var buf = _head_buf_get();
+    var bufsz = _HEAD_BUFSZ;
+    var emitted_bytes: i64 = 0;
+    var emitted_lines: i64 = 0;
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var n = syscall(0, fd, buf, bufsz);
+        if (n < 0) {
+            if ((0 - n) == 4) {
+                # EINTR — retry.
+            } else { return n; }
+        } else {
+            if (n == 0) { loop = 0; }
+            else {
+                var write_n = n;
+                if (count_lines == 0) {
+                    # Byte-limited.
+                    var remaining = limit - emitted_bytes;
+                    if (write_n > remaining) { write_n = remaining; }
+                } else {
+                    # Line-limited: find the Nth newline (if any) within
+                    # this read window and truncate.
+                    var i: i64 = 0;
+                    var capped: i64 = 0;
+                    while (i < n) {
+                        if (load8(buf + i) == 10) {
+                            emitted_lines = emitted_lines + 1;
+                            if (emitted_lines >= limit) {
+                                write_n = i + 1;
+                                capped = 1;
+                                i = n;
+                            }
+                        }
+                        i = i + 1;
+                    }
+                    if (capped == 0) { write_n = n; }
+                }
+                if (write_n > 0) {
+                    var wr = _head_write_all(buf, write_n);
+                    if (wr != 0) { return wr; }
+                    emitted_bytes = emitted_bytes + write_n;
+                }
+                if (count_lines == 0) {
+                    if (emitted_bytes >= limit) { loop = 0; }
+                } else {
+                    if (emitted_lines >= limit) { loop = 0; }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+fn cmd_head(start: i64): i64 {
+    _head_init_spec();
+    if (kriya_args_parse(_head_spec, start) != 0) {
+        syscall(1, 2, "kriya head: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
+        return EXIT_USAGE;
+    }
+
+    var quiet: i64 = 0;
+    if (flags_get_bool(_head_spec, _head_q_idx) == 1) { quiet = 1; }
+    var verbose: i64 = 0;
+    if (flags_get_bool(_head_spec, _head_v_idx) == 1) { verbose = 1; }
+
+    # Mode: -c wins over -n (last-wins; GNU same).
+    var count_lines: i64 = 1;
+    var limit: i64 = 10;
+
+    var n_arg = flags_get_str(_head_spec, _head_n_idx);
+    var c_arg = flags_get_str(_head_spec, _head_c_idx);
+
+    if (n_arg != 0) {
+        if (load8(n_arg) != 0) {
+            var v = kriya_parse_nonneg_int(n_arg);
+            if (v < 0) {
+                syscall(1, 2, "kriya head: error: --lines requires a non-negative integer\n", 59);
+                return EXIT_USAGE;
+            }
+            limit = v;
+            count_lines = 1;
+        }
+    }
+    if (c_arg != 0) {
+        if (load8(c_arg) != 0) {
+            var v = kriya_parse_nonneg_int(c_arg);
+            if (v < 0) {
+                syscall(1, 2, "kriya head: error: --bytes requires a non-negative integer\n", 59);
+                return EXIT_USAGE;
+            }
+            limit = v;
+            count_lines = 0;
+        }
+    }
+
+    var npos = flags_positional_count(_head_spec);
+    var any_failed: i64 = 0;
+
+    if (npos < 1) {
+        # Stdin.
+        if (verbose == 1) { _head_emit_header("standard input", 1); }
+        var r = _head_emit(0, limit, count_lines);
+        if (r != 0) {
+            _head_report("(stdin)", 0 - r);
+            any_failed = 1;
+        }
+        if (any_failed == 1) { return EXIT_FAILURE; }
+        return EXIT_SUCCESS;
+    }
+
+    var show_headers: i64 = 0;
+    if (npos > 1) { show_headers = 1; }
+    if (verbose == 1) { show_headers = 1; }
+    if (quiet == 1)   { show_headers = 0; }
+
+    var i: i64 = 0;
+    var first: i64 = 1;
+    while (i < npos) {
+        var p = flags_positional(_head_spec, i);
+        var fd: i64 = 0;
+        var name: i64 = p;
+        var is_stdin: i64 = 0;
+        if (load8(p) == 45) {
+            if (load8(p + 1) == 0) {
+                # Operand "-" means stdin.
+                fd = 0;
+                is_stdin = 1;
+                name = "standard input";
+            }
+        }
+        if (is_stdin == 0) {
+            fd = sys_open(p, 0, 0);
+            if (fd < 0) {
+                _head_report(p, 0 - fd);
+                any_failed = 1;
+                i = i + 1;
+                continue;
+            }
+        }
+        if (show_headers == 1) { _head_emit_header(name, first); }
+        var r = _head_emit(fd, limit, count_lines);
+        if (r != 0) {
+            _head_report(name, 0 - r);
+            any_failed = 1;
+        }
+        if (is_stdin == 0) { syscall(3, fd); }
+        first = 0;
+        i = i + 1;
+    }
+
+    if (any_failed == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}
