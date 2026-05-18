@@ -6,6 +6,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **ADR 0005** — Regex engine choice: Cyrius stdlib `lib/niyama.cyr` (BRE + RE2). PCRE deferred behind a v2.0 flag gate; no external regex deps. `grep -G`/default → `niyama_bre_*`; `grep -E` → `niyama_re2_*`; `grep -F` → in-tree byte scan. `-i` handled per-engine (byte-fold for BRE/F, `(?i)` inline prefix for RE2). ASCII-only at v1.0. Hard rules: no engine env var, no silent engine fallback, no `-P` (rejected with usage error). See `docs/adr/0005-regex-engine-niyama.md`.
+- **`grep`** (`src/cmd/grep.cyr`) — POSIX `grep(1)`, first M5 utility. Flags: `-i`/`-v`/`-w`/`-x`/`-c`/`-l`/`-L`/`-n`/`-q`/`-s`/`-h`/`-H`/`-o`/`-r`/`-R`/`-z`/`-E`/`-G`/`-F`/`-e PATTERN`/`-f FILE`. Pattern sources: positional[0] (when no `-e`/`-f`), single `-e PATTERN`, and `-f FILE` (one pattern per line — full multi-pattern path). Engine dispatched per ADR 0005. Streaming 64 KiB line buffer with bounded RAM. Recursive walk (`-r`/`-R`) uses `getdents64` via `src/lib/fs.cyr`, never follows symlinks (ADR 0003), skips non-regular non-directory entries. Filename header rule: on by default for 2+ operands or `-r`; `-h` forces off, `-H` forces on. Exit codes: `0` any match, `1` no match, `2` usage or filesystem error (suppressed to `1` under `-s`). `-P` is rejected with a usage error pointing at `-E` per ADR 0005. Smoke `scripts/smoke-grep.sh` — **66/66** every flag and engine combo compared cell-by-cell against GNU `grep` (literal + bracket + star + dot + escaped-group BRE patterns, ERE `+`/`{n,m}`/group/alternation, `-F` literal-regex-char, `-i` across all three engines, `-v`, `-c`, `-n`, `-l`/`-L` multi-file, `-w` word boundary, `-x` whole-line, `-o` only-matching with multi-match per line, `-h`/`-H`, `-s` suppress missing-file, multi-file headers, stdin via pipe and via `-` operand, `-e`/`-f` patterns, `-z` NUL-separated I/O, `-r` recursive). Niyama bench points added to `tests/kriya.bcyr`: `niyama/bre_search_literal` ~5µs/call and `niyama/re2_search_class` ~5µs/call against a 43-byte line. End-to-end on 10k-line input: kriya grep ~80ms vs GNU grep ~1ms — GNU's Boyer-Moore literal-scan fast path is ~80× faster than the Pike NFA we share with niyama; literal-pattern optimization is a follow-up against niyama, not a kriya hack. Cold-start re-bench (RUNS=100): median **1.210ms** (essentially flat from v0.5.0's 1.198ms — grep's `streq` lands after `true`'s hot path).
+- **Cyrius pin → 5.11.59** (was 5.11.54). `cyrius lib sync` now needed before build to populate `lib/unicode/*` for niyama's NFD path (the `cyrius lib sync` creates the directory but doesn't recurse files — manual copy from `~/.cyrius/versions/5.11.59/lib/unicode/` until the lib-sync fix lands upstream).
+
+### Deferred during this slice
+
+- **Multi-`-e`** — only one `-e PATTERN` is accepted; `-f FILE` is the multi-pattern path. Waits on a stdlib `lib/flags.cyr` accumulating-string variant (named follow-up: `flags_add_str_multi`).
+- **Pre-`-r` glob filters** `--include`/`--exclude`/`--include-dir`/`--exclude-dir` — needs a shared glob matcher kriya doesn't have yet (lands with `find` when M5 resumes).
+- **Context flags** `-A`/`-B`/`-C N` — needs a ring-buffer per file for pre-context replay; not blocking common usage.
+- **Color output** `--color=auto`/`always`/`never` — same blocker as `ls --color` (deferred against a shared ANSI-escape helper).
+- **`-Z`/`--null` NUL-separated filename output** (paired with `-l`/`-L`/`-r`) — same shape as `-z`, but on filename emit; lands when consumed.
+- **BRE `-i` bracket-class quirk** — `[A-M]` under `-i` against folded input matches `a-m`, not `A-M` literal. Documented in ADR 0005. Upstream fix is a `(?i)` flag in `niyama_bre_*`, not kriya-side.
+- **Literal-pattern fast path** — Boyer-Moore-style scan for patterns that are pure-literal (no regex metachars). Belongs in niyama, not kriya. Niyama proposal candidate.
+
 ## [0.5.0] — 2026-05-17
 
 **Closes M4** — ten text-stream utilities (`tee`, `wc`, `head`, `tail` incl. follow mode, `nl`, `uniq`, `tr`, `cut`, `sort`, `printf`), the biggest milestone by count. Each utility verified cell-by-cell against GNU coreutils where applicable. The new utilities share a common shape: streaming line buffers (64 KiB chunks, bounded RAM), terminator-aware (`-z` NUL-separated mode where it makes sense), stdin-via-`-` operand convention, partial-failure-preserves-output exit semantics. Highlights:

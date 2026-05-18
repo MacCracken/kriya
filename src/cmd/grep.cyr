@@ -1,0 +1,1016 @@
+# grep — POSIX `grep(1)`: search for lines matching a pattern.
+#
+# Argument shape:
+#   grep [opts] PATTERN [FILE...]
+#   grep [opts] -e PATTERN [-f FILE] [FILE...]
+#
+# Pattern flavors (per ADR 0005):
+#   default      POSIX BRE via niyama_bre_*
+#   -E / -E      POSIX ERE via niyama_re2_*
+#   -G           alias for default (BRE)
+#   -F           fixed-string byte scan, no engine
+#   -P           not supported in v1.0 — usage error (see ADR 0005)
+#
+# Pattern source:
+#   positional[0]    when no -e and no -f
+#   -e PATTERN       single pattern (multi-`-e` is a flags-stdlib follow-up)
+#   -f FILE          patterns from file, one per line (full multi-pattern path)
+#
+# Modifier flags:
+#   -i   ASCII case-insensitive (pattern + input pre-folded for BRE/-F;
+#        `(?i)` inline-prefix for RE2 per ADR 0005)
+#   -v   invert: emit lines that DO NOT match
+#   -w   word-boundary: match must be flanked by non-[A-Za-z0-9_] (or BOL/EOL)
+#   -x   whole-line: match must span the entire line
+#   -c   per-file match count instead of matching lines
+#   -l   list filenames with at least one match (per-file)
+#   -L   list filenames with NO matches (per-file)
+#   -n   prefix each emit with `LINENO:`
+#   -q   quiet: exit on first match, no output
+#   -s   suppress filesystem-error messages
+#   -h / -H   filename header control (auto when 2+ operands or -r)
+#   -o   emit only the matched substring(s) on each matching line
+#   -r / -R   recurse into directory operands; never follow symlinks
+#   -z   NUL-separated input + output
+#
+# Exit codes:
+#   0   at least one line matched (or, for -L, at least one file had no matches)
+#   1   no matches
+#   2   usage error or no patterns supplied
+
+# --- Globals -------------------------------------------------------------
+
+var _grep_spec    = 0;
+var _gr_i_idx     = 0;
+var _gr_v_idx     = 0;
+var _gr_w_idx     = 0;
+var _gr_x_idx     = 0;
+var _gr_c_idx     = 0;
+var _gr_l_idx     = 0;
+var _gr_L_idx     = 0;
+var _gr_n_idx     = 0;
+var _gr_q_idx     = 0;
+var _gr_s_idx     = 0;
+var _gr_h_idx     = 0;
+var _gr_H_idx     = 0;
+var _gr_o_idx     = 0;
+var _gr_r_idx     = 0;
+var _gr_R_idx     = 0;
+var _gr_z_idx     = 0;
+var _gr_E_idx     = 0;
+var _gr_G_idx     = 0;
+var _gr_F_idx     = 0;
+var _gr_P_idx     = 0;
+var _gr_e_idx     = 0;
+var _gr_f_idx     = 0;
+
+var _gr_read_buf  = 0;
+var _gr_line_buf  = 0;
+var _gr_fold_buf  = 0;
+var _GR_READ_SZ   = 65536;
+var _GR_LINE_SZ   = 65536;
+
+# Engine kinds.
+enum GrepEng {
+    GR_ENG_BRE   = 0,
+    GR_ENG_RE2   = 1,
+    GR_ENG_FIXED = 2,
+}
+
+# Pattern handle layout (40 bytes):
+#   0  : engine kind (GrepEng)
+#   8  : nfa pointer (0 for fixed-string)
+#   16 : pattern bytes pointer (raw or folded)
+#   24 : pattern length
+#   32 : fold flag (1 if pre-folded for -i + BRE/F)
+
+fn _gr_init_spec(): i64 {
+    if (_grep_spec != 0) { return 0; }
+    var s = flags_new();
+    _gr_i_idx = flags_add_bool(s, 105, "ignore-case",       0, "ASCII case-insensitive match");
+    _gr_v_idx = flags_add_bool(s, 118, "invert-match",      0, "emit non-matching lines");
+    _gr_w_idx = flags_add_bool(s, 119, "word-regexp",       0, "match must be flanked by non-word");
+    _gr_x_idx = flags_add_bool(s, 120, "line-regexp",       0, "match must span the entire line");
+    _gr_c_idx = flags_add_bool(s, 99,  "count",             0, "print match count per file");
+    _gr_l_idx = flags_add_bool(s, 108, "files-with-matches",0, "print filenames with matches");
+    _gr_L_idx = flags_add_bool(s, 76,  "files-without-match",0,"print filenames without matches");
+    _gr_n_idx = flags_add_bool(s, 110, "line-number",       0, "prefix each line with line number");
+    _gr_q_idx = flags_add_bool(s, 113, "quiet",             0, "no output; exit code only");
+    _gr_s_idx = flags_add_bool(s, 115, "no-messages",       0, "suppress filesystem error messages");
+    _gr_h_idx = flags_add_bool(s, 104, "no-filename",       0, "never prefix filename");
+    _gr_H_idx = flags_add_bool(s, 72,  "with-filename",     0, "always prefix filename");
+    _gr_o_idx = flags_add_bool(s, 111, "only-matching",     0, "emit only the matched substring");
+    _gr_r_idx = flags_add_bool(s, 114, "recursive",         0, "recurse into directory operands");
+    _gr_R_idx = flags_add_bool(s, 82,  "dereference-recursive", 0, "alias for -r (no symlink follow either)");
+    _gr_z_idx = flags_add_bool(s, 122, "null-data",         0, "NUL-separated input + output");
+    _gr_E_idx = flags_add_bool(s, 69,  "extended-regexp",   0, "ERE pattern (via niyama_re2)");
+    _gr_G_idx = flags_add_bool(s, 71,  "basic-regexp",      0, "BRE pattern (default)");
+    _gr_F_idx = flags_add_bool(s, 70,  "fixed-strings",     0, "literal-string match (no regex)");
+    _gr_P_idx = flags_add_bool(s, 80,  "perl-regexp",       0, "PCRE (rejected in v1.0 per ADR 0005)");
+    _gr_e_idx = flags_add_str(s,  101, "regexp",            0, "pattern (overrides positional[0])");
+    _gr_f_idx = flags_add_str(s,  102, "file",              0, "read patterns from file, one per line");
+    _grep_spec = s;
+    return 0;
+}
+
+fn _gr_read_get(): i64 {
+    if (_gr_read_buf != 0) { return _gr_read_buf; }
+    _gr_read_buf = alloc(_GR_READ_SZ);
+    return _gr_read_buf;
+}
+
+fn _gr_line_get(): i64 {
+    if (_gr_line_buf != 0) { return _gr_line_buf; }
+    _gr_line_buf = alloc(_GR_LINE_SZ);
+    return _gr_line_buf;
+}
+
+fn _gr_fold_get(): i64 {
+    if (_gr_fold_buf != 0) { return _gr_fold_buf; }
+    _gr_fold_buf = alloc(_GR_LINE_SZ);
+    return _gr_fold_buf;
+}
+
+# --- Error reporting ----------------------------------------------------
+
+fn _gr_report(operand, errno, suppress): i64 {
+    if (suppress == 1) { return 0; }
+    syscall(1, 2, "kriya grep: ", 12);
+    syscall(1, 2, operand, strlen(operand));
+    syscall(1, 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        syscall(1, 2, m, strlen(m));
+    } else {
+        syscall(1, 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        syscall(1, 2, &buf + i + 1, 6 - i);
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+# Render decimal `v` into buf. Returns byte count.
+fn _gr_render_dec(v, buf): i64 {
+    if (v == 0) { store8(buf, 48); return 1; }
+    var tmp[32];
+    var n: i64 = 0;
+    var rem = v;
+    while (rem > 0) {
+        store8(&tmp + n, 48 + (rem - (rem / 10) * 10));
+        rem = rem / 10;
+        n = n + 1;
+    }
+    var i: i64 = 0;
+    while (i < n) {
+        store8(buf + i, load8(&tmp + n - 1 - i));
+        i = i + 1;
+    }
+    return n;
+}
+
+fn _gr_emit_dec(v): i64 {
+    var buf[32];
+    var n = _gr_render_dec(v, &buf);
+    syscall(1, 1, &buf, n);
+    return 0;
+}
+
+# --- Case fold helpers --------------------------------------------------
+
+# Returns 1 if byte `c` is an ASCII uppercase letter.
+fn _gr_is_upper(c): i64 {
+    if (c < 65) { return 0; }
+    if (c > 90) { return 0; }
+    return 1;
+}
+
+fn _gr_to_lower(c): i64 {
+    if (_gr_is_upper(c) == 1) { return c + 32; }
+    return c;
+}
+
+# Lower-case `src` into `dst` for `len` bytes (ASCII A..Z only).
+fn _gr_fold_bytes(src, dst, len): i64 {
+    var i: i64 = 0;
+    while (i < len) {
+        store8(dst + i, _gr_to_lower(load8(src + i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Pattern fold for BRE: walk `pat` once, lowercasing literal letter bytes
+# that are NOT escaped by `\` and NOT inside a `[...]` bracket (we fold
+# bracket contents too — ASCII semantics for `-i` per ADR 0005).
+# Output written to fresh alloc'd buffer; returns (ptr, len). Stores len
+# in `*out_len`.
+fn _gr_pat_fold_bre(pat, pat_len, out_len_ptr): i64 {
+    var out = alloc(pat_len + 1);
+    var i: i64 = 0;
+    while (i < pat_len) {
+        var c = load8(pat + i);
+        if (c == 92) {  # backslash — copy escape as-is including next byte
+            store8(out + i, c);
+            i = i + 1;
+            if (i < pat_len) {
+                store8(out + i, load8(pat + i));
+                i = i + 1;
+            }
+        } else {
+            store8(out + i, _gr_to_lower(c));
+            i = i + 1;
+        }
+    }
+    store8(out + i, 0);
+    store64(out_len_ptr, pat_len);
+    return out;
+}
+
+# --- Engine compile + match --------------------------------------------
+
+# Allocate a 40-byte handle.
+fn _gr_handle_new(kind, nfa, pat, pat_len, fold): i64 {
+    var h = alloc(40);
+    store64(h + 0,  kind);
+    store64(h + 8,  nfa);
+    store64(h + 16, pat);
+    store64(h + 24, pat_len);
+    store64(h + 32, fold);
+    return h;
+}
+
+# Compile one pattern under the chosen engine flag set. Returns handle or 0.
+# `engine_flag`: 0=BRE, 1=RE2, 2=fixed. `ignore_case`: 1 if -i.
+fn _gr_compile(pat, engine_flag, ignore_case): i64 {
+    var pat_len = strlen(pat);
+    if (engine_flag == GR_ENG_FIXED) {
+        if (ignore_case == 1) {
+            var folded_len: i64 = 0;
+            var folded = alloc(pat_len + 1);
+            _gr_fold_bytes(pat, folded, pat_len);
+            store8(folded + pat_len, 0);
+            return _gr_handle_new(GR_ENG_FIXED, 0, folded, pat_len, 1);
+        }
+        return _gr_handle_new(GR_ENG_FIXED, 0, pat, pat_len, 0);
+    }
+    if (engine_flag == GR_ENG_RE2) {
+        # Prepend (?i) for case-insensitive — niyama_re2 honors the inline flag.
+        var compile_pat = pat;
+        if (ignore_case == 1) {
+            var buf = alloc(pat_len + 5);
+            store8(buf + 0, 40);   # (
+            store8(buf + 1, 63);   # ?
+            store8(buf + 2, 105);  # i
+            store8(buf + 3, 41);   # )
+            var k: i64 = 0;
+            while (k < pat_len) {
+                store8(buf + 4 + k, load8(pat + k));
+                k = k + 1;
+            }
+            store8(buf + 4 + pat_len, 0);
+            compile_pat = buf;
+        }
+        var nfa = niyama_re2_compile(compile_pat);
+        if (nfa == 0) { return 0; }
+        return _gr_handle_new(GR_ENG_RE2, nfa, compile_pat, strlen(compile_pat), 0);
+    }
+    # BRE
+    var use_pat = pat;
+    var use_len = pat_len;
+    var fold = 0;
+    if (ignore_case == 1) {
+        var fl: i64 = 0;
+        use_pat = _gr_pat_fold_bre(pat, pat_len, &fl);
+        use_len = pat_len;
+        fold = 1;
+    }
+    var bnfa = niyama_bre_compile(use_pat);
+    if (bnfa == 0) { return 0; }
+    return _gr_handle_new(GR_ENG_BRE, bnfa, use_pat, use_len, fold);
+}
+
+# Run `handle` against `line` (len bytes). Returns match start offset, or
+# -1 if no match. `match_end_ptr`, if non-zero, receives the match end
+# offset (exclusive) for -o support.
+fn _gr_search(handle, line, len, match_end_ptr): i64 {
+    var kind = load64(handle + 0);
+    if (kind == GR_ENG_FIXED) {
+        var pat = load64(handle + 16);
+        var plen = load64(handle + 24);
+        if (plen == 0) {
+            if (match_end_ptr != 0) { store64(match_end_ptr, 0); }
+            return 0;
+        }
+        if (plen > len) { return 0 - 1; }
+        var i: i64 = 0;
+        var limit = len - plen;
+        while (i <= limit) {
+            var k: i64 = 0;
+            var ok: i64 = 1;
+            while (ok == 1) {
+                if (k == plen) { ok = 2; }
+                else {
+                    if (load8(line + i + k) != load8(pat + k)) { ok = 0; }
+                    else { k = k + 1; }
+                }
+            }
+            if (ok == 2) {
+                if (match_end_ptr != 0) { store64(match_end_ptr, i + plen); }
+                return i;
+            }
+            i = i + 1;
+        }
+        return 0 - 1;
+    }
+    var nfa = load64(handle + 8);
+    if (kind == GR_ENG_RE2) {
+        var p = niyama_re2_search_at(nfa, line, len, 0);
+        if (p >= 0) {
+            if (match_end_ptr != 0) {
+                var e = niyama_re2_group_end(nfa, 0);
+                if (e < 0) { e = p; }
+                store64(match_end_ptr, e);
+            }
+        }
+        return p;
+    }
+    # BRE
+    var bp = niyama_bre_search_at(nfa, line, len, 0);
+    if (bp >= 0) {
+        if (match_end_ptr != 0) {
+            var be = niyama_bre_group_end(nfa, 0);
+            if (be < 0) { be = bp; }
+            store64(match_end_ptr, be);
+        }
+    }
+    return bp;
+}
+
+# --- Word + whole-line wrappers ----------------------------------------
+
+fn _gr_is_word_byte(c): i64 {
+    if (c >= 48 && c <= 57)  { return 1; }
+    if (c >= 65 && c <= 90)  { return 1; }
+    if (c >= 97 && c <= 122) { return 1; }
+    if (c == 95)             { return 1; }
+    return 0;
+}
+
+# Iterate matches across the line. For each match, the caller's check
+# (word/whole-line) decides whether to accept. Returns 1 (line matches),
+# 0 (no acceptable match), and writes the first accepted match's
+# (start, end) into the out-pointers when non-zero. `from_ptr` may be
+# non-zero to continue iteration (used by -o multi-match emit).
+fn _gr_check_line(handles, n_handles, line, len, word_mode, xline_mode,
+                  match_start_ptr, match_end_ptr, from): i64 {
+    var h_i: i64 = 0;
+    while (h_i < n_handles) {
+        var handle = vec_get(handles, h_i);
+        var pos = from;
+        var done: i64 = 0;
+        while (done == 0) {
+            var me: i64 = 0;
+            var ms: i64 = 0;
+            ms = _gr_search_at(handle, line, len, pos, &me);
+            if (ms < 0) { done = 1; }
+            else {
+                var ok: i64 = 1;
+                if (word_mode == 1) {
+                    if (ms > 0) {
+                        if (_gr_is_word_byte(load8(line + ms - 1)) == 1) { ok = 0; }
+                    }
+                    if (me < len) {
+                        if (_gr_is_word_byte(load8(line + me)) == 1) { ok = 0; }
+                    }
+                }
+                if (xline_mode == 1) {
+                    if (ms != 0)    { ok = 0; }
+                    if (me != len)  { ok = 0; }
+                }
+                if (ok == 1) {
+                    if (match_start_ptr != 0) { store64(match_start_ptr, ms); }
+                    if (match_end_ptr != 0)   { store64(match_end_ptr, me); }
+                    return 1;
+                }
+                # Move past this match start to keep looking for an
+                # acceptable one further along the line.
+                pos = ms + 1;
+                if (pos > len) { done = 1; }
+            }
+        }
+        h_i = h_i + 1;
+    }
+    return 0;
+}
+
+# Wrapper that searches from offset `from` instead of always 0.
+fn _gr_search_at(handle, line, len, from, match_end_ptr): i64 {
+    var kind = load64(handle + 0);
+    if (kind == GR_ENG_FIXED) {
+        var pat = load64(handle + 16);
+        var plen = load64(handle + 24);
+        if (plen == 0) {
+            if (match_end_ptr != 0) { store64(match_end_ptr, from); }
+            return from;
+        }
+        if (from + plen > len) { return 0 - 1; }
+        var i: i64 = from;
+        var limit = len - plen;
+        while (i <= limit) {
+            var k: i64 = 0;
+            var ok: i64 = 1;
+            while (ok == 1) {
+                if (k == plen) { ok = 2; }
+                else {
+                    if (load8(line + i + k) != load8(pat + k)) { ok = 0; }
+                    else { k = k + 1; }
+                }
+            }
+            if (ok == 2) {
+                if (match_end_ptr != 0) { store64(match_end_ptr, i + plen); }
+                return i;
+            }
+            i = i + 1;
+        }
+        return 0 - 1;
+    }
+    var nfa = load64(handle + 8);
+    if (kind == GR_ENG_RE2) {
+        var p = niyama_re2_search_at(nfa, line, len, from);
+        if (p >= 0) {
+            if (match_end_ptr != 0) {
+                var e = niyama_re2_group_end(nfa, 0);
+                if (e < 0) { e = p; }
+                store64(match_end_ptr, e);
+            }
+        }
+        return p;
+    }
+    var bp = niyama_bre_search_at(nfa, line, len, from);
+    if (bp >= 0) {
+        if (match_end_ptr != 0) {
+            var be = niyama_bre_group_end(nfa, 0);
+            if (be < 0) { be = bp; }
+            store64(match_end_ptr, be);
+        }
+    }
+    return bp;
+}
+
+# --- Emit helpers -------------------------------------------------------
+
+# Emit `name:` prefix (or `name:LINENO:`) when needed. Uses the configured
+# field separator (`:` or `-` for context lines — but we don't ship context).
+fn _gr_emit_prefix(name, show_name, show_line, lineno): i64 {
+    if (show_name == 1) {
+        syscall(1, 1, name, strlen(name));
+        syscall(1, 1, ":", 1);
+    }
+    if (show_line == 1) {
+        _gr_emit_dec(lineno);
+        syscall(1, 1, ":", 1);
+    }
+    return 0;
+}
+
+# --- Pattern intake -----------------------------------------------------
+
+# Append each newline-separated pattern in `buf` (`len` bytes) to vec
+# `out`. Skips a single empty pattern at EOF (matches GNU). Returns 0.
+fn _gr_split_patterns(buf, len, out): i64 {
+    var i: i64 = 0;
+    var start: i64 = 0;
+    while (i < len) {
+        if (load8(buf + i) == 10) {
+            var slen = i - start;
+            var s = alloc(slen + 1);
+            if (slen > 0) { memcpy(s, buf + start, slen); }
+            store8(s + slen, 0);
+            vec_push(out, s);
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (start < len) {
+        var rlen = len - start;
+        var r = alloc(rlen + 1);
+        memcpy(r, buf + start, rlen);
+        store8(r + rlen, 0);
+        vec_push(out, r);
+    }
+    return 0;
+}
+
+# Read entire `path` into a freshly-alloc'd buffer. Returns (ptr, length
+# via *out_len), or -errno via negative return when out_len is unused.
+fn _gr_slurp(path, out_len_ptr): i64 {
+    var fd = sys_open(path, 0, 0);
+    if (fd < 0) { return fd; }
+    var cap: i64 = 4096;
+    var buf = alloc(cap);
+    var used: i64 = 0;
+    var loop: i64 = 1;
+    while (loop == 1) {
+        if (used + 4096 > cap) {
+            var newcap = cap * 2;
+            var newbuf = alloc(newcap);
+            memcpy(newbuf, buf, used);
+            buf = newbuf;
+            cap = newcap;
+        }
+        var n = syscall(0, fd, buf + used, 4096);
+        if (n < 0) {
+            if ((0 - n) == 4) {
+                # EINTR — retry.
+            } else {
+                syscall(3, fd);
+                return n;
+            }
+        } else {
+            if (n == 0) { loop = 0; }
+            else { used = used + n; }
+        }
+    }
+    syscall(3, fd);
+    store64(out_len_ptr, used);
+    return buf;
+}
+
+# --- File processing ---------------------------------------------------
+
+# Process one fd as a stream. Returns 1 if any line matched (post-invert),
+# 0 if none. On read error, reports + returns -errno (negated for caller).
+# `name` is the display name (or 0 for no-name mode; required when
+# show_name is 1).
+fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
+    var invert      = load64(opts + 0);
+    var word_mode   = load64(opts + 8);
+    var xline_mode  = load64(opts + 16);
+    var count_mode  = load64(opts + 24);
+    var list_match  = load64(opts + 32);   # -l
+    var list_nomatch= load64(opts + 40);   # -L
+    var show_name   = load64(opts + 48);
+    var show_lineno = load64(opts + 56);
+    var quiet_mode  = load64(opts + 64);
+    var only_match  = load64(opts + 72);   # -o
+
+    var read_buf = _gr_read_get();
+    var line_buf = _gr_line_get();
+    var fold_buf = _gr_fold_get();
+    var fold_active = load64(handles + 0);  # 0 here is a flag stored separately
+    fold_active = load64(opts + 80);        # 1 if BRE/F with -i (caller computes)
+
+    var line_len: i64 = 0;
+    var lineno:   i64 = 0;
+    var matches:  i64 = 0;
+    var any_match: i64 = 0;
+    var truncated_warned: i64 = 0;
+    var loop: i64 = 1;
+    var early_exit: i64 = 0;
+    while (loop == 1) {
+        var n = syscall(0, fd, read_buf, _GR_READ_SZ);
+        if (n < 0) {
+            if ((0 - n) == 4) {
+                # EINTR — retry.
+            } else { return n; }
+        } else {
+            var consume_last: i64 = 0;
+            if (n == 0) {
+                # EOF — flush trailing line.
+                if (line_len > 0) { consume_last = 1; }
+                loop = 0;
+            }
+            var bi: i64 = 0;
+            var done_chunk: i64 = 0;
+            while (done_chunk == 0) {
+                var have_line: i64 = 0;
+                if (consume_last == 1) {
+                    have_line = 1;
+                    consume_last = 0;
+                    done_chunk = 1;
+                } else {
+                    if (bi >= n) { done_chunk = 1; }
+                    else {
+                        var b = load8(read_buf + bi);
+                        if (b == term_byte) {
+                            have_line = 1;
+                            bi = bi + 1;
+                        } else {
+                            if (line_len < _GR_LINE_SZ - 1) {
+                                store8(line_buf + line_len, b);
+                                line_len = line_len + 1;
+                            } else {
+                                if (truncated_warned == 0) {
+                                    syscall(1, 2, "kriya grep: warning: line exceeds 64 KiB; truncating\n", 54);
+                                    truncated_warned = 1;
+                                }
+                            }
+                            bi = bi + 1;
+                        }
+                    }
+                }
+                if (have_line == 1) {
+                    lineno = lineno + 1;
+                    # Apply -i input fold if engine demands it.
+                    var search_buf = line_buf;
+                    if (fold_active == 1) {
+                        _gr_fold_bytes(line_buf, fold_buf, line_len);
+                        search_buf = fold_buf;
+                    }
+                    var ms: i64 = 0;
+                    var me: i64 = 0;
+                    var matched = _gr_check_line(handles, n_handles, search_buf, line_len,
+                                                 word_mode, xline_mode, &ms, &me, 0);
+                    if (invert == 1) {
+                        if (matched == 1) { matched = 0; } else { matched = 1; }
+                    }
+                    if (matched == 1) {
+                        matches = matches + 1;
+                        any_match = 1;
+                        if (quiet_mode == 1) {
+                            early_exit = 1;
+                            done_chunk = 1;
+                            loop = 0;
+                        } elif (list_match == 1) {
+                            syscall(1, 1, name, strlen(name));
+                            var tb[2]; store8(&tb, term_byte);
+                            syscall(1, 1, &tb, 1);
+                            early_exit = 1;
+                            done_chunk = 1;
+                            loop = 0;
+                        } elif (list_nomatch == 1) {
+                            # -L: matching means "this file does NOT qualify";
+                            # we can early-exit since we just need to know
+                            # there was a match.
+                            early_exit = 1;
+                            done_chunk = 1;
+                            loop = 0;
+                        } elif (count_mode == 1) {
+                            # No emit yet — total flushed at file end.
+                        } elif (only_match == 1) {
+                            # -o: emit each match substring on its own line,
+                            # walking the line for additional matches. Note
+                            # the first (ms, me) is already valid.
+                            var op: i64 = 0;
+                            var cur_ms = ms;
+                            var cur_me = me;
+                            var more: i64 = 1;
+                            while (more == 1) {
+                                _gr_emit_prefix(name, show_name, show_lineno, lineno);
+                                # Emit raw bytes (not folded) from line_buf.
+                                if (cur_me > cur_ms) {
+                                    syscall(1, 1, line_buf + cur_ms, cur_me - cur_ms);
+                                }
+                                var tb[2]; store8(&tb, term_byte);
+                                syscall(1, 1, &tb, 1);
+                                # Advance past this match to find the next.
+                                var next_from = cur_me;
+                                if (next_from == cur_ms) { next_from = cur_ms + 1; }
+                                if (next_from > line_len) { more = 0; }
+                                else {
+                                    var nm: i64 = 0;
+                                    var ne: i64 = 0;
+                                    var got = _gr_check_line(handles, n_handles, search_buf,
+                                                             line_len, word_mode, xline_mode,
+                                                             &nm, &ne, next_from);
+                                    if (got == 1) { cur_ms = nm; cur_me = ne; }
+                                    else { more = 0; }
+                                }
+                            }
+                        } else {
+                            _gr_emit_prefix(name, show_name, show_lineno, lineno);
+                            if (line_len > 0) {
+                                syscall(1, 1, line_buf, line_len);
+                            }
+                            var tb[2]; store8(&tb, term_byte);
+                            syscall(1, 1, &tb, 1);
+                        }
+                    }
+                    line_len = 0;
+                }
+            }
+        }
+    }
+    # Per-file count emit.
+    if (early_exit == 0) {
+        if (count_mode == 1) {
+            if (quiet_mode == 0) {
+                if (show_name == 1) {
+                    syscall(1, 1, name, strlen(name));
+                    syscall(1, 1, ":", 1);
+                }
+                _gr_emit_dec(matches);
+                var tb[2]; store8(&tb, term_byte);
+                syscall(1, 1, &tb, 1);
+            }
+        } elif (list_nomatch == 1) {
+            # -L: emit name only if NO matches were seen.
+            if (any_match == 0) {
+                if (quiet_mode == 0) {
+                    syscall(1, 1, name, strlen(name));
+                    var tb[2]; store8(&tb, term_byte);
+                    syscall(1, 1, &tb, 1);
+                }
+            }
+        }
+    }
+    if (any_match == 1) { return 1; }
+    if (list_nomatch == 1) {
+        # -L "matched" means the file qualified (no internal match).
+        return 1 - any_match;
+    }
+    return 0;
+}
+
+# Recursive directory walk. Each regular file under `path` (no symlink
+# follow) is grepped. Returns 1 if any match anywhere, 0 otherwise.
+# `path` is mutated locally via path_join into `subbuf` for descent.
+fn _gr_walk_dir(dir_path, handles, n_handles, opts, term_byte, suppress): i64 {
+    var dir_fd = fs_openat(0 - 100, dir_path, 65536, 0);  # O_RDONLY | O_DIRECTORY
+    if (dir_fd < 0) {
+        _gr_report(dir_path, 0 - dir_fd, suppress);
+        return 0;
+    }
+    var found_any: i64 = 0;
+    var dent_buf = alloc(4096);
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var nb = fs_getdents64(dir_fd, dent_buf, 4096);
+        if (nb < 0) {
+            if ((0 - nb) == 4) {
+                # EINTR — retry.
+            } else {
+                _gr_report(dir_path, 0 - nb, suppress);
+                fs_close(dir_fd);
+                return found_any;
+            }
+        } else {
+            if (nb == 0) { loop = 0; }
+            else {
+                var off: i64 = 0;
+                while (off < nb) {
+                    var ent = dent_buf + off;
+                    var reclen = fs_dent_reclen(ent);
+                    var name = fs_dent_name(ent);
+                    var is_dd = fs_dent_is_dotdot(ent);
+                    if (is_dd == 0) {
+                        var st[36];  # 144 bytes (18 i64 slots)
+                        var r = fs_lstat_at(dir_fd, name, &st);
+                        if (r == 0) {
+                            # Build full path: dir_path + "/" + name
+                            var nlen = strlen(name);
+                            var dlen = strlen(dir_path);
+                            var sep = 1;
+                            if (dlen > 0) {
+                                if (load8(dir_path + dlen - 1) == 47) { sep = 0; }
+                            }
+                            var sub = alloc(dlen + sep + nlen + 1);
+                            memcpy(sub, dir_path, dlen);
+                            if (sep == 1) { store8(sub + dlen, 47); }
+                            memcpy(sub + dlen + sep, name, nlen);
+                            store8(sub + dlen + sep + nlen, 0);
+                            if (fs_is_dir(&st) == 1) {
+                                if (_gr_walk_dir(sub, handles, n_handles, opts, term_byte, suppress) == 1) {
+                                    found_any = 1;
+                                }
+                            } elif (fs_is_reg(&st) == 1) {
+                                var fd = sys_open(sub, 0, 0);
+                                if (fd < 0) {
+                                    _gr_report(sub, 0 - fd, suppress);
+                                } else {
+                                    var pr = _gr_process_fd(fd, sub, handles, n_handles, opts, term_byte);
+                                    syscall(3, fd);
+                                    if (pr < 0) { _gr_report(sub, 0 - pr, suppress); }
+                                    elif (pr == 1) { found_any = 1; }
+                                }
+                            }
+                            # Skip symlinks (ADR 0003) and other types.
+                        }
+                    }
+                    off = off + reclen;
+                }
+            }
+        }
+    }
+    fs_close(dir_fd);
+    return found_any;
+}
+
+# --- Entry point --------------------------------------------------------
+
+fn cmd_grep(start: i64): i64 {
+    _gr_init_spec();
+    if (kriya_args_parse(_grep_spec, start) != 0) {
+        syscall(1, 2, "kriya grep: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
+        return EXIT_USAGE;
+    }
+
+    # -P is rejected per ADR 0005.
+    if (flags_get_bool(_grep_spec, _gr_P_idx) == 1) {
+        syscall(1, 2, "kriya grep: -P (PCRE) is not supported; use -E for extended regex\n", 67);
+        return EXIT_USAGE;
+    }
+
+    # Engine selection. -E and -F are exclusive; -G is the BRE default.
+    var want_E = flags_get_bool(_grep_spec, _gr_E_idx);
+    var want_F = flags_get_bool(_grep_spec, _gr_F_idx);
+    if (want_E + want_F > 1) {
+        syscall(1, 2, "kriya grep: error: -E and -F are mutually exclusive\n", 53);
+        return EXIT_USAGE;
+    }
+    var engine: i64 = GR_ENG_BRE;
+    if (want_E == 1) { engine = GR_ENG_RE2; }
+    if (want_F == 1) { engine = GR_ENG_FIXED; }
+
+    var ignore_case = flags_get_bool(_grep_spec, _gr_i_idx);
+    var invert      = flags_get_bool(_grep_spec, _gr_v_idx);
+    var word_mode   = flags_get_bool(_grep_spec, _gr_w_idx);
+    var xline_mode  = flags_get_bool(_grep_spec, _gr_x_idx);
+    var count_mode  = flags_get_bool(_grep_spec, _gr_c_idx);
+    var list_match  = flags_get_bool(_grep_spec, _gr_l_idx);
+    var list_nomatch= flags_get_bool(_grep_spec, _gr_L_idx);
+    var lineno_mode = flags_get_bool(_grep_spec, _gr_n_idx);
+    var quiet_mode  = flags_get_bool(_grep_spec, _gr_q_idx);
+    var suppress    = flags_get_bool(_grep_spec, _gr_s_idx);
+    var name_no     = flags_get_bool(_grep_spec, _gr_h_idx);
+    var name_force  = flags_get_bool(_grep_spec, _gr_H_idx);
+    var only_match  = flags_get_bool(_grep_spec, _gr_o_idx);
+    var rec_mode    = flags_get_bool(_grep_spec, _gr_r_idx) | flags_get_bool(_grep_spec, _gr_R_idx);
+    var zero_term   = flags_get_bool(_grep_spec, _gr_z_idx);
+    var term_byte: i64 = 10;
+    if (zero_term == 1) { term_byte = 0; }
+
+    # Collect patterns: -e first, then -f, then positional[0].
+    var patterns = vec_new();
+    var e_arg = flags_get_str(_grep_spec, _gr_e_idx);
+    if (e_arg != 0) {
+        if (load8(e_arg) != 0 || strlen(e_arg) == 0) {
+            # Even empty -e is a valid pattern (matches every position).
+            vec_push(patterns, e_arg);
+        }
+    }
+    var f_arg = flags_get_str(_grep_spec, _gr_f_idx);
+    if (f_arg != 0) {
+        if (load8(f_arg) != 0) {
+            var flen: i64 = 0;
+            var fbuf = _gr_slurp(f_arg, &flen);
+            if (fbuf < 0) {
+                _gr_report(f_arg, 0 - fbuf, suppress);
+                return EXIT_USAGE;
+            }
+            _gr_split_patterns(fbuf, flen, patterns);
+        }
+    }
+
+    var first_positional_is_pattern = 0;
+    var npos = flags_positional_count(_grep_spec);
+    if (vec_len(patterns) == 0) {
+        # No -e/-f: positional[0] is the pattern.
+        if (npos < 1) {
+            syscall(1, 2, "kriya grep: error: no pattern (provide PATTERN or -e or -f)\n", 60);
+            return EXIT_USAGE;
+        }
+        vec_push(patterns, flags_positional(_grep_spec, 0));
+        first_positional_is_pattern = 1;
+    }
+    if (vec_len(patterns) == 0) {
+        # -f was empty and no positional pattern. POSIX: an empty pattern
+        # file means no patterns; every line is a non-match.
+        # Continue (return code will reflect zero matches).
+    }
+
+    # Compile each pattern.
+    var handles = vec_new();
+    var pi: i64 = 0;
+    var np = vec_len(patterns);
+    while (pi < np) {
+        var p = vec_get(patterns, pi);
+        var h = _gr_compile(p, engine, ignore_case);
+        if (h == 0) {
+            syscall(1, 2, "kriya grep: error: bad pattern: ", 32);
+            syscall(1, 2, p, strlen(p));
+            syscall(1, 2, "\n", 1);
+            return EXIT_USAGE;
+        }
+        vec_push(handles, h);
+        pi = pi + 1;
+    }
+    var n_handles = vec_len(handles);
+
+    # Decide whether input pre-fold is needed.
+    var fold_active: i64 = 0;
+    if (ignore_case == 1) {
+        if (engine == GR_ENG_BRE)   { fold_active = 1; }
+        if (engine == GR_ENG_FIXED) { fold_active = 1; }
+    }
+
+    # Compute file operand list (positional after the pattern slot).
+    var file_start: i64 = 0;
+    if (first_positional_is_pattern == 1) { file_start = 1; }
+    var n_files = npos - file_start;
+
+    # Filename display rules:
+    #   -h forces off; -H forces on; otherwise on when (n_files >= 2 OR -r/-R).
+    var show_name: i64 = 0;
+    if (n_files >= 2) { show_name = 1; }
+    if (rec_mode == 1) { show_name = 1; }
+    if (name_force == 1) { show_name = 1; }
+    if (name_no == 1)    { show_name = 0; }
+    if (list_match == 1) { show_name = 1; }
+    if (list_nomatch == 1) { show_name = 1; }
+
+    # Pack options into a 96-byte block to keep the helper signatures sane.
+    var opts = alloc(96);
+    store64(opts + 0,  invert);
+    store64(opts + 8,  word_mode);
+    store64(opts + 16, xline_mode);
+    store64(opts + 24, count_mode);
+    store64(opts + 32, list_match);
+    store64(opts + 40, list_nomatch);
+    store64(opts + 48, show_name);
+    store64(opts + 56, lineno_mode);
+    store64(opts + 64, quiet_mode);
+    store64(opts + 72, only_match);
+    store64(opts + 80, fold_active);
+
+    var any_match: i64 = 0;
+    var any_failed: i64 = 0;
+
+    if (n_files == 0) {
+        # Stdin mode.
+        if (rec_mode == 1) {
+            syscall(1, 2, "kriya grep: error: -r requires file operands\n", 45);
+            return EXIT_USAGE;
+        }
+        var r = _gr_process_fd(0, "(standard input)", handles, n_handles, opts, term_byte);
+        if (r < 0) { _gr_report("(standard input)", 0 - r, suppress); any_failed = 1; }
+        elif (r == 1) { any_match = 1; }
+    } else {
+        var fi: i64 = 0;
+        while (fi < n_files) {
+            var name = flags_positional(_grep_spec, file_start + fi);
+            var is_stdin: i64 = 0;
+            if (load8(name) == 45) {
+                if (load8(name + 1) == 0) { is_stdin = 1; }
+            }
+            if (is_stdin == 1) {
+                var rr = _gr_process_fd(0, "(standard input)", handles, n_handles, opts, term_byte);
+                if (rr < 0) { _gr_report("(standard input)", 0 - rr, suppress); any_failed = 1; }
+                elif (rr == 1) { any_match = 1; }
+            } else {
+                # stat to decide file vs directory
+                var st[36];
+                var lr = fs_lstat_at(0 - 100, name, &st);
+                if (lr < 0) {
+                    _gr_report(name, 0 - lr, suppress);
+                    any_failed = 1;
+                } elif (fs_is_dir(&st) == 1) {
+                    if (rec_mode == 1) {
+                        if (_gr_walk_dir(name, handles, n_handles, opts, term_byte, suppress) == 1) {
+                            any_match = 1;
+                        }
+                    } else {
+                        if (suppress == 0) {
+                            syscall(1, 2, "kriya grep: ", 12);
+                            syscall(1, 2, name, strlen(name));
+                            syscall(1, 2, ": Is a directory\n", 17);
+                        }
+                        any_failed = 1;
+                    }
+                } else {
+                    var fd = sys_open(name, 0, 0);
+                    if (fd < 0) {
+                        _gr_report(name, 0 - fd, suppress);
+                        any_failed = 1;
+                    } else {
+                        var pr = _gr_process_fd(fd, name, handles, n_handles, opts, term_byte);
+                        syscall(3, fd);
+                        if (pr < 0) { _gr_report(name, 0 - pr, suppress); any_failed = 1; }
+                        elif (pr == 1) { any_match = 1; }
+                    }
+                }
+            }
+            fi = fi + 1;
+        }
+    }
+
+    # GNU exit-code policy: 0 if any match, 1 if no match, 2 on error
+    # (subsumes usage and filesystem errors when -s is not set). With -s,
+    # filesystem errors don't bump the code to 2 — they just go silent.
+    if (any_failed == 1) {
+        if (suppress == 0) { return 2; }
+    }
+    if (any_match == 1) { return 0; }
+    return 1;
+}

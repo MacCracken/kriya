@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "kriya — coreutils-equivalent: cp/mv/rm/mkdir/echo/wc/find/grep and friends, in Cyrius"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "5.11.54"
+cyrius = "5.11.59"
 
 [build]
 entry = "src/main.cyr"
@@ -12,5 +12,5 @@ test = "src/test.cyr"
 output = "kriya"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "args", "flags", "chrono", "fnptr", "bench", "assert"]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "args", "flags", "chrono", "fnptr", "bench", "assert", "niyama", "unicode/_decode", "unicode/categories", "unicode/_categories_data", "unicode/casefold", "unicode/_casefold_data", "unicode/normalize", "unicode/_normalize_data"]
 ---

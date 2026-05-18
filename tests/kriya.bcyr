@@ -18,6 +18,11 @@ include "src/lib/args.cyr"
 include "src/cmd/true.cyr"
 include "src/cmd/false.cyr"
 
+var _grep_bench_bre   = 0;
+var _grep_bench_re2   = 0;
+var _grep_bench_line  = "the quick brown fox jumps over the lazy dog";
+var _grep_bench_llen  = 43;
+
 # ---- benchmark fixtures --------------------------------------------------
 
 fn bench_basename_ptr() {
@@ -65,6 +70,16 @@ fn bench_parse_octal_mode() {
     return 0;
 }
 
+fn bench_niyama_bre_search() {
+    var r = niyama_bre_search_at(_grep_bench_bre, _grep_bench_line, _grep_bench_llen, 0);
+    return 0;
+}
+
+fn bench_niyama_re2_search() {
+    var r = niyama_re2_search_at(_grep_bench_re2, _grep_bench_line, _grep_bench_llen, 0);
+    return 0;
+}
+
 # ---- runner --------------------------------------------------------------
 
 fn main() {
@@ -105,6 +120,18 @@ fn main() {
     var b9 = bench_new("args/parse_octal_mode");
     bench_run_batch(b9, &bench_parse_octal_mode, 10000, 100);
     bench_report(b9);
+
+    # niyama hot-path: per-line search against a typical-length line.
+    _grep_bench_bre = niyama_bre_compile("fox");
+    _grep_bench_re2 = niyama_re2_compile("fo[xy]");
+
+    var b10 = bench_new("niyama/bre_search_literal");
+    bench_run_batch(b10, &bench_niyama_bre_search, 10000, 100);
+    bench_report(b10);
+
+    var b11 = bench_new("niyama/re2_search_class");
+    bench_run_batch(b11, &bench_niyama_re2_search, 10000, 100);
+    bench_report(b11);
 
     return 0;
 }
