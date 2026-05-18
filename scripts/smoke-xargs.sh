@@ -1,0 +1,118 @@
+#!/bin/sh
+# smoke-xargs.sh — behavioural test for `kriya xargs`.
+#
+# Compares against GNU xargs cell-by-cell across input modes, batch
+# shapes, the `-I` replace token, the `-r` no-run-if-empty default,
+# and exit-code rollup conventions.
+
+set -e
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BIN="$ROOT/build/kriya"
+
+if [ ! -x "$BIN" ]; then
+    echo "error: $BIN not built. Run: cyrius build src/main.cyr build/kriya" >&2
+    exit 1
+fi
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+cd "$WORK"
+
+PASS=0
+FAIL=0
+
+expect_eq() {
+    if [ "$2" = "$3" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        printf 'FAIL %s:\nexpected: %s\ngot:      %s\n' "$1" "$2" "$3" >&2
+    fi
+}
+
+expect_exit() {
+    name=$1
+    expected=$2
+    shift 2
+    rc=0
+    "$@" >/dev/null 2>&1 || rc=$?
+    expect_eq "$name" "$expected" "$rc"
+}
+
+compare() {
+    name=$1
+    input=$2
+    args=$3
+    mine=$(printf '%s' "$input" | eval "$BIN xargs $args" 2>&1 || true)
+    gnu=$( printf '%s' "$input" | eval "xargs $args"      2>&1 || true)
+    expect_eq "$name" "$gnu" "$mine"
+}
+
+# --- default behaviour: no command → /bin/echo --------------------------
+
+compare 'default echo'         "a b c"            ""
+compare 'default echo lines'   "$(printf 'a\nb\nc\n')" ""
+compare 'with command'         "a b c"            "echo HIT"
+
+# --- -n batches --------------------------------------------------------
+
+compare '-n 1 batches'         "a b c d"          "-n 1 echo X"
+compare '-n 2 batches'         "a b c d"          "-n 2 echo X"
+compare '-n 3 batches'         "a b c d e"        "-n 3 echo X"
+
+# --- -0 NUL-separated --------------------------------------------------
+
+mine=$(printf 'a\0b\0c\0' | $BIN xargs -0 echo)
+gnu=$( printf 'a\0b\0c\0' | xargs    -0 echo)
+expect_eq '-0 NUL items'       "$gnu" "$mine"
+
+mine=$(printf 'a b\0c d\0' | $BIN xargs -0 echo)
+gnu=$( printf 'a b\0c d\0' | xargs    -0 echo)
+expect_eq '-0 preserves spaces' "$gnu" "$mine"
+
+# --- -I replace -------------------------------------------------------
+
+compare '-I {}'                "$(printf 'one\ntwo\nthree\n')" "-I {} echo '[{}]'"
+compare '-I @ custom'          "$(printf 'one\ntwo\n')"        "-I @ echo before @ after"
+compare '-I {} multi-sub'      "$(printf 'X\n')"                "-I {} echo {} and {}"
+
+# --- -r no-run-if-empty (modern GNU default) --------------------------
+
+mine=$(printf '' | $BIN xargs -r echo NOPE 2>&1 || true)
+gnu=$( printf '' | xargs    -r echo NOPE 2>&1 || true)
+expect_eq '-r empty'           "$gnu" "$mine"
+
+mine=$(printf '' | $BIN xargs    echo NOPE 2>&1 || true)
+gnu=$( printf '' | xargs    --no-run-if-empty echo NOPE 2>&1 || true)
+expect_eq 'default empty matches --no-run-if-empty' "$gnu" "$mine"
+
+# --- quoting / backslash ----------------------------------------------
+
+compare 'single quotes'        "'a b' c"          "echo"
+compare 'double quotes'        '"a b" c'          "echo"
+compare 'backslash escape'     "a\\ b c"          "echo"
+
+# --- -t trace ---------------------------------------------------------
+
+mine=$(printf 'a b\n' | $BIN xargs -t echo HIT 2>&1)
+gnu=$( printf 'a b\n' | xargs    -t echo HIT 2>&1)
+expect_eq '-t trace'           "$gnu" "$mine"
+
+# --- exit codes ------------------------------------------------------
+
+expect_exit 'all succeed'       0 sh -c "printf 'a\n' | $BIN xargs true"
+expect_exit 'child failure 123' 123 sh -c "printf 'a\n' | $BIN xargs false"
+
+# --- PATH resolution --------------------------------------------------
+
+mine=$(printf 'a\n' | $BIN xargs basename)
+gnu=$( printf 'a\n' | xargs    basename)
+expect_eq 'PATH resolves'      "$gnu" "$mine"
+
+# --- summary ---------------------------------------------------------
+
+TOTAL=$((PASS + FAIL))
+printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"
+if [ "$FAIL" -gt 0 ]; then exit 1; fi
+exit 0

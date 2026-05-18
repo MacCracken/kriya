@@ -45,6 +45,8 @@ include "src/cmd/cut.cyr"
 include "src/cmd/sort.cyr"
 include "src/cmd/printf.cyr"
 include "src/cmd/grep.cyr"
+include "src/cmd/find.cyr"
+include "src/cmd/xargs.cyr"
 
 fn print_usage() {
     syscall(1, 2, "usage: kriya <utility> [args...]\n", 33);
@@ -94,6 +96,8 @@ fn dispatch(name, start: i64): i64 {
     if (streq(name, "sort"))     { return cmd_sort(start); }
     if (streq(name, "printf"))   { return cmd_printf(start); }
     if (streq(name, "grep"))     { return cmd_grep(start); }
+    if (streq(name, "find"))     { return cmd_find(start); }
+    if (streq(name, "xargs"))    { return cmd_xargs(start); }
     print_unknown(name);
     return EXIT_USAGE;
 }

@@ -12,5 +12,5 @@ test = "src/test.cyr"
 output = "kriya"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "args", "flags", "chrono", "fnptr", "bench", "assert", "niyama", "unicode/_decode", "unicode/categories", "unicode/_categories_data", "unicode/casefold", "unicode/_casefold_data", "unicode/normalize", "unicode/_normalize_data"]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "args", "flags", "chrono", "fnptr", "bench", "assert", "niyama", "process", "unicode/_decode", "unicode/categories", "unicode/_categories_data", "unicode/casefold", "unicode/_casefold_data", "unicode/normalize", "unicode/_normalize_data"]
 ---

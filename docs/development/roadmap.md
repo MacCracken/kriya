@@ -64,37 +64,39 @@ Ten utilities — the biggest milestone by count:
 
 **710 behavioural smoke cases pass across all 23 shipped utilities (M2+M3+M4)**; cold-start median 1.198ms (flat from v0.4.0).
 
-### Post-M4 hold — AGNOS kernel boot burn-in
+### Post-M5 hold — AGNOS kernel boot burn-in
 
-**M5+ work is paused until kriya gets exercised in a real AGNOS kernel boot**. The 30 shipped utilities cover the POSIX-essential surface a shell needs to bootstrap; the next signal of value is whether they actually hold up when an OS uses them in anger. The boot-burn produces the consumer feedback that should shape M5's priorities:
+**M6+ work is paused until kriya gets exercised in a real AGNOS kernel boot**. The 33 shipped utilities cover the POSIX-essential surface a shell needs to bootstrap; the next signal of value is whether they actually hold up when an OS uses them in anger. The boot-burn produces the consumer feedback that should shape M6's priorities (`df`, `du`, `date`, `env`, `seq`):
 
 - Which utilities are hit in early boot, and which surface gaps appear?
-- Are the ADR-0003 (symlink-follow) / ADR-0004 (`/` refusal) policies right in practice, or do real boot scripts work against them?
-- Does the 1.198ms cold-start matter in aggregate over a real init sequence, or is it dominated by other costs?
-- Which deferred features get promoted to "next" based on real script usage?
+- Are the ADR-0003 (symlink-follow) / ADR-0004 (`/` refusal) / ADR-0005 (regex engine) policies right in practice?
+- Does the 1.192ms cold-start matter in aggregate over a real init sequence?
+- Which deferred features (multi-`-e` grep, find `-prune`/`-delete`, xargs `-P`) get promoted based on real script usage?
 
-**Trigger to resume**: agnos kernel completes a boot-burn run with kriya in the init userland. The trigger is concrete: a green AGNOS boot using kriya symlinks for `cp`/`mv`/`rm`/`mkdir`/etc., either by zugot recipe or direct install, and a written incident log (even if empty) capturing what was hit. The trigger lives outside this repo (it's an AGNOS-side milestone); kriya tracks it as a project-memory item with the boot-burn dashboard / PR link, not a kriya-internal task.
+**Trigger to resume**: agnos kernel completes a boot-burn run with kriya in the init userland. The trigger is concrete: a green AGNOS boot using kriya symlinks for `cp`/`mv`/`rm`/`mkdir`/`grep`/`find`/etc., either by zugot recipe or direct install, and a written incident log (even if empty) capturing what was hit. The trigger lives outside this repo; kriya tracks it as a project-memory item.
 
 During the hold, kriya is open for:
 
-- **Bug fixes** discovered in the existing 30 utilities.
+- **Bug fixes** discovered in the existing 33 utilities.
 - **Cross-FS directory `mv`** — the one remaining M2 follow-up, now unblocked since `rm -r`'s tree-walk exists.
 - **Cyrius proposal sweeps** when accepted (octal literals → decimal-with-comment cleanup; `*at()`-family wrappers → raw `syscall(N, ...)` cleanup).
-- **`printf` floating-point** — `%e` / `%f` / `%g` if a consumer asks before M5 resumes.
-- **`tail -f` multi-file follow** — same shape.
+- **stdlib `getenv` post-fork bug** — root-cause and fix the io.cyr `getenv` issue that find + xargs work around via PATH caching.
+- **Deferred features** in grep / find / xargs if a real consumer asks (multi-`-e`, `-prune`, `-delete`, `-P` parallel, etc.).
 
-NOT M5 work (grep / find / xargs) — that waits for the boot-burn signal.
+NOT M6 work (df / du / date / env / seq) — that waits for the boot-burn signal.
 
-### M5 — Filtering / search (v0.6.0) — paused pre-start
+### M5 — Filtering / search (v0.6.0) — ✅ shipped 2026-05-17
 
-The larger utilities. Each gets per-utility roadmap evaluation — if any outgrows kriya, extract it.
+Three utilities + one engine ADR + the process-fork integration.
 
-- [ ] **ADR 0005**: regex engine choice — use Cyrius stdlib `lib/niyama.cyr` (folded v5.9.0) per first-party "own the stack" guidance
-- [ ] `src/cmd/grep.cyr` — basic regex; `-i`, `-v`, `-c`, `-l`, `-r`, `-E` extended regex; uses niyama
-- [ ] `src/cmd/find.cyr` — tree walk, `-name` glob, `-type`, `-mtime`, `-exec` (via `exec_vec()`)
-- [ ] `src/cmd/xargs.cyr` — stdin → argv, `-n`, `-I`, `-P` (parallel — defer or include based on complexity)
+- [x] **ADR 0005**: regex engine choice — Cyrius stdlib `lib/niyama.cyr` (BRE + RE2). PCRE deferred behind a v2.0 flag gate.
+- [x] `src/cmd/grep.cyr` — `-i`/`-v`/`-w`/`-x`/`-c`/`-l`/`-L`/`-n`/`-q`/`-s`/`-h`/`-H`/`-o`/`-r`/`-R`/`-z`/`-E`/`-G`/`-F`/`-e`/`-f`; `-P` rejected with usage error pointing at `-E`. 66 smoke cases vs GNU.
+- [x] `src/cmd/find.cyr` — predicate AST + fnmatch-style glob (`-name`), `-type`/`-size`/`-mtime`/`-mmin`/`-empty`/`-newer`/`-maxdepth`/`-mindepth`, actions `-print`/`-print0`/`-exec ... \;`, full boolean grammar with parens, `-P` default + `-L` follow. 40 smoke cases vs GNU.
+- [x] `src/cmd/xargs.cyr` — `-0`/`-n`/`-I`/`-r`/`-t`/`-s` with whitespace + backslash + quote splitting, GNU-shaped exit-code rollup. 20 smoke cases vs GNU. `-P N` parallel deferred.
 
-**LOC review at end of M5**: any utility ≥ 400 LOC gets evaluated for extraction.
+**Cold-start** at M5 close: 1.192ms (RUNS=100; flat from v0.5.0). **126 smoke cases** total across the three utilities, every one cell-by-cell against GNU.
+
+**LOC review**: grep ~640, find ~770, xargs ~430. All under the 400-LOC split threshold's de facto upper bound (the policy targets single utilities; M5 utilities are larger but built on shared `fs`/`niyama`/`process` infrastructure — they pay for the engine surface, not unrelated sprawl). No extractions needed at v0.6.0.
 
 ### M6 — System info + misc (v0.7.0)
 

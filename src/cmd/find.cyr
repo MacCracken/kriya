@@ -1,0 +1,1071 @@
+# find — POSIX `find(1)`: walk a file tree, evaluate predicates per entry.
+#
+# Argument shape:
+#   find [STARTPATH...] [EXPRESSION]
+#
+# Predicates (each evaluates true/false per entry):
+#   -name PAT       basename matches fnmatch-style glob (`*`, `?`, `[...]`)
+#   -type X         entry is one of {f, d, l, s, p, b, c}
+#   -size [+-]N[ckMG]   size match (default 512-byte blocks; suffixes
+#                       c=bytes, k=KiB, M=MiB, G=GiB)
+#   -mtime [+-]N    last-modified N*24h ago (sign per GNU semantics)
+#   -mmin  [+-]N    last-modified N minutes ago
+#   -empty          regular file size 0 OR directory has no entries
+#   -newer REF      mtime newer than the reference path's mtime
+#   -maxdepth N     prune descent beyond depth N
+#   -mindepth N     skip emitting entries above depth N
+#
+# Actions (also predicates; default-true unless noted):
+#   -print          print the path + newline (default action when none given)
+#   -print0         print the path + NUL byte (-print0; pairs with xargs -0)
+#   -exec CMD... \; fork+exec for each match, `{}` substituted with the path
+#
+# Operators (precedence: ! > -a > -o; juxtaposition is implicit -a):
+#   ! EXPR / -not EXPR
+#   EXPR1 -a EXPR2 / EXPR1 -and EXPR2
+#   EXPR1 -o EXPR2 / EXPR1 -or EXPR2
+#   ( EXPR )        grouping (each paren is its own argv token)
+#
+# Symlink policy (ADR 0003):
+#   default (-P)    never follow symlinks during the walk
+#   -L              follow all symlinks (operands + descent)
+#   -H              deferred — follow operands only (waits on the
+#                   operand-vs-descent stat-mode plumbing in fs.cyr)
+#
+# Exit codes:
+#   0   walk completed; predicates evaluated for every entry
+#   1   one or more entries failed to open / stat / exec
+#   2   usage error (bad expression, unknown predicate)
+
+var _find_spec    = 0;
+var _f_L_idx      = 0;
+var _f_H_idx      = 0;
+var _f_P_idx      = 0;
+
+# Predicate-token kinds.
+enum FindNode {
+    F_N_AND       = 1,
+    F_N_OR        = 2,
+    F_N_NOT       = 3,
+    F_N_NAME      = 10,
+    F_N_TYPE      = 11,
+    F_N_SIZE      = 12,
+    F_N_MTIME     = 13,
+    F_N_MMIN      = 14,
+    F_N_EMPTY     = 15,
+    F_N_NEWER     = 16,
+    F_N_MAXDEPTH  = 17,
+    F_N_MINDEPTH  = 18,
+    F_N_PRINT     = 30,
+    F_N_PRINT0    = 31,
+    F_N_EXEC      = 32,
+}
+
+enum FindSign {
+    F_SIGN_EXACT = 0,
+    F_SIGN_PLUS  = 1,
+    F_SIGN_MINUS = 2,
+}
+
+# Parse state — globals for the recursive descent.
+var _f_argv_flat = 0;
+var _f_argv_n    = 0;
+var _f_pos       = 0;
+var _f_err       = 0;
+var _f_err_msg   = 0;
+var _f_now_secs  = 0;
+var _f_env_vec   = 0;   # cached /proc/self/environ as a vec of cstr*
+var _f_path_env  = 0;   # cached PATH (heap-copied at startup, stable across exec)
+
+# Walk state.
+var _f_any_failed = 0;
+
+# Symlink follow mode: 0=P (default), 1=L (follow everywhere).
+var _f_follow_mode = 0;
+
+# Cached AST root.
+var _f_ast = 0;
+
+fn _f_init_spec(): i64 {
+    if (_find_spec != 0) { return 0; }
+    var s = flags_new();
+    # Pre-expression flags. Note GNU's expression parser is positional,
+    # but kriya's flags-parse pulls them out wherever they sit; that's
+    # POSIX-permissive and consistent with the rest of kriya.
+    _f_L_idx = flags_add_bool(s, 76, "follow",         0, "follow all symlinks");
+    _f_H_idx = flags_add_bool(s, 72, "follow-operand", 0, "follow operand symlinks only (deferred)");
+    _f_P_idx = flags_add_bool(s, 80, "no-follow",      0, "never follow symlinks (default)");
+    _find_spec = s;
+    return 0;
+}
+
+# --- Error helper ------------------------------------------------------
+
+fn _f_report_path(path, errno): i64 {
+    syscall(1, 2, "kriya find: ", 12);
+    syscall(1, 2, path, strlen(path));
+    syscall(1, 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        syscall(1, 2, m, strlen(m));
+    } else {
+        syscall(1, 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        syscall(1, 2, &buf + i + 1, 6 - i);
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+fn _f_report_usage(msg): i64 {
+    syscall(1, 2, "kriya find: ", 12);
+    syscall(1, 2, msg, strlen(msg));
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
+
+# --- fnmatch-style glob -----------------------------------------------
+
+# Match `pat` (length `plen`) against `text` (length `tlen`). Supports
+# `*` (zero-or-more), `?` (one), `[abc]` / `[a-z]` / `[!...]` brackets.
+# Iterative algorithm with backtrack-on-`*` to keep stack flat.
+fn _f_glob_match(pat, plen, text, tlen): i64 {
+    var pi: i64 = 0;
+    var ti: i64 = 0;
+    var star_pi: i64 = 0 - 1;
+    var star_ti: i64 = 0;
+    while (ti <= tlen) {
+        var matched: i64 = 0;
+        if (pi < plen) {
+            var pc = load8(pat + pi);
+            if (pc == 42) {
+                star_pi = pi;
+                star_ti = ti;
+                pi = pi + 1;
+                matched = 1;
+            } elif (pc == 91) {
+                # bracket: scan for matching ']'
+                if (ti >= tlen) {
+                    # no char to match
+                } else {
+                    var bi = pi + 1;
+                    var negate: i64 = 0;
+                    if (bi < plen) {
+                        if (load8(pat + bi) == 33) { negate = 1; bi = bi + 1; }
+                    }
+                    var tc = load8(text + ti);
+                    var hit: i64 = 0;
+                    var closed: i64 = 0;
+                    while (closed == 0) {
+                        if (bi >= plen) { closed = 0 - 1; }
+                        else {
+                            var bc = load8(pat + bi);
+                            if (bc == 93 && bi > pi + 1 + negate) {
+                                closed = 1;
+                            } else {
+                                # Check for range a-z
+                                if (bi + 2 < plen) {
+                                    if (load8(pat + bi + 1) == 45) {
+                                        if (load8(pat + bi + 2) != 93) {
+                                            var lo = bc;
+                                            var hi = load8(pat + bi + 2);
+                                            if (tc >= lo && tc <= hi) { hit = 1; }
+                                            bi = bi + 3;
+                                            continue;
+                                        }
+                                    }
+                                }
+                                if (bc == tc) { hit = 1; }
+                                bi = bi + 1;
+                            }
+                        }
+                    }
+                    if (closed == 1) {
+                        if (negate == 1) { hit = 1 - hit; }
+                        if (hit == 1) {
+                            pi = bi + 1;
+                            ti = ti + 1;
+                            matched = 1;
+                        }
+                    }
+                }
+            } elif (pc == 63) {
+                if (ti < tlen) {
+                    pi = pi + 1;
+                    ti = ti + 1;
+                    matched = 1;
+                }
+            } elif (pc == 92) {
+                # backslash: next char literal
+                if (pi + 1 < plen && ti < tlen) {
+                    if (load8(pat + pi + 1) == load8(text + ti)) {
+                        pi = pi + 2;
+                        ti = ti + 1;
+                        matched = 1;
+                    }
+                }
+            } else {
+                if (ti < tlen) {
+                    if (pc == load8(text + ti)) {
+                        pi = pi + 1;
+                        ti = ti + 1;
+                        matched = 1;
+                    }
+                }
+            }
+        }
+        if (matched == 0) {
+            if (star_pi >= 0) {
+                pi = star_pi + 1;
+                star_ti = star_ti + 1;
+                ti = star_ti;
+            } else {
+                return 0;
+            }
+        }
+        if (pi == plen && ti == tlen) { return 1; }
+    }
+    return 0;
+}
+
+# --- Token helpers (argv navigation) ----------------------------------
+
+fn _f_tok(): i64 {
+    if (_f_pos >= _f_argv_n) { return 0; }
+    return load64(_f_argv_flat + _f_pos * 8);
+}
+
+fn _f_consume(): i64 {
+    var t = _f_tok();
+    _f_pos = _f_pos + 1;
+    return t;
+}
+
+fn _f_tok_eq(s): i64 {
+    var t = _f_tok();
+    if (t == 0) { return 0; }
+    return streq(t, s);
+}
+
+# Parse +/-/exact number prefix. On entry s points to "+N", "-N", or "N".
+# Stores sign in *sign_ptr, returns the integer value (or -1 on bad).
+fn _f_parse_signed_int(s, sign_ptr): i64 {
+    if (s == 0) { return 0 - 1; }
+    var i: i64 = 0;
+    var sign: i64 = F_SIGN_EXACT;
+    if (load8(s) == 43) { sign = F_SIGN_PLUS;  i = 1; }
+    elif (load8(s) == 45) { sign = F_SIGN_MINUS; i = 1; }
+    if (load8(s + i) == 0) { return 0 - 1; }
+    var n: i64 = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c < 48 || c > 57) { return 0 - 1; }
+        n = n * 10 + (c - 48);
+        i = i + 1;
+    }
+    store64(sign_ptr, sign);
+    return n;
+}
+
+# Parse a -size argument like "+10c", "-1M", "100". Returns byte
+# count (or -1 on bad). Stores sign in *sign_ptr.
+fn _f_parse_size(s, sign_ptr): i64 {
+    if (s == 0) { return 0 - 1; }
+    var i: i64 = 0;
+    var sign: i64 = F_SIGN_EXACT;
+    if (load8(s) == 43) { sign = F_SIGN_PLUS;  i = 1; }
+    elif (load8(s) == 45) { sign = F_SIGN_MINUS; i = 1; }
+    var digits_start = i;
+    while (load8(s + i) >= 48 && load8(s + i) <= 57) {
+        i = i + 1;
+    }
+    if (i == digits_start) { return 0 - 1; }
+    var n: i64 = 0;
+    var j = digits_start;
+    while (j < i) {
+        n = n * 10 + (load8(s + j) - 48);
+        j = j + 1;
+    }
+    var suf = load8(s + i);
+    var scale: i64 = 512;  # default unit = 512-byte block
+    if      (suf == 0)   { scale = 512; }
+    elif    (suf == 98)  { scale = 512; }
+    elif    (suf == 99)  { scale = 1; }
+    elif    (suf == 107) { scale = 1024; }
+    elif    (suf == 77)  { scale = 1048576; }
+    elif    (suf == 71)  { scale = 1073741824; }
+    else { return 0 - 1; }
+    if (suf != 0) {
+        if (load8(s + i + 1) != 0) { return 0 - 1; }
+    }
+    store64(sign_ptr, sign);
+    return n * scale;
+}
+
+# --- AST node allocator -----------------------------------------------
+
+# Node layout (32 bytes):
+#   0  kind
+#   8  data_a (lhs for binary; predicate primary data)
+#   16 data_b (rhs for binary; predicate secondary data)
+#   24 data_c (predicate tertiary data, e.g. exec-end-index)
+fn _f_node_new(kind, a, b, c): i64 {
+    var n = alloc(32);
+    store64(n + 0, kind);
+    store64(n + 8, a);
+    store64(n + 16, b);
+    store64(n + 24, c);
+    return n;
+}
+
+# Forward decls aren't supported — declare recursion order: parse_or →
+# parse_and → parse_unary → parse_primary, where primary may call
+# parse_or for grouped subexpressions. We achieve this by inlining
+# the primary parser's group handling to call parse_or via a state
+# pump.
+
+fn _f_set_err(msg): i64 {
+    _f_err = 1;
+    _f_err_msg = msg;
+    return 0;
+}
+
+fn _f_parse_primary(): i64 {
+    var t = _f_tok();
+    if (t == 0) { _f_set_err("missing operand"); return 0; }
+
+    # Group: ( EXPR )
+    if (streq(t, "(") == 1) {
+        _f_consume();
+        var inner = _f_parse_or();
+        if (_f_err == 1) { return 0; }
+        if (_f_tok_eq(")") == 0) { _f_set_err("expected ')' to close group"); return 0; }
+        _f_consume();
+        return inner;
+    }
+
+    # Predicates
+    if (streq(t, "-name") == 1) {
+        _f_consume();
+        var pat = _f_consume();
+        if (pat == 0) { _f_set_err("-name needs an argument"); return 0; }
+        return _f_node_new(F_N_NAME, pat, strlen(pat), 0);
+    }
+    if (streq(t, "-type") == 1) {
+        _f_consume();
+        var ta = _f_consume();
+        if (ta == 0) { _f_set_err("-type needs an argument"); return 0; }
+        if (load8(ta + 1) != 0) { _f_set_err("-type needs a single-letter argument"); return 0; }
+        return _f_node_new(F_N_TYPE, load8(ta), 0, 0);
+    }
+    if (streq(t, "-size") == 1) {
+        _f_consume();
+        var sa = _f_consume();
+        if (sa == 0) { _f_set_err("-size needs an argument"); return 0; }
+        var sign: i64 = 0;
+        var b = _f_parse_size(sa, &sign);
+        if (b < 0) { _f_set_err("bad -size argument"); return 0; }
+        return _f_node_new(F_N_SIZE, sign, b, _f_size_unit_block(sa));
+    }
+    if (streq(t, "-mtime") == 1) {
+        _f_consume();
+        var ma = _f_consume();
+        if (ma == 0) { _f_set_err("-mtime needs an argument"); return 0; }
+        var sg: i64 = 0;
+        var n = _f_parse_signed_int(ma, &sg);
+        if (n < 0) { _f_set_err("bad -mtime argument"); return 0; }
+        return _f_node_new(F_N_MTIME, sg, n, 0);
+    }
+    if (streq(t, "-mmin") == 1) {
+        _f_consume();
+        var mma = _f_consume();
+        if (mma == 0) { _f_set_err("-mmin needs an argument"); return 0; }
+        var sg2: i64 = 0;
+        var n2 = _f_parse_signed_int(mma, &sg2);
+        if (n2 < 0) { _f_set_err("bad -mmin argument"); return 0; }
+        return _f_node_new(F_N_MMIN, sg2, n2, 0);
+    }
+    if (streq(t, "-empty") == 1) {
+        _f_consume();
+        return _f_node_new(F_N_EMPTY, 0, 0, 0);
+    }
+    if (streq(t, "-newer") == 1) {
+        _f_consume();
+        var rp = _f_consume();
+        if (rp == 0) { _f_set_err("-newer needs an argument"); return 0; }
+        # stat the ref now; cache mtime in the node.
+        var st[36];
+        var r = fs_lstat_at(0 - 100, rp, &st);
+        if (r < 0) { _f_set_err("-newer reference path not found"); return 0; }
+        return _f_node_new(F_N_NEWER, load64(&st + 88), 0, 0);
+    }
+    if (streq(t, "-maxdepth") == 1) {
+        _f_consume();
+        var dx = _f_consume();
+        if (dx == 0) { _f_set_err("-maxdepth needs an argument"); return 0; }
+        var dv = kriya_parse_nonneg_int(dx);
+        if (dv < 0) { _f_set_err("bad -maxdepth value"); return 0; }
+        return _f_node_new(F_N_MAXDEPTH, dv, 0, 0);
+    }
+    if (streq(t, "-mindepth") == 1) {
+        _f_consume();
+        var dy = _f_consume();
+        if (dy == 0) { _f_set_err("-mindepth needs an argument"); return 0; }
+        var dv2 = kriya_parse_nonneg_int(dy);
+        if (dv2 < 0) { _f_set_err("bad -mindepth value"); return 0; }
+        return _f_node_new(F_N_MINDEPTH, dv2, 0, 0);
+    }
+    if (streq(t, "-print") == 1) {
+        _f_consume();
+        return _f_node_new(F_N_PRINT, 0, 0, 0);
+    }
+    if (streq(t, "-print0") == 1) {
+        _f_consume();
+        return _f_node_new(F_N_PRINT0, 0, 0, 0);
+    }
+    if (streq(t, "-exec") == 1) {
+        _f_consume();
+        # Collect argv tokens until the literal `;` terminator.
+        var start_pos = _f_pos;
+        var found_end: i64 = 0;
+        while (found_end == 0) {
+            var tk = _f_tok();
+            if (tk == 0) {
+                _f_set_err("-exec missing ';' terminator");
+                return 0;
+            }
+            if (streq(tk, ";") == 1) { found_end = 1; }
+            else { _f_consume(); }
+        }
+        var end_pos = _f_pos;
+        _f_consume();  # eat the ';'
+        if (end_pos == start_pos) {
+            _f_set_err("-exec needs at least one command argument");
+            return 0;
+        }
+        return _f_node_new(F_N_EXEC, start_pos, end_pos, 0);
+    }
+
+    _f_set_err("unknown predicate / operator");
+    return 0;
+}
+
+# Pull the unit-suffix indicator out of an unparsed -size arg so the
+# evaluator can choose between byte-exact (`c`) and block-rounded
+# (default / `b`). Returns 0 for blocks (default), 1 for bytes.
+fn _f_size_unit_block(s): i64 {
+    var i: i64 = 0;
+    if (load8(s) == 43 || load8(s) == 45) { i = 1; }
+    while (load8(s + i) >= 48 && load8(s + i) <= 57) { i = i + 1; }
+    var suf = load8(s + i);
+    if (suf == 0)   { return 0; }   # default = blocks
+    if (suf == 98)  { return 0; }   # b = blocks
+    return 1;  # c/k/M/G all measured in raw bytes
+}
+
+fn _f_parse_unary(): i64 {
+    var t = _f_tok();
+    if (t == 0) { _f_set_err("missing operand"); return 0; }
+    if (streq(t, "!") == 1 || streq(t, "-not") == 1) {
+        _f_consume();
+        var inner = _f_parse_unary();
+        if (_f_err == 1) { return 0; }
+        return _f_node_new(F_N_NOT, inner, 0, 0);
+    }
+    return _f_parse_primary();
+}
+
+fn _f_parse_and(): i64 {
+    var lhs = _f_parse_unary();
+    if (_f_err == 1) { return 0; }
+    var loop: i64 = 1;
+    while (loop == 1) {
+        if (_f_err == 1) { return 0; }
+        var t = _f_tok();
+        if (t == 0) { loop = 0; }
+        elif (streq(t, "-a") == 1 || streq(t, "-and") == 1) {
+            _f_consume();
+            var rhs = _f_parse_unary();
+            if (_f_err == 1) { return 0; }
+            lhs = _f_node_new(F_N_AND, lhs, rhs, 0);
+        }
+        # Implicit AND: any token that isn't `)`, `-o`, `-or`, or EOF
+        # is the start of another predicate.
+        elif (streq(t, ")") == 1 || streq(t, "-o") == 1 || streq(t, "-or") == 1) {
+            loop = 0;
+        } else {
+            var rhs2 = _f_parse_unary();
+            if (_f_err == 1) { return 0; }
+            lhs = _f_node_new(F_N_AND, lhs, rhs2, 0);
+        }
+    }
+    return lhs;
+}
+
+fn _f_parse_or(): i64 {
+    var lhs = _f_parse_and();
+    if (_f_err == 1) { return 0; }
+    var loop: i64 = 1;
+    while (loop == 1) {
+        if (_f_err == 1) { return 0; }
+        var t = _f_tok();
+        if (t == 0) { loop = 0; }
+        elif (streq(t, "-o") == 1 || streq(t, "-or") == 1) {
+            _f_consume();
+            var rhs = _f_parse_and();
+            if (_f_err == 1) { return 0; }
+            lhs = _f_node_new(F_N_OR, lhs, rhs, 0);
+        } else { loop = 0; }
+    }
+    return lhs;
+}
+
+# Return 1 if `n` (rooted at the top of the AST) contains an action node
+# anywhere (-print, -print0, -exec). When the expression has no
+# explicit action, find appends an implicit -print.
+fn _f_has_action(n): i64 {
+    if (n == 0) { return 0; }
+    var k = load64(n);
+    if (k == F_N_PRINT || k == F_N_PRINT0 || k == F_N_EXEC) { return 1; }
+    if (k == F_N_AND || k == F_N_OR) {
+        if (_f_has_action(load64(n + 8))  == 1) { return 1; }
+        if (_f_has_action(load64(n + 16)) == 1) { return 1; }
+    }
+    if (k == F_N_NOT) {
+        return _f_has_action(load64(n + 8));
+    }
+    return 0;
+}
+
+# --- Predicate evaluators ---------------------------------------------
+
+fn _f_eval_size_predicate(sign, want_bytes, unit_block, actual_size): i64 {
+    var actual = actual_size;
+    var target = want_bytes;
+    if (unit_block == 0) {
+        # GNU rounds size UP to the next 512-block when comparing in
+        # block units (size 1..512 → 1 block, 513..1024 → 2 blocks).
+        actual = (actual_size + 511) / 512;
+        target = want_bytes / 512;
+    }
+    if (sign == F_SIGN_PLUS)  { if (actual > target) { return 1; } return 0; }
+    if (sign == F_SIGN_MINUS) { if (actual < target) { return 1; } return 0; }
+    return (actual == target);
+}
+
+fn _f_eval_mtime_predicate(sign, want_days, mtime): i64 {
+    # GNU: file ages floor((now - mtime) / 86400) days. -N means age<N,
+    # +N means age>N, exact means floor(age) == N.
+    var age = _f_now_secs - mtime;
+    if (age < 0) { age = 0; }
+    var age_days = age / 86400;
+    if (sign == F_SIGN_PLUS)  { if (age_days > want_days) { return 1; } return 0; }
+    if (sign == F_SIGN_MINUS) { if (age_days < want_days) { return 1; } return 0; }
+    return (age_days == want_days);
+}
+
+fn _f_eval_mmin_predicate(sign, want_min, mtime): i64 {
+    var age = _f_now_secs - mtime;
+    if (age < 0) { age = 0; }
+    var age_min = age / 60;
+    if (sign == F_SIGN_PLUS)  { if (age_min > want_min) { return 1; } return 0; }
+    if (sign == F_SIGN_MINUS) { if (age_min < want_min) { return 1; } return 0; }
+    return (age_min == want_min);
+}
+
+fn _f_eval_type_predicate(letter, stat_buf): i64 {
+    var m = load64(stat_buf + 24);
+    var ifmt = m & 61440;
+    if (letter == 102) { if (ifmt == 32768) { return 1; } return 0; }   # f
+    if (letter == 100) { if (ifmt == 16384) { return 1; } return 0; }   # d
+    if (letter == 108) { if (ifmt == 40960) { return 1; } return 0; }   # l
+    if (letter == 115) { if (ifmt == 49152) { return 1; } return 0; }   # s
+    if (letter == 112) { if (ifmt == 4096)  { return 1; } return 0; }   # p
+    if (letter == 98)  { if (ifmt == 24576) { return 1; } return 0; }   # b
+    if (letter == 99)  { if (ifmt == 8192)  { return 1; } return 0; }   # c
+    return 0;
+}
+
+# Returns 1 (regular file size 0) OR (directory with no entries beyond .. /.
+# Other types yield 0.
+fn _f_eval_empty_predicate(path, stat_buf): i64 {
+    var m = load64(stat_buf + 24);
+    var ifmt = m & 61440;
+    if (ifmt == 32768) {
+        if (load64(stat_buf + 48) == 0) { return 1; }
+        return 0;
+    }
+    if (ifmt == 16384) {
+        var dfd = fs_openat(0 - 100, path, 65536, 0);
+        if (dfd < 0) { return 0; }
+        var dbuf = alloc(4096);
+        var any: i64 = 0;
+        var loop: i64 = 1;
+        while (loop == 1) {
+            var nb = fs_getdents64(dfd, dbuf, 4096);
+            if (nb <= 0) { loop = 0; }
+            else {
+                var off: i64 = 0;
+                while (off < nb) {
+                    var ent = dbuf + off;
+                    if (fs_dent_is_dotdot(ent) == 0) {
+                        any = 1;
+                        off = nb;
+                        loop = 0;
+                    } else {
+                        off = off + fs_dent_reclen(ent);
+                    }
+                }
+            }
+        }
+        fs_close(dfd);
+        if (any == 0) { return 1; }
+        return 0;
+    }
+    return 0;
+}
+
+# Build the env vec once (lazy).
+fn _f_env_get(): i64 {
+    if (_f_env_vec != 0) { return _f_env_vec; }
+    var v = vec_new();
+    var fd = sys_open("/proc/self/environ", 0, 0);
+    if (fd < 0) { _f_env_vec = v; return v; }
+    var cap: i64 = 4096;
+    var buf = alloc(cap);
+    var used: i64 = 0;
+    var loop: i64 = 1;
+    while (loop == 1) {
+        if (used + 4096 > cap) {
+            var newcap = cap * 2;
+            var newbuf = alloc(newcap);
+            memcpy(newbuf, buf, used);
+            buf = newbuf;
+            cap = newcap;
+        }
+        var n = syscall(0, fd, buf + used, 4096);
+        if (n < 0) {
+            if ((0 - n) == 4) {
+                # EINTR retry
+            } else { loop = 0; }
+        } else {
+            if (n == 0) { loop = 0; }
+            else { used = used + n; }
+        }
+    }
+    syscall(3, fd);
+    # Split on NUL — each entry is already NUL-terminated in the buffer.
+    var start: i64 = 0;
+    var i: i64 = 0;
+    while (i < used) {
+        if (load8(buf + i) == 0) {
+            if (i > start) { vec_push(v, buf + start); }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    _f_env_vec = v;
+    return v;
+}
+
+# Resolve `cmd` to an absolute path: if it already contains a slash,
+# return as-is; otherwise walk $PATH looking for an executable hit.
+# Returns the original `cmd` cstr if no PATH entry matches — execve
+# will then fail with ENOENT, mirroring GNU's "exec error" behaviour.
+fn _f_resolve_exec(cmd): i64 {
+    var i: i64 = 0;
+    var has_slash: i64 = 0;
+    while (load8(cmd + i) != 0) {
+        if (load8(cmd + i) == 47) { has_slash = 1; }
+        i = i + 1;
+    }
+    if (has_slash == 1) { return cmd; }
+    var path_env = _f_path_env;
+    if (path_env == 0)        { return cmd; }
+    if (load8(path_env) == 0) { return cmd; }
+    var pp: i64 = 0;
+    var done: i64 = 0;
+    while (done == 0) {
+        var seg_end = pp;
+        var scanning: i64 = 1;
+        while (scanning == 1) {
+            var c = load8(path_env + seg_end);
+            if (c == 0) { scanning = 0; }
+            elif (c == 58) { scanning = 0; }
+            else { seg_end = seg_end + 1; }
+        }
+        var slen = seg_end - pp;
+        var entry: i64 = 0;
+        if (slen == 0) {
+            entry = alloc(2);
+            store8(entry, 46);
+            store8(entry + 1, 0);
+        } else {
+            entry = alloc(slen + 1);
+            memcpy(entry, path_env + pp, slen);
+            store8(entry + slen, 0);
+        }
+        var candidate = path_join(entry, cmd);
+        if (sys_access(candidate, 1) == 0) {
+            var st[36];
+            if (sys_stat(candidate, &st) == 0) {
+                if (fs_is_reg(&st) == 1) { return candidate; }
+            }
+        }
+        if (load8(path_env + seg_end) == 0) { done = 1; }
+        else { pp = seg_end + 1; }
+    }
+    return cmd;
+}
+
+# Run -exec for `path`, with argv tokens at argv_flat[arg_lo..arg_hi).
+# Returns 1 (exit 0) / 0 (anything else).
+fn _f_run_exec(arg_lo, arg_hi, path): i64 {
+    var args = vec_new();
+    var i = arg_lo;
+    while (i < arg_hi) {
+        var tok = load64(_f_argv_flat + i * 8);
+        # Substitute `{}` literally → path.
+        var tlen = strlen(tok);
+        var has_braces: i64 = 0;
+        if (tlen == 2) {
+            if (load8(tok) == 123 && load8(tok + 1) == 125) { has_braces = 1; }
+        }
+        if (has_braces == 1) {
+            vec_push(args, path);
+        } else {
+            # Substring substitution: any `{}` inside the token is replaced
+            # by the path. Common GNU idiom: `-exec sh -c 'foo {} bar' \;`.
+            # We scan + rebuild.
+            var has_inner: i64 = 0;
+            var k: i64 = 0;
+            while (k + 1 < tlen) {
+                if (load8(tok + k) == 123 && load8(tok + k + 1) == 125) {
+                    has_inner = 1;
+                    k = tlen;
+                } else { k = k + 1; }
+            }
+            if (has_inner == 0) {
+                vec_push(args, tok);
+            } else {
+                var plen = strlen(path);
+                # Build buffer: each {} expands to plen bytes.
+                var out_cap = tlen + plen * 4;
+                var out = alloc(out_cap + 1);
+                var oi: i64 = 0;
+                var ki: i64 = 0;
+                while (ki < tlen) {
+                    if (ki + 1 < tlen) {
+                        if (load8(tok + ki) == 123 && load8(tok + ki + 1) == 125) {
+                            memcpy(out + oi, path, plen);
+                            oi = oi + plen;
+                            ki = ki + 2;
+                            continue;
+                        }
+                    }
+                    store8(out + oi, load8(tok + ki));
+                    oi = oi + 1;
+                    ki = ki + 1;
+                }
+                store8(out + oi, 0);
+                vec_push(args, out);
+            }
+        }
+        i = i + 1;
+    }
+    # PATH-resolve argv[0] since execve doesn't do it for us.
+    if (vec_len(args) > 0) {
+        var first = vec_get(args, 0);
+        vec_set(args, 0, _f_resolve_exec(first));
+    }
+    var env = _f_env_get();
+    var rc = exec_env(args, env);
+    if (rc == 0) { return 1; }
+    return 0;
+}
+
+# Evaluate AST node `n` for the given entry context.
+# ctx layout:
+#   0  path (cstr)
+#   8  name (cstr)
+#   16 stat_buf ptr
+#   24 depth (i64)
+fn _f_eval(n, ctx): i64 {
+    if (n == 0) { return 1; }
+    var k = load64(n);
+    if (k == F_N_AND) {
+        var a = _f_eval(load64(n + 8), ctx);
+        if (a == 0) { return 0; }
+        return _f_eval(load64(n + 16), ctx);
+    }
+    if (k == F_N_OR) {
+        var a2 = _f_eval(load64(n + 8), ctx);
+        if (a2 == 1) { return 1; }
+        return _f_eval(load64(n + 16), ctx);
+    }
+    if (k == F_N_NOT) {
+        return 1 - _f_eval(load64(n + 8), ctx);
+    }
+
+    var path = load64(ctx + 0);
+    var name = load64(ctx + 8);
+    var st   = load64(ctx + 16);
+    var depth = load64(ctx + 24);
+
+    if (k == F_N_NAME) {
+        var pat = load64(n + 8);
+        var plen = load64(n + 16);
+        return _f_glob_match(pat, plen, name, strlen(name));
+    }
+    if (k == F_N_TYPE)   { return _f_eval_type_predicate(load64(n + 8), st); }
+    if (k == F_N_SIZE)   { return _f_eval_size_predicate(load64(n + 8), load64(n + 16), load64(n + 24), load64(st + 48)); }
+    if (k == F_N_MTIME)  { return _f_eval_mtime_predicate(load64(n + 8), load64(n + 16), load64(st + 88)); }
+    if (k == F_N_MMIN)   { return _f_eval_mmin_predicate (load64(n + 8), load64(n + 16), load64(st + 88)); }
+    if (k == F_N_EMPTY)  { return _f_eval_empty_predicate(path, st); }
+    if (k == F_N_NEWER)  {
+        var ref_mtime = load64(n + 8);
+        if (load64(st + 88) > ref_mtime) { return 1; }
+        return 0;
+    }
+    if (k == F_N_MAXDEPTH) { return 1; }   # filter applied at walk level
+    if (k == F_N_MINDEPTH) {
+        if (depth >= load64(n + 8)) { return 1; }
+        return 0;
+    }
+    if (k == F_N_PRINT) {
+        syscall(1, 1, path, strlen(path));
+        var nl[2]; store8(&nl, 10);
+        syscall(1, 1, &nl, 1);
+        return 1;
+    }
+    if (k == F_N_PRINT0) {
+        syscall(1, 1, path, strlen(path));
+        var nz[2]; store8(&nz, 0);
+        syscall(1, 1, &nz, 1);
+        return 1;
+    }
+    if (k == F_N_EXEC) {
+        return _f_run_exec(load64(n + 8), load64(n + 16), path);
+    }
+    return 0;
+}
+
+# Extract max-depth from the AST (-1 if none).
+fn _f_get_maxdepth(n): i64 {
+    if (n == 0) { return 0 - 1; }
+    var k = load64(n);
+    if (k == F_N_MAXDEPTH) { return load64(n + 8); }
+    if (k == F_N_AND || k == F_N_OR) {
+        var a = _f_get_maxdepth(load64(n + 8));
+        if (a >= 0) { return a; }
+        return _f_get_maxdepth(load64(n + 16));
+    }
+    if (k == F_N_NOT) { return _f_get_maxdepth(load64(n + 8)); }
+    return 0 - 1;
+}
+
+# --- Walk -------------------------------------------------------------
+
+fn _f_walk(path, depth, max_depth): i64 {
+    var st_buf = alloc(144);
+    var r: i64 = 0;
+    if (_f_follow_mode == 1) {
+        r = fs_fstatat(0 - 100, path, st_buf, 0);
+        if (r < 0 && (0 - r) == 2) {
+            # Following a dangling symlink → fall back to lstat so the
+            # entry still shows up in the walk per GNU behaviour.
+            r = fs_lstat_at(0 - 100, path, st_buf);
+        }
+    } else {
+        r = fs_lstat_at(0 - 100, path, st_buf);
+    }
+    if (r < 0) {
+        _f_report_path(path, 0 - r);
+        _f_any_failed = 1;
+        return 0;
+    }
+    var ctx[4];
+    store64(&ctx + 0,  path);
+    var slash = path_basename_ptr(path);
+    if (slash == 0) { slash = path; }
+    store64(&ctx + 8,  slash);
+    store64(&ctx + 16, st_buf);
+    store64(&ctx + 24, depth);
+
+    _f_eval(_f_ast, &ctx);
+
+    var ifmt = load64(st_buf + 24) & 61440;
+    var is_dir: i64 = 0;
+    if (ifmt == 16384) { is_dir = 1; }
+    if (is_dir == 0) { return 0; }
+
+    if (max_depth >= 0) {
+        if (depth >= max_depth) { return 0; }
+    }
+
+    var open_flags: i64 = 65536;  # O_RDONLY | O_DIRECTORY
+    if (_f_follow_mode == 0) { open_flags = open_flags | 131072; }  # O_NOFOLLOW
+    var dfd = fs_openat(0 - 100, path, open_flags, 0);
+    if (dfd < 0) {
+        _f_report_path(path, 0 - dfd);
+        _f_any_failed = 1;
+        return 0;
+    }
+    var dbuf = alloc(4096);
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var nb = fs_getdents64(dfd, dbuf, 4096);
+        if (nb < 0) {
+            if ((0 - nb) == 4) {
+                # EINTR retry
+            } else {
+                _f_report_path(path, 0 - nb);
+                _f_any_failed = 1;
+                fs_close(dfd);
+                return 0;
+            }
+        } else {
+            if (nb == 0) { loop = 0; }
+            else {
+                var off: i64 = 0;
+                while (off < nb) {
+                    var ent = dbuf + off;
+                    var reclen = fs_dent_reclen(ent);
+                    var ename = fs_dent_name(ent);
+                    if (fs_dent_is_dotdot(ent) == 0) {
+                        var elen = strlen(ename);
+                        var plen = strlen(path);
+                        var sep: i64 = 1;
+                        if (plen > 0) {
+                            if (load8(path + plen - 1) == 47) { sep = 0; }
+                        }
+                        var sub = alloc(plen + sep + elen + 1);
+                        memcpy(sub, path, plen);
+                        if (sep == 1) { store8(sub + plen, 47); }
+                        memcpy(sub + plen + sep, ename, elen);
+                        store8(sub + plen + sep + elen, 0);
+                        _f_walk(sub, depth + 1, max_depth);
+                    }
+                    off = off + reclen;
+                }
+            }
+        }
+    }
+    fs_close(dfd);
+    return 0;
+}
+
+# --- Entry point ------------------------------------------------------
+
+fn cmd_find(start: i64): i64 {
+    # find DOES NOT go through the standard flags parser — its expression
+    # grammar uses tokens like `-type` / `-name` that would be rejected
+    # as unknown options. Instead we walk argv directly: -L / -H / -P
+    # may appear as the first one or two tokens, then start paths, then
+    # the expression.
+    _f_now_secs = clock_epoch_secs();
+    _f_any_failed = 0;
+    _f_err = 0;
+    _f_err_msg = 0;
+    _f_env_vec = 0;
+    _f_follow_mode = 0;
+    # Snapshot PATH up-front: io.cyr's getenv uses a stack buffer that
+    # appears to come back stale after a fork+exec+waitpid cycle (the
+    # first call returns the right value, subsequent calls see /proc/
+    # self/environ as empty). Caching the heap copy once at startup
+    # sidesteps it.
+    _f_path_env = getenv("PATH");
+
+    var total = kriya_argv_count();
+    # Build a private flat argv view of argv[start..].
+    var slice_n = total - start;
+    if (slice_n < 0) { slice_n = 0; }
+    _f_argv_flat = alloc(slice_n * 8);
+    _f_argv_n = slice_n;
+    var fi: i64 = 0;
+    while (fi < slice_n) {
+        store64(_f_argv_flat + fi * 8, argv(start + fi));
+        fi = fi + 1;
+    }
+
+    # Pre-expression flags: -L / -H / -P (zero, one, or more, last wins).
+    var head: i64 = 0;
+    var consumed_head: i64 = 1;
+    while (consumed_head == 1) {
+        consumed_head = 0;
+        if (head < _f_argv_n) {
+            var t0 = load64(_f_argv_flat + head * 8);
+            if (streq(t0, "-L") == 1) { _f_follow_mode = 1; head = head + 1; consumed_head = 1; }
+            elif (streq(t0, "-P") == 1) { _f_follow_mode = 0; head = head + 1; consumed_head = 1; }
+            elif (streq(t0, "-H") == 1) {
+                _f_report_usage("-H is deferred in this release; use -P or -L");
+                return EXIT_USAGE;
+            }
+        }
+    }
+
+    # Split start paths vs expression. Start paths are leading argv
+    # tokens that don't look like predicates / operators. Once we hit
+    # an arg starting with `-`, `!`, or `(`, the expression begins.
+    var expr_start: i64 = head;
+    while (expr_start < _f_argv_n) {
+        var t = load64(_f_argv_flat + expr_start * 8);
+        var c0 = load8(t);
+        if (c0 == 45) { break; }
+        if (c0 == 33 && load8(t + 1) == 0) { break; }
+        if (c0 == 40 && load8(t + 1) == 0) { break; }
+        if (c0 == 41 && load8(t + 1) == 0) { break; }
+        expr_start = expr_start + 1;
+    }
+
+    var start_paths = vec_new();
+    var sp: i64 = head;
+    while (sp < expr_start) {
+        vec_push(start_paths, load64(_f_argv_flat + sp * 8));
+        sp = sp + 1;
+    }
+    if (vec_len(start_paths) == 0) { vec_push(start_paths, "."); }
+
+    _f_pos = expr_start;
+    if (_f_pos >= _f_argv_n) {
+        _f_ast = _f_node_new(F_N_PRINT, 0, 0, 0);
+    } else {
+        _f_ast = _f_parse_or();
+        if (_f_err == 1) {
+            _f_report_usage(_f_err_msg);
+            return EXIT_USAGE;
+        }
+        if (_f_pos != _f_argv_n) {
+            _f_report_usage("trailing tokens after expression (missing operator?)");
+            return EXIT_USAGE;
+        }
+        # If the user wrote no action, GNU implicitly appends -print
+        # in an AND with the expression.
+        if (_f_has_action(_f_ast) == 0) {
+            _f_ast = _f_node_new(F_N_AND, _f_ast, _f_node_new(F_N_PRINT, 0, 0, 0), 0);
+        }
+    }
+
+    var max_depth = _f_get_maxdepth(_f_ast);
+
+    var npaths = vec_len(start_paths);
+    var pi: i64 = 0;
+    while (pi < npaths) {
+        var p = vec_get(start_paths, pi);
+        _f_walk(p, 0, max_depth);
+        pi = pi + 1;
+    }
+
+    if (_f_any_failed == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}
