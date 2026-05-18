@@ -6,6 +6,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-18
+
+**Closes M7** — POSIX.1-2017 compliance audit. No new utilities; this is the audit-and-document milestone. Three deliverables:
+
+1. **`docs/audit/2026-05-18-posix-compliance.md`** — every shipped utility walked against POSIX.1-2017 with deviation cataloging. 32 of 38 utilities are POSIX-defined; 6 are intentional kriya-scope extensions (`yes`, `seq`, `stat`, `realpath`, `readlink`, `which`). No utility quietly diverges from POSIX for any flag it ships — every gap is either *missing* (deferred behind a named follow-up) or *added* (BSD/GNU extension shipped intentionally).
+2. **Three new ADRs** for cross-cutting policy that previously lived in scattered file headers:
+   - **ADR 0006** — Utility scope: which six non-POSIX utilities ship and the four-criteria gate for any future addition.
+   - **ADR 0007** — `date` defaults to UTC at v0.7.0; local-time tzfile parsing is the named follow-up.
+   - **ADR 0008** — POSIX exit-code policy: `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_USAGE` three-tier baseline with POSIX-named overrides (grep no-match=1, xargs 123/124/125/126/127, env 126/127).
+3. **`tests/kriya-posix.tcyr`** — POSIX-blessed assertion harness running under `cyrius test`. Fork+execve+pipe-capture helper plus 18 starter cases per pillar utility (`true`/`false`/`echo`/`pwd`/`wc`/`grep`/`cp`/`ls`/`seq`/`env`/`date`/`find`/`xargs`). Population is incremental; this is the scaffold.
+
+Cold-start re-bench (RUNS=100): median **1.201ms** — flat as expected, no new dispatcher entries. 86 unit assertions + 18 POSIX-blessed = 104 in-process test cases; 644 smoke cases across 27 utility-area shell scripts.
+
+### Added
+
+- POSIX.1-2017 compliance audit at `docs/audit/2026-05-18-posix-compliance.md`.
+- ADR 0006 — Utility scope: six non-POSIX utilities ship in kriya.
+- ADR 0007 — `date` defaults to UTC at v0.7.0; local-time follow-up named.
+- ADR 0008 — POSIX exit-code policy: three-tier convention + per-utility specifics.
+- `tests/kriya-posix.tcyr` — POSIX-blessed assertion harness (18 starter cases).
+
 ## [0.7.0] — 2026-05-18
 
 **Closes M6** — five system-info/misc utilities (`seq`, `env`, `date`, `du`, `df`). M6 ships ahead of the AGNOS kernel boot-burn signal at user direction (same shape as the M5 mid-hold resume) — kriya runs in parallel with kernel work, on kernel's timeline. **168 behavioural smoke cases across the five M6 utilities** (44 seq + 28 env + 44 date + 37 du + 15 df), every flag and shape compared cell-by-cell against GNU coreutils where applicable. Cyrius pin bumped to **5.11.61**. Cold-start re-bench (RUNS=100): median **1.212ms** — still well under the 2ms v1.0 target despite 5 new dispatcher entries.

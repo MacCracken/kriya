@@ -1,0 +1,191 @@
+# kriya-posix — POSIX-blessed assertions per utility.
+#
+# Companion to `tests/kriya.tcyr` (in-process unit assertions on
+# pure functions) and `scripts/smoke-*.sh` (cell-by-cell vs GNU
+# coreutils). This file's lane is the **POSIX.1-2017 spec test
+# cases** — invariants the standard explicitly tests, that we want
+# `cyrius test` to enforce on every release.
+#
+# Harness:
+#   _posix_run(args_vec, out_buf, bufsz) → (exit << 32) | nbytes
+#       Fork + execve + pipe-capture of stdout; stderr -> /dev/null;
+#       waitpid; returns packed exit-code + read-byte-count.
+#   posix_assert_exit(name, expected, args_vec)
+#   posix_assert_stdout(name, expected_cstr, args_vec)
+#
+# Requires `build/kriya` to be present. `cyrius test` runs the test
+# binary from the project root, so the relative path resolves.
+#
+# Population is incremental: this file ships M7 with one POSIX-blessed
+# case per pillar utility. Future work fills in the rest of the
+# per-utility POSIX spec tests as M8/M9 land.
+
+# stdlib is auto-included via cyrius.cyml [deps].stdlib; the
+# kriya.tcyr precedent shows no explicit lib/* includes are needed.
+
+var _posix_kriya_bin = "build/kriya";
+var _posix_stdout_buf = 0;
+var _POSIX_STDOUT_BUFSZ: i64 = 65536;
+
+fn _posix_buf(): i64 {
+    if (_posix_stdout_buf != 0) { return _posix_stdout_buf; }
+    _posix_stdout_buf = alloc(_POSIX_STDOUT_BUFSZ);
+    return _posix_stdout_buf;
+}
+
+# Build a vec of cstr args, prepending the kriya binary + the utility
+# name (invoked here via `kriya <util> ...`).
+fn _posix_args(util): i64 {
+    var v = vec_new();
+    vec_push(v, _posix_kriya_bin);
+    vec_push(v, util);
+    return v;
+}
+
+# Fork, exec build/kriya with `args` (vec of cstr), pipe stdout into
+# `out_buf`, send stderr to /dev/null, wait, return packed
+# (exit << 32) | stdout_byte_count. -1 on fork/pipe error.
+fn _posix_run(args, out_buf, bufsz): i64 {
+    var argc = vec_len(args);
+    if (argc < 1) { return 0 - 1; }
+    var cmd = vec_get(args, 0);
+    var argv = alloc((argc + 1) * 8);
+    var i: i64 = 0;
+    while (i < argc) {
+        store64(argv + i * 8, vec_get(args, i));
+        i = i + 1;
+    }
+    store64(argv + argc * 8, 0);
+    var envp = alloc(8);
+    store64(envp, 0);
+
+    var pipefd[16];
+    sys_pipe(&pipefd);
+    var rfd = load32(&pipefd);
+    var wfd = load32(&pipefd + 4);
+
+    var pid = sys_fork();
+    if (pid < 0) { sys_close(rfd); sys_close(wfd); return 0 - 1; }
+    if (pid == 0) {
+        sys_close(rfd);
+        sys_dup2(wfd, 1);
+        sys_close(wfd);
+        var devnull = sys_open("/dev/null", 1, 0);
+        if (devnull >= 0) { sys_dup2(devnull, 2); sys_close(devnull); }
+        sys_execve(cmd, argv, envp);
+        sys_exit(127);
+    }
+    sys_close(wfd);
+
+    var total: i64 = 0;
+    var rgo: i64 = 1;
+    while (rgo == 1) {
+        var n = sys_read(rfd, out_buf + total, bufsz - total);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= bufsz) { rgo = 0; }
+        }
+    }
+    sys_close(rfd);
+    var stbuf[1];
+    sys_waitpid(pid, &stbuf, 0);
+    var st = load32(&stbuf);
+    var exit_code: i64 = 0 - 1;
+    if (WIFEXITED(st) == 1) { exit_code = WEXITSTATUS(st); }
+    return (exit_code << 32) | (total & 4294967295);
+}
+
+fn _posix_exit(packed): i64 { return packed >> 32; }
+fn _posix_nbytes(packed): i64 { return packed & 4294967295; }
+
+# Assert exit code from `args` (vec) matches `expected`.
+fn posix_assert_exit(name, expected, args): i64 {
+    var buf = _posix_buf();
+    var p = _posix_run(args, buf, _POSIX_STDOUT_BUFSZ);
+    assert_eq(_posix_exit(p), expected, name);
+    return 0;
+}
+
+# Assert stdout bytes from `args` (vec) match the C-string `expected`.
+fn posix_assert_stdout(name, expected, args): i64 {
+    var buf = _posix_buf();
+    var i: i64 = 0;
+    while (i < 1024) { store8(buf + i, 0); i = i + 1; }
+    var p = _posix_run(args, buf, _POSIX_STDOUT_BUFSZ);
+    var nb = _posix_nbytes(p);
+    store8(buf + nb, 0);
+    assert_eq(streq(buf, expected), 1, name);
+    return 0;
+}
+
+# Builders that vec_push then return — keep main() flat.
+fn _a0(util): i64 { return _posix_args(util); }
+
+fn _a1(util, a): i64 {
+    var v = _posix_args(util);
+    vec_push(v, a);
+    return v;
+}
+
+fn _a2(util, a, b): i64 {
+    var v = _posix_args(util);
+    vec_push(v, a);
+    vec_push(v, b);
+    return v;
+}
+
+fn _a3(util, a, b, c): i64 {
+    var v = _posix_args(util);
+    vec_push(v, a);
+    vec_push(v, b);
+    vec_push(v, c);
+    return v;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("POSIX: true/false exit codes");
+    posix_assert_exit("true exits 0",        0, _a0("true"));
+    posix_assert_exit("false exits 1",       1, _a0("false"));
+
+    test_group("POSIX: echo");
+    posix_assert_stdout("echo hello",        "hello\n",   _a1("echo", "hello"));
+    posix_assert_stdout("echo a b c joined", "a b c\n",   _a3("echo", "a", "b", "c"));
+    posix_assert_stdout("echo -n suppresses newline", "no-nl", _a2("echo", "-n", "no-nl"));
+
+    test_group("POSIX: pwd exits 0");
+    posix_assert_exit("pwd exits 0",         0, _a0("pwd"));
+
+    test_group("POSIX: wc -c file");
+    posix_assert_exit("wc -c build/kriya exits 0", 0, _a2("wc", "-c", "build/kriya"));
+
+    test_group("POSIX: grep no-match is 1, not error");
+    posix_assert_exit("grep no-match on /dev/null -> 1", 1, _a2("grep", "nonexistent-xyz-123", "/dev/null"));
+    posix_assert_exit("grep no-match on VERSION -> 1",   1, _a2("grep", "no-such-thing", "VERSION"));
+
+    test_group("POSIX: usage errors exit 2");
+    posix_assert_exit("cp no operands -> 2",     2, _a0("cp"));
+    posix_assert_exit("ls --bogus -> 2",         2, _a1("ls", "--nope-not-a-flag"));
+    posix_assert_exit("seq no operand -> 2",     2, _a0("seq"));
+
+    test_group("POSIX: env exit codes (127/0/1)");
+    posix_assert_exit("env not-found -> 127", 127, _a2("env", "-i", "no-such-command-anywhere"));
+    posix_assert_exit("env /bin/true -> 0",     0, _a2("env", "-i", "/bin/true"));
+    posix_assert_exit("env /bin/false -> 1",    1, _a2("env", "-i", "/bin/false"));
+
+    test_group("POSIX: date format byte-count");
+    posix_assert_exit("date +%Y exits 0", 0, _a1("date", "+%Y"));
+
+    test_group("POSIX: find missing path -> 1");
+    posix_assert_exit("find missing -> 1", 1, _a1("find", "/nonexistent-path-xyz-12345"));
+
+    test_group("POSIX: xargs -r empty stdin -> 0");
+    posix_assert_exit("xargs -r empty -> 0", 0, _a2("xargs", "-r", "echo"));
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

@@ -12,7 +12,7 @@
 - [x] Dispatcher overhead measured (one-call cold start) and held under **2 ms** on Cyrius-current hardware — v0.5.0 median 1.198ms
 - [ ] At least one downstream consumer green (agnoshi `$PATH` lookup → kriya symlinks) — pending AGNOS kernel boot burn-in
 - [x] CHANGELOG complete from v0.1.0 onward
-- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`) — path traversal, TOCTOU, signal handling, symlink follow policy — M8 deliverable
+- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-security.md`) — path traversal, TOCTOU, signal handling, symlink follow policy, plus external research for CVEs/0-days against coreutils-equivalent surfaces — M8 deliverable
 - [ ] Benchmarks captured in `docs/benchmarks.md` — partial (cold-start tracked in state.md; per-utility coverage pending M8)
 
 ## Milestones
@@ -109,11 +109,11 @@ Five utilities, shipped ahead of the AGNOS kernel boot-burn signal at user direc
 - [x] `src/cmd/du.cyr` — `-s`/`-a`/`-c`/`-h`/`-k`/`-b`/`-L`/`-P`/`-d N`/`-S`; 1024-byte default blocks; `-b` skips directory st_size (apparent-size dir semantic); hardlink dedup deferred; 37 smoke cases.
 - [x] `src/cmd/df.cyr` — `-h`/`-T`/`-i`/`-a`/`-P`; `statfs(2)` per mount, parses `/proc/self/mounts` with octal-escape decoding; pseudo-FS filter (proc/sysfs/cgroup/etc.) by default; exact-mp operand match (path-walk via stat.st_dev deferred); 15 structural-parity cases vs GNU.
 
-### M7 — POSIX-compliance audit (v0.8.0)
+### M7 — POSIX-compliance audit (v0.8.0) — ✅ shipped 2026-05-18
 
-- [ ] Per-utility POSIX conformance review against the POSIX manual
-- [ ] Capture all deviations in ADRs
-- [ ] Build a `tests/kriya-posix.tcyr` suite running POSIX-blessed test cases per utility
+- [x] Per-utility POSIX conformance review against the POSIX manual — `docs/audit/2026-05-18-posix-compliance.md` covers all 38 shipped utilities. 32 are POSIX-defined; 6 are intentional kriya-scope extensions. No quiet divergences.
+- [x] Capture all deviations in ADRs — three new ADRs landed: 0006 (utility scope + four-criteria gate), 0007 (`date` UTC-only at v0.7.0 with local-time follow-up named), 0008 (POSIX exit-code policy — three-tier baseline + per-utility specifics).
+- [x] Build a `tests/kriya-posix.tcyr` suite running POSIX-blessed test cases per utility — 18 starter cases across pillar utilities; fork+execve+pipe-capture harness. Population is incremental into M8/M9.
 
 ### M8 — Security audit + benchmarks (v0.9.0)
 
