@@ -64,26 +64,29 @@ Ten utilities — the biggest milestone by count:
 
 **710 behavioural smoke cases pass across all 23 shipped utilities (M2+M3+M4)**; cold-start median 1.198ms (flat from v0.4.0).
 
-### Post-M5 hold — AGNOS kernel boot burn-in
+### Post-M5 — AGNOS kernel boot burn-in (parallel signal)
 
-**M6+ work is paused until kriya gets exercised in a real AGNOS kernel boot**. The 33 shipped utilities cover the POSIX-essential surface a shell needs to bootstrap; the next signal of value is whether they actually hold up when an OS uses them in anger. The boot-burn produces the consumer feedback that should shape M6's priorities (`df`, `du`, `date`, `env`, `seq`):
+**Boot-burn is a parallel signal on the AGNOS kernel's timeline, not a blocking gate on kriya.** The 33 shipped utilities cover the POSIX-essential surface a shell needs to bootstrap; boot-burn produces consumer feedback that should shape M6's priorities (`df`, `du`, `date`, `env`, `seq`). The kernel team's fix cycles and integration timeline drive when that signal arrives; kriya keeps moving on adjacent work in the meantime.
+
+What boot-burn will tell us (when it lands):
 
 - Which utilities are hit in early boot, and which surface gaps appear?
 - Are the ADR-0003 (symlink-follow) / ADR-0004 (`/` refusal) / ADR-0005 (regex engine) policies right in practice?
 - Does the 1.192ms cold-start matter in aggregate over a real init sequence?
 - Which deferred features (multi-`-e` grep, find `-prune`/`-delete`, xargs `-P`) get promoted based on real script usage?
 
-**Trigger to resume**: agnos kernel completes a boot-burn run with kriya in the init userland. The trigger is concrete: a green AGNOS boot using kriya symlinks for `cp`/`mv`/`rm`/`mkdir`/`grep`/`find`/etc., either by zugot recipe or direct install, and a written incident log (even if empty) capturing what was hit. The trigger lives outside this repo; kriya tracks it as a project-memory item.
+**Signal shape**: agnos kernel completes a boot-burn run with kriya in the init userland (green boot using kriya symlinks via zugot recipe or direct install), plus a written incident log capturing what was hit. Tracked outside this repo as a project-memory item.
 
-During the hold, kriya is open for:
+Active work surface during kernel fix cycles:
 
-- **Bug fixes** discovered in the existing 33 utilities.
+- **Bug fixes** in any of the 33 shipped utilities.
 - **Cross-FS directory `mv`** — the one remaining M2 follow-up, now unblocked since `rm -r`'s tree-walk exists.
 - **Cyrius proposal sweeps** when accepted (octal literals → decimal-with-comment cleanup; `*at()`-family wrappers → raw `syscall(N, ...)` cleanup).
 - **stdlib `getenv` post-fork bug** — root-cause and fix the io.cyr `getenv` issue that find + xargs work around via PATH caching.
 - **Deferred features** in grep / find / xargs if a real consumer asks (multi-`-e`, `-prune`, `-delete`, `-P` parallel, etc.).
+- **CI / release / build-script review** vs kindred Cyrius repos.
 
-NOT M6 work (df / du / date / env / seq) — that waits for the boot-burn signal.
+M6 utilities themselves (`df` / `du` / `date` / `env` / `seq`) still wait for boot-burn feedback — building those ahead of the signal risks shaping the wrong surface.
 
 ### M5 — Filtering / search (v0.6.0) — ✅ shipped 2026-05-17
 

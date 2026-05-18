@@ -166,13 +166,42 @@ if [ -d /dev/shm ] && [ "$TMP_DEV" != "$SHM_DEV" ]; then
     target=$(readlink "$XFS_LINK_DST")
     expect_eq "link target preserved"    "/some/target" "$target"
 
-    # Cross-FS directory mv: not supported until rm tree-walk ships.
+    # Cross-FS directory mv: cp -R + rm -r round trip.
     XFS_DIR=$(mktemp -d -p /dev/shm kriya-mv-dir.XXXXXX)
     echo "x" > "$XFS_DIR/inside"
-    expect_exit "cross-FS dir errors"   1 "$BIN" mv "$XFS_DIR" "$WORK/dir_landed"
-    # The src directory must still exist (we failed before unlinking).
-    expect_present "xfs src dir intact" "$XFS_DIR"
-    rm -rf "$XFS_DIR"
+    mkdir "$XFS_DIR/sub"
+    echo "deep" > "$XFS_DIR/sub/nested"
+    ln -s /etc/hostname "$XFS_DIR/sub/link"
+    chmod 0750 "$XFS_DIR/sub"
+    XFS_DIR_DST="$WORK/dir_landed"
+    expect_exit "cross-FS dir succeeds"  0 "$BIN" mv "$XFS_DIR" "$XFS_DIR_DST"
+    # The src directory must be gone (rm -r ran after cp -R).
+    expect_absent "xfs src dir gone"     "$XFS_DIR"
+    # The destination tree mirrors the source — files, nested dir, symlink.
+    expect_present "xfs dst dir present" "$XFS_DIR_DST"
+    expect_eq "xfs dst file content"     "x" "$(cat "$XFS_DIR_DST/inside")"
+    expect_eq "xfs dst nested content"   "deep" "$(cat "$XFS_DIR_DST/sub/nested")"
+    if [ -L "$XFS_DIR_DST/sub/link" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL xfs symlink preserved as link" >&2; fi
+    target=$(readlink "$XFS_DIR_DST/sub/link")
+    expect_eq "xfs dst link target"      "/etc/hostname" "$target"
+    # -p semantic: subdir mode preserved through cp -R.
+    sub_mode=$(stat -c %a "$XFS_DIR_DST/sub")
+    expect_eq "xfs dst subdir mode"      "750" "$sub_mode"
+    # The inode of the destination must differ from anything in /dev/shm —
+    # proof we crossed filesystems. (We can only check that dst exists on
+    # the same FS as $WORK, which is on /tmp; the inode-differ check on
+    # the regular-file path above already proves the EXDEV path is taken.)
+
+    # Failed cross-FS dir mv: existing non-dir at destination must NOT clobber
+    # the source. cp -R into a file destination errors; we then roll back.
+    XFS_DIR2=$(mktemp -d -p /dev/shm kriya-mv-dir2.XXXXXX)
+    echo "x" > "$XFS_DIR2/inside"
+    BLOCKER="$WORK/dir_blocker"
+    echo "blocker" > "$BLOCKER"
+    expect_exit "cross-FS dir onto file" 1 "$BIN" mv "$XFS_DIR2" "$BLOCKER"
+    # Source dir must remain (we failed before rm -r ran).
+    expect_present "xfs src after fail"  "$XFS_DIR2"
+    rm -rf "$XFS_DIR2"
 else
     echo "(skipping cross-FS tests — /tmp and /dev/shm on same fs or /dev/shm missing)"
 fi

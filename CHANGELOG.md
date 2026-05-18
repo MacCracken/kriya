@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Cross-filesystem directory `mv`** — `mv srcdir dstdir` across filesystems (rename(2) returns EXDEV) now falls back to `_cp_recursive_one` with POLICY_P (preserve symlinks per ADR 0003; preserve mode + timestamps) followed by `_rm_dir_at` to drain the source tree. Closes the only outstanding M2 follow-up, now unblocked since `rm -r`'s tree-walk shipped at v0.3.0. On either step's failure the destination tree is best-effort rolled back so the user doesn't end up with two authoritative copies — matches the regular-file rollback semantic that already existed for `mv`'s cross-FS file path. `src/main.cyr` include order is now `cp → rm → mv` so mv.cyr can call `_rm_dir_at` (rm.cyr has no cp/mv dependencies, verified). Smoke `scripts/smoke-mv.sh` gains 8 cross-FS dir cases (round-trip with nested files, nested dirs, preserved symlinks, preserved subdir mode; rollback on cp-failure when destination is a non-dir). **51/51** mv smoke cases now pass (up from 43/43). cp 26/26, cp-R 39/39, rm 53/53 unchanged — confirms the include reorder is harmless.
+
 ## [0.6.0] — 2026-05-17
 
 **Closes M5** — three filtering/search utilities (`grep`, `find`, `xargs`) on top of one new shared dependency surface: Cyrius stdlib's `niyama` (regex via ADR 0005), `process` (fork+execve for `-exec`), and the `unicode/*` modules niyama pulls in transitively. **126 behavioural smoke cases across the three M5 utilities** (66 grep + 40 find + 20 xargs), every one compared cell-by-cell against the GNU equivalent. Cyrius pin bumped to **5.11.59**. Cold-start re-bench (RUNS=100, post-find-and-xargs): median **1.192ms** — still flat against v0.5.0's 1.198ms; the three new dispatcher table entries land after `true`'s hot path and contribute essentially nothing.

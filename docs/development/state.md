@@ -44,7 +44,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0; **M4 closed at v0
 | `rmdir` | `src/cmd/rmdir.cyr` | **implemented** (`-p`, `-v`, `--ignore-fail-on-non-empty`) | M2 |
 | `touch` | `src/cmd/touch.cyr` | **implemented** (`-a`, `-m`, `-c`; `-r`/`-t`/`-d` deferred to chrono helpers) | M2 |
 | `cp` | `src/cmd/cp.cyr` | **implemented** (`-f`/`-i`/`-p`/`-v`/`-R`/`-r`/`-P`/`-H`/`-L`; fd-rooted recursion with `O_NOFOLLOW` per ADR 0003; `--preserve=links` for hardlink dedup deferred) | M2 |
-| `mv` | `src/cmd/mv.cyr` | **implemented** (`-f`/`-i`/`-n`/`-v`; same-FS rename; cross-FS files+symlinks; ADR-0003 symlink-to-dir refusal; cross-FS dir mv lands with rm tree-walk) | M2 |
+| `mv` | `src/cmd/mv.cyr` | **implemented** (`-f`/`-i`/`-n`/`-v`; same-FS rename; cross-FS files+symlinks+**directories** via cp -R + rm -r with dest-tree rollback on either-step failure; ADR-0003 symlink-to-dir refusal) | M2 |
 | `rm` | `src/cmd/rm.cyr` | **implemented** (`-f`/`-i`/`-r`/`-R`/`-d`/`-v`; fd-rooted recursion with O_NOFOLLOW per ADR 0003; protected-paths refusal per ADR 0004) | M2 |
 | `ln` | `src/cmd/ln.cyr` | **implemented** (`-s`, `-f`, `-P`, `-n`, `-v`; `-r`/`-T`/`-t`/`-b` deferred) | M2 |
 | `ls` | `src/cmd/ls.cyr` | **implemented** (`-a`/`-A`/`-l`/`-h`/`-r`/`-1`/`-F`/`-i`/`-d`/`-R`; defer multi-column tty packing, `-t`/`-S`, `--color`, `%U`/`%G` name lookup) | M3 |
@@ -96,7 +96,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0; **M4 closed at v0
 - `scripts/smoke-ln.sh` — behavioural test for `ln` (30/30 — symbolic + hard creation, `-f` overwrite, single-arg form, multi-into-dir, ADR-0003 deploy-retarget idiom `-s -f -n`, `-P` inode-match verification, dangling-symlink ok, hard-to-missing error, verbose).
 - `scripts/smoke-cp.sh` — behavioural test for non-recursive `cp` (26/26 — basic + 200 KiB multi-block, existing-dest gating with `-f`/`-i`, `-i`-on-pipe usage error, multi-into-dir, `-p` mode+mtime preservation, non-`-p` current-time, self-copy refusal, directory-without-R EISDIR, partial-failure exit, verbose).
 - `scripts/smoke-cp-recursive.sh` — behavioural test for `cp -R` (39/39 — full ADR-0003 `-P`/`-H`/`-L` matrix verified: `-P` default preserves symlinks, `-H` follows command-line operands and preserves inner links, `-L` materialises all link content; plus `-r` alias, into-existing-dir, `-p` mode/time preservation under recursion, error paths, symlink-to-`/etc` preserved by default).
-- `scripts/smoke-mv.sh` — behavioural test for `mv` (43/43 — same-FS rename, overwrite default, `-n` silent skip, `-i`-on-pipe usage error, multi-into-dir, dir rename, ADR-0003 symlink-to-dir refusal in both single-pair and multi-into-dir shapes, self-move detection, partial-failure paths, verbose. Cross-FS round-trips when `/tmp` and `/dev/shm` differ — file with inode-differs assertion, symlink with target preservation, cross-FS dir error path).
+- `scripts/smoke-mv.sh` — behavioural test for `mv` (51/51 — same-FS rename, overwrite default, `-n` silent skip, `-i`-on-pipe usage error, multi-into-dir, dir rename, ADR-0003 symlink-to-dir refusal in both single-pair and multi-into-dir shapes, self-move detection, partial-failure paths, verbose. Cross-FS round-trips when `/tmp` and `/dev/shm` differ — file with inode-differs assertion, symlink with target preservation, **cross-FS directory round trip via cp -R + rm -r with nested files, nested subdir, preserved symlink, preserved subdir mode 0750; rollback assertion when dest blocker file makes cp -R fail**).
 - `scripts/smoke-rm.sh` — behavioural test for `rm` (53/53 — every ADR-0004 canonicalization escape (`/`, `/.`, `/tmp/..`, `////`, `/../../../`, relative `../../`), no `--no-preserve-root` flag, no env-var bypass, multi-op atomicity preserved; ADR-0003 symlink-to-dir `rm` leaves target intact, `rm -r` of dir-containing-symlink-to-dir never descends; `-f` silences ENOENT; `-r`/`-R`/`-d`/`-v`; partial-failure exit; `-i`-on-pipe usage error).
 - `scripts/smoke-basename-dirname.sh` — paired behavioural test (26/26 — POSIX single-pair, suffix-strip matching + non-matching, `-a`/`-s`/`-z`, multi-operand dirname, NUL-termination, error paths).
 - `scripts/smoke-realpath.sh` — behavioural test for `realpath` + the underlying `fs_realpath` helper (30/30 — absolute/relative, `.`/`..`/duplicate-slash collapse, symlink chains, `-e` default, `-m` text completion through missing components, cycle ELOOP, multi-operand partial-failure exit, `-q` silent mode, `-z` NUL termination).
@@ -145,21 +145,22 @@ _None yet._ Expected consumers once M1 ships:
 
 **M5 was resumed on 2026-05-17 by user request, pre-boot-burn. All three utilities (`grep`, `find`, `xargs`) shipped in one session.** v0.6.0 cut the same day. The original boot-burn rationale now carries forward to M6.
 
-### Post-M5 hold — AGNOS kernel boot burn-in
+### Post-M5 — AGNOS kernel boot burn-in (parallel signal)
 
-**M6 (system info: `df`, `du`, `date`, `env`, `seq`) is paused until kriya gets exercised in a real AGNOS kernel boot.** Thirty utilities cover the POSIX-essential surface a shell needs to bootstrap; the next signal of value is whether they actually hold up when an OS uses them in anger. The boot-burn will produce the consumer feedback that should shape M5's priorities — which utilities are hit first, whether the ADR-0003 / 0004 policies are right in practice, which deferred features get promoted.
+**Boot-burn is a parallel signal on the AGNOS kernel's timeline, not a blocking gate on kriya.** The kernel team's fix cycles and integration timeline drive when that signal arrives; kriya keeps moving on adjacent work in the meantime. Thirty-three utilities cover the POSIX-essential surface a shell needs to bootstrap; the boot-burn will produce the consumer feedback that shapes M6's priorities — which utilities are hit first, whether ADR-0003 / 0004 / 0005 policies are right in practice, which deferred features get promoted.
 
-**Resume trigger**: agnos kernel completes a boot-burn run with kriya in the init userland (zugot recipe install or direct), plus a written incident log capturing what was exercised. Trigger lives outside this repo; tracked as a project-memory item with the boot-burn dashboard / PR link, not a kriya-internal task.
+**Signal shape**: agnos kernel completes a boot-burn run with kriya in the init userland (zugot recipe install or direct), plus a written incident log capturing what was exercised. Tracked outside this repo as a project-memory item with the boot-burn dashboard / PR link.
 
-**Open during the hold:**
+**Active work surface during kernel fix cycles:**
 
 - Bug fixes in any of the 33 shipped utilities (boot-burn is the most likely surface for these).
 - Cross-FS directory `mv` — only outstanding M2 follow-up; unblocked now that `rm -r` exists.
 - Cyrius proposal sweeps when accepted (octal-literal cleanup, raw-syscall → stdlib-wrapper cleanup).
 - **stdlib `getenv` post-fork bug** — root-cause + fix the io.cyr issue that find + xargs work around via PATH caching.
-- Any deferred feature listed in CHANGELOG `[0.6.0] / Deferred at v0.6.0 cut` if a real consumer asks before M6 resumes.
+- Any deferred feature listed in CHANGELOG `[0.6.0] / Deferred at v0.6.0 cut` if a real consumer asks.
+- CI / release / build-script review vs kindred Cyrius repos.
 
-**NOT open during the hold:** new M6 work (`df` / `du` / `date` / `env` / `seq`). That waits for the boot-burn signal.
+**Still waits for boot-burn signal:** M6 utilities themselves (`df` / `du` / `date` / `env` / `seq`). Building those ahead of the signal risks shaping the wrong surface.
 
 ### Deferred features
 
@@ -171,7 +172,7 @@ Each tracked against a future enabler (named follow-up, not "TBD"):
 - touch `-r REF` / `-t STAMP` / `-d STR` — same `lib/chrono.cyr` dependency; `-h` (no-dereference) deferred until symlink-aware utimensat wrapper.
 - ln `-r` (relative symlink resolution), `-T`/`-t` (target-directory disambiguation), `-b`/`--backup`.
 - cp `--preserve=links` (hardlink dedup during recursive copy).
-- mv multi-file `--follow` + cross-FS directory mv (the latter unblocked now).
+- mv multi-file `--follow` (cross-FS directory mv now shipped at [Unreleased] via cp -R + rm -r).
 - mkdir / touch decimal POSIX-mode constants (`511 # 0o777`, `1073741823 # UTIME_NOW`) — sweep to octal once Cyrius proposal `2026-05-17-octal-literal-syntax` lands.
 - touch `syscall(280, ...)`, ln `syscall(265, ...)`, fs.cyr raw at-family syscalls — sweep to `sys_utimensat`/`sys_linkat`/etc. once Cyrius proposal `2026-05-17-syscalls-at-family-stdlib` lands.
 - stat `%U`/`%G` (passwd/group lookup), `%x`/`%y`/`%z` (chrono strftime), `%N` (quoting+symlink-target rendering), real `%W` birth time (statx).

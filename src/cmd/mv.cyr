@@ -32,9 +32,12 @@
 # Cross-filesystem moves (rename(2) returns -EXDEV / -18):
 #   - Regular file: fall back to `_cp_one` + `sys_unlink(src)`.
 #   - Symlink: readlink + sys_symlink at dst + sys_unlink(src).
-#   - Directory: NOT supported in this ship. Errors with a clear
-#     message. Lands when `rm`'s tree-walk ships and mv can call
-#     it to remove the source after cp -R.
+#   - Directory: `_cp_recursive_one` with POLICY_P (preserve symlinks
+#     per ADR 0003, preserve mode + timestamps) followed by `_rm_dir_at`
+#     to drain the source tree. On either failure the destination
+#     tree is best-effort rolled back so the user doesn't end up with
+#     two authoritative copies — same semantic as the regular-file
+#     unlink-failure rollback below.
 #
 # Root protection (ADR 0004): mv is not in the protected_paths scope
 # (that's rm-only). The kernel returns EBUSY on rename("/", ...) and
@@ -169,14 +172,23 @@ fn _mv_cross_fs(src, dst, src_st, verbose): i64 {
     }
 
     if (fs_is_dir(src_st) == 1) {
-        # Cross-FS directory move: not supported in this ship.
-        # Documented in the file header; lands with `rm`'s tree-walk.
-        syscall(1, 2, "kriya mv: '", 11);
-        syscall(1, 2, src, strlen(src));
-        syscall(1, 2, "' -> '", 6);
-        syscall(1, 2, dst, strlen(dst));
-        syscall(1, 2, "': cannot move directory across filesystems (cp -R + rm -r workaround until rm ships)\n", 86);
-        return 0 - 18;
+        # Cross-FS directory move: cp -R (POLICY_P preserves symlinks
+        # per ADR 0003; preserve=1 carries mode + timestamps) followed
+        # by rm -r of the source. Either step's failure triggers a
+        # best-effort rollback of whatever was copied so the user
+        # doesn't end up with two authoritative trees.
+        var cr = _cp_recursive_one(src, dst, 0, 1, 0, 1, 0);
+        if (cr != 0) {
+            _rm_dir_at(0 - 100, dst, dst, 1, 0, 0);
+            return cr;
+        }
+        var rr = _rm_dir_at(0 - 100, src, src, 1, 0, 0);
+        if (rr != 0) {
+            _rm_dir_at(0 - 100, dst, dst, 1, 0, 0);
+            return rr;
+        }
+        if (verbose == 1) { _mv_verbose(src, dst); }
+        return 0;
     }
 
     if (fs_is_reg(src_st) == 0) {
