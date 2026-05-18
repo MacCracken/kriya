@@ -1,0 +1,429 @@
+# date — POSIX `date(1)`: print the current time, optionally
+# strftime-formatted.
+#
+# Argument shape:
+#   date [-u] [+FORMAT]
+#
+# Flags:
+#   -u / --utc / --universal   force UTC. At v0.7.0 this is a no-op:
+#                              kriya date ALWAYS prints UTC because
+#                              tzfile parsing (/etc/localtime, TZ env
+#                              with POSIX-style offset rules) is a
+#                              multi-hundred-LOC follow-up not in M6
+#                              scope. The flag is accepted so scripts
+#                              that pass it work; it's just the default.
+#
+# Operand:
+#   +FORMAT                    strftime-style format string. Without
+#                              `+FORMAT` the default is GNU's:
+#                              `%a %b %_d %H:%M:%S %Z %Y`.
+#
+# Local-time defer: GNU `date` defaults to local time. kriya `date`
+# defaults to UTC at v0.7.0. The deviation is documented in --help
+# (when --help ships) and here. Tzfile-aware operation lands behind
+# a known follow-up; until then UTC is the floor that requires no
+# external state.
+#
+# strftime specifiers shipped (cell-by-cell against GNU under TZ=UTC):
+#   %Y  year, 4 digits           %y  year, 2 digits (yy)
+#   %m  month, 01-12             %d  day-of-month, 01-31
+#   %e  day-of-month, space-pad  %_d like %e (GNU pad-flag form)
+#   %H  hour, 00-23              %I  hour, 01-12
+#   %M  minute, 00-59            %S  second, 00-60
+#   %p  AM/PM                    %P  am/pm
+#   %j  day-of-year, 001-366
+#   %u  weekday 1=Mon..7=Sun     %w  weekday 0=Sun..6=Sat
+#   %a  short weekday (Mon)      %A  full weekday (Monday)
+#   %b / %h short month (Jan)    %B  full month (January)
+#   %Z  timezone name (UTC)      %z  timezone offset (+0000)
+#   %s  epoch seconds            %N  nanoseconds (000000000 — we sample
+#                                    clock_epoch_secs, not ns)
+#   %T  same as %H:%M:%S         %R  same as %H:%M
+#   %D  same as %m/%d/%y         %F  same as %Y-%m-%d
+#   %%  literal %                %n  newline           %t  tab
+#
+# Anything else (`%c`, `%x`, `%X`, locale-aware specifiers, etc.)
+# emits the `%X` source bytes verbatim — matches GNU's "unknown
+# specifier" forgiveness rather than erroring.
+
+var _date_weekday_short: i64 = 0;   # lazy-init 7×4-byte cstrs ("Mon"...)
+var _date_weekday_full:  i64 = 0;
+var _date_month_short:   i64 = 0;   # 12×4-byte ("Jan"...)
+var _date_month_full:    i64 = 0;
+
+fn _date_init_names(): i64 {
+    if (_date_weekday_short != 0) { return 0; }
+    var ws = alloc(7 * 8);
+    store64(ws + 0,  "Sun");
+    store64(ws + 8,  "Mon");
+    store64(ws + 16, "Tue");
+    store64(ws + 24, "Wed");
+    store64(ws + 32, "Thu");
+    store64(ws + 40, "Fri");
+    store64(ws + 48, "Sat");
+    _date_weekday_short = ws;
+    var wf = alloc(7 * 8);
+    store64(wf + 0,  "Sunday");
+    store64(wf + 8,  "Monday");
+    store64(wf + 16, "Tuesday");
+    store64(wf + 24, "Wednesday");
+    store64(wf + 32, "Thursday");
+    store64(wf + 40, "Friday");
+    store64(wf + 48, "Saturday");
+    _date_weekday_full = wf;
+    var ms = alloc(12 * 8);
+    store64(ms + 0,   "Jan");
+    store64(ms + 8,   "Feb");
+    store64(ms + 16,  "Mar");
+    store64(ms + 24,  "Apr");
+    store64(ms + 32,  "May");
+    store64(ms + 40,  "Jun");
+    store64(ms + 48,  "Jul");
+    store64(ms + 56,  "Aug");
+    store64(ms + 64,  "Sep");
+    store64(ms + 72,  "Oct");
+    store64(ms + 80,  "Nov");
+    store64(ms + 88,  "Dec");
+    _date_month_short = ms;
+    var mf = alloc(12 * 8);
+    store64(mf + 0,   "January");
+    store64(mf + 8,   "February");
+    store64(mf + 16,  "March");
+    store64(mf + 24,  "April");
+    store64(mf + 32,  "May");
+    store64(mf + 40,  "June");
+    store64(mf + 48,  "July");
+    store64(mf + 56,  "August");
+    store64(mf + 64,  "September");
+    store64(mf + 72,  "October");
+    store64(mf + 80,  "November");
+    store64(mf + 88,  "December");
+    _date_month_full = mf;
+    return 0;
+}
+
+# Weekday 0=Sun..6=Sat from epoch seconds.
+# Unix epoch (1970-01-01) was a Thursday (4). So: ((days + 4) mod 7).
+fn _date_weekday(epoch): i64 {
+    var days = epoch / 86400;
+    var w = (days + 4) % 7;
+    if (w < 0) { w = w + 7; }
+    return w;
+}
+
+# Day-of-year 1..366 from year + month-1-indexed + day-1-indexed.
+fn _date_day_of_year(y, m, d): i64 {
+    _chrono_init_mdays();
+    var i: i64 = 0;
+    var doy: i64 = 0;
+    while (i < m - 1) {
+        var md = load64(_chrono_mdays + i * 8);
+        if (i == 1) { if (is_leap_year(y) == 1) { md = 29; } }
+        doy = doy + md;
+        i = i + 1;
+    }
+    doy = doy + d;
+    return doy;
+}
+
+# Write a 2-digit zero-padded value at buf+pos. Returns pos+2.
+fn _date_w2(buf, pos, val): i64 {
+    store8(buf + pos, 48 + val / 10);
+    store8(buf + pos + 1, 48 + val % 10);
+    return pos + 2;
+}
+
+# Write a 2-digit space-padded value at buf+pos. Returns pos+2.
+fn _date_w2_sp(buf, pos, val): i64 {
+    var tens = val / 10;
+    if (tens == 0) {
+        store8(buf + pos, 32);
+    } else {
+        store8(buf + pos, 48 + tens);
+    }
+    store8(buf + pos + 1, 48 + val % 10);
+    return pos + 2;
+}
+
+fn _date_w3(buf, pos, val): i64 {
+    store8(buf + pos, 48 + val / 100);
+    store8(buf + pos + 1, 48 + (val / 10) % 10);
+    store8(buf + pos + 2, 48 + val % 10);
+    return pos + 3;
+}
+
+fn _date_w4(buf, pos, val): i64 {
+    store8(buf + pos, 48 + val / 1000);
+    store8(buf + pos + 1, 48 + (val / 100) % 10);
+    store8(buf + pos + 2, 48 + (val / 10) % 10);
+    store8(buf + pos + 3, 48 + val % 10);
+    return pos + 4;
+}
+
+# Append a null-terminated string to buf at pos. Returns new pos.
+fn _date_wstr(buf, pos, s): i64 {
+    var i: i64 = 0;
+    while (load8(s + i) != 0) {
+        store8(buf + pos + i, load8(s + i));
+        i = i + 1;
+    }
+    return pos + i;
+}
+
+# Append signed decimal at buf+pos. Returns new pos.
+fn _date_wint(buf, pos, v): i64 {
+    var p = pos;
+    if (v < 0) {
+        store8(buf + p, 45);
+        p = p + 1;
+        v = 0 - v;
+    }
+    var tmp[24];
+    var k: i64 = 0;
+    if (v == 0) {
+        store8(&tmp, 48);
+        k = 1;
+    } else {
+        while (v > 0) {
+            store8(&tmp + k, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            k = k + 1;
+        }
+    }
+    while (k > 0) {
+        k = k - 1;
+        store8(buf + p, load8(&tmp + k));
+        p = p + 1;
+    }
+    return p;
+}
+
+# Render a single conversion spec `c` into buf at pos. `parts` is
+# the epoch_to_date struct; `wkday` is 0..6 (Sun..Sat); `epoch` is
+# raw seconds. Returns the new buf offset.
+fn _date_render_spec(buf, pos, c, parts, wkday, epoch): i64 {
+    if (c == 89) { return _date_w4(buf, pos, load64(parts)); }                              # %Y
+    if (c == 121) {                                                                          # %y
+        var y2 = load64(parts) % 100;
+        return _date_w2(buf, pos, y2);
+    }
+    if (c == 109) { return _date_w2(buf, pos, load64(parts + 8)); }                          # %m
+    if (c == 100) { return _date_w2(buf, pos, load64(parts + 16)); }                         # %d
+    if (c == 101) { return _date_w2_sp(buf, pos, load64(parts + 16)); }                      # %e
+    if (c == 72) { return _date_w2(buf, pos, load64(parts + 24)); }                         # %H
+    if (c == 73) {                                                                           # %I
+        var h = load64(parts + 24) % 12;
+        if (h == 0) { h = 12; }
+        return _date_w2(buf, pos, h);
+    }
+    if (c == 77) { return _date_w2(buf, pos, load64(parts + 32)); }                         # %M
+    if (c == 83) { return _date_w2(buf, pos, load64(parts + 40)); }                         # %S
+    if (c == 112) {                                                                          # %p AM/PM
+        if (load64(parts + 24) < 12) { return _date_wstr(buf, pos, "AM"); }
+        return _date_wstr(buf, pos, "PM");
+    }
+    if (c == 80) {                                                                           # %P am/pm
+        if (load64(parts + 24) < 12) { return _date_wstr(buf, pos, "am"); }
+        return _date_wstr(buf, pos, "pm");
+    }
+    if (c == 106) {                                                                          # %j
+        var doy = _date_day_of_year(load64(parts), load64(parts + 8), load64(parts + 16));
+        return _date_w3(buf, pos, doy);
+    }
+    if (c == 117) {                                                                          # %u 1=Mon..7=Sun
+        var u = wkday;
+        if (u == 0) { u = 7; }
+        store8(buf + pos, 48 + u);
+        return pos + 1;
+    }
+    if (c == 119) {                                                                          # %w 0=Sun..6=Sat
+        store8(buf + pos, 48 + wkday);
+        return pos + 1;
+    }
+    if (c == 97) {                                                                           # %a
+        _date_init_names();
+        return _date_wstr(buf, pos, load64(_date_weekday_short + wkday * 8));
+    }
+    if (c == 65) {                                                                           # %A
+        _date_init_names();
+        return _date_wstr(buf, pos, load64(_date_weekday_full + wkday * 8));
+    }
+    if (c == 98) {                                                                           # %b
+        _date_init_names();
+        var m = load64(parts + 8);
+        return _date_wstr(buf, pos, load64(_date_month_short + (m - 1) * 8));
+    }
+    if (c == 104) {                                                                          # %h alias %b
+        _date_init_names();
+        var m = load64(parts + 8);
+        return _date_wstr(buf, pos, load64(_date_month_short + (m - 1) * 8));
+    }
+    if (c == 66) {                                                                           # %B
+        _date_init_names();
+        var m = load64(parts + 8);
+        return _date_wstr(buf, pos, load64(_date_month_full + (m - 1) * 8));
+    }
+    if (c == 90) { return _date_wstr(buf, pos, "UTC"); }                                    # %Z
+    if (c == 122) { return _date_wstr(buf, pos, "+0000"); }                                 # %z
+    if (c == 115) { return _date_wint(buf, pos, epoch); }                                   # %s
+    if (c == 78) { return _date_wstr(buf, pos, "000000000"); }                              # %N (no ns sampling at v0.7.0)
+    if (c == 84) {                                                                           # %T = %H:%M:%S
+        var p = _date_w2(buf, pos, load64(parts + 24));
+        store8(buf + p, 58); p = p + 1;
+        p = _date_w2(buf, p, load64(parts + 32));
+        store8(buf + p, 58); p = p + 1;
+        return _date_w2(buf, p, load64(parts + 40));
+    }
+    if (c == 82) {                                                                           # %R = %H:%M
+        var p = _date_w2(buf, pos, load64(parts + 24));
+        store8(buf + p, 58); p = p + 1;
+        return _date_w2(buf, p, load64(parts + 32));
+    }
+    if (c == 68) {                                                                           # %D = %m/%d/%y
+        var p = _date_w2(buf, pos, load64(parts + 8));
+        store8(buf + p, 47); p = p + 1;
+        p = _date_w2(buf, p, load64(parts + 16));
+        store8(buf + p, 47); p = p + 1;
+        return _date_w2(buf, p, load64(parts) % 100);
+    }
+    if (c == 70) {                                                                           # %F = %Y-%m-%d
+        var p = _date_w4(buf, pos, load64(parts));
+        store8(buf + p, 45); p = p + 1;
+        p = _date_w2(buf, p, load64(parts + 8));
+        store8(buf + p, 45); p = p + 1;
+        return _date_w2(buf, p, load64(parts + 16));
+    }
+    if (c == 110) { store8(buf + pos, 10); return pos + 1; }                                # %n
+    if (c == 116) { store8(buf + pos, 9);  return pos + 1; }                                # %t
+    if (c == 37)  { store8(buf + pos, 37); return pos + 1; }                                # %%
+    # Unknown — emit `%X` source verbatim.
+    store8(buf + pos, 37);
+    store8(buf + pos + 1, c);
+    return pos + 2;
+}
+
+# Format the timestamp using FMT (cstr; if 0, use the default).
+fn _date_format(fmt, epoch, buf, bufsz): i64 {
+    var parts = epoch_to_date(epoch);
+    var wkday = _date_weekday(epoch);
+    var pos: i64 = 0;
+    var i: i64 = 0;
+    var default_fmt = "%a %b %e %H:%M:%S %Z %Y";
+    var src = fmt;
+    if (src == 0) { src = default_fmt; }
+    while (load8(src + i) != 0) {
+        var c = load8(src + i);
+        if (pos >= bufsz - 32) {
+            # Safety margin — flush early.
+            syscall(1, 1, buf, pos);
+            pos = 0;
+        }
+        if (c == 37) {                          # `%`
+            var next = load8(src + i + 1);
+            if (next == 0) {
+                # Trailing % — emit literally.
+                store8(buf + pos, 37);
+                pos = pos + 1;
+                i = i + 1;
+            } else {
+                # GNU pad-modifier `%_d` / `%-d` / `%0X`: pass through for
+                # the one specifier we explicitly handle (`%_d` -> %e).
+                if (next == 95) {
+                    var nn = load8(src + i + 2);
+                    if (nn == 100) {
+                        pos = _date_w2_sp(buf, pos, load64(parts + 16));
+                        i = i + 3;
+                    } else {
+                        store8(buf + pos, 37);
+                        store8(buf + pos + 1, next);
+                        store8(buf + pos + 2, nn);
+                        pos = pos + 3;
+                        i = i + 3;
+                    }
+                } else {
+                    pos = _date_render_spec(buf, pos, next, parts, wkday, epoch);
+                    i = i + 2;
+                }
+            }
+        } else {
+            store8(buf + pos, c);
+            pos = pos + 1;
+            i = i + 1;
+        }
+    }
+    store8(buf + pos, 10);                       # trailing newline
+    pos = pos + 1;
+    syscall(1, 1, buf, pos);
+    return 0;
+}
+
+fn cmd_date(start: i64): i64 {
+    var n_argv = kriya_argv_count();
+    var fmt: i64 = 0;
+    var i = start;
+    while (i < n_argv) {
+        var tok = argv(i);
+        var tlen = strlen(tok);
+        if (tlen >= 1) {
+            if (load8(tok) == 43) {              # `+`
+                fmt = tok + 1;
+                i = i + 1;
+                continue;
+            }
+            if (load8(tok) == 45) {
+                if (tlen == 1) {
+                    syscall(1, 2, "kriya date: error: lone `-` is not a valid operand\n", 51);
+                    return EXIT_USAGE;
+                }
+                if (load8(tok + 1) == 45) {
+                    # Long option.
+                    if (tlen == 2) {
+                        i = i + 1;
+                        continue;
+                    }
+                    var name = tok + 2;
+                    var nlen = tlen - 2;
+                    var hit: i64 = 0;
+                    if (nlen == 3) {
+                        if (_seq_bytes_eq(name, "utc", 3) == 1) { hit = 1; }
+                    }
+                    if (nlen == 9) {
+                        if (_seq_bytes_eq(name, "universal", 9) == 1) { hit = 1; }
+                    }
+                    if (hit == 1) {
+                        i = i + 1;
+                        continue;
+                    }
+                    syscall(1, 2, "kriya date: error: unknown long option (only --utc/--universal accepted at v0.7.0)\n", 84);
+                    return EXIT_USAGE;
+                }
+                # Short option(s): only `-u` accepted at v0.7.0.
+                var p: i64 = 1;
+                var ok: i64 = 1;
+                while (p < tlen) {
+                    var c = load8(tok + p);
+                    if (c == 117) {
+                        # -u: no-op, UTC is the default already.
+                        p = p + 1;
+                    } else {
+                        ok = 0;
+                        p = tlen;
+                    }
+                }
+                if (ok == 0) {
+                    syscall(1, 2, "kriya date: error: unknown short option (only -u accepted at v0.7.0; -d/-r/-R/-I deferred)\n", 92);
+                    return EXIT_USAGE;
+                }
+                i = i + 1;
+                continue;
+            }
+        }
+        syscall(1, 2, "kriya date: error: unexpected operand (use +FORMAT)\n", 52);
+        return EXIT_USAGE;
+    }
+
+    var epoch = clock_epoch_secs();
+    var buf = alloc(4096);
+    _date_format(fmt, epoch, buf, 4096);
+    return EXIT_SUCCESS;
+}

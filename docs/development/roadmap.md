@@ -64,29 +64,27 @@ Ten utilities — the biggest milestone by count:
 
 **710 behavioural smoke cases pass across all 23 shipped utilities (M2+M3+M4)**; cold-start median 1.198ms (flat from v0.4.0).
 
-### Post-M5 — AGNOS kernel boot burn-in (parallel signal)
+### Post-M6 — AGNOS kernel boot burn-in (parallel signal)
 
-**Boot-burn is a parallel signal on the AGNOS kernel's timeline, not a blocking gate on kriya.** The 33 shipped utilities cover the POSIX-essential surface a shell needs to bootstrap; boot-burn produces consumer feedback that should shape M6's priorities (`df`, `du`, `date`, `env`, `seq`). The kernel team's fix cycles and integration timeline drive when that signal arrives; kriya keeps moving on adjacent work in the meantime.
+**Boot-burn is a parallel signal on the AGNOS kernel's timeline, not a blocking gate on kriya.** The 38 shipped utilities cover the full POSIX-essential surface a shell needs to bootstrap; boot-burn produces the consumer feedback that retroactively shapes which deferred features get promoted. The kernel team's fix cycles and integration timeline drive when that signal arrives; kriya keeps moving on adjacent work in the meantime.
 
 What boot-burn will tell us (when it lands):
 
 - Which utilities are hit in early boot, and which surface gaps appear?
 - Are the ADR-0003 (symlink-follow) / ADR-0004 (`/` refusal) / ADR-0005 (regex engine) policies right in practice?
-- Does the 1.192ms cold-start matter in aggregate over a real init sequence?
-- Which deferred features (multi-`-e` grep, find `-prune`/`-delete`, xargs `-P`) get promoted based on real script usage?
+- Does the 1.212ms cold-start matter in aggregate over a real init sequence?
+- Which deferred features (local-time `date`, hardlink `du`, multi-`-e` `grep`, find `-prune`/`-delete`, xargs `-P`, etc.) get promoted based on real script usage?
 
 **Signal shape**: agnos kernel completes a boot-burn run with kriya in the init userland (green boot using kriya symlinks via zugot recipe or direct install), plus a written incident log capturing what was hit. Tracked outside this repo as a project-memory item.
 
 Active work surface during kernel fix cycles:
 
-- **Bug fixes** in any of the 33 shipped utilities.
-- **Cross-FS directory `mv`** — the one remaining M2 follow-up, now unblocked since `rm -r`'s tree-walk exists.
+- **Bug fixes** in any of the 38 shipped utilities.
 - **Cyrius proposal sweeps** when accepted (octal literals → decimal-with-comment cleanup; `*at()`-family wrappers → raw `syscall(N, ...)` cleanup).
 - **stdlib `getenv` post-fork bug** — root-cause and fix the io.cyr `getenv` issue that find + xargs work around via PATH caching.
-- **Deferred features** in grep / find / xargs if a real consumer asks (multi-`-e`, `-prune`, `-delete`, `-P` parallel, etc.).
+- **Deferred features** in any utility if a real consumer asks (date local-time, du hardlink dedup, df statvfs-based operand walk, etc.).
 - **CI / release / build-script review** vs kindred Cyrius repos.
-
-M6 utilities themselves (`df` / `du` / `date` / `env` / `seq`) still wait for boot-burn feedback — building those ahead of the signal risks shaping the wrong surface.
+- **M7 POSIX-compliance audit** — can start before or after boot-burn at user direction.
 
 ### M5 — Filtering / search (v0.6.0) — ✅ shipped 2026-05-17
 
@@ -101,13 +99,15 @@ Three utilities + one engine ADR + the process-fork integration.
 
 **LOC review**: grep ~640, find ~770, xargs ~430. All under the 400-LOC split threshold's de facto upper bound (the policy targets single utilities; M5 utilities are larger but built on shared `fs`/`niyama`/`process` infrastructure — they pay for the engine surface, not unrelated sprawl). No extractions needed at v0.6.0.
 
-### M6 — System info + misc (v0.7.0)
+### M6 — System info + misc (v0.7.0) — ✅ shipped 2026-05-18
 
-- [ ] `src/cmd/df.cyr` — filesystem usage via `statvfs`
-- [ ] `src/cmd/du.cyr` — directory-tree size, `-h` human, `-s` summary
-- [ ] `src/cmd/date.cyr` — time print with strftime-like format
-- [ ] `src/cmd/env.cyr` — env var print / unset / set-on-exec
-- [ ] `src/cmd/seq.cyr` — integer / float sequence generation
+Five utilities, shipped ahead of the AGNOS kernel boot-burn signal at user direction (same shape as the M5 mid-hold resume).
+
+- [x] `src/cmd/seq.cyr` — integer-only at v0.7.0 (float defers behind printf `%f`/`%g` follow-up); negative-FIRST `-DIGIT` handled via in-utility argv walk; 44 cell-by-cell smoke cases vs GNU.
+- [x] `src/cmd/env.cyr` — `-i`/`-`/`-u`/`-0` + NAME=VALUE assignments + in-order op application; PATH-resolved direct `sys_execve` (no fork); exit 127 ENOENT / 126 other; 28 smoke cases.
+- [x] `src/cmd/date.cyr` — 28 strftime specifiers including `%Y`/`%m`/`%d`/`%H`/`%M`/`%S`/`%a`/`%A`/`%b`/`%B`/`%j`/`%u`/`%w`/`%p`/`%P`/`%T`/`%R`/`%D`/`%F`/`%s`/`%Z`/`%z`/escapes; UTC-only at v0.7.0 (`-u` no-op); local-time tzfile parsing deferred; 44 smoke cases under `LC_ALL=C TZ=UTC`.
+- [x] `src/cmd/du.cyr` — `-s`/`-a`/`-c`/`-h`/`-k`/`-b`/`-L`/`-P`/`-d N`/`-S`; 1024-byte default blocks; `-b` skips directory st_size (apparent-size dir semantic); hardlink dedup deferred; 37 smoke cases.
+- [x] `src/cmd/df.cyr` — `-h`/`-T`/`-i`/`-a`/`-P`; `statfs(2)` per mount, parses `/proc/self/mounts` with octal-escape decoding; pseudo-FS filter (proc/sysfs/cgroup/etc.) by default; exact-mp operand match (path-walk via stat.st_dev deferred); 15 structural-parity cases vs GNU.
 
 ### M7 — POSIX-compliance audit (v0.8.0)
 

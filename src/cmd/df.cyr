@@ -1,0 +1,562 @@
+# df — POSIX `df(1)`: filesystem usage.
+#
+# Argument shape:
+#   df [opts] [FILE...]
+#
+# Flags:
+#   -h / --human-readable   K/M/G/T size suffixes with 1-decimal
+#   -k                      1024-byte blocks (default — matches GNU)
+#   -T / --print-type       add Type column
+#   -i / --inodes           inode counts instead of block counts
+#   -a / --all              include pseudo-FS that are skipped by default
+#   -P / --portability      POSIX-strict output (no smart-column-width)
+#
+# Without operand: print one row per mount in /proc/self/mounts.
+# With FILE operands: for each FILE, print the row for the filesystem
+# it lives on (resolved via stat → match against mount table dev).
+#
+# Pseudo-FS filter (default skip, override with -a):
+#   fs_type ∈ {proc, sysfs, devpts, securityfs, cgroup, cgroup2,
+#              pstore, autofs, mqueue, hugetlbfs, debugfs, tracefs,
+#              fusectl, configfs, ramfs, bpf, rpc_pipefs, sunrpc,
+#              binfmt_misc, fuse.gvfsd-fuse}
+#   OR f_blocks == 0
+#
+# /proc/self/mounts fields are space-separated; values with literal
+# spaces are octal-escaped as \040 — we decode those when parsing the
+# mount-point and device-name fields.
+#
+# Output columns (default): Filesystem | 1K-blocks | Used | Available
+#                           | Use% | Mounted on
+# With -T: Filesystem | Type | 1K-blocks | Used | Available | Use% | Mounted on
+# With -i: Filesystem | Inodes | IUsed | IFree | IUse% | Mounted on
+#
+# Deferred at v0.7.0: `--output=`, `--total`, `--exclude-type=`,
+# `--type=`, `--sync`, statvfs(3)'s f_flag flag-list rendering.
+
+var _df_human:        i64 = 0;
+var _df_show_type:    i64 = 0;
+var _df_inodes:       i64 = 0;
+var _df_all:          i64 = 0;
+var _df_portable:     i64 = 0;
+var _df_any_failed:   i64 = 0;
+
+# statfs buffer offsets (Linux x86_64, 64-bit struct statfs64).
+enum DfStatfs {
+    DF_STATFS_TYPE    = 0;
+    DF_STATFS_BSIZE   = 8;
+    DF_STATFS_BLOCKS  = 16;
+    DF_STATFS_BFREE   = 24;
+    DF_STATFS_BAVAIL  = 32;
+    DF_STATFS_FILES   = 40;
+    DF_STATFS_FFREE   = 48;
+    DF_STATFS_FSID    = 56;
+    DF_STATFS_NAMELEN = 64;
+    DF_STATFS_FRSIZE  = 72;
+    DF_STATFS_FLAGS   = 80;
+    DF_STATFS_BUFSZ   = 120;
+}
+
+fn _df_statfs(path, buf): i64 {
+    return syscall(137, path, buf);
+}
+
+# Decode /proc/self/mounts field-with-escapes (`\040` for space, etc.).
+# Writes the decoded bytes into `out` (caller-allocated) and returns
+# the decoded byte count. Stops at the first space or NUL in `src`.
+fn _df_decode_field(src, out): i64 {
+    var i: i64 = 0;
+    var o: i64 = 0;
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var c = load8(src + i);
+        if (c == 0)  { loop = 0; }
+        else {
+            if (c == 32) { loop = 0; }
+            else {
+                if (c == 9) { loop = 0; }
+                else {
+                    if (c == 92) {
+                        # \DDD octal escape (3 digits).
+                        var d1 = load8(src + i + 1);
+                        var d2 = load8(src + i + 2);
+                        var d3 = load8(src + i + 3);
+                        if ((d1 >= 48) & (d1 <= 55)) {
+                            if ((d2 >= 48) & (d2 <= 55)) {
+                                if ((d3 >= 48) & (d3 <= 55)) {
+                                    var v = (d1 - 48) * 64 + (d2 - 48) * 8 + (d3 - 48);
+                                    store8(out + o, v);
+                                    o = o + 1;
+                                    i = i + 4;
+                                } else {
+                                    store8(out + o, c); o = o + 1; i = i + 1;
+                                }
+                            } else {
+                                store8(out + o, c); o = o + 1; i = i + 1;
+                            }
+                        } else {
+                            store8(out + o, c); o = o + 1; i = i + 1;
+                        }
+                    } else {
+                        store8(out + o, c);
+                        o = o + 1;
+                        i = i + 1;
+                    }
+                }
+            }
+        }
+    }
+    store8(out + o, 0);
+    return o;
+}
+
+# Advance src to one byte past the next space (or to a NUL).
+fn _df_skip_to_next_field(src): i64 {
+    var p: i64 = 0;
+    while (load8(src + p) != 0) {
+        if (load8(src + p) == 32) {
+            p = p + 1;
+            return p;
+        }
+        if (load8(src + p) == 9) {
+            p = p + 1;
+            return p;
+        }
+        p = p + 1;
+    }
+    return p;
+}
+
+# Pseudo-FS membership check. Returns 1 if `fs_type` is in our skip
+# list. Direct string compare against each known name.
+fn _df_is_pseudo_fs(fs_type): i64 {
+    var t = fs_type;
+    var l = strlen(t);
+    if (l == 4) {
+        if (_seq_bytes_eq(t, "proc", 4) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "ramfs", 4) == 1) { return 0; }   # length 5 below
+        if (_seq_bytes_eq(t, "sunr", 4) == 1) { return 0; }
+        if (_seq_bytes_eq(t, "rpc_", 4) == 1) { return 0; }
+        if (_seq_bytes_eq(t, "bpf", 3) == 1)  { return 0; }
+    }
+    if (l == 3) {
+        if (_seq_bytes_eq(t, "bpf", 3) == 1) { return 1; }
+    }
+    if (l == 5) {
+        if (_seq_bytes_eq(t, "sysfs", 5) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "ramfs", 5) == 1) { return 1; }
+    }
+    if (l == 6) {
+        if (_seq_bytes_eq(t, "devpts", 6) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "cgroup", 6) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "mqueue", 6) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "autofs", 6) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "pstore", 6) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "sunrpc", 6) == 1) { return 1; }
+    }
+    if (l == 7) {
+        if (_seq_bytes_eq(t, "cgroup2", 7) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "tracefs", 7) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "debugfs", 7) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "fusectl", 7) == 1) { return 1; }
+    }
+    if (l == 8) {
+        if (_seq_bytes_eq(t, "configfs", 8) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "hugetlbfs", 9) == 1) { return 0; }
+    }
+    if (l == 9) {
+        if (_seq_bytes_eq(t, "hugetlbfs", 9) == 1) { return 1; }
+    }
+    if (l == 10) {
+        if (_seq_bytes_eq(t, "securityfs", 10) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "binfmt_mis", 10) == 1) { return 0; }
+    }
+    if (l == 11) {
+        if (_seq_bytes_eq(t, "binfmt_misc", 11) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "rpc_pipefs", 10) == 1)  { return 0; }
+    }
+    return 0;
+}
+
+# Write an integer right-justified in a field of `width`. Returns
+# pos+width.
+fn _df_w_int_right(buf, pos, val, width): i64 {
+    var tmp[32];
+    var k: i64 = 0;
+    var v = val;
+    if (v == 0) {
+        store8(&tmp, 48);
+        k = 1;
+    } else {
+        while (v > 0) {
+            store8(&tmp + k, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            k = k + 1;
+        }
+    }
+    var pad = width - k;
+    var i: i64 = 0;
+    while (i < pad) {
+        store8(buf + pos + i, 32);
+        i = i + 1;
+    }
+    while (k > 0) {
+        k = k - 1;
+        store8(buf + pos + pad + (width - pad) - k - 1, load8(&tmp + k));
+    }
+    return pos + width;
+}
+
+# Append a string left-justified, padded with spaces to `width`.
+fn _df_w_str_left(buf, pos, s, slen, width): i64 {
+    memcpy(buf + pos, s, slen);
+    var i = slen;
+    while (i < width) {
+        store8(buf + pos + i, 32);
+        i = i + 1;
+    }
+    return pos + width;
+}
+
+# Right-justified str into `width` bytes (truncates if longer).
+fn _df_w_str_right(buf, pos, s, slen, width): i64 {
+    if (slen >= width) {
+        memcpy(buf + pos, s, slen);
+        return pos + slen;
+    }
+    var pad = width - slen;
+    var i: i64 = 0;
+    while (i < pad) {
+        store8(buf + pos + i, 32);
+        i = i + 1;
+    }
+    memcpy(buf + pos + pad, s, slen);
+    return pos + width;
+}
+
+# Compute Use% from used+free per GNU's rule: ceil(used / (used + bavail))
+# Returns 0..100. With used+bavail == 0, returns "-" sentinel via -1.
+fn _df_use_pct(used, bavail): i64 {
+    var total = used + bavail;
+    if (total <= 0) { return 0 - 1; }
+    var pct = _du_div_ceil(used * 100, total);
+    if (pct < 0)   { pct = 0; }
+    if (pct > 100) { pct = 100; }
+    return pct;
+}
+
+# Convert raw block count (in fragments of `frsize` bytes) to 1024-byte
+# blocks (round up). Used for default + when -k is set (which it is by
+# default in our world).
+fn _df_to_kib(frsize, count): i64 {
+    return _du_div_ceil(frsize * count, 1024);
+}
+
+# Format a size cell. With -h: use _du_fmt_size with byte input;
+# without: integer KiB.
+fn _df_fmt_cell(buf, pos, frsize, count, width): i64 {
+    if (_df_human == 1) {
+        var bytes_val = frsize * count;
+        # Reuse du's human formatter by temporarily flipping its flag.
+        var saved = _du_human;
+        _du_human = 1;
+        # Right-align: compute formatted length first.
+        var tmp = alloc(32);
+        var p2 = _du_fmt_size(tmp, 0, bytes_val);
+        _du_human = saved;
+        return _df_w_str_right(buf, pos, tmp, p2, width);
+    }
+    return _df_w_int_right(buf, pos, _df_to_kib(frsize, count), width);
+}
+
+# Render one mount row using the active flag state.
+# `dev`, `mp`, `fs_type` are cstrs; `st` is the 120-byte statfs.
+fn _df_emit_row(dev, mp, fs_type, st): i64 {
+    var f_blocks = load64(st + 16);
+    var f_bfree  = load64(st + 24);
+    var f_bavail = load64(st + 32);
+    var f_files  = load64(st + 40);
+    var f_ffree  = load64(st + 48);
+    var f_frsize = load64(st + 72);
+    if (f_frsize == 0) { f_frsize = load64(st + 8); }   # fall back to bsize
+
+    var used   = f_blocks - f_bfree;
+    var iused  = f_files - f_ffree;
+
+    var dev_len = strlen(dev);
+    var mp_len  = strlen(mp);
+    var ft_len  = strlen(fs_type);
+
+    var buf = alloc(2048);
+    var pos: i64 = 0;
+    var dev_col_w: i64 = 14;
+    if (dev_len > dev_col_w) { dev_col_w = dev_len; }
+    pos = _df_w_str_left(buf, pos, dev, dev_len, dev_col_w);
+    store8(buf + pos, 32); pos = pos + 1;
+    if (_df_show_type == 1) {
+        var t_col_w: i64 = 8;
+        if (ft_len > t_col_w) { t_col_w = ft_len; }
+        pos = _df_w_str_left(buf, pos, fs_type, ft_len, t_col_w);
+        store8(buf + pos, 32); pos = pos + 1;
+    }
+    if (_df_inodes == 1) {
+        pos = _df_w_int_right(buf, pos, f_files, 10);
+        store8(buf + pos, 32); pos = pos + 1;
+        pos = _df_w_int_right(buf, pos, iused, 10);
+        store8(buf + pos, 32); pos = pos + 1;
+        pos = _df_w_int_right(buf, pos, f_ffree, 10);
+        store8(buf + pos, 32); pos = pos + 1;
+        var ipct = _df_use_pct(iused, f_ffree);
+        if (ipct < 0) {
+            pos = _df_w_str_right(buf, pos, "-", 1, 4);
+        } else {
+            pos = _df_w_int_right(buf, pos, ipct, 3);
+            store8(buf + pos, 37); pos = pos + 1;
+        }
+        store8(buf + pos, 32); pos = pos + 1;
+    } else {
+        pos = _df_fmt_cell(buf, pos, f_frsize, f_blocks, 10);
+        store8(buf + pos, 32); pos = pos + 1;
+        pos = _df_fmt_cell(buf, pos, f_frsize, used, 10);
+        store8(buf + pos, 32); pos = pos + 1;
+        pos = _df_fmt_cell(buf, pos, f_frsize, f_bavail, 10);
+        store8(buf + pos, 32); pos = pos + 1;
+        var pct = _df_use_pct(used, f_bavail);
+        if (pct < 0) {
+            pos = _df_w_str_right(buf, pos, "-", 1, 4);
+        } else {
+            pos = _df_w_int_right(buf, pos, pct, 3);
+            store8(buf + pos, 37); pos = pos + 1;
+        }
+        store8(buf + pos, 32); pos = pos + 1;
+    }
+    memcpy(buf + pos, mp, mp_len);
+    pos = pos + mp_len;
+    store8(buf + pos, 10);
+    pos = pos + 1;
+    syscall(1, 1, buf, pos);
+    return 0;
+}
+
+# Print the header row.
+fn _df_emit_header(): i64 {
+    var buf = alloc(512);
+    var pos: i64 = 0;
+    pos = _df_w_str_left(buf, pos, "Filesystem", 10, 14);
+    store8(buf + pos, 32); pos = pos + 1;
+    if (_df_show_type == 1) {
+        pos = _df_w_str_left(buf, pos, "Type", 4, 8);
+        store8(buf + pos, 32); pos = pos + 1;
+    }
+    if (_df_inodes == 1) {
+        pos = _df_w_str_right(buf, pos, "Inodes", 6, 10);
+        store8(buf + pos, 32); pos = pos + 1;
+        pos = _df_w_str_right(buf, pos, "IUsed", 5, 10);
+        store8(buf + pos, 32); pos = pos + 1;
+        pos = _df_w_str_right(buf, pos, "IFree", 5, 10);
+        store8(buf + pos, 32); pos = pos + 1;
+        pos = _df_w_str_right(buf, pos, "IUse%", 5, 4);
+        store8(buf + pos, 32); pos = pos + 1;
+    } else {
+        if (_df_human == 1) {
+            pos = _df_w_str_right(buf, pos, "Size", 4, 10);
+        } else {
+            pos = _df_w_str_right(buf, pos, "1K-blocks", 9, 10);
+        }
+        store8(buf + pos, 32); pos = pos + 1;
+        pos = _df_w_str_right(buf, pos, "Used", 4, 10);
+        store8(buf + pos, 32); pos = pos + 1;
+        if (_df_human == 1) {
+            pos = _df_w_str_right(buf, pos, "Avail", 5, 10);
+        } else {
+            pos = _df_w_str_right(buf, pos, "Available", 9, 10);
+        }
+        store8(buf + pos, 32); pos = pos + 1;
+        pos = _df_w_str_right(buf, pos, "Use%", 4, 4);
+        store8(buf + pos, 32); pos = pos + 1;
+    }
+    memcpy(buf + pos, "Mounted on", 10);
+    pos = pos + 10;
+    store8(buf + pos, 10);
+    pos = pos + 1;
+    syscall(1, 1, buf, pos);
+    return 0;
+}
+
+# Load /proc/self/mounts into an allocated buffer. Returns
+# (buf_ptr, used_bytes) packed in a pair: caller reads from the
+# return ptr at offset 0=ptr, 8=len.
+fn _df_load_mounts(): i64 {
+    var fd = sys_open("/proc/self/mounts", 0, 0);
+    if (fd < 0) { return 0; }
+    var cap: i64 = 65536;
+    var buf = alloc(cap);
+    var used: i64 = 0;
+    var loop: i64 = 1;
+    while (loop == 1) {
+        if (used + 4096 > cap) {
+            var newcap = cap * 2;
+            var newbuf = alloc(newcap);
+            memcpy(newbuf, buf, used);
+            buf = newbuf;
+            cap = newcap;
+        }
+        var n = syscall(0, fd, buf + used, 4096);
+        if (n < 0) {
+            if ((0 - n) == 4) {
+                # EINTR retry
+            } else { loop = 0; }
+        } else {
+            if (n == 0) { loop = 0; }
+            else { used = used + n; }
+        }
+    }
+    syscall(3, fd);
+    var ret = alloc(16);
+    store64(ret, buf);
+    store64(ret + 8, used);
+    return ret;
+}
+
+fn cmd_df(start: i64): i64 {
+    _df_human       = 0;
+    _df_show_type   = 0;
+    _df_inodes      = 0;
+    _df_all         = 0;
+    _df_portable    = 0;
+    _df_any_failed  = 0;
+
+    var n_argv = kriya_argv_count();
+    var operands_buf = alloc(64 * 8);
+    var n_operands: i64 = 0;
+    var i = start;
+    while (i < n_argv) {
+        var tok = argv(i);
+        var tlen = strlen(tok);
+        if (tlen >= 2) {
+            if (load8(tok) == 45) {
+                if (load8(tok + 1) == 45) {
+                    if (tlen == 2) { i = i + 1; continue; }
+                    var nlen = tlen - 2;
+                    var name = tok + 2;
+                    var hit: i64 = 0;
+                    if (nlen == 14) {
+                        if (_seq_bytes_eq(name, "human-readable", 14) == 1) { _df_human = 1; hit = 1; }
+                    }
+                    if (nlen == 10) {
+                        if (_seq_bytes_eq(name, "print-type", 10) == 1) { _df_show_type = 1; hit = 1; }
+                    }
+                    if (nlen == 6) {
+                        if (_seq_bytes_eq(name, "inodes", 6) == 1) { _df_inodes = 1; hit = 1; }
+                    }
+                    if (nlen == 3) {
+                        if (_seq_bytes_eq(name, "all", 3) == 1) { _df_all = 1; hit = 1; }
+                    }
+                    if (nlen == 11) {
+                        if (_seq_bytes_eq(name, "portability", 11) == 1) { _df_portable = 1; hit = 1; }
+                    }
+                    if (hit == 0) {
+                        syscall(1, 2, "kriya df: error: unknown long option\n", 37);
+                        return EXIT_USAGE;
+                    }
+                    i = i + 1;
+                    continue;
+                }
+                var p: i64 = 1;
+                var ok: i64 = 1;
+                while (p < tlen) {
+                    var c = load8(tok + p);
+                    if (c == 104)       { _df_human = 1; p = p + 1; }
+                    else { if (c == 107) { p = p + 1; }                        # -k no-op
+                    else { if (c == 84)  { _df_show_type = 1; p = p + 1; }
+                    else { if (c == 105) { _df_inodes = 1; p = p + 1; }
+                    else { if (c == 97)  { _df_all = 1; p = p + 1; }
+                    else { if (c == 80)  { _df_portable = 1; p = p + 1; }
+                    else {
+                        ok = 0;
+                        p = tlen;
+                    } } } } } }
+                }
+                if (ok == 0) {
+                    syscall(1, 2, "kriya df: error: unknown short option\n", 38);
+                    return EXIT_USAGE;
+                }
+                i = i + 1;
+                continue;
+            }
+        }
+        store64(operands_buf + n_operands * 8, tok);
+        n_operands = n_operands + 1;
+        i = i + 1;
+    }
+
+    var mounts_pack = _df_load_mounts();
+    if (mounts_pack == 0) {
+        syscall(1, 2, "kriya df: error: cannot read /proc/self/mounts\n", 47);
+        return EXIT_FAILURE;
+    }
+    var mbuf = load64(mounts_pack);
+    var mused = load64(mounts_pack + 8);
+
+    _df_emit_header();
+
+    # Walk lines.
+    var line_start: i64 = 0;
+    var li: i64 = 0;
+    while (li < mused) {
+        if (load8(mbuf + li) == 10) {
+            # Line is mbuf[line_start..li]. Parse 3 fields: dev, mp, fs_type.
+            var p = line_start;
+            var dev_buf = alloc(1024);
+            var mp_buf  = alloc(1024);
+            var ft_buf  = alloc(64);
+            _df_decode_field(mbuf + p, dev_buf);
+            p = p + _df_skip_to_next_field(mbuf + p);
+            _df_decode_field(mbuf + p, mp_buf);
+            p = p + _df_skip_to_next_field(mbuf + p);
+            _df_decode_field(mbuf + p, ft_buf);
+
+            # Filter.
+            var keep: i64 = 1;
+            if (_df_all == 0) {
+                if (_df_is_pseudo_fs(ft_buf) == 1) { keep = 0; }
+            }
+            # Skip if operands present and this mp doesn't match any.
+            if (keep == 1) {
+                if (n_operands > 0) {
+                    keep = 0;
+                    # TODO: proper "filesystem containing operand path" match
+                    # via stat(operand).st_dev. v0.7.0 only supports exact
+                    # mp match for simplicity (documented).
+                    var oi: i64 = 0;
+                    while (oi < n_operands) {
+                        var op = load64(operands_buf + oi * 8);
+                        var oplen = strlen(op);
+                        var mplen = strlen(mp_buf);
+                        if (oplen == mplen) {
+                            if (_seq_bytes_eq(op, mp_buf, oplen) == 1) { keep = 1; oi = n_operands; }
+                        }
+                        oi = oi + 1;
+                    }
+                }
+            }
+            if (keep == 1) {
+                var st[120];
+                var sr = _df_statfs(mp_buf, &st);
+                if (sr == 0) {
+                    var f_blocks = load64(&st + 16);
+                    if (_df_all == 0) {
+                        if (f_blocks == 0) { keep = 0; }
+                    }
+                    if (keep == 1) {
+                        _df_emit_row(dev_buf, mp_buf, ft_buf, &st);
+                    }
+                }
+            }
+            line_start = li + 1;
+        }
+        li = li + 1;
+    }
+    if (_df_any_failed == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}

@@ -1,0 +1,488 @@
+# du — POSIX `du(1)`: directory-tree size.
+#
+# Argument shape:
+#   du [opts] [FILE...]
+#
+# Flags:
+#   -s / --summarize       only print a total for each operand
+#   -a / --all             show counts for every file, not just dirs
+#   -c / --total           grand total line at the end
+#   -h / --human-readable  K/M/G with 1-decimal precision
+#   -k                     1024-byte blocks (default — matches GNU
+#                          without POSIXLY_CORRECT)
+#   -b / --bytes           apparent size (st_size), not allocated blocks
+#   -L / --dereference     follow symbolic links
+#   -P / --no-dereference  do NOT follow (default per ADR 0003)
+#   -d N / --max-depth=N   only print entries at depth <= N (counting
+#                          operand at depth 0)
+#   -S / --separate-dirs   do not include subdirectories in dir totals
+#
+# Size accounting:
+#   Default unit is the allocated 1024-byte block. The kernel reports
+#   st_blocks in 512-byte units; we divide by 2 with ceiling rounding
+#   so a 1-byte file shows as 1 KiB block. `-b/--apparent-size` uses
+#   st_size directly (st_size byte count, rounded up to whole KiB
+#   units unless `-h` overrides).
+#
+# Symlink policy (ADR 0003): default `-P` lstats every entry. Symbolic
+# links contribute their own name-target byte count and are NOT
+# descended. `-L` switches to stat (follow) at every level.
+#
+# Hardlink dedup: GNU du dedupes by (st_dev, st_ino) so a hardlinked
+# file is counted once per tree. kriya du at v0.7.0 does NOT dedupe —
+# hardlinks are counted at each name they appear under. Tracked as a
+# follow-up against the future inode-set helper that `cp --preserve=links`
+# also needs.
+#
+# -x (one-filesystem), --exclude/--exclude-from, --inodes, and -0
+# NUL-terminated output are deferred.
+
+var _du_summarize:   i64 = 0;
+var _du_all:         i64 = 0;
+var _du_total:       i64 = 0;
+var _du_human:       i64 = 0;
+var _du_bytes:       i64 = 0;
+var _du_follow:      i64 = 0;
+var _du_max_depth:   i64 = 0;
+var _du_have_depth:  i64 = 0;
+var _du_sep_dirs:    i64 = 0;
+var _du_grand:       i64 = 0;
+
+# Round-up division: (a + b - 1) / b.
+fn _du_div_ceil(a, b): i64 {
+    if (b <= 0) { return 0; }
+    return (a + b - 1) / b;
+}
+
+# st_blocks (offset 64) is in 512-byte units. Convert to 1024-byte
+# allocated blocks with ceiling rounding.
+fn _du_block_size_1k(st): i64 {
+    var b = load64(st + 64);
+    return _du_div_ceil(b, 2);
+}
+
+# Apparent size: st_size (offset 48), in bytes, rounded up to 1024-byte
+# units. (When `-h` overrides, we keep the byte value and let the
+# formatter pick units; when default, we report KiB blocks.)
+fn _du_apparent_size(st): i64 {
+    return load64(st + 48);
+}
+
+# Compute the numeric size for a stat buf according to the active mode.
+# Modes (in increasing complexity):
+#   default:     1024-byte allocated blocks (st_blocks/2, round-up)
+#   -h:          allocated bytes (st_blocks*512) — formatter picks unit
+#   -b:          apparent bytes (st_size) — raw byte count
+#   -b -h:       apparent bytes — formatter picks unit
+fn _du_size(st): i64 {
+    if (_du_bytes == 1) {
+        return _du_apparent_size(st);
+    }
+    if (_du_human == 1) {
+        return load64(st + 64) * 512;
+    }
+    return _du_block_size_1k(st);
+}
+
+# Format size for output. With -h, choose smallest unit where value
+# < 1024 (K/M/G/T) and print with 1 decimal except K which prints whole.
+# Without -h, print the integer KiB-block count as-is.
+fn _du_fmt_size(buf, pos, size): i64 {
+    if (_du_human == 0) {
+        return _date_wint(buf, pos, size);  # signed int writer; sizes are non-negative here
+    }
+    if (size < 1024) {
+        var p = _date_wint(buf, pos, size);
+        return p;
+    }
+    # Pick the largest 1024^k <= size, capping at T (1024^4).
+    var units = "KMGT";
+    var u: i64 = 0;
+    var v = size;
+    while (v >= 1024) {
+        v = v / 1024;
+        u = u + 1;
+        if (u >= 4) {
+            u = 4;
+            v = 0;
+        }
+    }
+    # Recompute v at scale `u` with one-decimal precision.
+    # GNU's -h shows e.g. "1.4K", "200K", "4.0G". Whole numbers omit decimals
+    # when they're round; we always emit a single fractional digit when
+    # below 10, omit when >= 10. Simplify: always emit `int.frac<unit>`
+    # if value < 10*unit, else `int<unit>`.
+    var scale: i64 = 1;
+    var s: i64 = 0;
+    while (s < u) { scale = scale * 1024; s = s + 1; }
+    var whole = size / scale;
+    if (whole >= 10) {
+        # Round half-up.
+        var rounded = _du_div_ceil(size, scale);
+        var p = _date_wint(buf, pos, rounded);
+        store8(buf + p, load8(units + (u - 1)));
+        return p + 1;
+    }
+    # Fractional. tenths = (size mod scale) * 10 / scale, ceil.
+    var rem = size - whole * scale;
+    var tenths = _du_div_ceil(rem * 10, scale);
+    if (tenths >= 10) {
+        whole = whole + 1;
+        tenths = 0;
+    }
+    var p = _date_wint(buf, pos, whole);
+    store8(buf + p, 46);
+    p = p + 1;
+    store8(buf + p, 48 + tenths);
+    p = p + 1;
+    store8(buf + p, load8(units + (u - 1)));
+    return p + 1;
+}
+
+# Emit a "SIZE\tPATH\n" line.
+fn _du_emit(size, path): i64 {
+    var buf = alloc(2048);
+    var p = _du_fmt_size(buf, 0, size);
+    store8(buf + p, 9);
+    p = p + 1;
+    var plen = strlen(path);
+    memcpy(buf + p, path, plen);
+    p = p + plen;
+    store8(buf + p, 10);
+    p = p + 1;
+    syscall(1, 1, buf, p);
+    return 0;
+}
+
+# Recursively walk `name` rooted at `parent_dirfd`. `depth` is operand-
+# relative (0 for the operand itself). `display` is the user-visible
+# path used in output. Returns total size of this subtree (including
+# the dir's own block usage; -S removes children before reporting).
+fn _du_walk(parent_dirfd, name, display, depth): i64 {
+    # Stat (or lstat) the directory entry itself.
+    var st[144];
+    var sr: i64 = 0;
+    if (_du_follow == 1) {
+        sr = fs_fstatat(parent_dirfd, name, &st, 0);
+    } else {
+        sr = fs_lstat_at(parent_dirfd, name, &st);
+    }
+    if (sr != 0) {
+        syscall(1, 2, "kriya du: cannot access '", 25);
+        syscall(1, 2, display, strlen(display));
+        syscall(1, 2, "': ", 3);
+        if (errmsg_is_known(0 - sr) == 1) {
+            var m = errmsg_for(0 - sr);
+            syscall(1, 2, m, strlen(m));
+        }
+        syscall(1, 2, "\n", 1);
+        _du_any_failed = 1;
+        return 0;
+    }
+    var self_size = _du_size(&st);
+
+    # Non-directory: report as appropriate.
+    if (fs_is_dir(&st) == 0) {
+        # File / symlink / other: report only if -a or if depth==0.
+        var should_emit: i64 = 0;
+        if (depth == 0) { should_emit = 1; }
+        if (_du_all == 1)       { should_emit = 1; }
+        if (_du_summarize == 1) {
+            if (depth != 0) { should_emit = 0; }
+        }
+        if (_du_have_depth == 1) {
+            if (depth > _du_max_depth) { should_emit = 0; }
+        }
+        if (should_emit == 1) { _du_emit(self_size, display); }
+        if (depth == 0) { _du_grand = _du_grand + self_size; }
+        return self_size;
+    }
+
+    # Directory. Open and walk.
+    var dir_fd: i64 = 0;
+    if (_du_follow == 1) {
+        # O_RDONLY | O_DIRECTORY = 65536.
+        dir_fd = fs_openat(parent_dirfd, name, 65536, 0);
+    } else {
+        dir_fd = fs_opendir_nofollow(parent_dirfd, name);
+    }
+    if (dir_fd < 0) {
+        syscall(1, 2, "kriya du: cannot access '", 25);
+        syscall(1, 2, display, strlen(display));
+        syscall(1, 2, "': ", 3);
+        if (errmsg_is_known(0 - dir_fd) == 1) {
+            var m = errmsg_for(0 - dir_fd);
+            syscall(1, 2, m, strlen(m));
+        }
+        syscall(1, 2, "\n", 1);
+        _du_any_failed = 1;
+        return self_size;
+    }
+
+    var subtree: i64 = self_size;
+    # In -b/--apparent-size mode, directories don't contribute their
+    # own st_size — only file content bytes count toward apparent size.
+    # (Matches GNU's --apparent-size dir handling.)
+    if (_du_bytes == 1) { subtree = 0; }
+    var children_only: i64 = 0;
+    var ent_buf = alloc(4096);
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var nb = fs_getdents64(dir_fd, ent_buf, 4096);
+        if (nb < 0) {
+            if ((0 - nb) == 4) {
+                # EINTR — retry.
+            } else {
+                loop = 0;
+            }
+        } else {
+            if (nb == 0) { loop = 0; }
+            else {
+                var off: i64 = 0;
+                while (off < nb) {
+                    var ent = ent_buf + off;
+                    var reclen = fs_dent_reclen(ent);
+                    if (fs_dent_is_dotdot(ent) == 0) {
+                        var ename = fs_dent_name(ent);
+                        var child_disp = path_join(display, ename);
+                        # Classify via lstat (or stat with -L).
+                        var cst[144];
+                        var csr: i64 = 0;
+                        if (_du_follow == 1) {
+                            csr = fs_fstatat(dir_fd, ename, &cst, 0);
+                        } else {
+                            csr = fs_lstat_at(dir_fd, ename, &cst);
+                        }
+                        if (csr == 0) {
+                            if (fs_is_dir(&cst) == 1) {
+                                var child_size = _du_walk(dir_fd, ename, child_disp, depth + 1);
+                                if (_du_sep_dirs == 0) {
+                                    subtree = subtree + child_size;
+                                }
+                                children_only = children_only + child_size;
+                            } else {
+                                var sz = _du_size(&cst);
+                                subtree = subtree + sz;
+                                children_only = children_only + sz;
+                                # Emit per-file lines under -a.
+                                var depth_ok: i64 = 1;
+                                if (_du_have_depth == 1) {
+                                    if (depth + 1 > _du_max_depth) { depth_ok = 0; }
+                                }
+                                if (_du_summarize == 1) { depth_ok = 0; }
+                                if (_du_all == 1) {
+                                    if (depth_ok == 1) { _du_emit(sz, child_disp); }
+                                }
+                                # _du_grand is operand-level only — children
+                                # fold into the top-level subtree below.
+                            }
+                        }
+                    }
+                    off = off + reclen;
+                }
+            }
+        }
+    }
+    fs_close(dir_fd);
+
+    # Decide whether to print this directory line.
+    var print_dir: i64 = 1;
+    if (_du_summarize == 1) {
+        if (depth != 0) { print_dir = 0; }
+    }
+    if (_du_have_depth == 1) {
+        if (depth > _du_max_depth) { print_dir = 0; }
+    }
+    if (print_dir == 1) { _du_emit(subtree, display); }
+
+    # Grand-total accumulates the OPERAND-level subtree only (matches
+    # GNU's -c semantics — sum of what the user named).
+    if (depth == 0) {
+        _du_grand = _du_grand + subtree;
+    }
+    return subtree;
+}
+
+var _du_any_failed: i64 = 0;
+
+fn cmd_du(start: i64): i64 {
+    _du_summarize   = 0;
+    _du_all         = 0;
+    _du_total       = 0;
+    _du_human       = 0;
+    _du_bytes       = 0;
+    _du_follow      = 0;
+    _du_max_depth   = 0;
+    _du_have_depth  = 0;
+    _du_sep_dirs    = 0;
+    _du_grand       = 0;
+    _du_any_failed  = 0;
+
+    var n_argv = kriya_argv_count();
+    var operands_buf = alloc(512 * 8);
+    var n_operands: i64 = 0;
+    var no_more_opts: i64 = 0;
+
+    var i = start;
+    while (i < n_argv) {
+        var tok = argv(i);
+        var tlen = strlen(tok);
+        if (no_more_opts == 0) {
+            if (tlen >= 2) {
+                if (load8(tok) == 45) {
+                    if (load8(tok + 1) == 45) {
+                        if (tlen == 2) {
+                            no_more_opts = 1;
+                            i = i + 1;
+                            continue;
+                        }
+                        # Long option.
+                        var eq_off: i64 = 0;
+                        var k: i64 = 2;
+                        while (k < tlen) {
+                            if (load8(tok + k) == 61) { eq_off = k; k = tlen; }
+                            k = k + 1;
+                        }
+                        var nlen = tlen - 2;
+                        if (eq_off > 0) { nlen = eq_off - 2; }
+                        var handled: i64 = 0;
+                        if (nlen == 9) {
+                            if (_seq_bytes_eq(tok + 2, "summarize", 9) == 1) { _du_summarize = 1; handled = 1; }
+                            if (_seq_bytes_eq(tok + 2, "max-depth", 9) == 1) {
+                                var dval: i64 = 0;
+                                if (eq_off > 0) {
+                                    dval = kriya_parse_nonneg_int(tok + eq_off + 1);
+                                } else {
+                                    i = i + 1;
+                                    if (i >= n_argv) {
+                                        syscall(1, 2, "kriya du: error: --max-depth requires an argument\n", 50);
+                                        return EXIT_USAGE;
+                                    }
+                                    dval = kriya_parse_nonneg_int(argv(i));
+                                }
+                                if (dval < 0) {
+                                    syscall(1, 2, "kriya du: error: invalid --max-depth value\n", 43);
+                                    return EXIT_USAGE;
+                                }
+                                _du_max_depth = dval;
+                                _du_have_depth = 1;
+                                handled = 1;
+                            }
+                        }
+                        if (nlen == 3) {
+                            if (_seq_bytes_eq(tok + 2, "all", 3) == 1) { _du_all = 1; handled = 1; }
+                        }
+                        if (nlen == 5) {
+                            if (_seq_bytes_eq(tok + 2, "total", 5) == 1) { _du_total = 1; handled = 1; }
+                            if (_seq_bytes_eq(tok + 2, "bytes", 5) == 1) { _du_bytes = 1; handled = 1; }
+                        }
+                        if (nlen == 14) {
+                            if (_seq_bytes_eq(tok + 2, "human-readable", 14) == 1) { _du_human = 1; handled = 1; }
+                            if (_seq_bytes_eq(tok + 2, "separate-dirs", 13) == 1) { _du_sep_dirs = 1; handled = 1; }  # 13 — no
+                        }
+                        if (nlen == 13) {
+                            if (_seq_bytes_eq(tok + 2, "separate-dirs", 13) == 1) { _du_sep_dirs = 1; handled = 1; }
+                        }
+                        if (nlen == 11) {
+                            if (_seq_bytes_eq(tok + 2, "dereference", 11) == 1) { _du_follow = 1; handled = 1; }
+                        }
+                        if (nlen == 14) {
+                            if (_seq_bytes_eq(tok + 2, "no-dereference", 14) == 1) { _du_follow = 0; handled = 1; }
+                        }
+                        if (handled == 0) {
+                            syscall(1, 2, "kriya du: error: unknown long option\n", 37);
+                            return EXIT_USAGE;
+                        }
+                        i = i + 1;
+                        continue;
+                    }
+                    # Short options.
+                    var p: i64 = 1;
+                    var consumed_next: i64 = 0;
+                    var loop: i64 = 1;
+                    while (loop == 1) {
+                        if (p >= tlen) {
+                            loop = 0;
+                        } else {
+                            var c = load8(tok + p);
+                            if (c == 115) {                # -s
+                                _du_summarize = 1; p = p + 1;
+                            } else { if (c == 97) {        # -a
+                                _du_all = 1; p = p + 1;
+                            } else { if (c == 99) {        # -c
+                                _du_total = 1; p = p + 1;
+                            } else { if (c == 104) {       # -h
+                                _du_human = 1; p = p + 1;
+                            } else { if (c == 107) {       # -k
+                                _du_bytes = 0; p = p + 1;
+                            } else { if (c == 98) {        # -b
+                                _du_bytes = 1; p = p + 1;
+                            } else { if (c == 76) {        # -L
+                                _du_follow = 1; p = p + 1;
+                            } else { if (c == 80) {        # -P
+                                _du_follow = 0; p = p + 1;
+                            } else { if (c == 83) {        # -S
+                                _du_sep_dirs = 1; p = p + 1;
+                            } else { if (c == 100) {       # -d N
+                                var dval: i64 = 0;
+                                if (p + 1 < tlen) {
+                                    dval = kriya_parse_nonneg_int(tok + p + 1);
+                                } else {
+                                    if (i + 1 >= n_argv) {
+                                        syscall(1, 2, "kriya du: error: -d requires an argument\n", 41);
+                                        return EXIT_USAGE;
+                                    }
+                                    dval = kriya_parse_nonneg_int(argv(i + 1));
+                                    consumed_next = 1;
+                                }
+                                if (dval < 0) {
+                                    syscall(1, 2, "kriya du: error: invalid -d value\n", 34);
+                                    return EXIT_USAGE;
+                                }
+                                _du_max_depth = dval;
+                                _du_have_depth = 1;
+                                loop = 0;
+                            } else {
+                                syscall(1, 2, "kriya du: error: unknown short option\n", 38);
+                                return EXIT_USAGE;
+                            } } } } } } } } } }
+                        }
+                    }
+                    if (consumed_next == 1) { i = i + 2; } else { i = i + 1; }
+                    continue;
+                }
+            }
+        }
+        # Positional (operand path).
+        store64(operands_buf + n_operands * 8, tok);
+        n_operands = n_operands + 1;
+        i = i + 1;
+    }
+
+    # GNU rejects -a + -s as mutually exclusive.
+    if (_du_all == 1) {
+        if (_du_summarize == 1) {
+            syscall(1, 2, "kriya du: error: cannot both summarize and show all entries\n", 60);
+            return EXIT_USAGE;
+        }
+    }
+
+    if (n_operands == 0) {
+        # Default to ".".
+        store64(operands_buf, ".");
+        n_operands = 1;
+    }
+
+    var oi: i64 = 0;
+    while (oi < n_operands) {
+        var op = load64(operands_buf + oi * 8);
+        _du_walk(0 - 100, op, op, 0);
+        oi = oi + 1;
+    }
+
+    if (_du_total == 1) {
+        _du_emit(_du_grand, "total");
+    }
+    if (_du_any_failed == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}

@@ -1,0 +1,443 @@
+# seq — repeating integer sequence (GNU/BSD; not in POSIX but ships
+# in kriya per the M6 roadmap).
+#
+# Argument shapes:
+#   seq LAST                    1 2 3 ... LAST
+#   seq FIRST LAST              FIRST FIRST+1 ... LAST   (descending if FIRST > LAST)
+#   seq FIRST INCR LAST         FIRST FIRST+INCR ... bounded by LAST
+#
+# Flags:
+#   -s / --separator SEP   inter-number separator (default "\n").
+#                          A trailing newline is ALWAYS emitted after
+#                          the final number — matches GNU.
+#   -w / --equal-width     zero-pad short numbers to match the wider
+#                          of FIRST and LAST text widths (sign byte
+#                          counted; pad goes after sign).
+#   -f / --format FMT      printf-style format. DEFERRED at v0.7.0
+#                          behind the shared printf float follow-up
+#                          (kriya printf doesn't ship %e/%f/%g yet).
+#                          Passing -f errors with a clear usage
+#                          message pointing at the deferred item.
+#
+# Integer only at v0.7.0. GNU's float behaviour (`seq 0.1 0.1 0.5`)
+# defers behind the same printf float follow-up.
+#
+# Empty output is not an error: if direction-of-incr disagrees with
+# direction from FIRST to LAST, exit 0 with no bytes written.
+# Zero INCR is a usage error.
+
+var _seq_err = 0;
+
+# `-N` where N is a digit must be a positional (negative number), not
+# a short option — the stdlib parser would otherwise treat `-3` as a
+# short flag and reject the invocation. seq's flag surface is small
+# (3 flags) and the negative-FIRST UX is core, so we do our own
+# minimal argv walk instead of going through `kriya_args_parse`.
+# Matches GNU seq's tolerance for bare numeric leading operands.
+fn _seq_token_is_negnum(tok): i64 {
+    if (tok == 0) { return 0; }
+    if (load8(tok) != 45) { return 0; }       # not "-..."
+    var c = load8(tok + 1);
+    if (c < 48) { return 0; }
+    if (c > 57) { return 0; }
+    return 1;
+}
+
+# Byte-equal: are the first `n` bytes of `a` and `b` identical?
+# Returns 1 on match, 0 otherwise.
+fn _seq_bytes_eq(a, b, n): i64 {
+    var i: i64 = 0;
+    while (i < n) {
+        if (load8(a + i) != load8(b + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Parse a null-terminated cstring as a signed base-10 integer.
+# Sets `_seq_err = 1` on: null pointer, empty string, leading sign
+# with nothing after, non-digit body. Otherwise `_seq_err = 0` and
+# returns the value (which may legitimately be 0 or negative).
+fn _seq_parse_signed(s): i64 {
+    _seq_err = 0;
+    if (s == 0)        { _seq_err = 1; return 0; }
+    if (load8(s) == 0) { _seq_err = 1; return 0; }
+    var i:   i64 = 0;
+    var neg: i64 = 0;
+    var c = load8(s);
+    if (c == 45) {
+        neg = 1;
+        i = 1;
+    } else {
+        if (c == 43) { i = 1; }
+    }
+    if (load8(s + i) == 0) { _seq_err = 1; return 0; }
+    var n: i64 = 0;
+    while (load8(s + i) != 0) {
+        c = load8(s + i);
+        if (c < 48) { _seq_err = 1; return 0; }
+        if (c > 57) { _seq_err = 1; return 0; }
+        n = n * 10 + (c - 48);
+        i = i + 1;
+    }
+    if (neg == 1) { return 0 - n; }
+    return n;
+}
+
+# Digit count for |v| (excludes any sign byte).
+fn _seq_digit_count(v): i64 {
+    if (v < 0) { v = 0 - v; }
+    if (v == 0) { return 1; }
+    var c: i64 = 0;
+    while (v > 0) {
+        v = v / 10;
+        c = c + 1;
+    }
+    return c;
+}
+
+# Text length of v as written (sign byte counted for negatives).
+fn _seq_text_len(v): i64 {
+    var n = _seq_digit_count(v);
+    if (v < 0) { n = n + 1; }
+    return n;
+}
+
+# Write v into `buf` starting at `offset`. Returns the new offset.
+# No null terminator.
+fn _seq_write_int(buf, offset, v): i64 {
+    var off = offset;
+    if (v < 0) {
+        store8(buf + off, 45);
+        off = off + 1;
+        v = 0 - v;
+    }
+    var tmp[24];
+    var k: i64 = 0;
+    if (v == 0) {
+        store8(&tmp, 48);
+        k = 1;
+    } else {
+        while (v > 0) {
+            store8(&tmp + k, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            k = k + 1;
+        }
+    }
+    while (k > 0) {
+        k = k - 1;
+        store8(buf + off, load8(&tmp + k));
+        off = off + 1;
+    }
+    return off;
+}
+
+# Like _seq_write_int but zero-pads to total `width` (sign byte
+# counted in `width`; padding lands AFTER any sign so the output
+# looks like `-007` not `00-7`).
+fn _seq_write_int_w(buf, offset, v, width): i64 {
+    var off = offset;
+    var neg: i64 = 0;
+    if (v < 0) {
+        store8(buf + off, 45);
+        off = off + 1;
+        v = 0 - v;
+        neg = 1;
+    }
+    var dc = _seq_digit_count(v);
+    var pad = width - dc - neg;
+    while (pad > 0) {
+        store8(buf + off, 48);
+        off = off + 1;
+        pad = pad - 1;
+    }
+    var tmp[24];
+    var k: i64 = 0;
+    if (v == 0) {
+        store8(&tmp, 48);
+        k = 1;
+    } else {
+        while (v > 0) {
+            store8(&tmp + k, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            k = k + 1;
+        }
+    }
+    while (k > 0) {
+        k = k - 1;
+        store8(buf + off, load8(&tmp + k));
+        off = off + 1;
+    }
+    return off;
+}
+
+fn cmd_seq(start: i64): i64 {
+    var n_argv = kriya_argv_count();
+    var sep    = "\n";
+    var seplen: i64 = 1;
+    var equal_width: i64 = 0;
+    var pos_buf[24];          # up to 3 positional pointers
+    var npos: i64 = 0;
+    var saw_double_dash: i64 = 0;
+
+    var i = start;
+    while (i < n_argv) {
+        var tok = argv(i);
+        var tlen = strlen(tok);
+        if (saw_double_dash == 1) {
+            if (npos >= 3) {
+                syscall(1, 2, "kriya seq: error: too many operands\n", 36);
+                return EXIT_USAGE;
+            }
+            store64(&pos_buf + npos * 8, tok);
+            npos = npos + 1;
+            i = i + 1;
+            continue;
+        }
+        if (tlen >= 2) {
+            if (load8(tok) == 45) {
+                if (load8(tok + 1) == 45) {
+                    if (tlen == 2) {
+                        saw_double_dash = 1;
+                        i = i + 1;
+                        continue;
+                    }
+                    # Long option: --name or --name=VALUE.
+                    var eq_off: i64 = 0;
+                    var k: i64 = 2;
+                    while (k < tlen) {
+                        if (load8(tok + k) == 61) {
+                            eq_off = k;
+                            k = tlen;
+                        }
+                        k = k + 1;
+                    }
+                    var name_len: i64 = tlen - 2;
+                    if (eq_off > 0) { name_len = eq_off - 2; }
+                    # --separator / --separator=VAL
+                    if (name_len == 9) {
+                        if (_seq_bytes_eq(tok + 2, "separator", 9) == 1) {
+                            if (eq_off > 0) {
+                                sep = tok + eq_off + 1;
+                            } else {
+                                i = i + 1;
+                                if (i >= n_argv) {
+                                    syscall(1, 2, "kriya seq: error: --separator requires an argument\n", 51);
+                                    return EXIT_USAGE;
+                                }
+                                sep = argv(i);
+                            }
+                            if (load8(sep) == 0) {
+                                seplen = 1;
+                                sep = "\n";
+                            } else {
+                                seplen = strlen(sep);
+                            }
+                            i = i + 1;
+                            continue;
+                        }
+                    }
+                    # --equal-width (no value)
+                    if (name_len == 11) {
+                        if (_seq_bytes_eq(tok + 2, "equal-width", 11) == 1) {
+                            if (eq_off > 0) {
+                                syscall(1, 2, "kriya seq: error: --equal-width does not take a value\n", 54);
+                                return EXIT_USAGE;
+                            }
+                            equal_width = 1;
+                            i = i + 1;
+                            continue;
+                        }
+                    }
+                    # --format / --format=VAL  (deferred)
+                    if (name_len == 6) {
+                        if (_seq_bytes_eq(tok + 2, "format", 6) == 1) {
+                            syscall(1, 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 86);
+                            return EXIT_USAGE;
+                        }
+                    }
+                    syscall(1, 2, "kriya seq: error: unknown option\n", 33);
+                    return EXIT_USAGE;
+                }
+                # Short option(s) — but `-DIGIT` is a negative number.
+                if (_seq_token_is_negnum(tok) == 1) {
+                    if (npos >= 3) {
+                        syscall(1, 2, "kriya seq: error: too many operands\n", 36);
+                        return EXIT_USAGE;
+                    }
+                    store64(&pos_buf + npos * 8, tok);
+                    npos = npos + 1;
+                    i = i + 1;
+                    continue;
+                }
+                # Walk byte-by-byte: handle clustered flags like -ws,
+                # and "value attached" forms like -sFOO.
+                var p: i64 = 1;
+                var consumed_next: i64 = 0;
+                var loop: i64 = 1;
+                while (loop == 1) {
+                    if (p >= tlen) {
+                        loop = 0;
+                    } else {
+                        var ch = load8(tok + p);
+                        if (ch == 119) {              # -w
+                            equal_width = 1;
+                            p = p + 1;
+                        } else {
+                            if (ch == 115) {          # -s
+                                if (p + 1 < tlen) {
+                                    sep = tok + p + 1;
+                                } else {
+                                    if (i + 1 >= n_argv) {
+                                        syscall(1, 2, "kriya seq: error: -s requires an argument\n", 42);
+                                        return EXIT_USAGE;
+                                    }
+                                    sep = argv(i + 1);
+                                    consumed_next = 1;
+                                }
+                                if (load8(sep) == 0) {
+                                    seplen = 1;
+                                    sep = "\n";
+                                } else {
+                                    seplen = strlen(sep);
+                                }
+                                loop = 0;
+                            } else {
+                                if (ch == 102) {      # -f
+                                    syscall(1, 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 86);
+                                    return EXIT_USAGE;
+                                }
+                                syscall(1, 2, "kriya seq: error: unknown option\n", 33);
+                                return EXIT_USAGE;
+                            }
+                        }
+                    }
+                }
+                if (consumed_next == 1) {
+                    i = i + 2;
+                } else {
+                    i = i + 1;
+                }
+                continue;
+            }
+        }
+        # Positional.
+        if (npos >= 3) {
+            syscall(1, 2, "kriya seq: error: too many operands\n", 36);
+            return EXIT_USAGE;
+        }
+        store64(&pos_buf + npos * 8, tok);
+        npos = npos + 1;
+        i = i + 1;
+    }
+
+    if (npos < 1) {
+        syscall(1, 2, "kriya seq: error: missing operand (LAST)\n", 41);
+        return EXIT_USAGE;
+    }
+
+    var first: i64 = 1;
+    var incr:  i64 = 1;
+    var last:  i64 = 0;
+
+    if (npos == 1) {
+        last = _seq_parse_signed(load64(&pos_buf));
+        if (_seq_err == 1) {
+            syscall(1, 2, "kriya seq: error: invalid LAST operand\n", 39);
+            return EXIT_USAGE;
+        }
+    } else {
+        if (npos == 2) {
+            first = _seq_parse_signed(load64(&pos_buf));
+            if (_seq_err == 1) {
+                syscall(1, 2, "kriya seq: error: invalid FIRST operand\n", 40);
+                return EXIT_USAGE;
+            }
+            last = _seq_parse_signed(load64(&pos_buf + 8));
+            if (_seq_err == 1) {
+                syscall(1, 2, "kriya seq: error: invalid LAST operand\n", 39);
+                return EXIT_USAGE;
+            }
+        } else {
+            first = _seq_parse_signed(load64(&pos_buf));
+            if (_seq_err == 1) {
+                syscall(1, 2, "kriya seq: error: invalid FIRST operand\n", 40);
+                return EXIT_USAGE;
+            }
+            incr = _seq_parse_signed(load64(&pos_buf + 8));
+            if (_seq_err == 1) {
+                syscall(1, 2, "kriya seq: error: invalid INCREMENT operand\n", 44);
+                return EXIT_USAGE;
+            }
+            last = _seq_parse_signed(load64(&pos_buf + 16));
+            if (_seq_err == 1) {
+                syscall(1, 2, "kriya seq: error: invalid LAST operand\n", 39);
+                return EXIT_USAGE;
+            }
+        }
+    }
+
+    if (incr == 0) {
+        syscall(1, 2, "kriya seq: error: increment must not be zero\n", 45);
+        return EXIT_USAGE;
+    }
+
+    # Width for -w: max text-len(first, last). GNU also includes
+    # text-len(last reachable value) but for monotonic integer steps
+    # the bounds are the extrema.
+    var width: i64 = 0;
+    if (equal_width == 1) {
+        var w1 = _seq_text_len(first);
+        var w2 = _seq_text_len(last);
+        if (w1 > w2) { width = w1; } else { width = w2; }
+    }
+
+    var BUFSZ: i64 = 8192;
+    var buf = alloc(BUFSZ);
+    var blen: i64 = 0;
+
+    var v = first;
+    var first_emit: i64 = 1;
+    var go: i64 = 1;
+    while (go == 1) {
+        if (incr > 0) {
+            if (v > last) { go = 0; }
+        } else {
+            if (v < last) { go = 0; }
+        }
+        if (go == 1) {
+            # Worst-case per iter: separator (seplen) + number (up to 22 bytes
+            # signed i64 incl sign) + a margin. Flush at half capacity.
+            if (blen + seplen + 32 >= BUFSZ) {
+                syscall(1, 1, buf, blen);
+                blen = 0;
+            }
+            if (first_emit == 0) {
+                memcpy(buf + blen, sep, seplen);
+                blen = blen + seplen;
+            }
+            first_emit = 0;
+            if (equal_width == 1) {
+                blen = _seq_write_int_w(buf, blen, v, width);
+            } else {
+                blen = _seq_write_int(buf, blen, v);
+            }
+            v = v + incr;
+        }
+    }
+
+    # Final newline if anything emitted (matches GNU).
+    if (first_emit == 0) {
+        if (blen + 1 >= BUFSZ) {
+            syscall(1, 1, buf, blen);
+            blen = 0;
+        }
+        store8(buf + blen, 10);
+        blen = blen + 1;
+    }
+
+    if (blen > 0) {
+        syscall(1, 1, buf, blen);
+    }
+    return EXIT_SUCCESS;
+}
