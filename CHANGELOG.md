@@ -4,7 +4,43 @@ All notable changes to kriya will be documented here.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
+
 ## [Unreleased]
+
+## [1.0.0] — 2026-05-18
+
+**v1.0 freeze.** Closes **M9**. Tag `1.0.0`.
+
+kriya at 1.0.0 ships **38 POSIX-style utilities** plus the dispatcher, **eight ADRs** capturing every cross-cutting design choice, two **independent audits** (POSIX compliance + security), **per-utility benchmarks** vs GNU, and **fuzz harnesses** for the three parser-style utilities (`grep`, `find`, `printf`). Cold-start median **1.196 ms** (RUNS=100) — under 60% of the 2 ms v1.0 budget.
+
+### Added (M9 deliverables)
+
+- **`tests/kriya-grep.fcyr`** — niyama regex parser fuzz (1127 assertions over 3000+ random patterns: BRE compile, RE2 compile, bracket-class heavy patterns). Deterministic xorshift seed; replayable.
+- **`tests/kriya-find.fcyr`** — find predicate AST fuzz via fork+exec (201 assertions over 200 random argv combinations from find's lexicon).
+- **`tests/kriya-printf.fcyr`** — printf format engine fuzz via fork+exec (201 assertions over 200 random format strings + arg permutations).
+- **`scripts/fuzz.sh`** — convenience runner for all three harnesses.
+
+### v1.0 criteria — final status
+
+- [x] **Core utility set across M1–M6 ships, each with happy + error-path tests + at least one fuzz harness for parser-style utilities (`grep`, `find`, `printf`).** All 38 utilities. 644 smoke cases. 1529 fuzz assertions across the three parser-style harnesses.
+- [x] **POSIX compliance documented per utility (deviations get ADRs)** — M7 audit at `docs/audit/2026-05-18-posix-compliance.md`. 32 of 38 POSIX-defined; 6 intentional scope extensions under ADR 0006.
+- [x] **Each destructive utility covered by TOCTOU + symlink-safety test** — smoke-cp-recursive (39), smoke-mv (51), smoke-rm (53); M8 mitigations added F1/F4/F5 NOFOLLOW protections.
+- [x] **Dispatcher overhead under 2 ms** — v1.0.0 median 1.196 ms (60% of budget; flat across M2–M9).
+- [ ] **One downstream consumer green** — moved to post-1.0 as **M10 (Consumer-burn)** in [roadmap.md](docs/development/roadmap.md). Trigger sequence: AGNOS USB-keyboard-on-boot resolves → AGNOS coreutils integration → first green boot-burn → 1.0.1 release with the consumer-burn audit. The kriya side is ready; this is a parallel signal on the kernel team's timeline.
+- [x] **CHANGELOG complete from v0.1.0 onward** — every milestone (M0–M9) has a versioned entry.
+- [x] **Security audit pass** — M8 audit at `docs/audit/2026-05-18-security.md`. External CVE/0-day cross-walk against the uutils-coreutils audit (41 CVEs); 34 N/A or already-mitigated, 3 patched in M8, 2 documented as POSIX-conformant.
+- [x] **Benchmarks captured** in `docs/benchmarks.md` — cold-start history + per-utility throughput vs GNU + named optimization follow-ups.
+
+**7 of 8 criteria met; the 8th is a parallel signal awaiting external consumer.**
+
+### Test totals at 1.0.0
+
+- **104 in-process assertions** across `tests/kriya.tcyr` (86 unit) + `tests/kriya-posix.tcyr` (18 POSIX-blessed).
+- **1529 fuzz assertions** across `kriya-grep.fcyr` + `kriya-find.fcyr` + `kriya-printf.fcyr`.
+- **644 smoke cases** across 27 utility-area shell scripts.
+
+Post-1.0 work — boot-burn signal, GNU-parity features, Cyrius sweep cycles, perf optimizations — is sequenced in [`docs/development/roadmap.md`](docs/development/roadmap.md) under Post-1.0 milestones (M10–M14). Each item is one PR against a tagged 1.x.y minor.
 
 ## [0.9.0] — 2026-05-18
 
@@ -95,14 +131,6 @@ After v0.6.0 the kriya surface covers every POSIX-essential text/search/filter u
 - **`find`** (`src/cmd/find.cyr`) — POSIX `find(1)`, second M5 utility. Predicates: `-name` (fnmatch-style glob: `*`, `?`, `[abc]`, `[a-z]`, `[!...]`, `\X` escape), `-type` (`f`/`d`/`l`/`s`/`p`/`b`/`c`), `-size [+-]N[cbkMG]` (default 512-byte block units with GNU's round-up-to-next-block on exact match; `c` raw bytes), `-mtime [+-]N` (24h windows), `-mmin [+-]N`, `-empty` (zero-size regular file or no-entry directory), `-newer REF` (mtime newer than REF), `-maxdepth N` (prune descent), `-mindepth N` (skip shallow emits). Actions: `-print` (default when no other action shipped), `-print0` (NUL-terminated for `xargs -0`), `-exec CMD... \;` (fork + execve + waitpid; `{}` substituted as a free-standing argv token or as a substring inside any token). Operators: `!` / `-not`, `-a` / `-and` (implicit between juxtaposed predicates), `-o` / `-or`, `(` / `)` grouping. Symlink policy per ADR 0003: default `-P` (no follow); `-L` follows everywhere (operands + descent + per-entry stat); `-H` (operand-only follow) deferred. Recursive-descent parser builds a small AST (32-byte nodes) keyed by `FindNode` enum; per-entry evaluation short-circuits AND/OR. Tree walk via `fs_getdents64` reuses the grep `-r` pattern. `-exec` env: parent env is read once from `/proc/self/environ` into a vec and passed to `exec_env`; PATH is also cached at startup (the stdlib `getenv` returns empty on every call after the first fork+exec+waitpid in this build — root-caused but not fixed upstream yet; cache sidesteps it). `-exec` PATH-resolves argv[0] in-process before execve since execve itself doesn't search PATH. Smoke `scripts/smoke-find.sh` — **40/40** cell-by-cell against GNU `find`: default print, `-type` matrix, `-name` glob (literal, `*`, `?`, bracket-class, no-match), `-size` exact/`+`/`-`/default-block, `-empty`, `-newer`, `-mtime ±N`, `-maxdepth 0/1/2`, `-mindepth`, AND (implicit + explicit), `-o`, `!`/`-not`, parens, `-print`/`-print0`/`-exec` (with `echo` and `wc -l`), `-L` symlink follow, multi-start-path, exit codes (unknown predicate `2`, bad `-size` `2`, missing `-exec ;` `2`, missing start path `1`, `-H` deferred `2`).
 
 - **`xargs`** (`src/cmd/xargs.cyr`) — POSIX `xargs(1)`, M5 closer. Reads stdin into items, batches them onto a command's argv, exec's. Flags: `-0`/`--null` (NUL-separated input, pairs with `find -print0`), `-n N`/`--max-args=N` (items per exec), `-I REPLSTR`/`--replace` (one exec per item; REPLSTR in any CMD-arg substring is replaced — `-I {}` is the common idiom), `-r`/`--no-run-if-empty` (modern GNU default; we always skip the exec on empty input), `-t`/`--verbose` (trace each command to stderr before running), `-s N`/`--max-chars=N` (argv byte cap, default 128 KiB). Default command is `/bin/echo` when no CMD is given. Item splitting in default (whitespace) mode honors POSIX backslash + single/double-quote rules; in `-0` mode items are NUL-delimited with no escape handling. PATH-resolves argv[0] in-process before execve (same path as find — see the post-fork-getenv caching note). Exit-code rollup follows GNU: `0` all-succeeded, `123` any child non-zero, `124` child exited `255`, `127` fork/exec error. Smoke `scripts/smoke-xargs.sh` — **20/20** cell-by-cell against GNU `xargs`: default echo / explicit CMD, `-n 1`/`-n 2`/`-n 3` batching, `-0` NUL items, `-I {}` replacement with multi-substitution, `-r` empty-stdin guard, quoting (single/double/backslash), `-t` trace, `123` exit on child failure, PATH-resolved commands.
-
-### Deferred at v0.6.0 cut
-
-- **stdlib `getenv` post-fork bug** — `lib/io.cyr`'s `getenv` uses a stack-allocated 8KB buffer to read `/proc/self/environ`; the first call after process start works, but every subsequent call (after at least one fork+exec+waitpid cycle) reads back empty bytes. find and xargs both cache PATH once at startup to sidestep. **Niyama-track follow-up against cyrius parent repo** — likely a stack-vs-syscall-clobber interaction; worth root-causing before any utility that loops getenv across forks ships.
-- **`find` follow-up features** — `-H` (operand-only symlink follow), `-prune` (control-flow predicate), `-delete` (needs to inherit the rm `-rf /` refusal from ADR 0004), `-exec CMD... +` (batched exec — needs ARG_MAX-aware argv chunking), `-regex` (regex against full path via niyama), `-perm` (mode tests), `-user`/`-group` (passwd/group lookup), `-depth` (DFS post-order traversal).
-- **`xargs` follow-up features** — `-P N` (parallel jobs — needs job-table management), `-p` (interactive prompt before each exec), `-L N` (lines-per-command), `-x` (exit on argv overflow instead of splitting), `--show-limits` (print effective caps).
-- **`grep` follow-up features** — multi-`-e` (only single `-e PATTERN` ships; multi via `-f FILE`. Waits on stdlib `flags_add_str_multi`), `--include`/`--exclude`/`--include-dir`/`--exclude-dir` (needs a shared glob matcher — the find glob is a candidate to extract), `-A`/`-B`/`-C N` context, `--color=auto`/`always`/`never` (shared blocker with `ls --color`), `-Z`/`--null` NUL-separated filename output, BRE `-i` bracket-class quirk (`[A-M]` under `-i` matches `a-m`, not `A-M` literal — upstream fix is `(?i)` for `niyama_bre`).
-- **Literal-pattern fast path for grep** — Boyer-Moore-style scan for purely-literal patterns. Belongs in niyama; today the linear Pike NFA puts us at ~80× GNU's throughput on literal-heavy workloads.
 
 ## [0.5.0] — 2026-05-17
 

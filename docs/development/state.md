@@ -5,6 +5,8 @@
 
 ## Version
 
+**1.0.0** — released 2026-05-18. **v1.0 freeze.** Closes M9. **38 POSIX-style utilities** + dispatcher; **8 ADRs**; **2 audits** (POSIX compliance + security); per-utility benchmarks vs GNU; fuzz harnesses for the three parser-style utilities. **7 of 8 v1.0 criteria met**; the 8th (downstream-consumer-green via AGNOS boot-burn) is deferred to a post-1.0 consumer-burn cycle per user direction (parallel signal, not blocker). Test totals: **104 in-process assertions** (86 unit + 18 POSIX-blessed), **1529 fuzz assertions** (1127 grep + 201 find + 201 printf), **644 smoke cases** across 27 shell scripts. Cold-start median **1.196 ms** (RUNS=100; 60% of the 2 ms v1.0 budget).
+
 **0.9.0** — released 2026-05-18. **Closes M8** (security audit + per-utility benchmarks). Two deliverables: (1) `docs/audit/2026-05-18-security.md` — security audit with external CVE/0-day research, primary input the Canonical-commissioned uutils-coreutils audit (CVE-2026-35338 through CVE-2026-35381, 41 CVEs against the exact surface kriya occupies). Cross-walk: 34 N/A or already-mitigated, **3 newly exposed and patched here** (F1 cp recursive source NOFOLLOW, F4 find -empty NOFOLLOW, F5 grep -r NOFOLLOW), 2 documented as POSIX-conformant (F2 cp -f dst, F6 non-recursive grep operand). (2) `docs/benchmarks.md` + `scripts/bench-throughput.sh` — per-utility throughput vs GNU with named optimization follow-ups for the visible gaps (`wc -c` short-circuit, niyama literal Boyer-Moore, `tail` seek-from-end). Cold-start median **1.201ms** (RUNS=100; flat from v0.8.0). **6 of 8 v1.0 criteria now checked** — remaining: fuzz harnesses for parser-style utilities, one downstream consumer green (AGNOS kernel boot-burn).
 
 **0.8.0** — released 2026-05-18. **Closes M7** (POSIX.1-2017 compliance audit). No new utilities — three deliverables: (1) `docs/audit/2026-05-18-posix-compliance.md` walks every shipped utility against POSIX with deviation cataloging (32 of 38 POSIX-defined; 6 intentional kriya-scope extensions; no quiet divergences); (2) three new ADRs — **0006** utility scope (`yes`/`seq`/`stat`/`realpath`/`readlink`/`which` and the four-criteria gate), **0007** `date` UTC-only at v0.7.0 with local-time follow-up named, **0008** POSIX exit-code policy (three-tier baseline + per-utility POSIX overrides); (3) `tests/kriya-posix.tcyr` — fork+execve+pipe-capture harness plus 18 starter POSIX-blessed cases per pillar utility. **104 in-process test cases** (86 unit + 18 POSIX) across two tcyr files; 644 smoke cases across 27 shell scripts. Cold-start median **1.201ms** (RUNS=100; flat from v0.7.0's 1.212ms — no new dispatcher entries).
@@ -23,7 +25,7 @@ Coreutils-equivalent for AGNOS — the small POSIX-style utilities (`cp`, `mv`, 
 
 ## Source
 
-M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0; M4 closed at v0.5.0; M5 closed at v0.6.0; M6 closed at v0.7.0; M7 closed at v0.8.0; **M8 closed at v0.9.0**. **Thirty-eight shipped utilities** (six M1 + seven M2 + seven M3 + ten M4 + three M5 + five M6: `seq`, `env`, `date`, `du`, `df`); six shared lib modules in place (`exit`, `path`, `errmsg`, `args`, `fs`, `protected`); **eight** ADRs accepted (0001–0008); two architecture notes (signal model + errno policy); M7 POSIX audit at `docs/audit/2026-05-18-posix-compliance.md`; M8 security audit at `docs/audit/2026-05-18-security.md`; per-utility benchmarks at `docs/benchmarks.md`. Cold-start re-benched at each release boundary: 1.185ms (v0.2.0) → 1.159ms (v0.3.0) → 1.208ms (v0.4.0) → 1.198ms (v0.5.0) → 1.192ms (v0.6.0) → 1.212ms (v0.7.0) → 1.201ms (v0.8.0) → **1.201ms (v0.9.0)** — flat through M7+M8 (no new dispatcher entries; the three M8 NOFOLLOW mitigations don't touch the hot path).
+M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0; M4 closed at v0.5.0; M5 closed at v0.6.0; M6 closed at v0.7.0; M7 closed at v0.8.0; M8 closed at v0.9.0; **M9 closed at v1.0.0 — v1.0 freeze**. **Thirty-eight shipped utilities** (six M1 + seven M2 + seven M3 + ten M4 + three M5 + five M6: `seq`, `env`, `date`, `du`, `df`); six shared lib modules in place (`exit`, `path`, `errmsg`, `args`, `fs`, `protected`); **eight** ADRs accepted (0001–0008); two architecture notes (signal model + errno policy); M7 POSIX audit at `docs/audit/2026-05-18-posix-compliance.md`; M8 security audit at `docs/audit/2026-05-18-security.md`; per-utility benchmarks at `docs/benchmarks.md`. Cold-start re-benched at each release boundary: 1.185ms (v0.2.0) → 1.159ms (v0.3.0) → 1.208ms (v0.4.0) → 1.198ms (v0.5.0) → 1.192ms (v0.6.0) → 1.212ms (v0.7.0) → 1.201ms (v0.8.0) → 1.201ms (v0.9.0) → **1.196ms (v1.0.0)** — flat through M7+M8+M9 (no new dispatcher entries; M9 adds three fuzz `.fcyr` files which aren't part of the production binary).
 
 | Module | Status |
 |---|---|
@@ -126,7 +128,10 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0; M4 closed at v0.5
 - `scripts/smoke-date.sh` — behavioural test for `date` (44/44 — every shipped strftime specifier compared cell-by-cell against GNU `date` under `LC_ALL=C TZ=UTC`; default format `%a %b %e %H:%M:%S %Z %Y`; composite specifiers `%T`/`%R`/`%D`/`%F`; weekday `%a`/`%A`/`%u`/`%w`; month `%b`/`%h`/`%B`; 12-hour `%I`/`%p`/`%P`; epoch `%s` parity within 1 second; `%N` stubbed zeros; `%_d` pad form; truly-unknown specifier `%X` passthrough via `%@`/`%!`; `-u`/`--utc`/`--universal` no-op; exit codes 0/2 matrix).
 - `scripts/smoke-env.sh` — behavioural test for `env` (28/28 — env-prints with default + `-i` + `-` + `--ignore-environment`; assignments + `-u`/`--unset`/`--unset=` removals applied in token order so `-u FOO FOO=x` keeps FOO=x and `FOO=x -u FOO` drops it; `--` ends option recognition but scans assignments until first non-assignment; `-0`/`--null` NUL-separated print; PATH resolution via modified env; sys_execve direct replace (no fork); exit 127 ENOENT / 126 EACCES; clustered shorts `-iu PATH`; absolute-path commands bypass PATH; usage errors at exit 2 for unknown options, missing -u argument, empty -u NAME).
 - `scripts/smoke-seq.sh` — behavioural test for `seq` (44/44 — every shape (1/2/3 operands) and flag combo (`-s` short/long/attached/`=`-form, `-w` equal-width including width 1/2/3 boundaries) compared cell-by-cell against GNU `seq`; `-DIGIT` bare negative-FIRST UX via in-utility argv walk; `--` terminator; descending direction with negative incr; empty-output cases (incr-direction disagrees with bounds); error matrix (zero incr, no operand, too many operands, unknown short/long option, bad numeric operand) at exit 2; deferred `-f`/`--format` at exit 2).
-- `tests/kriya.fcyr` — fuzz stub (lands when M2 destructive utilities arrive).
+- `tests/kriya-grep.fcyr` — fuzz harness for grep's regex parser (niyama BRE + RE2 + bracket-class boundary patterns). 1127 assertions over 3000+ random patterns; deterministic xorshift seed for replayability.
+- `tests/kriya-find.fcyr` — fuzz harness for find's predicate AST via fork+exec. 201 assertions over 200 random argv combinations from find's lexicon.
+- `tests/kriya-printf.fcyr` — fuzz harness for printf's format engine via fork+exec. 201 assertions over 200 random format strings + arg permutations.
+- `scripts/fuzz.sh` — convenience runner for all three fuzz harnesses; opt-in (not part of `cyrius test` default discovery).
 
 ## Dependencies
 
@@ -153,64 +158,21 @@ _None yet._ Expected consumers once M1 ships:
 - **M6 ✅ v0.7.0** (2026-05-18, user-resumed mid-hold) — 5 system-info/misc utilities (`seq`, `env`, `date`, `du`, `df`) with 168 behavioural smoke cases vs GNU. `seq` integer-only with `-DIGIT` negative-FIRST UX (float `-f FORMAT` deferred behind printf %f/%g). `env` is fork-free `sys_execve` direct replace; in-order op application matches GNU's `-u FOO FOO=x` vs `FOO=x -u FOO` semantics. `date` ships 28 strftime specifiers under UTC (local-time tzfile parsing deferred). `du` reuses `fs_getdents64` walk with `-b` apparent-size + dir-st_size-skip; hardlink dedup deferred. `df` parses `/proc/self/mounts` with octal-escape decoding + builtin pseudo-FS filter. **Cold-start 1.212ms** (RUNS=100; slight uptick from v0.6.0's 1.192ms, well under the 2ms v1.0 target). Cyrius pin bumped to **5.11.61**. Cross-FS directory `mv` also shipped earlier in this cycle — the only remaining M2 follow-up, now closed.
 - **M5 ✅ v0.6.0** (2026-05-17, user-resumed mid-hold) — three utilities (`grep`, `find`, `xargs`) with 126 behavioural smoke cases against GNU. grep uses niyama (ADR 0005) with `-i`/`-v`/`-w`/`-x`/`-c`/`-l`/`-L`/`-n`/`-q`/`-s`/`-h`/`-H`/`-o`/`-r`/`-R`/`-z`/`-E`/`-G`/`-F`/`-e`/`-f`; `-P` rejected. find ships POSIX-essential predicates (`-name`/`-type`/`-size`/`-mtime`/`-mmin`/`-empty`/`-newer`/`-maxdepth`/`-mindepth`), actions (`-print`/`-print0`/`-exec`), operators (full boolean grammar with parens), `-P` default + `-L` follow. xargs ships `-0`/`-n`/`-I`/`-r`/`-t`/`-s` with GNU-shaped exit-code rollup. **Cold-start 1.192ms** (flat from v0.5.0).
 
-### M5 + M6 closed (resumed mid-hold on user signal)
+### Mid-cycle resumes (M5 + M6, 2026-05-17/18)
 
-**M5 was resumed on 2026-05-17 by user request, pre-boot-burn. All three utilities (`grep`, `find`, `xargs`) shipped in one session.** v0.6.0 cut the same day. **M6 was resumed on 2026-05-18 by user request — `seq`, `env`, `date`, `du`, `df` shipped in one session.** v0.7.0 cut the same day.
+M5 was resumed on 2026-05-17 by user request, pre-boot-burn. All three utilities (`grep`, `find`, `xargs`) shipped in one session; v0.6.0 cut the same day. M6 was resumed on 2026-05-18 — `seq`, `env`, `date`, `du`, `df` shipped in one session; v0.7.0 cut the same day. M7/M8/M9 all followed on 2026-05-18 in the same momentum window, landing at v1.0.0.
 
-### Post-M6 — AGNOS kernel boot burn-in (parallel signal)
+### Post-1.0 — sequenced in roadmap.md
 
-**Boot-burn is a parallel signal on the AGNOS kernel's timeline, not a blocking gate on kriya.** The kernel team's fix cycles and integration timeline drive when that signal arrives; kriya keeps moving on adjacent work in the meantime. Thirty-eight utilities cover the POSIX-essential surface a shell needs to bootstrap (M1–M6 complete); the boot-burn will produce the consumer feedback that retroactively shapes which deferred features get promoted — local-time tzfile parsing for `date`, hardlink dedup for `du`, statvfs-based `df` operand walks, etc.
+Post-1.0 milestones M10–M14 live in [`roadmap.md`](roadmap.md). Summary:
 
-**Signal shape**: agnos kernel completes a boot-burn run with kriya in the init userland (zugot recipe install or direct), plus a written incident log capturing what was exercised. Tracked outside this repo as a project-memory item with the boot-burn dashboard / PR link.
+- **M10 — Consumer-burn** — the last v1.0 criterion. Trigger: AGNOS USB-keyboard-on-boot resolves → AGNOS coreutils integration → first green boot-burn → 1.0.1 with consumer-burn audit. Parallel signal on the kernel team's timeline, not a blocker.
+- **M11 — Cyrius proposal sweeps** — octal-literal cleanup, raw-syscall → stdlib-wrapper cleanup. Triggered by upstream Cyrius acceptance.
+- **M12 — POSIX-deviation fill-in** — GNU-parity features grouped by enabler dependency (chrono, flags, stdlib helpers, per-utility independent).
+- **M13 — Performance optimization** — `wc -c` short-circuit, niyama Boyer-Moore, `tail` seek-from-end, speculative items.
+- **M14 — stdlib `getenv` post-fork bug** — upstream Cyrius fix; kriya then strips PATH-cache workaround.
 
-**Active work surface during kernel fix cycles:**
-
-- Bug fixes in any of the 33 shipped utilities (boot-burn is the most likely surface for these).
-- Cross-FS directory `mv` — only outstanding M2 follow-up; unblocked now that `rm -r` exists.
-- Cyrius proposal sweeps when accepted (octal-literal cleanup, raw-syscall → stdlib-wrapper cleanup).
-- **stdlib `getenv` post-fork bug** — root-cause + fix the io.cyr issue that find + xargs work around via PATH caching.
-- Any deferred feature listed in CHANGELOG `[0.6.0] / Deferred at v0.6.0 cut` if a real consumer asks.
-- CI / release / build-script review vs kindred Cyrius repos.
-
-**Next milestone:** M7 POSIX-compliance audit + per-utility deviation ADRs. Whether to ship before or after boot-burn signal is a user decision.
-
-### Deferred features
-
-Each tracked against a future enabler (named follow-up, not "TBD"):
-
-- echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
-- pwd `$PWD` inode-match — waits on `fs.cyr` stat-compare.
-- sleep fractional + suffix (`1.5s`, `1m`, `1h`) — waits on `lib/chrono.cyr` duration-parser.
-- touch `-r REF` / `-t STAMP` / `-d STR` — same `lib/chrono.cyr` dependency; `-h` (no-dereference) deferred until symlink-aware utimensat wrapper.
-- ln `-r` (relative symlink resolution), `-T`/`-t` (target-directory disambiguation), `-b`/`--backup`.
-- cp `--preserve=links` (hardlink dedup during recursive copy).
-- mv multi-file `--follow` (cross-FS directory mv now shipped at [Unreleased] via cp -R + rm -r).
-- mkdir / touch decimal POSIX-mode constants (`511 # 0o777`, `1073741823 # UTIME_NOW`) — sweep to octal once Cyrius proposal `2026-05-17-octal-literal-syntax` lands.
-- touch `syscall(280, ...)`, ln `syscall(265, ...)`, fs.cyr raw at-family syscalls — sweep to `sys_utimensat`/`sys_linkat`/etc. once Cyrius proposal `2026-05-17-syscalls-at-family-stdlib` lands.
-- stat `%U`/`%G` (passwd/group lookup), `%x`/`%y`/`%z` (chrono strftime), `%N` (quoting+symlink-target rendering), real `%W` birth time (statx).
-- ls multi-column tty packing, `-t`/`-S` sort keys, `--color=auto`, `%U`/`%G` name lookup, locale mtime form.
-- tail `-f` multi-file + same-size-rewrite truncation detection; `-n +N` / `-c +N` start-from-line semantics; k/M/G suffixes on counts.
-- head `-n -N` / `-c -N` all-but-last (shared suffix-parser with tail/dd when extracted).
-- nl section delimiters (`-d`/`-h`/`-f`/`\:` markers); `-b p REGEX` (needs niyama); `-l N` empty-line collapse; `-p`.
-- uniq `--all-repeated[=METHOD]`, `--group[=METHOD]`, multi-byte case-fold.
-- tr `[=c=]` equivalence classes, `[c*N]` repetition, locale-aware case fold.
-- cut multi-byte `-c` distinct from `-b` (needs UTF-8 decoder).
-- sort `-h`/`-V`/`-g`/`-M`/`-R`/`-m`/`-d`/`-i`, multi-key `-k F1 -k F2 ...`, end-field key range `-k F1,F2`, external-sort fallback for inputs > 256 MiB.
-- printf floating-point conversions (`%e`/`%E`/`%f`/`%F`/`%g`/`%G`/`%a`/`%A`); hex escape `\xHH`; positional args `%N$s`.
-- Option-parser short clustering `-rfv` and attached short values `-n10` — waits on stdlib `lib/flags.cyr` upgrade. ADR 0002 honoured end-to-end after that.
-- `--help` / `--help=json` / `kriya --list` per ADR 0002 — waits on the spec-renderer on top of `flags.cyr`.
-- CI / release / build-script review — flagged 2026-05-17 against kindred Cyrius repos (`agnos`, `vidya`, `owl`, `cyim`, `sit`).
-- Deferred features tracked against future enablers (each a known-named follow-up, not "TBD"):
-  - echo `-e`/`-E` — waits on `lib/str.cyr` escape table.
-  - pwd `$PWD` inode-match — waits on `fs.cyr` stat-compare.
-  - sleep fractional + suffix (`1.5s`, `1m`, `1h`) — waits on `lib/chrono.cyr` duration-parser.
-  - touch `-r REF` / `-t STAMP` / `-d STR` — same `lib/chrono.cyr` dependency; `-h` (no-dereference) deferred until symlink-aware utimensat wrapper.
-  - ln `-r` (relative symlink resolution), `-T`/`-t` (target-directory disambiguation), `-b`/`--backup` — separate-PR work in M3.
-  - mkdir / touch decimal POSIX-mode constants (`511 # 0o777`, `1073741823 # UTIME_NOW`) — sweep to octal once Cyrius proposal `2026-05-17-octal-literal-syntax` lands.
-  - touch `syscall(280, ...)` and ln `syscall(265, ...)` — sweep to `sys_utimensat`/`sys_linkat` once Cyrius proposal `2026-05-17-syscalls-at-family-stdlib` lands.
-  - Option-parser short clustering `-rfv` and attached short values `-n10` — waits on stdlib `lib/flags.cyr` upgrade. ADR 0002 honoured end-to-end after that.
-  - `--help` / `--help=json` / `kriya --list` per ADR 0002 — waits on the spec-renderer on top of `flags.cyr`.
-  - CI / release / build-script review — flagged 2026-05-17 against kindred Cyrius repos (`agnos`, `vidya`, `owl`, `cyim`, `sit`).
+Each can advance independently against a tagged 1.x.y minor.
 
 ## Next
 

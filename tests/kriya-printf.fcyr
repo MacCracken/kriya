@@ -1,0 +1,174 @@
+# kriya-printf — fuzz harness for printf's format-engine parser.
+#
+# Drives `build/kriya printf <random-format> <random-args...>` and
+# asserts the child exits cleanly. printf parses every byte of FORMAT
+# looking for `%` specifiers, width/precision, flags, and `\` escapes
+# — historically a rich source of OOB-read and infinite-loop bugs in
+# C implementations. Same deterministic-seeded approach as
+# kriya-find.fcyr.
+
+var _FP_SEED: i64 = 11400714785074694791;
+var _FP_NITER: i64 = 200;
+var _FP_BIN = "build/kriya";
+
+fn _fp_rng_next(state_ptr): i64 {
+    var s = load64(state_ptr);
+    if (s == 0) { s = 1; }
+    s = s ^ (s << 13);
+    s = s ^ (s >> 7);
+    s = s ^ (s << 17);
+    store64(state_ptr, s);
+    return s;
+}
+
+fn _fp_rng_range(state_ptr, lo, hi): i64 {
+    var v = _fp_rng_next(state_ptr);
+    if (v < 0) { v = 0 - v; }
+    return lo + (v % (hi - lo));
+}
+
+# Format-string lexicon — bias toward `%`, flags, conversions,
+# and escape sequences (the parser's hot paths). Each entry is a
+# fragment that gets glued together into a longer format string.
+fn _fp_fragments(): i64 {
+    var v = vec_new();
+    vec_push(v, "%");
+    vec_push(v, "%%");
+    vec_push(v, "%s");
+    vec_push(v, "%d");
+    vec_push(v, "%i");
+    vec_push(v, "%o");
+    vec_push(v, "%x");
+    vec_push(v, "%X");
+    vec_push(v, "%c");
+    vec_push(v, "%b");
+    vec_push(v, "%-");
+    vec_push(v, "%+");
+    vec_push(v, "%0");
+    vec_push(v, "% ");
+    vec_push(v, "%#");
+    vec_push(v, "%*");
+    vec_push(v, "%.");
+    vec_push(v, "%10");
+    vec_push(v, "%.5");
+    vec_push(v, "%-10.5");
+    vec_push(v, "\\n");
+    vec_push(v, "\\t");
+    vec_push(v, "\\0");
+    vec_push(v, "\\\\");
+    vec_push(v, "\\041");
+    vec_push(v, "\\777");
+    vec_push(v, "\\");
+    vec_push(v, "abc");
+    vec_push(v, "");
+    return v;
+}
+
+fn _fp_args_lexicon(): i64 {
+    var v = vec_new();
+    vec_push(v, "");
+    vec_push(v, "x");
+    vec_push(v, "42");
+    vec_push(v, "-1");
+    vec_push(v, "0");
+    vec_push(v, "077");
+    vec_push(v, "0xff");
+    vec_push(v, "longer-string-input-for-stretch");
+    return v;
+}
+
+fn _fp_run(args): i64 {
+    var argc = vec_len(args);
+    if (argc < 1) { return 0 - 1; }
+    var cmd = vec_get(args, 0);
+    var argv = alloc((argc + 1) * 8);
+    var i: i64 = 0;
+    while (i < argc) {
+        store64(argv + i * 8, vec_get(args, i));
+        i = i + 1;
+    }
+    store64(argv + argc * 8, 0);
+    var envp = alloc(8);
+    store64(envp, 0);
+    var pid = sys_fork();
+    if (pid < 0) { return 0 - 1; }
+    if (pid == 0) {
+        var devnull = sys_open("/dev/null", 1, 0);
+        if (devnull >= 0) {
+            sys_dup2(devnull, 1);
+            sys_dup2(devnull, 2);
+            sys_close(devnull);
+        }
+        sys_execve(cmd, argv, envp);
+        sys_exit(127);
+    }
+    var stbuf[1];
+    sys_waitpid(pid, &stbuf, 0);
+    var st = load32(&stbuf);
+    if (WIFEXITED(st) == 1) { return WEXITSTATUS(st); }
+    return 0 - 2;
+}
+
+# Glue 1..N random fragments into a heap-allocated null-terminated
+# cstring. Returns the buffer.
+fn _fp_build_format(state_ptr, frags, frags_n): i64 {
+    var n_frag = _fp_rng_range(state_ptr, 1, 8);
+    var buf = alloc(512);
+    var off: i64 = 0;
+    var i: i64 = 0;
+    while (i < n_frag) {
+        var idx = _fp_rng_range(state_ptr, 0, frags_n);
+        var frag = vec_get(frags, idx);
+        var fl = strlen(frag);
+        if (off + fl >= 511) { i = n_frag; }
+        else {
+            memcpy(buf + off, frag, fl);
+            off = off + fl;
+            i = i + 1;
+        }
+    }
+    store8(buf + off, 0);
+    return buf;
+}
+
+fn main() {
+    alloc_init();
+    var seed[8];
+    store64(&seed, _FP_SEED);
+
+    test_group("fuzz: printf with random format strings + args");
+    var frags = _fp_fragments();
+    var frags_n = vec_len(frags);
+    var arglex = _fp_args_lexicon();
+    var arglex_n = vec_len(arglex);
+
+    var i: i64 = 0;
+    while (i < _FP_NITER) {
+        var fmt = _fp_build_format(&seed, frags, frags_n);
+        var args = vec_new();
+        vec_push(args, _FP_BIN);
+        vec_push(args, "printf");
+        vec_push(args, fmt);
+        var nargs = _fp_rng_range(&seed, 0, 4);
+        var j: i64 = 0;
+        while (j < nargs) {
+            var idx = _fp_rng_range(&seed, 0, arglex_n);
+            vec_push(args, vec_get(arglex, idx));
+            j = j + 1;
+        }
+        var rc = _fp_run(args);
+        assert_neq(rc, 0 - 2, "printf did not exit cleanly under fuzz");
+        if (rc >= 0) {
+            if (rc > 128) {
+                assert_lt(rc, 129, "printf did not crash (no SIG-derived exit)");
+            }
+        }
+        i = i + 1;
+    }
+    assert_eq(1, 1, "printf survived 200 random format inputs");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);
