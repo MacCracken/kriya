@@ -41,9 +41,9 @@ jobs:
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
       - name: Test
-        # v5.6.28: bare `cyrius test` picks up the [build].test entry
-        # AND auto-discovers tests/*.tcyr — avoids the previous
-        # `cyrius test src/test.cyr` form that hard-failed when the
-        # stub didn't exist (Issue 1) and also wouldn't ever exercise
-        # tests/${proj}.tcyr.
-        run: cyrius test
+        # Explicit test paths — robust against any Cyrius version's
+        # auto-discovery behavior. Add new tcyr files here when they
+        # land; CI is then deterministic about what runs.
+        run: |
+          cyrius test tests/kriya.tcyr
+          cyrius test tests/kriya-posix.tcyr
