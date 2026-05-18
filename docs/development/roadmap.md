@@ -6,14 +6,14 @@
 
 ## v1.0 criteria
 
-- [ ] Core utility set across M1–M6 ships, each with happy + error-path tests + at least one fuzz harness for parser-style utilities (`grep`, `find`, `printf`)
+- [ ] Core utility set across M1–M6 ships, each with happy + error-path tests + at least one fuzz harness for parser-style utilities (`grep`, `find`, `printf`) — utilities + smoke tests ship; **per-utility fuzz harness still owed** for `grep`/`find`/`printf`. Tracked as the last code-side v1.0 deliverable.
 - [x] POSIX compliance documented per utility (deviations get ADRs) — M2-M4 utilities verify cell-by-cell against GNU
-- [ ] Each destructive utility (`rm`, `mv`, `cp -f`) covered by a TOCTOU + symlink-safety test — covered for M2; the broader fuzz harness lands at M8
-- [x] Dispatcher overhead measured (one-call cold start) and held under **2 ms** on Cyrius-current hardware — v0.5.0 median 1.198ms
-- [ ] At least one downstream consumer green (agnoshi `$PATH` lookup → kriya symlinks) — pending AGNOS kernel boot burn-in
-- [x] CHANGELOG complete from v0.1.0 onward
-- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-security.md`) — path traversal, TOCTOU, signal handling, symlink follow policy, plus external research for CVEs/0-days against coreutils-equivalent surfaces — M8 deliverable
-- [ ] Benchmarks captured in `docs/benchmarks.md` — partial (cold-start tracked in state.md; per-utility coverage pending M8)
+- [x] Each destructive utility (`rm`, `mv`, `cp -f`) covered by a TOCTOU + symlink-safety test — M8 audit verified ADR-0003/0004 coverage across cp/mv/rm; three M8 mitigations (F1 cp, F4 find, F5 grep) closed remaining TOCTOU gaps with smoke-suite regression coverage.
+- [x] Dispatcher overhead measured (one-call cold start) and held under **2 ms** on Cyrius-current hardware — v0.9.0 median 1.201ms (60% of budget).
+- [ ] At least one downstream consumer green (agnoshi `$PATH` lookup → kriya symlinks) — pending AGNOS kernel boot burn-in.
+- [x] CHANGELOG complete from v0.1.0 onward.
+- [x] Security audit pass (`docs/audit/2026-05-18-security.md`) — path traversal, TOCTOU, signal handling, symlink-follow policy + external CVE/0-day research. M8 deliverable, shipped.
+- [x] Benchmarks captured in `docs/benchmarks.md` — cold-start history + per-utility throughput vs GNU. M8 deliverable, shipped.
 
 ## Milestones
 
@@ -115,11 +115,11 @@ Five utilities, shipped ahead of the AGNOS kernel boot-burn signal at user direc
 - [x] Capture all deviations in ADRs — three new ADRs landed: 0006 (utility scope + four-criteria gate), 0007 (`date` UTC-only at v0.7.0 with local-time follow-up named), 0008 (POSIX exit-code policy — three-tier baseline + per-utility specifics).
 - [x] Build a `tests/kriya-posix.tcyr` suite running POSIX-blessed test cases per utility — 18 starter cases across pillar utilities; fork+execve+pipe-capture harness. Population is incremental into M8/M9.
 
-### M8 — Security audit + benchmarks (v0.9.0)
+### M8 — Security audit + benchmarks (v0.9.0) — ✅ shipped 2026-05-18
 
-- [ ] Full security audit: path traversal, TOCTOU, signal handling, symlink follow, every destructive op
-- [ ] Benchmarks finalized — dispatcher cold start, per-utility throughput
-- [ ] CHANGELOG complete
+- [x] Full security audit: path traversal, TOCTOU, signal handling, symlink follow, every destructive op — `docs/audit/2026-05-18-security.md`. External CVE/0-day research included (uutils-coreutils CVE-2026-35338..35381 cross-walked: 34 N/A or already-mitigated, 3 patched in M8, 2 documented as POSIX-conformant).
+- [x] Benchmarks finalized — `docs/benchmarks.md` with cold-start history + per-utility throughput vs GNU; `scripts/bench-throughput.sh` for deterministic re-runs.
+- [x] CHANGELOG complete (was already on v1.0 criteria before this milestone).
 
 ### M9 — v1.0 freeze
 

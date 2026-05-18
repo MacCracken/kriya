@@ -606,7 +606,14 @@ fn _f_eval_empty_predicate(path, stat_buf): i64 {
         return 0;
     }
     if (ifmt == 16384) {
-        var dfd = fs_openat(0 - 100, path, 65536, 0);
+        # M8 mitigation: respect _f_follow_mode for NOFOLLOW. Without
+        # this, a swapped-in symlink between classifying lstat and this
+        # open would be silently followed even under default `-P`.
+        # Mirrors the conditional NOFOLLOW pattern used at the main
+        # descent site (_f_descend / line ~918).
+        var open_flags: i64 = 65536;  # O_RDONLY | O_DIRECTORY
+        if (_f_follow_mode == 0) { open_flags = open_flags | 131072; }  # O_NOFOLLOW
+        var dfd = fs_openat(0 - 100, path, open_flags, 0);
         if (dfd < 0) { return 0; }
         var dbuf = alloc(4096);
         var any: i64 = 0;

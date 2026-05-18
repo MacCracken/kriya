@@ -785,7 +785,13 @@ fn _gr_walk_dir(dir_path, handles, n_handles, opts, term_byte, suppress): i64 {
                                     found_any = 1;
                                 }
                             } elif (fs_is_reg(&st) == 1) {
-                                var fd = sys_open(sub, 0, 0);
+                                # M8 mitigation: O_NOFOLLOW (131072) to close
+                                # the TOCTOU window between lstat-classify and
+                                # this open. If the regular file was swapped
+                                # for a symlink, ELOOP — we report and skip
+                                # rather than leak the target's bytes.
+                                # See CVE-2026-35359 in uutils-coreutils.
+                                var fd = sys_open(sub, 131072, 0);
                                 if (fd < 0) {
                                     _gr_report(sub, 0 - fd, suppress);
                                 } else {

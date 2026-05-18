@@ -329,8 +329,15 @@ fn _cp_symlink_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_dis
 # fd-based regular-file copy used during recursion. Source is opened
 # from the parent dirfd; destination is opened with O_NOFOLLOW per
 # ADR 0003 (under -f, an existing dest symlink is unlinked first).
-fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, preserve, verbose, src_st): i64 {
-    var src_fd = fs_openat(src_dirfd, src_name, 0, 0);  # O_RDONLY
+# `follow` carries the lstat-vs-stat decision from the caller:
+# follow=0 means the source was classified via lstat (POLICY_P/H in-walk)
+# so we must open with O_NOFOLLOW to close the TOCTOU window where the
+# entry could be swapped for a symlink between classify and open
+# (M8 mitigation, see CVE-2026-35359 in uutils-coreutils).
+fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, preserve, verbose, src_st, follow): i64 {
+    var src_open_flags: i64 = 0;
+    if (follow == 0) { src_open_flags = 131072; }     # O_NOFOLLOW
+    var src_fd = fs_openat(src_dirfd, src_name, src_open_flags, 0);
     if (src_fd < 0) {
         _cp_report(src_display, 0 - src_fd);
         return src_fd;
@@ -504,7 +511,7 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
                                     if (fs_is_reg(&child_st) == 1) {
                                         rr = _cp_file_at(src_fd, name, child_src_disp,
                                                          dst_fd, name, child_dst_disp,
-                                                         force, preserve, verbose, &child_st);
+                                                         force, preserve, verbose, &child_st, follow);
                                     } else {
                                         syscall(1, 2, "kriya cp: ", 10);
                                         syscall(1, 2, child_src_disp, strlen(child_src_disp));

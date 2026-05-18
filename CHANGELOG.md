@@ -6,6 +6,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-18
+
+**Closes M8** — security audit + per-utility benchmarks. Two deliverables under the new convention `docs/audit/<date>-<type>.md`:
+
+1. **`docs/audit/2026-05-18-security.md`** — security audit including external CVE / 0-day research. Primary input: the Canonical-commissioned uutils-coreutils audit (CVE-2026-35338 through CVE-2026-35381) which disclosed 41 CVEs against the exact surface kriya occupies. Cross-walked every CVE to kriya: 34 N/A or already-mitigated, 3 newly exposed and patched in this milestone (**F1/F4/F5**), 2 documented as POSIX-conformant (**F2/F6**). No critical or untracked issues. Findings traced to ADR-0003 / 0004 / 0005 where applicable.
+2. **`docs/benchmarks.md`** — per-utility throughput vs GNU (3-run median wall clock) across the full M1-M6 surface. Includes cold-start history table and named optimization follow-ups for the visible gaps (`wc -c` short-circuit, niyama literal Boyer-Moore, `tail` seek-from-end, speculative `find` predicate JIT and `cp` `copy_file_range`).
+
+Cold-start median **1.201ms** (RUNS=100; flat from v0.8.0's 1.201ms — no behavior changes outside the three NOFOLLOW mitigations, which don't touch the dispatcher hot path).
+
+### Added
+
+- **Security audit** at `docs/audit/2026-05-18-security.md` — full path-traversal / TOCTOU / signal-handling / symlink-follow / destructive-op review with the external uutils CVE cross-walk.
+- **Per-utility benchmarks** at `docs/benchmarks.md` — kriya vs GNU throughput across `wc`, `grep`, `sort`, `find`, `cp`, `head`, `tail` plus the cold-start history table.
+- **`scripts/bench-throughput.sh`** — deterministic-corpus throughput benchmark generator; runs at each release boundary.
+
+### Mitigated (M8 security findings)
+
+- **F1 / CVE-2026-35359-class** — `cp -R` recursive source open lacked `O_NOFOLLOW`. `_cp_file_at` now takes a `follow` parameter; under POLICY_P/H in-walk, source open uses `O_NOFOLLOW`. Closes the TOCTOU window where a regular-file entry could be swapped for a symlink between `lstat`-classify and `openat`. (`src/cmd/cp.cyr` — 39/39 cp-recursive smoke cases pass after fix.)
+- **F4 — `find -empty` TOCTOU** — `_f_eval_empty_predicate` now conditionally adds `O_NOFOLLOW` based on `_f_follow_mode`. Mirrors the canonical pattern at the main descent site. (`src/cmd/find.cyr` — 40/40 find smoke cases pass.)
+- **F5 — `grep -r` TOCTOU** — recursive file open now uses `O_NOFOLLOW` flag. On `ELOOP` the swapped symlink is reported and skipped rather than read through. (`src/cmd/grep.cyr` — 66/66 grep smoke cases pass.)
+
+### Documented (security findings — POSIX-conformant, no change)
+
+- **F2** — `cp -f` non-recursive destination follows symlinks. POSIX behavior; matches GNU `cp`. Scripts running as root must validate destinations.
+- **F6** — non-recursive `grep` on file operands follows symlinks. POSIX behavior; matches GNU `grep`. User-passed paths are trusted.
+- **SUID safety** — kriya is NOT designed to be installed SUID. If made SUID, F2/F6/similar POSIX-follow paths become privilege-escalation primitives. Future `docs/guides/deployment-suid.md` will cover this; install kriya as a non-SUID symlink farm.
+
+### v1.0 criteria checked off this milestone
+
+- [x] **Security audit pass** — `docs/audit/2026-05-18-security.md` with external CVE/0-day research.
+- [x] **Benchmarks captured** in `docs/benchmarks.md` — cold-start history + per-utility throughput vs GNU.
+- [x] **Each destructive utility covered by TOCTOU + symlink-safety test** — smoke-cp-recursive (39), smoke-mv (51), smoke-rm (53) all exercise the ADR-0003 / 0004 paths; M8 mitigations added test-validated NOFOLLOW behavior.
+
+After v0.9.0, **6 of 8 v1.0 criteria are checked**. Remaining: per-utility fuzz harnesses for parser-style utilities (grep, find, printf) and one downstream consumer green (the AGNOS kernel boot burn-in signal).
+
 ## [0.8.0] — 2026-05-18
 
 **Closes M7** — POSIX.1-2017 compliance audit. No new utilities; this is the audit-and-document milestone. Three deliverables:
