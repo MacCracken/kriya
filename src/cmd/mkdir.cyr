@@ -72,7 +72,7 @@ fn _mkdir_report(operand, errno): i64 {
 # non-dir error" split.
 fn _mkdir_is_dir(path): i64 {
     var buf[144];
-    var sr = sys_stat(path, &buf);
+    var sr = k_stat(path, &buf);
     if (sr != 0) { return 0; }
     var st_mode = load64(&buf + 24);
     # S_IFMT = 0o170000 (61440); S_IFDIR = 0o040000 (16384).
@@ -95,7 +95,7 @@ fn _mkdir_single(path, set_mode, mode, verbose): i64 {
         _mkdir_report(path, 2);
         return 0 - 2;
     }
-    var r = sys_mkdir(path, 511);
+    var r = k_mkdir(path, 511);
     if (r != 0) {
         _mkdir_report(path, 0 - r);
         return r;
@@ -159,7 +159,7 @@ fn _mkdir_with_parents(path, set_mode, mode, verbose): i64 {
 
             if (skip == 0) {
                 # 0o777 = 511 (Cyrius has no octal literal syntax).
-                var r = sys_mkdir(prefix, 511);
+                var r = k_mkdir(prefix, 511);
                 if (r == 0) {
                     any_made = 1;
                     last_made = i;

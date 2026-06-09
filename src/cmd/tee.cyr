@@ -129,7 +129,7 @@ fn cmd_tee(start: i64): i64 {
         } else {
             flags = flags | 512;   # | O_TRUNC
         }
-        var fd = sys_open(p, flags, 438);  # 0o666 = 438
+        var fd = k_open(p, flags, 438);  # 0o666 = 438
         if (fd < 0) {
             _tee_report(p, 0 - fd);
             any_failed = 1;
@@ -143,7 +143,7 @@ fn cmd_tee(start: i64): i64 {
     var buf = _tee_buf_get();
     var loop: i64 = 1;
     while (loop == 1) {
-        var n = syscall(0, 0, buf, _TEE_BUFSZ);  # SYS_READ fd 0
+        var n = k_read( 0, buf, _TEE_BUFSZ);  # SYS_READ fd 0
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR — retry.
@@ -170,7 +170,7 @@ fn cmd_tee(start: i64): i64 {
                         _tee_report(op, 0 - wr);
                         any_failed = 1;
                         # Close the failing fd (unless it's stdout).
-                        if (fi > 0) { syscall(3, fd); }
+                        if (fi > 0) { k_close( fd); }
                         # Mark by setting to -1; we'll skip on next pass.
                         vec_set(fds, fi, 0 - 1);
                     }
@@ -197,7 +197,7 @@ fn cmd_tee(start: i64): i64 {
     var ci: i64 = 1;
     while (ci < nfds) {
         var fd = vec_get(fds, ci);
-        if (fd != (0 - 1)) { syscall(3, fd); }
+        if (fd != (0 - 1)) { k_close( fd); }
         ci = ci + 1;
     }
 

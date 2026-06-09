@@ -5,11 +5,20 @@
 var CLOCK_REALTIME = 0;
 var CLOCK_MONOTONIC = 1;
 
-# Get current time in nanoseconds (monotonic clock)
+# Get current time in nanoseconds (monotonic clock).
+# v6.0.56: agnos has no wall-clock/monotonic/sleep syscall in the frozen 0-33
+# surface (228=clock_gettime / 35=nanosleep are out of range), so the agnos
+# branches return a fixed-zero epoch and sleep is a no-op — deterministic
+# instead of an invalid-syscall result. See the agnos follow-up issue.
 fn clock_now_ns(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     var ts[16];
     syscall(228, CLOCK_MONOTONIC, &ts);
     return load64(&ts) * 1000000000 + load64(&ts + 8);
+    #endif
 }
 
 # Get current time in milliseconds (monotonic)
@@ -19,16 +28,26 @@ fn clock_now_ms(): i64 {
 
 # Get current epoch seconds (wall clock)
 fn clock_epoch_secs(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     var ts[16];
     syscall(228, CLOCK_REALTIME, &ts);
     return load64(&ts);
+    #endif
 }
 
 # Get current epoch nanoseconds (wall clock)
 fn clock_epoch_ns(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     var ts[16];
     syscall(228, CLOCK_REALTIME, &ts);
     return load64(&ts) * 1000000000 + load64(&ts + 8);
+    #endif
 }
 
 # Duration struct: {secs: i64, nsecs: i64} = 16 bytes
@@ -62,11 +81,16 @@ fn dur_between(start_ns, end_ns): i64 {
 
 # Sleep for ms milliseconds (blocking)
 fn sleep_ms(ms): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;                       # no nanosleep on agnos — no-op
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     var ts[16];
     store64(&ts, ms / 1000);
     store64(&ts + 8, (ms % 1000) * 1000000);
     syscall(35, &ts, 0);
     return 0;
+    #endif
 }
 
 # ================================================================

@@ -58,18 +58,31 @@ fn vec_cap(v): i64 {
     return load64(v + 16);
 }
 
+# v6.0.56: target-aware fatal exit. agnos exit is syscall(0), not Linux's
+# syscall(60) (out of agnos's 0-33 range → a no-op that lets a fatal error
+# path keep running). Kept raw — vec.cyr is deliberately syscalls.cyr-free.
+fn _vec_die(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    syscall(0, 1);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    _vec_die();
+    #endif
+    return 0;
+}
+
 # Get element at index, abort if out of bounds
 fn vec_get(v, idx): i64 {
-    if (idx < 0) { syscall(1, 2, "vec: index < 0\n", 15); syscall(60, 1); }
-    if (idx >= load64(v + 8)) { syscall(1, 2, "vec: index out of bounds\n", 25); syscall(60, 1); }
+    if (idx < 0) { syscall(1, 2, "vec: index < 0\n", 15); _vec_die(); }
+    if (idx >= load64(v + 8)) { syscall(1, 2, "vec: index out of bounds\n", 25); _vec_die(); }
     var data = load64(v);
     return load64(data + idx * 8);
 }
 
 # Set element at index, abort if out of bounds
 fn vec_set(v, idx, val): i64 {
-    if (idx < 0) { syscall(1, 2, "vec: index < 0\n", 15); syscall(60, 1); }
-    if (idx >= load64(v + 8)) { syscall(1, 2, "vec: index out of bounds\n", 25); syscall(60, 1); }
+    if (idx < 0) { syscall(1, 2, "vec: index < 0\n", 15); _vec_die(); }
+    if (idx >= load64(v + 8)) { syscall(1, 2, "vec: index out of bounds\n", 25); _vec_die(); }
     var data = load64(v);
     store64(data + idx * 8, val);
     return 0;
@@ -93,7 +106,7 @@ fn vec_push_a(a, v, val): i64 {
         var new_cap = cap * 2;
         if (new_cap > VEC_CAP_MAX) {
             syscall(1, 2, "vec: capacity overflow\n", 23);
-            syscall(60, 1);
+            _vec_die();
         }
         var new_data = alloc_via(a, new_cap * 8);
         if (new_data == 0) { return 0 - 1; }
@@ -117,7 +130,7 @@ fn vec_push(v, val): i64 {
     var rc = vec_push_a(default_alloc(), v, val);
     if (rc < 0) {
         syscall(1, 2, "vec: alloc failed\n", 18);
-        syscall(60, 1);
+        _vec_die();
     }
     return 0;
 }
@@ -130,6 +143,19 @@ fn vec_pop(v): i64 {
     store64(v + 8, len);
     var data = load64(v);
     return load64(data + len * 8);
+}
+
+# Shrink the vector to `new_len` (a no-op if new_len >= current len).
+# The underlying capacity + data slots are preserved — subsequent
+# vec_push reuses the existing buffer, so this is the bounded-memory
+# save/restore primitive for per-fn / per-scope reset patterns where
+# vec_new + free would leak under a bump allocator.
+fn vec_truncate(v, new_len): i64 {
+    if (new_len < 0) { return 0; }
+    var cur_len = load64(v + 8);
+    if (new_len >= cur_len) { return 0; }
+    store64(v + 8, new_len);
+    return 0;
 }
 
 # Find first occurrence of val, return index or -1

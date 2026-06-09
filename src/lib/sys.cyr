@@ -1,0 +1,348 @@
+# sys.cyr — kriya's portable syscall layer.
+#
+# Commands call these `k_*` wrappers; the wrapper dispatches to the
+# host's native syscall ABI. The two targets differ in BOTH numbers
+# AND shape:
+#
+#   - Numbers: agnos read=#5/close=#6/open=#7/… vs Linux read=#0/
+#     close=#3/open=#2/…. A raw `syscall(0,fd,buf,n)` "read" on Linux
+#     is `exit()` on agnos — so raw Linux-numbered syscalls are a
+#     silent footgun and must never appear in a command file.
+#   - Shape: agnos paths are LENGTH-COUNTED (`open(name,namelen,flags)`,
+#     `stat(path,pathlen,buf)`, `rename(old,oldlen,new,newlen)`), Linux
+#     paths are NUL-terminated. These wrappers take a NUL-terminated
+#     path and compute the length for agnos via `strlen`.
+#   - Missing primitives: agnos has no cwd / symlinks / lseek / statfs /
+#     ioctl / chmod / utimensat. The wrapper returns a negative error and
+#     the matching `K_HAVE_*` flag is 0, so a verb refuses cleanly rather
+#     than misbehaving (e.g. `df` prints "not supported on this system").
+#
+# The agnos branch leans on the stdlib `SYS_*` constants + native
+# `sys_*` wrappers from `syscalls_x86_64_agnos.cyr` (pulled in by the
+# `syscalls` dep when building `--agnos`). The Linux branch uses the
+# x86_64 numbers inline (same decimal-with-comment style as fs.cyr).
+
+# --- capability flags: 1 where the target supports the primitive ---
+
+#ifdef CYRIUS_TARGET_AGNOS
+enum KSysCap {
+    K_HAVE_TTY      = 0;   # no ioctl / termios
+    K_HAVE_CWD      = 0;   # no per-process cwd — paths must be absolute
+    K_HAVE_LSEEK    = 0;   # no lseek
+    K_HAVE_STATFS   = 0;   # no statfs
+    K_HAVE_SYMLINK  = 0;   # no symlink / readlink
+    K_HAVE_CHMOD    = 0;   # no chmod
+    K_HAVE_UTIMES   = 0;   # no utimensat
+    K_HAVE_ATFAMILY = 0;   # no *at(); fs.cyr uses abspath emulation
+}
+#endif
+#ifndef CYRIUS_TARGET_AGNOS
+enum KSysCap {
+    K_HAVE_TTY      = 1;
+    K_HAVE_CWD      = 1;
+    K_HAVE_LSEEK    = 1;
+    K_HAVE_STATFS   = 1;
+    K_HAVE_SYMLINK  = 1;
+    K_HAVE_CHMOD    = 1;
+    K_HAVE_UTIMES   = 1;
+    K_HAVE_ATFAMILY = 1;
+}
+#endif
+
+# AT_FDCWD (-100) as a function — Cyrius enums reject negative literals.
+fn k_at_fdcwd(): i64 { return 0 - 100; }
+
+# =====================================================================
+# Uniform-shape primitives (same call signature on both targets; only
+# the syscall number differs, handled by the per-target branch).
+# =====================================================================
+
+fn k_read(fd, buf, n): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return syscall(SYS_READ, fd, buf, n);          # agnos #5
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(0, fd, buf, n);                 # linux read #0
+    #endif
+}
+
+fn k_write(fd, buf, n): i64 {
+    # write is #1 on BOTH targets, but route it for one consistent layer.
+    return syscall(1, fd, buf, n);
+}
+
+fn k_close(fd): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return syscall(SYS_CLOSE, fd);                 # agnos #6
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(3, fd);                         # linux close #3
+    #endif
+}
+
+# open(NUL-terminated path, flags, mode) -> fd / <0. On agnos `mode` is
+# dropped (no mode bits) and the length is computed from the path.
+fn k_open(path, flags, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # Translate Linux open-flag bits to agnos AO_* bits (agnos open#7 = name,
+    # namelen, flags). Access mode (low 2 bits RDONLY=0/WRONLY=1/RDWR=2) and
+    # O_TRUNC(0x200) match; O_CREAT and O_DIRECTORY differ; O_APPEND/O_NOFOLLOW/
+    # O_CLOEXEC have no agnos analogue (dropped). `mode` is unused on agnos.
+    var af = flags & 0x3;                                  # access mode (same low 2 bits)
+    if ((flags & 0x40) != 0)    { af = af | 0x100; }       # Linux O_CREAT(0x40) -> agnos AO_CREAT(0x100)
+    if ((flags & 0x200) != 0)   { af = af | 0x200; }       # O_TRUNC (0x200 on both)
+    if ((flags & 0x10000) != 0) { af = af | 0x800; }       # Linux O_DIRECTORY(0x10000) -> agnos AO_DIRECTORY(0x800)
+    return syscall(SYS_OPEN, path, strlen(path), af);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(2, path, flags, mode);                  # linux open #2 (path,flags,mode)
+    #endif
+}
+
+# getdents -> fills `buf` with a stream of Linux `linux_dirent64` records
+# (d_ino@0:8, d_off@8:8, d_reclen@16:u16, d_type@18:u8, d_name@19:NUL-term),
+# the canonical format fs.cyr's fs_dent_* accessors read. On agnos the kernel
+# emits a DIFFERENT packed record (reclen@0:u16, type@2, namelen@3, ino@4:u32,
+# name@8 namelen-bytes NUL-padded but not guaranteed terminated); we translate
+# the stream here so every caller sees one format. agnos records are ~11 B
+# smaller than Linux's, so we read agnos into a temp capped at half `bufsize`
+# to guarantee the expanded translation fits.
+fn k_getdents(fd, buf, bufsize): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var cap = bufsize / 2;
+    if (cap < 64) { cap = 64; }
+    var tmp = alloc(cap);
+    var ar = syscall(SYS_GETDENTS, fd, tmp, cap);          # agnos #29
+    if (ar <= 0) { return ar; }                            # 0 = end of dir, <0 = error
+    var ti = 0;
+    var wo = 0;
+    while (ti < ar) {
+        var arec = tmp + ti;
+        var areclen = load8(arec + 0) | (load8(arec + 1) << 8);   # agnos d_reclen (u16)
+        if (areclen < 8) { ti = ar; }                      # malformed — stop
+        else {
+            var atype    = load8(arec + 2);                # already a DT_* value
+            var anamelen = load8(arec + 3);
+            # agnos d_ino is a u32 at +4 — assemble from bytes (no load32 in kriya).
+            var aino = load8(arec + 4) | (load8(arec + 5) << 8) | (load8(arec + 6) << 16) | (load8(arec + 7) << 24);
+            # Linux record: 19 header + namelen + 1 NUL, rounded up to 8.
+            var lreclen = 19 + anamelen + 1;
+            lreclen = (lreclen + 7) & (0 - 8);
+            if (wo + lreclen > bufsize) { ti = ar; }        # out of room — return what we have
+            else {
+                var rec = buf + wo;
+                store64(rec + 0, aino);                     # d_ino
+                store64(rec + 8, wo + lreclen);             # d_off (synthetic next offset)
+                store8(rec + 16, lreclen & 0xFF);           # d_reclen lo
+                store8(rec + 17, (lreclen >> 8) & 0xFF);    # d_reclen hi
+                store8(rec + 18, atype);                    # d_type
+                var k = 0;
+                while (k < anamelen) { store8(rec + 19 + k, load8(arec + 8 + k)); k = k + 1; }
+                var pp = 19 + anamelen;
+                while (pp < lreclen) { store8(rec + pp, 0); pp = pp + 1; }   # NUL-terminate + pad
+                wo = wo + lreclen;
+                ti = ti + areclen;
+            }
+        }
+    }
+    return wo;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(217, fd, buf, bufsize);                 # linux getdents64 #217
+    #endif
+}
+
+# =====================================================================
+# Path metadata / mutation. NUL-terminated path in; agnos counts length.
+# =====================================================================
+
+# stat fills the caller's buffer in the canonical Linux 144-byte layout
+# (mode@24, nlink@16, size@48, ino@8, blocks@64, mtime@88) on BOTH targets,
+# so fs.cyr's fs_is_dir/fs_perms/etc. and every caller read one struct shape.
+# agnos stat#33 returns a packed 48-byte struct (mode@0, nlink@8, size@16,
+# ino@24, blocks@32, mtime@40) — translated here. Mode bits are standard Unix
+# on both, so the S_IF* masks need no change.
+#ifdef CYRIUS_TARGET_AGNOS
+fn _k_agnos_stat(path, buf): i64 {
+    var a[48];                                             # agnos packed stat
+    var r = syscall(SYS_STAT, path, strlen(path), &a);     # agnos #33 (path,pathlen,statbuf)
+    if (r != 0) { return r; }
+    var z = 0;
+    while (z < 144) { store8(buf + z, 0); z = z + 1; }     # clear the Linux struct first
+    store64(buf +  8, load64(&a + 24));                    # st_ino    <- agnos ino@24
+    store64(buf + 16, load64(&a +  8));                    # st_nlink  <- agnos nlink@8
+    store64(buf + 24, load64(&a +  0));                    # st_mode   <- agnos mode@0
+    store64(buf + 48, load64(&a + 16));                    # st_size   <- agnos size@16
+    store64(buf + 64, load64(&a + 32));                    # st_blocks <- agnos blocks@32
+    store64(buf + 88, load64(&a + 40));                    # st_mtime  <- agnos mtime@40
+    return 0;
+}
+#endif
+
+fn k_stat(path, buf): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return _k_agnos_stat(path, buf);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(262, k_at_fdcwd(), path, buf, 0);       # linux newfstatat(AT_FDCWD,path,buf,0)
+    #endif
+}
+
+# lstat — like stat but does NOT follow a final symlink. agnos has no
+# symlinks, so it is identical to k_stat there.
+fn k_lstat(path, buf): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return _k_agnos_stat(path, buf);                       # agnos: no symlinks → same as stat
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(262, k_at_fdcwd(), path, buf, 256);     # linux AT_SYMLINK_NOFOLLOW=256
+    #endif
+}
+
+fn k_mkdir(path, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return syscall(SYS_MKDIR, path, strlen(path));         # agnos #9 (path,pathlen) — no mode
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(83, path, mode);                        # linux mkdir #83
+    #endif
+}
+
+fn k_rmdir(path): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return syscall(SYS_RMDIR, path, strlen(path));         # agnos #10
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(84, path);                              # linux rmdir #84
+    #endif
+}
+
+fn k_unlink(path): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return syscall(SYS_UNLINK, path, strlen(path));        # agnos #30
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(87, path);                              # linux unlink #87
+    #endif
+}
+
+fn k_rename(oldp, newp): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return syscall(SYS_RENAME, oldp, strlen(oldp), newp, strlen(newp));  # agnos #31 (a4=r10)
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(82, oldp, newp);                        # linux rename #82
+    #endif
+}
+
+fn k_link(target, linkpath): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return syscall(SYS_LINK, target, strlen(target), linkpath, strlen(linkpath));  # agnos #32 (a4)
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(86, target, linkpath);                  # linux link #86
+    #endif
+}
+
+# =====================================================================
+# Primitives absent on agnos. Linux: native syscall. agnos: refuse with
+# a negative error (callers gate on K_HAVE_*). ENOSYS=-38 by convention.
+# =====================================================================
+
+fn k_lseek(fd, off, whence): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;                                         # no lseek on agnos (ENOSYS)
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(8, fd, off, whence);                    # linux lseek #8
+    #endif
+}
+
+# isatty(fd) -> 1 if a terminal, else 0. Linux probes via ioctl(TCGETS);
+# agnos has no ioctl/termios so nothing is ever a tty.
+fn k_isatty(fd): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var tio[16];
+    var r = syscall(16, fd, 21505, &tio);                  # SYS_IOCTL, TCGETS=21505
+    if (r == 0) { return 1; }
+    return 0;
+    #endif
+}
+
+# getcwd(buf, sz) -> length-incl-NUL / <0. agnos has no cwd; the working
+# directory is always root, so report "/".
+fn k_getcwd(buf, sz): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (sz < 2) { return 0 - 36; }                         # ENAMETOOLONG
+    store8(buf, 47);                                       # '/'
+    store8(buf + 1, 0);
+    return 2;                                              # length incl. NUL, matching Linux getcwd
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(79, buf, sz);                           # linux getcwd #79
+    #endif
+}
+
+fn k_statfs(path, buf): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;                                         # no statfs on agnos
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(137, path, buf);                        # linux statfs #137
+    #endif
+}
+
+fn k_symlink(target, linkpath): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;                                         # no symlinks on agnos
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(88, target, linkpath);                  # linux symlink #88
+    #endif
+}
+
+fn k_readlink(path, buf, bufsize): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;                                         # no symlinks on agnos
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(89, path, buf, bufsize);                # linux readlink #89
+    #endif
+}
+
+# access(path, mode) -> 0 if the access check passes. agnos has no
+# permission model, so any existing path is treated as accessible
+# (X_OK/R_OK/W_OK all collapse to "does it exist?"). mode bits: R=4 W=2 X=1.
+fn k_access(path, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var st[48];                                            # agnos 48-byte stat
+    if (k_stat(path, &st) == 0) { return 0; }
+    return 0 - 2;                                          # ENOENT
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(21, path, mode);                        # linux access #21
+    #endif
+}
+
+fn k_chmod(path, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;                                         # no mode bits on agnos
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(90, path, mode);                        # linux chmod #90
+    #endif
+}
+
+# utimensat(dirfd, path, times, flags) — set atime/mtime. agnos has no
+# such call; touch refuses the timestamp-set path there.
+fn k_utimensat(dirfd, path, times, flags): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;                                         # no utimensat on agnos
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(280, dirfd, path, times, flags);        # linux utimensat #280
+    #endif
+}

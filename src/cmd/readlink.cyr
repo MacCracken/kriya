@@ -122,8 +122,19 @@ fn cmd_readlink(start: i64): i64 {
 
         var n: i64 = 0;
         if (canon_mode == 0) {
-            # POSIX raw read-link.
-            n = sys_readlink(p, out_buf, BUFSZ - 1);
+            # POSIX raw read-link. agnos has no symlinks
+            # (K_HAVE_SYMLINK == 0): emit a clear one-line message and
+            # mark failure rather than a bare errno. On Linux this
+            # branch is DCE'd and the native k_readlink path is taken.
+            if (K_HAVE_SYMLINK == 0) {
+                if (quiet == 0) {
+                    syscall(1, 2, "kriya readlink: symbolic links not supported on AGNOS\n", 54);
+                }
+                any_failed = 1;
+                i = i + 1;
+                continue;
+            }
+            n = k_readlink(p, out_buf, BUFSZ - 1);
         } else {
             var mode = FS_REALPATH_REQUIRE_PARENT;
             if (canon_mode == 2) { mode = FS_REALPATH_REQUIRE_ALL; }

@@ -76,7 +76,7 @@ fn _touch_create(path, no_create): i64 {
     # need the file to exist; we close it immediately. O_NOCTTY would
     # only matter for terminals; skipping it is fine for the workload.
     # 0o666 = 438; O_WRONLY | O_CREAT = 1 | 64 = 65.
-    var fd = sys_open(path, 65, 438);
+    var fd = k_open(path, 65, 438);
     if (fd < 0) {
         # Existing file: open(O_WRONLY) without O_EXCL will succeed
         # if we have write permission. EACCES on a read-only file is
@@ -88,7 +88,7 @@ fn _touch_create(path, no_create): i64 {
         if (errno == 13) { return 0; }
         return fd;
     }
-    syscall(3, fd);  # SYS_CLOSE
+    k_close( fd);  # SYS_CLOSE
     return 0;
 }
 
@@ -133,7 +133,11 @@ fn _touch_update_times(path, update_atime, update_mtime): i64 {
             times = 0;
         }
     }
-    return syscall(280, 0 - 100, path, times, 0);
+    # agnos has no utimensat (K_HAVE_UTIMES==0): the file was already created by
+    # _touch_create via k_open(O_CREAT), so the timestamp-set is best-effort —
+    # report success rather than failing the whole touch.
+    if (K_HAVE_UTIMES == 0) { return 0; }
+    return fs_utimensat(0 - 100, path, times, 0);
 }
 
 fn _touch_one(path, update_atime, update_mtime, no_create): i64 {

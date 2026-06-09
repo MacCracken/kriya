@@ -184,7 +184,7 @@ fn _nl_run(fd, body_type, counter_p, increment, fmt, width, sep, sep_len): i64 {
     var truncated_warned: i64 = 0;
     var loop: i64 = 1;
     while (loop == 1) {
-        var n = syscall(0, fd, read_buf, _NL_READ_SZ);
+        var n = k_read( fd, read_buf, _NL_READ_SZ);
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR — retry.
@@ -358,7 +358,7 @@ fn cmd_nl(start: i64): i64 {
             }
         }
         if (is_stdin == 0) {
-            fd = sys_open(p, 0, 0);
+            fd = k_open(p, 0, 0);
             if (fd < 0) {
                 _nl_report(p, 0 - fd);
                 any_failed = 1;
@@ -371,7 +371,7 @@ fn cmd_nl(start: i64): i64 {
             _nl_report(p, 0 - r);
             any_failed = 1;
         }
-        if (is_stdin == 0) { syscall(3, fd); }
+        if (is_stdin == 0) { k_close( fd); }
         i = i + 1;
     }
 

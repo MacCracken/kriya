@@ -338,7 +338,7 @@ fn _cut_run(in_fd, mode, ranges, complement, delim, out_delim, out_delim_len, on
     var truncated_warned: i64 = 0;
     var loop: i64 = 1;
     while (loop == 1) {
-        var n = syscall(0, in_fd, read_buf, _CUT_READ_SZ);
+        var n = k_read( in_fd, read_buf, _CUT_READ_SZ);
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR retry.
@@ -489,7 +489,7 @@ fn cmd_cut(start: i64): i64 {
             if (load8(p + 1) == 0) { is_stdin = 1; }
         }
         if (is_stdin == 0) {
-            fd = sys_open(p, 0, 0);
+            fd = k_open(p, 0, 0);
             if (fd < 0) {
                 _cut_report(p, 0 - fd);
                 any_failed = 1;
@@ -502,7 +502,7 @@ fn cmd_cut(start: i64): i64 {
             _cut_report(p, 0 - r);
             any_failed = 1;
         }
-        if (is_stdin == 0) { syscall(3, fd); }
+        if (is_stdin == 0) { k_close( fd); }
         i = i + 1;
     }
 

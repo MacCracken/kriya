@@ -117,7 +117,7 @@ fn _tail_slurp(fd, name, out): i64 {
     var read_buf = alloc(_TAIL_READ_BUFSZ);
     var loop: i64 = 1;
     while (loop == 1) {
-        var n = syscall(0, fd, read_buf, _TAIL_READ_BUFSZ);
+        var n = k_read( fd, read_buf, _TAIL_READ_BUFSZ);
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR — retry.
@@ -217,7 +217,7 @@ fn _tail_follow(fd, name): i64 {
     # Initial size = current file size at this point. Anything past
     # this is "new content".
     var st[144];
-    var sr = sys_stat(name, &st);
+    var sr = k_stat(name, &st);
     if (sr != 0) {
         _tail_report(name, 0 - sr);
         return sr;
@@ -230,7 +230,7 @@ fn _tail_follow(fd, name): i64 {
         sleep_ms(_TAIL_FOLLOW_POLL_MS);
 
         var st2[144];
-        var sr2 = sys_stat(name, &st2);
+        var sr2 = k_stat(name, &st2);
         if (sr2 != 0) {
             # File vanished. Keep waiting; GNU's default tail -f
             # behaviour is to ignore disappearance until --retry/-F.
@@ -242,8 +242,14 @@ fn _tail_follow(fd, name): i64 {
                 syscall(1, 2, "kriya tail: ", 12);
                 syscall(1, 2, name, strlen(name));
                 syscall(1, 2, ": file truncated\n", 17);
-                # lseek(fd, 0, SEEK_SET).  SYS_LSEEK = 8.
-                syscall(8, fd, 0, 0);
+                # lseek(fd, 0, SEEK_SET) to re-read the rewritten file.
+                # agnos has no lseek (K_HAVE_LSEEK == 0): fall back to
+                # leaving the fd where it is — the read loop below still
+                # streams forward from the current position. On Linux the
+                # seek is behavior-neutral with the old syscall(8,...).
+                if (K_HAVE_LSEEK == 1) {
+                    k_lseek(fd, 0, 0);
+                }
                 last_size = 0;
                 # Fall through to the "read new bytes" path with cur_size.
             }
@@ -253,7 +259,7 @@ fn _tail_follow(fd, name): i64 {
                 while (done == 0) {
                     var chunk = _TAIL_READ_BUFSZ;
                     if (to_read < chunk) { chunk = to_read; }
-                    var n = syscall(0, fd, buf, chunk);
+                    var n = k_read( fd, buf, chunk);
                     if (n < 0) {
                         if ((0 - n) == 4) {
                             # EINTR retry.
@@ -404,7 +410,7 @@ fn cmd_tail(start: i64): i64 {
             }
         }
         if (is_stdin == 0) {
-            fd = sys_open(p, 0, 0);
+            fd = k_open(p, 0, 0);
             if (fd < 0) {
                 _tail_report(p, 0 - fd);
                 any_failed = 1;
@@ -427,7 +433,7 @@ fn cmd_tail(start: i64): i64 {
                 # SIGINT (handled by kernel default → exit 130).
             }
         }
-        if (is_stdin == 0) { syscall(3, fd); }
+        if (is_stdin == 0) { k_close( fd); }
         first = 0;
         i = i + 1;
     }

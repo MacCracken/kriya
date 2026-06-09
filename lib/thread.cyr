@@ -1,6 +1,6 @@
 # thread.cyr — thread creation, joining, and synchronization
 # Usage: include "lib/thread.cyr"
-# Requires: syscalls.cyr, alloc.cyr, atomic.cyr (transitively via mutex)
+# Requires: syscalls.cyr, alloc.cyr, mmap.cyr (PROT_*), atomic.cyr (via mutex)
 #
 # Threads share the process address space (CLONE_VM).
 # Each thread gets its own stack via mmap.
@@ -8,7 +8,26 @@
 #
 # >>> include "lib/syscalls.cyr"
 # >>> include "lib/alloc.cyr"
+# >>> include "lib/mmap.cyr"
+# >>> include "lib/thread_win.cyr"
 # >>> include "lib/thread.cyr"
+
+# v6.0.53: Win32 has no clone/futex — the Linux thread body below (SYS_CLONE +
+# CLONE_* + futex + hand-assembled trampolines) can't even parse under
+# CYRIUS_TARGET_WIN. Route to a serial-fallback variant, mirroring
+# lib/process.cyr → lib/process_win.cyr (v6.0.51). See issue
+# 2026-06-03-windows-threading-stdlib-gap.md.
+#ifdef CYRIUS_TARGET_WIN
+include "lib/thread_win.cyr"
+#endif
+
+#ifndef CYRIUS_TARGET_WIN
+
+# mmap.cyr supplies the PROT_READ/PROT_WRITE enum for the thread-stack mmap
+# below (explicit since v6.0.52; previously free-rode on alloc.cyr's Linux
+# closure). The .53 #ifndef-WIN guard now also keeps this PROT_* reference off
+# the Windows path entirely. include-once dedupes.
+include "lib/mmap.cyr"
 
 # v5.5.31: mutex_lock / mutex_unlock use atomic_cas for race-free
 # acquisition. Explicit include so existing callers of thread.cyr
@@ -47,7 +66,7 @@ fn munmap_stack(addr, size): i64 {
 # Why a dedicated helper instead of inlining in thread_create:
 # after `clone(CLONE_VM)`, the child shares the address space with
 # the parent but RBP still points at the parent's stack frame
-# (kernel only updates RSP to the child_stack we pass). cc5 emits
+# (kernel only updates RSP to the child_stack we pass). cycc emits
 # every local read/write as `[rbp-N]`, so any post-clone cyrius
 # code in the child reads/writes the parent's stack slots — which
 # the parent has already overwritten on its way through
@@ -406,3 +425,5 @@ fn chan_try_recv(ch): i64 {
     syscall(SYS_FUTEX, ch + 32, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1, 0, 0, 0);
     return result;
 }
+
+#endif

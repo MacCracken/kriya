@@ -206,6 +206,21 @@ fn f64_max(a, b): i64 {
     return b;
 }
 
+# Inclusive comparisons (v6.0.x — avatara proposal 2026-06-02). The
+# compiler ships f64_lt/f64_gt/f64_eq builtins but no <= / >=, so every
+# consumer doing an inclusive range/threshold check (0.0 <= x <= 1.0)
+# rolled its own. NaN-correct by construction: for any NaN operand
+# f64_lt/f64_gt/f64_eq are all 0, so these correctly return 0.
+fn f64_le(a, b): i64 {
+    if (f64_lt(a, b) == 1) { return 1; }
+    return f64_eq(a, b);
+}
+# f64 a >= b : 1 if true, else 0.
+fn f64_ge(a, b): i64 {
+    if (f64_gt(a, b) == 1) { return 1; }
+    return f64_eq(a, b);
+}
+
 # ================================================================
 # Inverse trigonometry
 # ================================================================

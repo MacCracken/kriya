@@ -425,7 +425,7 @@ fn cmd_stat(start: i64): i64 {
         var st[144];
         var sr: i64 = 0;
         if (deref == 1) {
-            sr = sys_stat(p, &st);
+            sr = k_stat(p, &st);
         } else {
             sr = fs_lstat_at(0 - 100, p, &st);
         }

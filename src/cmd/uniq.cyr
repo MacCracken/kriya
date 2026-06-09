@@ -248,7 +248,7 @@ fn _uq_run(in_fd, out_fd, skip_f, skip_s, cw, ic, show_c, show_d, show_u, term_b
 
     var loop: i64 = 1;
     while (loop == 1) {
-        var n = syscall(0, in_fd, read_buf, _UQ_READ_SZ);
+        var n = k_read( in_fd, read_buf, _UQ_READ_SZ);
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR retry.
@@ -415,7 +415,7 @@ fn cmd_uniq(start: i64): i64 {
             if (load8(p + 1) == 0) { is_stdin = 1; }
         }
         if (is_stdin == 0) {
-            in_fd = sys_open(p, 0, 0);
+            in_fd = k_open(p, 0, 0);
             if (in_fd < 0) {
                 _uq_report(p, 0 - in_fd);
                 return EXIT_FAILURE;
@@ -426,10 +426,10 @@ fn cmd_uniq(start: i64): i64 {
     if (npos == 2) {
         var p = flags_positional(_uq_spec, 1);
         # O_WRONLY | O_CREAT | O_TRUNC = 577. Mode 0666 = 438.
-        out_fd = sys_open(p, 577, 438);
+        out_fd = k_open(p, 577, 438);
         if (out_fd < 0) {
             _uq_report(p, 0 - out_fd);
-            if (in_opened == 1) { syscall(3, in_fd); }
+            if (in_opened == 1) { k_close( in_fd); }
             return EXIT_FAILURE;
         }
         out_opened = 1;
@@ -441,8 +441,8 @@ fn cmd_uniq(start: i64): i64 {
         any_failed = 1;
     }
 
-    if (in_opened == 1)  { syscall(3, in_fd); }
-    if (out_opened == 1) { syscall(3, out_fd); }
+    if (in_opened == 1)  { k_close( in_fd); }
+    if (out_opened == 1) { k_close( out_fd); }
 
     if (any_failed == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;

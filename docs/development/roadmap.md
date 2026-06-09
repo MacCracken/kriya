@@ -132,6 +132,14 @@ Three fuzz harnesses land at M9 to close the last code-side v1.0 criterion: `tes
 
 v1.0 froze 2026-05-18 with 7 of 8 criteria checked. The 8th — downstream consumer green via AGNOS kernel boot-burn — is the trigger for **M10**. The remaining post-1.0 work falls into four buckets that can advance independently against tagged minor releases (1.x.y).
 
+### M11 — AGNOS as a build target (1.1.0, opened 2026-06-06; design-first)
+
+Make kriya the sovereign, **shell-independent** coreutils for AGNOS — the canonical home for the FS tools (any shell execs it, the Unix way; agnsh's 1.4.2 builtin verbs are a shell-bound convenience that this supersedes once 1.43.x `execwait` lands). **Prep done:** pin 5.11.61 → 6.0.56, lib re-vendored, VERSION → 1.1.0.
+
+**Why it's a real refactor (not a gate-the-blockers port like bannermanor/commandress):** kriya hardcodes **Linux syscall numbers** (`syscall(82,…)`=rename, `217`=getdents64, `257`=openat — ~610 numeric-syscall sites) instead of the target-aware `SYS_*` constants, parses **Linux `getdents64`/`stat` struct formats** (the sovereign agnos formats differ — see `agnos-userland-abi.md` §4.1/§4.2), and uses modern **`*at` syscalls** (openat/renameat/linkat/newfstatat/utimensat) that agnos doesn't define (agnos has the basic forms with different numbers + the explicit-length ABI).
+
+**Plan:** make the central `src/lib/fs.cyr` syscall layer target-aware (`#ifdef CYRIUS_TARGET_AGNOS`: agnos numbers + sovereign dirent/stat structs + `*at`→basic mapping; Linux path unchanged) — most commands flow through it, so it's the leverage point. Then gate the per-command stragglers: `ln` (linkat/newfstatat), `touch` (utimensat → degrade timestamps), `tail` (lseek → degrade), `pwd` + path resolution (getcwd → degrade; CWD is userland-owned on agnos), `rm`/`cp`/`mv` (TTY `ioctl` TCGETS → non-interactive). Validate with `cyrius build --agnos` per command + the Linux `.tcyr` regression. Analogous to the agnosys-core repair, scaled to the coreutils FS surface.
+
 ### M10 — Consumer-burn (closes v1.0 criterion #8)
 
 The single remaining v1.0 criterion. Trigger sequence:

@@ -1,0 +1,83 @@
+# args_win.cyr — command-line argument access on Windows (PE/x86_64)
+# Usage: include "lib/args.cyr" (dispatches here under CYRIUS_TARGET_WIN)
+#
+# Windows has no /proc/self/cmdline (the Linux source) and no entry-stack
+# argv (the macOS source). Instead kernel32!GetCommandLineW() returns the
+# whole command line as ONE UTF-16LE, NUL-terminated string (program path
+# + args, NOT pre-split), in a kernel-owned, process-static buffer — safe
+# to read once, never freed. cycc routes it through the PE-internal
+# reroute `syscall(0xF006)` -> EGETCMDLINE_PE (src/backend/x86/emit.cyr,
+# v6.0.54); the pointer comes back in rax. See CHANGELOG [6.0.54].
+#
+# args_init() tokenizes that one string into the SAME NUL-joined byte blob
+# the Linux branch builds from /proc/self/cmdline ("arg0\0arg1\0arg2\0") via
+# the shared `_args_tokenize_utf16` (lib/args.cyr), so argc()/argv(n) are
+# byte-identical to the Linux implementations.
+#
+# SCOPE BOUNDARY (documented, deliberate): the tokenizer handles the common
+# subset — toggle on '"' (the quote bytes are stripped, a quoted run keeps
+# its embedded spaces as one arg), split on unquoted space/tab — NOT the
+# full CommandLineToArgvW backslash-before-quote semantics (\\" runs, 2n
+# backslashes + quote, etc.). It down-converts ASCII only: each wide char's
+# low byte is kept and the high byte dropped, the same fidelity assumption
+# process_win.cyr's `_w_append_cstr` already makes. Fine for ASCII tool
+# paths + flags; a Unicode install path or backslash-quoted argv would
+# corrupt silently. Full CommandLineToArgvW would need a shell32 import +
+# LocalFree (a new DLL) — out of scope unless a consumer forces it.
+
+include "lib/alloc.cyr"
+
+var _args_base = 0;
+var _args_len = 0;
+
+# Initialize argument access by tokenizing GetCommandLineW into a NUL-joined
+# cstr blob (via the shared, host-testable _args_tokenize_utf16). Safe to
+# call first-thing: alloc() lazy-bootstraps the heap (alloc.cyr v5.8.37).
+# Returns the blob length (informational — Linux returns bytes read, macOS
+# returns 0, WIN returns blob bytes).
+fn args_init() {
+    var w = syscall(61446);            # GetCommandLineW -> LPWSTR in rax
+    if (w == 0) { return 0; }
+    # 2x the Windows cmdline cap (32767 chars); the blob is >= 1 byte per char
+    # after down-convert (quotes stripped), so a valid cmdline never truncates.
+    var cap = 65536;
+    var buf = alloc(cap);
+    if (buf == 0) { return 0; }
+    _args_base = buf;
+    _args_len = _args_tokenize_utf16(w, buf, cap);
+    return _args_len;
+}
+
+# Number of arguments = count of NUL terminators in the blob [0,_args_len).
+# (Identical to the Linux branch — the blob format is the same.)
+fn argc() {
+    var base = _args_base;
+    if (base == 0) { return 0; }
+    var n = _args_len;
+    var count: i64 = 0;
+    var i: i64 = 0;
+    while (i < n) {
+        if (load8(base + i) == 0) { count = count + 1; }
+        i = i + 1;
+    }
+    return count;
+}
+
+# Pointer to the nth NUL-terminated argument (n=0 = program path).
+# (Identical to the Linux branch.)
+fn argv(n) {
+    var base = _args_base;
+    if (base == 0) { return 0; }
+    var blen = _args_len;
+    var count: i64 = 0;
+    var i: i64 = 0;
+    if (n == 0) { return base; }
+    while (i < blen) {
+        if (load8(base + i) == 0) {
+            count = count + 1;
+            if (count == n) { return base + i + 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}

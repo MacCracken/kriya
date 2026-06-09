@@ -72,11 +72,24 @@ fn is_some(opt): i64 {
     return is_tag(opt, Some);
 }
 
+# v6.0.56: target-aware fatal exit (agnos exit = syscall(0), not Linux's
+# syscall(60), out of agnos's 0-33 range). Kept raw — tagged.cyr is
+# syscalls.cyr-free.
+fn _tagged_die(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    syscall(0, 1);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    syscall(60, 1);
+    #endif
+    return 0;
+}
+
 # Unwrap: return value or abort if None
 fn unwrap(opt): i64 {
     if (is_none(opt) == 1) {
         syscall(1, 2, "unwrap called on None\n", 22);
-        syscall(60, 1);
+        _tagged_die();
     }
     return payload(opt);
 }

@@ -303,6 +303,20 @@ fn sys_socket(domain, type, protocol): i64 {
     return syscall(SYS_SOCKET, domain, type, protocol);
 }
 
+# Create a connected pair of sockets (AF_UNIX). `fds` points to two
+# i32 slots that receive the pair. Returns 0 or -errno. Useful for
+# in-process bidirectional loopback (e.g. TLS handshake e2e).
+fn sys_socketpair(domain, type, protocol, fds): i64 {
+    return syscall(SYS_SOCKETPAIR, domain, type, protocol, fds);
+}
+
+# Set a socket option (e.g. SOL_SOCKET=1 / SO_REUSEADDR=2 to allow
+# rapid rebind of a listening port). `val` points to the option value,
+# `vallen` its byte length. Returns 0 or -errno.
+fn sys_setsockopt(fd, level, optname, val, vallen): i64 {
+    return syscall(SYS_SETSOCKOPT, fd, level, optname, val, vallen);
+}
+
 # Connect a socket to a remote address.
 fn sys_connect(fd, sockaddr, addrlen): i64 {
     return syscall(SYS_CONNECT, fd, sockaddr, addrlen);

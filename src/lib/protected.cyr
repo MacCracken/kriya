@@ -57,7 +57,7 @@ fn protected_canonicalize(operand): i64 {
     }
     # Relative — prepend cwd.
     var cwd_buf[4096];
-    var n = syscall(SYS_GETCWD, &cwd_buf, 4096);
+    var n = k_getcwd(&cwd_buf, 4096);
     if (n < 0) {
         # Can't get cwd. Best-effort: refuse the operand defensively
         # would be too aggressive; return the operand normalized so

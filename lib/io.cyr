@@ -48,9 +48,29 @@ var STDIN = 0;
 var STDOUT = 1;
 var STDERR = 2;
 
-# Open a file with given flags and mode, return fd
+# Open a file with given flags and mode, return fd.
+#
+# v6.0.55: agnos's sys_open is (name, namelen, ao_flags) — NOT the Linux
+# (path, O_flags, mode) shape — and its AO_* bits differ from O_* (AO_CREAT
+# 0x100 vs O_CREAT 64, etc.). Passing Linux args straight through lands the
+# O_flags value in `namelen` and the mode in `ao_flags` → a silent ABI
+# miscompile (no ud2) that breaks every file op. The agnos branch computes
+# namelen = strlen(path) and maps O_* → AO_*. All io.cyr open sites funnel
+# through here so the bridge applies once. See CHANGELOG [6.0.55].
 fn file_open(path: cstring, flags, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var namelen = 0;
+    while (load8(path + namelen) != 0) { namelen = namelen + 1; }
+    var ao = 0;
+    if ((flags & 3) != 0) { ao = ao | 0x1; }       # O_WRONLY/O_RDWR -> AO_WRONLY (O_RDONLY=0)
+    if ((flags & 64) != 0) { ao = ao | 0x100; }    # O_CREAT  -> AO_CREAT
+    if ((flags & 512) != 0) { ao = ao | 0x200; }   # O_TRUNC  -> AO_TRUNC
+    if ((flags & 1024) != 0) { ao = ao | 0x400; }  # O_APPEND -> AO_APPEND
+    return sys_open(path, namelen, ao);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return sys_open(path, flags, mode);
+    #endif
 }
 
 # Close a file descriptor
@@ -179,7 +199,7 @@ fn _io_errno_to_iorr(errn): i64 {
 # Result variant of file_open. On success: Ok(fd); on failure:
 # Err(IoError variant for the underlying errno).
 fn file_open_r(path: cstring, flags, mode): Result {
-    var fd = sys_open(path, flags, mode);
+    var fd = file_open(path, flags, mode);   # via the agnos AO_*/namelen bridge
     if (fd < 0) { return Err(_io_errno_to_iorr(0 - fd)); }
     return Ok(fd);
 }
@@ -213,7 +233,7 @@ fn file_write_r(fd, buf, len): Result {
 # corresponding IoError variant; read failure mid-stream returns
 # whatever was read up to that point as Ok.
 fn file_read_all_r(path, buf, maxlen): Result {
-    var fd = sys_open(path, 0, 0);
+    var fd = file_open(path, 0, 0);          # via the agnos AO_*/namelen bridge
     if (fd < 0) { return Err(_io_errno_to_iorr(0 - fd)); }
     var total = 0;
     var rgo = 1;
@@ -233,7 +253,7 @@ fn file_read_all_r(path, buf, maxlen): Result {
 # O_TRUNC, writes, closes. Open failure → Err; write failure →
 # Err with errno mapping.
 fn file_write_all_r(path, buf, len): Result {
-    var fd = sys_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);   # via the agnos bridge
     if (fd < 0) { return Err(_io_errno_to_iorr(0 - fd)); }
     var n = sys_write(fd, buf, len);
     sys_close(fd);

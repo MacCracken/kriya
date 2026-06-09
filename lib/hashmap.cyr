@@ -213,13 +213,26 @@ var MAP_CAP_MAX = 0x4000000;
 # v5.8.35 — Allocator-as-first-arg internal grow. Returns 0 on
 # success, -1 on grow OOM (the back-compat _map_grow aborts the
 # process; map_set_a propagates the -1 to its caller).
+# v6.0.56: target-aware fatal exit (agnos exit = syscall(0), not Linux's
+# syscall(60) which is out of agnos's 0-33 range). Kept raw — hashmap.cyr is
+# syscalls.cyr-free.
+fn _hm_die(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    syscall(0, 1);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    _hm_die();
+    #endif
+    return 0;
+}
+
 fn _map_grow_a(a, m): i64 {
     var old_entries = load64(m);
     var old_cap = load64(m + 8);
     var new_cap = old_cap * 2;
     if (new_cap > MAP_CAP_MAX) {
         syscall(1, 2, "map: capacity overflow\n", 23);
-        syscall(60, 1);
+        _hm_die();
     }
     var new_entries = alloc_via(a, new_cap * 24);
     if (new_entries == 0) { return 0 - 1; }
@@ -244,7 +257,7 @@ fn _map_grow(m): i64 {
     var rc = _map_grow_a(default_alloc(), m);
     if (rc < 0) {
         syscall(1, 2, "map: alloc failed\n", 18);
-        syscall(60, 1);
+        _hm_die();
     }
     return 0;
 }
@@ -274,7 +287,7 @@ fn map_set(m, key, value): i64 {
     var rc = map_set_a(default_alloc(), m, key, value);
     if (rc < 0) {
         syscall(1, 2, "map: alloc failed\n", 18);
-        syscall(60, 1);
+        _hm_die();
     }
     return 0;
 }
@@ -464,7 +477,7 @@ fn _map_u64_grow_a(a, m): i64 {
     var new_cap = old_cap * 2;
     if (new_cap > MAP_CAP_MAX) {
         syscall(1, 2, "map_u64: capacity overflow\n", 27);
-        syscall(60, 1);
+        _hm_die();
     }
     var new_entries = alloc_via(a, new_cap * 16);
     if (new_entries == 0) { return 0 - 1; }
@@ -492,7 +505,7 @@ fn _map_u64_grow(m): i64 {
     var rc = _map_u64_grow_a(default_alloc(), m);
     if (rc < 0) {
         syscall(1, 2, "map_u64: alloc failed\n", 22);
-        syscall(60, 1);
+        _hm_die();
     }
     return 0;
 }

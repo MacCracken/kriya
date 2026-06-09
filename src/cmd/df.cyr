@@ -58,7 +58,7 @@ enum DfStatfs {
 }
 
 fn _df_statfs(path, buf): i64 {
-    return syscall(137, path, buf);
+    return k_statfs(path, buf);
 }
 
 # Decode /proc/self/mounts field-with-escapes (`\040` for space, etc.).
@@ -387,7 +387,7 @@ fn _df_emit_header(): i64 {
 # (buf_ptr, used_bytes) packed in a pair: caller reads from the
 # return ptr at offset 0=ptr, 8=len.
 fn _df_load_mounts(): i64 {
-    var fd = sys_open("/proc/self/mounts", 0, 0);
+    var fd = k_open("/proc/self/mounts", 0, 0);
     if (fd < 0) { return 0; }
     var cap: i64 = 65536;
     var buf = alloc(cap);
@@ -401,7 +401,7 @@ fn _df_load_mounts(): i64 {
             buf = newbuf;
             cap = newcap;
         }
-        var n = syscall(0, fd, buf + used, 4096);
+        var n = k_read( fd, buf + used, 4096);
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR retry
@@ -411,7 +411,7 @@ fn _df_load_mounts(): i64 {
             else { used = used + n; }
         }
     }
-    syscall(3, fd);
+    k_close( fd);
     var ret = alloc(16);
     store64(ret, buf);
     store64(ret + 8, used);
@@ -419,6 +419,14 @@ fn _df_load_mounts(): i64 {
 }
 
 fn cmd_df(start: i64): i64 {
+    # df is built entirely on statfs(2), which agnos does not provide
+    # (K_HAVE_STATFS == 0). Refuse cleanly up front rather than walking a
+    # mount table that does not exist. On Linux this branch is DCE'd.
+    if (K_HAVE_STATFS == 0) {
+        syscall(1, 2, "kriya df: not supported on AGNOS (no statfs)\n", 45);
+        return EXIT_FAILURE;
+    }
+
     _df_human       = 0;
     _df_show_type   = 0;
     _df_inodes      = 0;

@@ -123,9 +123,10 @@ fn _cp_report(operand, errno): i64 {
 }
 
 fn _cp_isatty(fd): i64 {
-    var tio[96];
-    var r = syscall(16, fd, 21505, &tio);  # SYS_IOCTL, TCGETS
-    if (r == 0) { return 1; }
+    # Portable tty probe: k_isatty does the ioctl(TCGETS) on Linux and
+    # returns 0 on agnos (no ioctl/termios) — so -i prompting is never
+    # interactive on agnos and falls through to the non-tty path.
+    if (k_isatty(fd) == 1) { return 1; }
     return 0;
 }
 
@@ -134,7 +135,7 @@ fn _cp_prompt(dst): i64 {
     syscall(1, 2, dst, strlen(dst));
     syscall(1, 2, "'? ", 3);
     var c[8];
-    var n = syscall(0, 0, &c, 8);
+    var n = k_read( 0, &c, 8);
     if (n < 1) { return 0; }
     var ch = load8(&c);
     if (ch == 121) { return 1; }
@@ -144,7 +145,7 @@ fn _cp_prompt(dst): i64 {
 
 fn _cp_is_dir_path(path): i64 {
     var buf[144];
-    var r = sys_stat(path, &buf);
+    var r = k_stat(path, &buf);
     if (r != 0) { return 0; }
     if (fs_is_dir(&buf) == 1) { return 1; }
     return 0;
@@ -168,7 +169,7 @@ fn _cp_copy_loop(src_fd, dst_fd, src_display, dst_display): i64 {
     var failed: i64 = 0;
     var first_errno: i64 = 0;
     while (loop == 1) {
-        var n = syscall(0, src_fd, buf, bufsz);
+        var n = k_read( src_fd, buf, bufsz);
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR — retry.
@@ -211,7 +212,7 @@ fn _cp_copy_loop(src_fd, dst_fd, src_display, dst_display): i64 {
 # Source open is path-based (POSIX: follows symlinks).
 fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
     var src_stat[144];
-    var sr = sys_stat(src, &src_stat);
+    var sr = k_stat(src, &src_stat);
     if (sr != 0) {
         _cp_report(src, 0 - sr);
         return sr;
@@ -222,7 +223,7 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
     }
 
     var dst_stat[144];
-    var dr = sys_stat(dst, &dst_stat);
+    var dr = k_stat(dst, &dst_stat);
     if (dr == 0) {
         if (load64(&src_stat + 0) == load64(&dst_stat + 0)) {
             if (load64(&src_stat + 8) == load64(&dst_stat + 8)) {
@@ -255,26 +256,26 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
         }
     }
 
-    var src_fd = sys_open(src, 0, 0);
+    var src_fd = k_open(src, 0, 0);
     if (src_fd < 0) {
         _cp_report(src, 0 - src_fd);
         return src_fd;
     }
 
     var perms = fs_perms(&src_stat);
-    var dst_fd = sys_open(dst, 577, perms);
+    var dst_fd = k_open(dst, 577, perms);
     if (dst_fd < 0) {
-        syscall(3, src_fd);
+        k_close( src_fd);
         _cp_report(dst, 0 - dst_fd);
         return dst_fd;
     }
 
     var r = _cp_copy_loop(src_fd, dst_fd, src, dst);
-    syscall(3, src_fd);
-    syscall(3, dst_fd);
+    k_close( src_fd);
+    k_close( dst_fd);
 
     if (r != 0) {
-        sys_unlink(dst);
+        k_unlink(dst);
         return r;
     }
 
@@ -285,7 +286,7 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
         store64(&ts + 8,  load64(&src_stat + 80));
         store64(&ts + 16, load64(&src_stat + 88));
         store64(&ts + 24, load64(&src_stat + 96));
-        syscall(280, 0 - 100, dst, &ts, 0);
+        if (K_HAVE_UTIMES == 1) { fs_utimensat(0 - 100, dst, &ts, 0); }   # best-effort mtime preserve; no-op on agnos
     }
 
     if (verbose == 1) { _cp_verbose(src, dst); }
@@ -566,9 +567,9 @@ fn _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose): i
     var sr: i64 = 0;
     var follow = _cp_should_follow(policy, 1);
     if (follow == 1) {
-        sr = sys_stat(src, &st);
+        sr = k_stat(src, &st);
     } else {
-        sr = syscall(262, 0 - 100, src, &st, 256);  # fstatat AT_SYMLINK_NOFOLLOW
+        sr = fs_lstat_at(0 - 100, src, &st);  # fstatat AT_SYMLINK_NOFOLLOW
     }
     if (sr != 0) {
         _cp_report(src, 0 - sr);
@@ -577,15 +578,18 @@ fn _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose): i
 
     if (fs_is_lnk(&st) == 1) {
         # Reachable only when not following — copy the symlink itself.
+        # k_readlink does readlink(2) on Linux and returns -38 (ENOSYS)
+        # on agnos (no symlinks) — so n < 0 there and the error path below
+        # reports it gracefully rather than misbehaving.
         var link_buf = alloc(4096);
-        var n = sys_readlink(src, link_buf, 4095);
+        var n = k_readlink(src, link_buf, 4095);
         if (n < 0) {
             _cp_report(src, 0 - n);
             return n;
         }
         store8(link_buf + n, 0);
-        if (force == 1) { sys_unlink(dst); }
-        var lr = sys_symlink(link_buf, dst);
+        if (force == 1) { k_unlink(dst); }
+        var lr = k_symlink(link_buf, dst);
         if (lr != 0) {
             _cp_report(dst, 0 - lr);
             return lr;

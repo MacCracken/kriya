@@ -93,9 +93,10 @@ fn _rm_report(operand, errno): i64 {
 }
 
 fn _rm_isatty(fd): i64 {
-    var tio[96];
-    var r = syscall(16, fd, 21505, &tio);  # SYS_IOCTL, TCGETS
-    if (r == 0) { return 1; }
+    # Portable tty probe: k_isatty does the ioctl(TCGETS) on Linux and
+    # returns 0 on agnos (no ioctl/termios) — so -i prompting is never
+    # interactive on agnos and falls through to the non-tty path.
+    if (k_isatty(fd) == 1) { return 1; }
     return 0;
 }
 
@@ -112,7 +113,7 @@ fn _rm_prompt(kind, display): i64 {
     syscall(1, 2, display, strlen(display));
     syscall(1, 2, "'? ", 3);
     var c[8];
-    var n = syscall(0, 0, &c, 8);
+    var n = k_read( 0, &c, 8);
     if (n < 1) { return 0; }
     var ch = load8(&c);
     if (ch == 121) { return 1; }
@@ -268,7 +269,7 @@ fn _rm_dir_at(parent_dirfd, name, display, force, interactive, verbose): i64 {
 fn _rm_one(operand, force, interactive, recursive, dir_only, verbose): i64 {
     # lstat the operand (NEVER follow).
     var st[144];
-    var sr = syscall(262, 0 - 100, operand, &st, 256);  # fstatat AT_SYMLINK_NOFOLLOW
+    var sr = fs_lstat_at(0 - 100, operand, &st);  # fstatat AT_SYMLINK_NOFOLLOW
     if (sr != 0) {
         if (force == 1) {
             if ((0 - sr) == 2) { return 0; }  # ENOENT under -f
@@ -286,7 +287,7 @@ fn _rm_one(operand, force, interactive, recursive, dir_only, verbose): i64 {
             if (interactive == 1) {
                 if (_rm_prompt("remove directory", operand) == 0) { return 0; }
             }
-            var rmd = sys_rmdir(operand);
+            var rmd = k_rmdir(operand);
             if (rmd != 0) {
                 if (force == 1) {
                     if ((0 - rmd) == 2) { return 0; }
@@ -317,7 +318,7 @@ fn _rm_one(operand, force, interactive, recursive, dir_only, verbose): i64 {
         }
         if (_rm_prompt(prompt_kind, operand) == 0) { return 0; }
     }
-    var ur = sys_unlink(operand);
+    var ur = k_unlink(operand);
     if (ur != 0) {
         if (force == 1) {
             if ((0 - ur) == 2) { return 0; }

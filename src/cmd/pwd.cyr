@@ -50,7 +50,7 @@ fn cmd_pwd(start: i64): i64 {
     }
 
     var buf[4096];
-    var len = syscall(SYS_GETCWD, &buf, 4096);
+    var len = k_getcwd(&buf, 4096);
     if (len < 0) {
         syscall(1, 2, "kriya pwd: error: getcwd failed\n", 32);
         return EXIT_FAILURE;

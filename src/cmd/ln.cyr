@@ -82,14 +82,11 @@ fn _ln_report(operand, errno): i64 {
 
 # lstat-based "is `path` a directory?" — symlinks to directories are
 # NOT counted as directories so the `-n` no-dereference policy works.
-#
-# Raw fstatat(AT_FDCWD=-100, path, &buf, AT_SYMLINK_NOFOLLOW=256).
-# SYS_NEWFSTATAT = 262 on x86_64. (Lives behind the pending stdlib
-# proposal `2026-05-17-syscalls-at-family-stdlib.md` — when sys_lstat
-# lands, swap this for that.)
+# k_lstat fills the canonical Linux 144-byte stat layout on BOTH targets
+# (on agnos it is identical to k_stat since there are no symlinks).
 fn _ln_is_real_dir(path): i64 {
     var buf[144];
-    var r = syscall(262, 0 - 100, path, &buf, 256);
+    var r = k_lstat(path, &buf);
     if (r != 0) { return 0; }
     var st_mode = load64(&buf + 24);
     if ((st_mode & 61440) == 16384) { return 1; }  # S_IFMT/S_IFDIR
@@ -101,7 +98,7 @@ fn _ln_is_real_dir(path): i64 {
 # behavior.
 fn _ln_resolved_dir(path): i64 {
     var buf[144];
-    var r = sys_stat(path, &buf);
+    var r = k_stat(path, &buf);
     if (r != 0) { return 0; }
     var st_mode = load64(&buf + 24);
     if ((st_mode & 61440) == 16384) { return 1; }
@@ -139,19 +136,30 @@ fn _ln_make(target, link, symbolic, physical, force, verbose): i64 {
     if (force == 1) {
         # Best-effort unlink. We don't care about ENOENT; any other
         # errno will be surfaced by the link call below.
-        sys_unlink(link);
+        k_unlink(link);
     }
     var r: i64 = 0;
     if (symbolic == 1) {
-        r = sys_symlink(target, link);
+        # agnos has no symlinks (K_HAVE_SYMLINK == 0); refuse cleanly
+        # rather than silently misbehaving. On Linux this branch is DCE'd.
+        if (K_HAVE_SYMLINK == 0) {
+            syscall(1, 2, "kriya ln: symbolic links not supported on AGNOS\n", 48);
+            return EXIT_FAILURE;
+        }
+        r = k_symlink(target, link);
     } else {
-        # Hard link via linkat for explicit policy control.
+        # Hard link. On Linux, use linkat for explicit follow policy:
         # SYS_LINKAT = 265. AT_FDCWD = -100. AT_SYMLINK_FOLLOW = 1024.
         # Default (no -P): follow source symlink — POSIX ln behavior.
-        # -P: do not follow.
-        var flags: i64 = 1024;
-        if (physical == 1) { flags = 0; }
-        r = syscall(265, 0 - 100, target, 0 - 100, link, flags);
+        # -P: do not follow. agnos has no *at()/symlinks, so route the
+        # plain hard link through k_link (ext2 supports hard links).
+        if (K_HAVE_ATFAMILY == 1) {
+            var flags: i64 = 1024;
+            if (physical == 1) { flags = 0; }
+            r = fs_linkat(0 - 100, target, 0 - 100, link, flags);
+        } else {
+            r = k_link(target, link);
+        }
     }
     if (r != 0) {
         _ln_report(link, 0 - r);

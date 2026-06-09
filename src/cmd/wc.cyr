@@ -162,7 +162,7 @@ fn _wc_count_fd(fd, counter): i64 {
     var maxlen = load64(counter + 32);
     var loop: i64 = 1;
     while (loop == 1) {
-        var n = syscall(0, fd, buf, bufsz);
+        var n = k_read( fd, buf, bufsz);
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR — retry.
@@ -342,14 +342,14 @@ fn cmd_wc(start: i64): i64 {
     var i: i64 = 0;
     while (i < npos) {
         var p = flags_positional(_wc_spec, i);
-        var fd = sys_open(p, 0, 0);  # O_RDONLY
+        var fd = k_open(p, 0, 0);  # O_RDONLY
         if (fd < 0) {
             _wc_report(p, 0 - fd);
             any_failed = 1;
         } else {
             var c = _wc_counter_new();
             var r = _wc_count_fd(fd, c);
-            syscall(3, fd);
+            k_close( fd);
             if (r != 0) {
                 _wc_report(p, 0 - r);
                 any_failed = 1;

@@ -515,7 +515,7 @@ fn _gr_split_patterns(buf, len, out): i64 {
 # Read entire `path` into a freshly-alloc'd buffer. Returns (ptr, length
 # via *out_len), or -errno via negative return when out_len is unused.
 fn _gr_slurp(path, out_len_ptr): i64 {
-    var fd = sys_open(path, 0, 0);
+    var fd = k_open(path, 0, 0);
     if (fd < 0) { return fd; }
     var cap: i64 = 4096;
     var buf = alloc(cap);
@@ -529,12 +529,12 @@ fn _gr_slurp(path, out_len_ptr): i64 {
             buf = newbuf;
             cap = newcap;
         }
-        var n = syscall(0, fd, buf + used, 4096);
+        var n = k_read( fd, buf + used, 4096);
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR — retry.
             } else {
-                syscall(3, fd);
+                k_close( fd);
                 return n;
             }
         } else {
@@ -542,7 +542,7 @@ fn _gr_slurp(path, out_len_ptr): i64 {
             else { used = used + n; }
         }
     }
-    syscall(3, fd);
+    k_close( fd);
     store64(out_len_ptr, used);
     return buf;
 }
@@ -579,7 +579,7 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
     var loop: i64 = 1;
     var early_exit: i64 = 0;
     while (loop == 1) {
-        var n = syscall(0, fd, read_buf, _GR_READ_SZ);
+        var n = k_read( fd, read_buf, _GR_READ_SZ);
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR — retry.
@@ -765,7 +765,7 @@ fn _gr_walk_dir(dir_path, handles, n_handles, opts, term_byte, suppress): i64 {
                     var name = fs_dent_name(ent);
                     var is_dd = fs_dent_is_dotdot(ent);
                     if (is_dd == 0) {
-                        var st[36];  # 144 bytes (18 i64 slots)
+                        var st[144];  # 144 bytes (18 i64 slots)
                         var r = fs_lstat_at(dir_fd, name, &st);
                         if (r == 0) {
                             # Build full path: dir_path + "/" + name
@@ -791,12 +791,12 @@ fn _gr_walk_dir(dir_path, handles, n_handles, opts, term_byte, suppress): i64 {
                                 # for a symlink, ELOOP — we report and skip
                                 # rather than leak the target's bytes.
                                 # See CVE-2026-35359 in uutils-coreutils.
-                                var fd = sys_open(sub, 131072, 0);
+                                var fd = k_open(sub, 131072, 0);
                                 if (fd < 0) {
                                     _gr_report(sub, 0 - fd, suppress);
                                 } else {
                                     var pr = _gr_process_fd(fd, sub, handles, n_handles, opts, term_byte);
-                                    syscall(3, fd);
+                                    k_close( fd);
                                     if (pr < 0) { _gr_report(sub, 0 - pr, suppress); }
                                     elif (pr == 1) { found_any = 1; }
                                 }
@@ -976,7 +976,7 @@ fn cmd_grep(start: i64): i64 {
                 elif (rr == 1) { any_match = 1; }
             } else {
                 # stat to decide file vs directory
-                var st[36];
+                var st[144];
                 var lr = fs_lstat_at(0 - 100, name, &st);
                 if (lr < 0) {
                     _gr_report(name, 0 - lr, suppress);
@@ -995,13 +995,13 @@ fn cmd_grep(start: i64): i64 {
                         any_failed = 1;
                     }
                 } else {
-                    var fd = sys_open(name, 0, 0);
+                    var fd = k_open(name, 0, 0);
                     if (fd < 0) {
                         _gr_report(name, 0 - fd, suppress);
                         any_failed = 1;
                     } else {
                         var pr = _gr_process_fd(fd, name, handles, n_handles, opts, term_byte);
-                        syscall(3, fd);
+                        k_close( fd);
                         if (pr < 0) { _gr_report(name, 0 - pr, suppress); any_failed = 1; }
                         elif (pr == 1) { any_match = 1; }
                     }

@@ -25,6 +25,12 @@ include "lib/alloc_windows.cyr"
 include "lib/alloc_macos.cyr"
 #endif
 
+# AGNOS ring-3 — no brk; chunk-based bump over agnos mmap(27) (2 MB-granular,
+# hint-less → discontiguous chunks). See lib/alloc_agnos.cyr.
+#ifdef CYRIUS_TARGET_AGNOS
+include "lib/alloc_agnos.cyr"
+#endif
+
 #ifdef CYRIUS_TARGET_LINUX
 var _heap_base = 0;
 var _heap_ptr = 0;

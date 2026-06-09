@@ -121,11 +121,11 @@ fn _so_slurp(fd, buf, cap, overflow_p): i64 {
         var room = cap - have;
         if (room <= 0) {
             # Drain remaining bytes (so we know if there was more).
-            var n = syscall(0, fd, read_buf, _SORT_READ_BUFSZ);
+            var n = k_read( fd, read_buf, _SORT_READ_BUFSZ);
             if (n <= 0) { loop = 0; }
             else { store64(overflow_p, 1); }
         } else {
-            var n = syscall(0, fd, read_buf, _SORT_READ_BUFSZ);
+            var n = k_read( fd, read_buf, _SORT_READ_BUFSZ);
             if (n < 0) {
                 if ((0 - n) == 4) {
                     # EINTR retry.
@@ -609,7 +609,7 @@ fn cmd_sort(start: i64): i64 {
                 if (load8(p + 1) == 0) { is_stdin = 1; }
             }
             if (is_stdin == 0) {
-                fd = sys_open(p, 0, 0);
+                fd = k_open(p, 0, 0);
                 if (fd < 0) {
                     _so_report(p, 0 - fd);
                     return EXIT_FAILURE;
@@ -617,7 +617,7 @@ fn cmd_sort(start: i64): i64 {
             }
             var room = _SORT_INPUT_CAP - have;
             var n = _so_slurp(fd, buf + have, room, &overflow_box);
-            if (is_stdin == 0) { syscall(3, fd); }
+            if (is_stdin == 0) { k_close( fd); }
             if (n < 0) {
                 _so_report(p, 0 - n);
                 return EXIT_FAILURE;
@@ -681,7 +681,7 @@ fn cmd_sort(start: i64): i64 {
     if (o_arg != 0) {
         if (load8(o_arg) != 0) {
             # O_WRONLY | O_CREAT | O_TRUNC = 577, mode 0666 = 438.
-            out_fd = sys_open(o_arg, 577, 438);
+            out_fd = k_open(o_arg, 577, 438);
             if (out_fd < 0) {
                 _so_report(o_arg, 0 - out_fd);
                 return EXIT_FAILURE;
@@ -711,7 +711,7 @@ fn cmd_sort(start: i64): i64 {
                 var wr = _so_write_all(out_fd, buf + _so_rec_off(rec), rlen);
                 if (wr != 0) {
                     _so_report("(write)", 0 - wr);
-                    if (out_opened == 1) { syscall(3, out_fd); }
+                    if (out_opened == 1) { k_close( out_fd); }
                     return EXIT_FAILURE;
                 }
             }
@@ -721,6 +721,6 @@ fn cmd_sort(start: i64): i64 {
         i = i + 1;
     }
 
-    if (out_opened == 1) { syscall(3, out_fd); }
+    if (out_opened == 1) { k_close( out_fd); }
     return EXIT_SUCCESS;
 }

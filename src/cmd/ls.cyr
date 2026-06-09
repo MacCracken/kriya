@@ -419,7 +419,8 @@ fn _ls_collect(dir_path, all_mode, almost_all): i64 {
                         var name_copy = alloc(nlen + 1);
                         memcpy(name_copy, name, nlen + 1);
                         var rec = _ls_rec_new(name_copy);
-                        fs_lstat_at(dir_fd, name, _ls_rec_st(rec));
+                        var ent_fp = path_join(dir_path, name);
+                        fs_stat_entry(dir_fd, ent_fp, name, _ls_rec_st(rec), 0);
                         # Cache symlink target if it'll be needed by -l.
                         if (fs_is_lnk(_ls_rec_st(rec)) == 1) {
                             _ls_load_link_target(dir_fd, rec);

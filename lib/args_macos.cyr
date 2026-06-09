@@ -21,12 +21,21 @@
 # Inline asm — mirrors lib/fnptr.cyr's pattern for stashing a register
 # into a local slot via [x29, #-8].
 fn _macho_argv_base() {
+    # Guard on the TARGET arch (AARCH64), not CYRIUS_ARCH_X86 — the x86
+    # cross-compiler predefines X86 even when building the arm64 cycc, so
+    # an X86 guard would zero argv on the shipped arm64 binary. See [6.0.42].
+    #ifdef CYRIUS_ARCH_AARCH64
     var result = 0;
     asm {
         0xE0; 0x03; 0x1C; 0xAA;    # mov x0, x28
         0xA0; 0x83; 0x1F; 0xF8;    # stur x0, [x29, #-8]  (result)
     }
     return result;
+    #else
+    # x86-macOS: argv parking deferred to the shared macho entry emit (see
+    # _macho_x28 in runtime.cyr + issue layer 6). Return 0 for now.
+    return 0;
+    #endif
 }
 
 # On Linux the equivalent fn reads /proc/self/cmdline; on macOS the

@@ -90,13 +90,13 @@ fn pam_unix_authenticate(user, password): i64 {
         sys_dup2(rfd, 0);
         sys_close(rfd);
 
-        var argv[4];
-        store64(&argv,      helper);
-        store64(&argv + 8,  user);
-        store64(&argv + 16, "nullok");
+        var argv[40];   # N BYTES (CLAUDE.md buffer contract): 4 ptrs = 32 B.
+        store64(&argv,      helper);     # was argv[4]/envp[1] = 8 B each → envp[0]
+        store64(&argv + 8,  user);       # aliased argv[1] and store64(&envp,0)
+        store64(&argv + 16, "nullok");   # zeroed `user`, so the helper got no user.
         store64(&argv + 24, 0);
 
-        var envp[1];
+        var envp[16];
         store64(&envp, 0);
 
         sys_execve(helper, &argv, &envp);

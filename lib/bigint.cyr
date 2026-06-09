@@ -282,10 +282,19 @@ fn u256_mod(r, a, p): i64 {
     return 0;
 }
 
-# r = (a + b) mod p
+# r = (a + b) mod p. Precondition: a, b < p (so a + b < 2p → one reduce
+# suffices). Honors u256_add's carry-out — without it, when a + b ≥ 2^256
+# the truncated r tests < p and the needed subtract is skipped, leaving r
+# short by 2^256 − p (wrong for moduli near 2^256, e.g. the P-256 group
+# order; Curve25519 callers with p < 2^255 never overflow). Mirrors
+# u256_submod's borrow handling. See CHANGELOG [6.0.36].
 fn u256_addmod(r, a, b, p): i64 {
-    u256_add(r, a, b);
-    if (u256_cmp(r, p) >= 0) { u256_sub(r, r, p); }
+    var carry = u256_add(r, a, b);
+    if (carry > 0) {
+        u256_sub(r, r, p);              # overflowed 2^256 → reduce once
+    } else {
+        if (u256_cmp(r, p) >= 0) { u256_sub(r, r, p); }
+    }
     return 0;
 }
 

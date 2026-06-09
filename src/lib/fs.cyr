@@ -129,70 +129,192 @@ fn fs_perms(stat_buf): i64 {
 # become per-arch-routed; until then, x86_64-only (the kriya build
 # target today).
 
+# NOTE on the agnos branches below: agnos has NO dirfd-relative *at()
+# calls and NO per-process cwd — only PATH-BASED syscalls (wrapped as
+# k_open/k_stat/k_unlink/… in sys.cyr). So each *at wrapper routes to
+# the path-based k_* when `dirfd == AT_FDCWD` (-100) — the top-level
+# entry point, where the recursive walk seeds from an ABSOLUTE path —
+# and returns -ENOSYS (-38) for any real dirfd (mid-recursion,
+# relative-to-fd), which agnos cannot satisfy. Net effect: single-level
+# / absolute-path ops work; dirfd-relative recursion fails cleanly at
+# depth instead of misbehaving. The Linux branch (#ifndef) keeps the
+# exact raw-syscall body unchanged.
+
 fn fs_openat(dirfd, path, flags, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (dirfd == k_at_fdcwd()) { return k_open(path, flags, mode); }
+    return 0 - 38;                               # no open-relative-to-fd on agnos (ENOSYS)
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return syscall(257, dirfd, path, flags, mode);
+    #endif
 }
 
 # fstatat with explicit `flags`. Use AT_SYMLINK_NOFOLLOW (256) for
 # lstat-equivalent, 0 for stat-equivalent.
 fn fs_fstatat(dirfd, path, buf, flags): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # agnos has no symlinks, so the NOFOLLOW flag is irrelevant → k_stat.
+    if (dirfd == k_at_fdcwd()) { return k_stat(path, buf); }
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return syscall(262, dirfd, path, buf, flags);
+    #endif
 }
 
 fn fs_lstat_at(dirfd, path, buf): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (dirfd == k_at_fdcwd()) { return k_lstat(path, buf); }
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return syscall(262, dirfd, path, buf, 256);  # AT_SYMLINK_NOFOLLOW
+    #endif
+}
+
+# stat a directory ENTRY identified by (dirfd, name) during a readdir walk.
+# `fullpath` is the entry's absolute path (dirpath joined with name) — the
+# caller already has it. follow=1 -> stat (deref), 0 -> lstat. Linux uses the
+# dirfd-relative *at (TOCTOU-safe per ADR 0003); agnos has no dirfd-relative
+# call, so it stats `fullpath` directly (no symlinks there, so no TOCTOU gap).
+# This is what lets ls -l / du show real metadata on agnos, where a real-dirfd
+# fs_lstat_at would return -38.
+fn fs_stat_entry(dirfd, fullpath, name, buf, follow): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (follow == 1) { return k_stat(fullpath, buf); }
+    return k_lstat(fullpath, buf);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (follow == 1) { return fs_fstatat(dirfd, name, buf, 0); }
+    return fs_lstat_at(dirfd, name, buf);
+    #endif
 }
 
 # Open a directory for traversal in the safe shape required by
 # ADR 0003: O_RDONLY | O_DIRECTORY | O_NOFOLLOW. The mode argument
 # is unused for read-only opens but the syscall signature wants it.
 fn fs_opendir_nofollow(dirfd, name): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # Pass O_DIRECTORY (k_open maps it to agnos AO_DIRECTORY) so the kernel
+    # returns a getdents-capable dir fd; O_NOFOLLOW is moot (no symlinks).
+    if (dirfd == k_at_fdcwd()) { return k_open(name, 65536, 0); }
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     # 0 | 65536 | 131072 = 196608.
     return syscall(257, dirfd, name, 196608, 0);
+    #endif
 }
 
 fn fs_mkdirat(dirfd, path, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (dirfd == k_at_fdcwd()) { return k_mkdir(path, mode); }
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return syscall(258, dirfd, path, mode);
+    #endif
 }
 
 # unlinkat with flags: 0 for files, AT_REMOVEDIR=512 for empty dirs.
 fn fs_unlinkat(dirfd, path, flags): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (dirfd == k_at_fdcwd()) {
+        if ((flags & 512) != 0) { return k_rmdir(path); }   # AT_REMOVEDIR
+        return k_unlink(path);
+    }
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return syscall(263, dirfd, path, flags);
+    #endif
 }
 
 fn fs_linkat(old_dirfd, old_path, new_dirfd, new_path, flags): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # Path-based k_link needs BOTH dirfds at AT_FDCWD (no relative resolution).
+    if (old_dirfd == k_at_fdcwd()) {
+        if (new_dirfd == k_at_fdcwd()) { return k_link(old_path, new_path); }
+    }
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return syscall(265, old_dirfd, old_path, new_dirfd, new_path, flags);
+    #endif
 }
 
 fn fs_symlinkat(target, dirfd, link): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # k_symlink returns -38 on agnos (no symlinks) regardless of dirfd.
+    if (dirfd == k_at_fdcwd()) { return k_symlink(target, link); }
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return syscall(266, target, dirfd, link);
+    #endif
 }
 
 fn fs_fchmodat(dirfd, path, mode, flags): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # k_chmod returns -38 on agnos (no mode bits) regardless of dirfd.
+    if (dirfd == k_at_fdcwd()) { return k_chmod(path, mode); }
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return syscall(268, dirfd, path, mode, flags);
+    #endif
 }
 
 fn fs_utimensat(dirfd, path, times, flags): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # k_utimensat returns -38 on agnos (no utimensat) regardless of dirfd.
+    if (dirfd == k_at_fdcwd()) { return k_utimensat(dirfd, path, times, flags); }
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return syscall(280, dirfd, path, times, flags);
+    #endif
 }
 
 fn fs_readlinkat(dirfd, path, buf, bufsize): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # k_readlink returns -38 on agnos (no symlinks) regardless of dirfd.
+    if (dirfd == k_at_fdcwd()) { return k_readlink(path, buf, bufsize); }
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return syscall(267, dirfd, path, buf, bufsize);
+    #endif
 }
 
 # rename(2): rename within a filesystem. Cross-FS returns -EXDEV (-18),
 # letting the caller fall back to copy+unlink. SYS_RENAME = 82 on x86_64.
 fn fs_rename(oldpath, newpath): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return k_rename(oldpath, newpath);           # agnos path-based rename
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return syscall(82, oldpath, newpath);
+    #endif
 }
 
 # renameat(2): rename rooted at explicit dirfds. SYS_RENAMEAT = 264.
 fn fs_renameat(old_dirfd, oldpath, new_dirfd, newpath): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # Path-based k_rename needs BOTH dirfds at AT_FDCWD (no relative resolution).
+    if (old_dirfd == k_at_fdcwd()) {
+        if (new_dirfd == k_at_fdcwd()) { return k_rename(oldpath, newpath); }
+    }
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return syscall(264, old_dirfd, oldpath, new_dirfd, newpath);
+    #endif
 }
 
 fn fs_close(fd): i64 {
-    return syscall(3, fd);
+    return k_close( fd);
 }
 
 # --- directory entry iteration -------------------------------------
@@ -205,8 +327,12 @@ fn fs_close(fd): i64 {
 #   d_type:   offset 18, u8
 #   d_name:   offset 19, null-terminated cstring (padded)
 
+# Route through k_getdents on BOTH targets: it picks the per-target
+# syscall number (Linux #217 / agnos #29) AND translates agnos's packed
+# dirent stream into the Linux linux_dirent64 layout the fs_dent_*
+# accessors below read — so callers see one record format everywhere.
 fn fs_getdents64(fd, buf, bufsize): i64 {
-    return syscall(217, fd, buf, bufsize);
+    return k_getdents(fd, buf, bufsize);
 }
 
 # Read d_reclen as a u16. Cyrius has no u16 load, so we assemble it
@@ -314,7 +440,7 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
         var ilen = strlen(input);
         memcpy(remaining, input + 1, ilen);  # also copies the null
     } else {
-        var n = syscall(SYS_GETCWD, result, BUFSZ);
+        var n = k_getcwd(result, BUFSZ);
         if (n < 0) { return n; }
         ri = n - 1;  # SYS_GETCWD returns length INCLUDING null
         if (ri < 1) { ri = 1; }

@@ -134,6 +134,8 @@ enum SysNr {
     # Wrappers exist to prevent silent aarch64 syscall-number misroute when
     # consumers hardcode x86_64 numbers. See CHANGELOG [5.11.18].
     SYS_SOCKET = 198;
+    SYS_SOCKETPAIR = 199;
+    SYS_SETSOCKOPT = 208;
     SYS_BIND = 200;
     SYS_LISTEN = 201;
     SYS_CONNECT = 203;
@@ -190,6 +192,27 @@ enum FutexOp {
 # Open flags (cross-arch identical — values from
 # asm-generic/fcntl.h, which aarch64 uses unmodified)
 # ================================================================
+# O_* flag VALUES differ between Linux and macOS/BSD (the access-mode low
+# bits 0/1/2 match, but CREAT/EXCL/TRUNC/APPEND/etc. don't). This file is
+# included for BOTH Linux-aarch64 AND macho-arm (lib/syscalls.cyr dispatch
+# + ESYSXLAT translating the call numbers), so the constants must match the
+# RUNTIME OS. Without this, a macho tool/wrapper opening O_CREAT|O_TRUNC
+# passes Linux bits to BSD open → wrong flags → file not created (v6.0.34
+# "cyrius build … FAIL", cyrfmt --write). See CHANGELOG.
+#ifdef CYRIUS_TARGET_MACOS
+enum OpenFlag {
+    O_RDONLY = 0;
+    O_WRONLY = 1;
+    O_RDWR = 2;
+    O_CREAT = 0x200;
+    O_EXCL = 0x800;
+    O_TRUNC = 0x400;
+    O_APPEND = 0x8;
+    O_NONBLOCK = 0x4;
+    O_CLOEXEC = 0x1000000;
+}
+#endif
+#ifdef CYRIUS_TARGET_LINUX
 enum OpenFlag {
     O_RDONLY = 0;
     O_WRONLY = 1;
@@ -201,6 +224,7 @@ enum OpenFlag {
     O_NONBLOCK = 2048;
     O_CLOEXEC = 524288;
 }
+#endif
 
 # ================================================================
 # Signals (cross-arch identical — asm-generic/signal.h)

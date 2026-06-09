@@ -64,7 +64,7 @@ fn _xa_report(msg): i64 {
 fn _xa_env_get(): i64 {
     if (_xa_env_vec != 0) { return _xa_env_vec; }
     var v = vec_new();
-    var fd = sys_open("/proc/self/environ", 0, 0);
+    var fd = k_open("/proc/self/environ", 0, 0);
     if (fd < 0) { _xa_env_vec = v; return v; }
     var cap: i64 = 4096;
     var buf = alloc(cap);
@@ -78,7 +78,7 @@ fn _xa_env_get(): i64 {
             buf = newbuf;
             cap = newcap;
         }
-        var n = syscall(0, fd, buf + used, 4096);
+        var n = k_read( fd, buf + used, 4096);
         if (n < 0) {
             if ((0 - n) == 4) { } else { loop = 0; }
         } else {
@@ -86,7 +86,7 @@ fn _xa_env_get(): i64 {
             else { used = used + n; }
         }
     }
-    syscall(3, fd);
+    k_close( fd);
     var start: i64 = 0;
     var i: i64 = 0;
     while (i < used) {
@@ -134,9 +134,10 @@ fn _xa_resolve_exec(cmd): i64 {
             store8(entry + slen, 0);
         }
         var candidate = path_join(entry, cmd);
-        if (sys_access(candidate, 1) == 0) {
-            var st[36];
-            if (sys_stat(candidate, &st) == 0) {
+        # k_access: X_OK on Linux, existence check on agnos (no perm model).
+        if (k_access(candidate, 1) == 0) {
+            var st[144];
+            if (k_stat(candidate, &st) == 0) {
                 if (fs_is_reg(&st) == 1) { return candidate; }
             }
         }
@@ -162,7 +163,7 @@ fn _xa_slurp_stdin(out_len_ptr): i64 {
             buf = newbuf;
             cap = newcap;
         }
-        var n = syscall(0, 0, buf + used, 4096);
+        var n = k_read( 0, buf + used, 4096);
         if (n < 0) {
             if ((0 - n) == 4) { } else { return n; }
         } else {

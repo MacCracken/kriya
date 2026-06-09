@@ -90,6 +90,8 @@ enum SysNr {
     # v5.11.18 (kybernet 1.1.5-surfaced — sd_notify dgram + supervisor IPC).
     # See aarch64 peer + CHANGELOG [5.11.18].
     SYS_SOCKET = 41;
+    SYS_SOCKETPAIR = 53;
+    SYS_SETSOCKOPT = 54;
     SYS_CONNECT = 42;
     SYS_RECVFROM = 45;
     SYS_RECVMSG = 47;

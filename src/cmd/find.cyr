@@ -404,7 +404,7 @@ fn _f_parse_primary(): i64 {
         var rp = _f_consume();
         if (rp == 0) { _f_set_err("-newer needs an argument"); return 0; }
         # stat the ref now; cache mtime in the node.
-        var st[36];
+        var st[144];
         var r = fs_lstat_at(0 - 100, rp, &st);
         if (r < 0) { _f_set_err("-newer reference path not found"); return 0; }
         return _f_node_new(F_N_NEWER, load64(&st + 88), 0, 0);
@@ -646,7 +646,7 @@ fn _f_eval_empty_predicate(path, stat_buf): i64 {
 fn _f_env_get(): i64 {
     if (_f_env_vec != 0) { return _f_env_vec; }
     var v = vec_new();
-    var fd = sys_open("/proc/self/environ", 0, 0);
+    var fd = k_open("/proc/self/environ", 0, 0);
     if (fd < 0) { _f_env_vec = v; return v; }
     var cap: i64 = 4096;
     var buf = alloc(cap);
@@ -660,7 +660,7 @@ fn _f_env_get(): i64 {
             buf = newbuf;
             cap = newcap;
         }
-        var n = syscall(0, fd, buf + used, 4096);
+        var n = k_read( fd, buf + used, 4096);
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR retry
@@ -670,7 +670,7 @@ fn _f_env_get(): i64 {
             else { used = used + n; }
         }
     }
-    syscall(3, fd);
+    k_close( fd);
     # Split on NUL — each entry is already NUL-terminated in the buffer.
     var start: i64 = 0;
     var i: i64 = 0;
@@ -723,9 +723,10 @@ fn _f_resolve_exec(cmd): i64 {
             store8(entry + slen, 0);
         }
         var candidate = path_join(entry, cmd);
-        if (sys_access(candidate, 1) == 0) {
-            var st[36];
-            if (sys_stat(candidate, &st) == 0) {
+        # k_access: X_OK on Linux, existence check on agnos (no perm model).
+        if (k_access(candidate, 1) == 0) {
+            var st[144];
+            if (k_stat(candidate, &st) == 0) {
                 if (fs_is_reg(&st) == 1) { return candidate; }
             }
         }

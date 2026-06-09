@@ -512,7 +512,7 @@ fn _tr_run(in_fd, set1_seq, set1_seq_len, set1_mem, set2_seq, set2_seq_len, set2
     var prev_byte: i64 = 0 - 1;  # nothing emitted yet
     var loop: i64 = 1;
     while (loop == 1) {
-        var n = syscall(0, in_fd, in_buf, _TR_BUFSZ);
+        var n = k_read( in_fd, in_buf, _TR_BUFSZ);
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR retry.

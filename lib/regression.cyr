@@ -51,7 +51,7 @@
 #     would need parametrizing call shapes that are dispatcher-
 #     idiosyncratic.
 #   - Cyrius-specific tool integration (`_cyrlint_count_marker`
-#     uses `CYRLINT_PATH`, `_ts_mode_run` uses cc5 mode flags).
+#     uses `CYRLINT_PATH`, `_ts_mode_run` uses cycc mode flags).
 #     Those stay in their dispatchers as thin wrappers over the
 #     primitives this module exports.
 #
@@ -193,7 +193,7 @@ fn regression_pipe_to_bin_capture(bin_path, src_path, out_path, envp): i64 {
         sys_close(out_fd);
         var dn2 = sys_open("/dev/null", 1, 0);
         if (dn2 >= 0) { sys_dup2(dn2, 2); sys_close(dn2); }
-        var argv[2];
+        var argv[24];   # N BYTES (CLAUDE.md buffer contract): cmd + NUL = 16 B
         store64(&argv,     bin_path);
         store64(&argv + 8, 0);
         sys_execve(bin_path, &argv, envp);
@@ -244,7 +244,7 @@ fn regression_run_with_timeout(bin_path, timeout_ms, envp): i64 {
         if (dn1 >= 0) { sys_dup2(dn1, 1); sys_close(dn1); }
         var dn2 = sys_open("/dev/null", 1, 0);
         if (dn2 >= 0) { sys_dup2(dn2, 2); sys_close(dn2); }
-        var argv[2];
+        var argv[24];   # N BYTES (CLAUDE.md buffer contract): cmd + NUL = 16 B
         store64(&argv,     bin_path);
         store64(&argv + 8, 0);
         sys_execve(bin_path, &argv, envp);
@@ -289,7 +289,7 @@ fn regression_exec_capture(bin_path, buf, buflen, envp): i64 {
         if (dn_r >= 0) { sys_dup2(dn_r, 0); sys_close(dn_r); }
         var dn_e = sys_open("/dev/null", 1, 0);
         if (dn_e >= 0) { sys_dup2(dn_e, 2); sys_close(dn_e); }
-        var argv[2];
+        var argv[24];   # N BYTES (CLAUDE.md buffer contract): cmd + NUL = 16 B
         store64(&argv,     bin_path);
         store64(&argv + 8, 0);
         sys_execve(bin_path, &argv, envp);
@@ -316,7 +316,7 @@ fn regression_exec_run(bin_path, envp): i64 {
         if (dn1 >= 0) { sys_dup2(dn1, 1); sys_close(dn1); }
         var dn2 = sys_open("/dev/null", 1, 0);
         if (dn2 >= 0) { sys_dup2(dn2, 2); sys_close(dn2); }
-        var argv[2];
+        var argv[24];   # N BYTES (CLAUDE.md buffer contract): cmd + NUL = 16 B
         store64(&argv,     bin_path);
         store64(&argv + 8, 0);
         sys_execve(bin_path, &argv, envp);
@@ -345,7 +345,7 @@ fn regression_exec_with_arg_capture(bin_path, arg, buf, buflen, envp): i64 {
         if (dn_r >= 0) { sys_dup2(dn_r, 0); sys_close(dn_r); }
         var dn_e = sys_open("/dev/null", 1, 0);
         if (dn_e >= 0) { sys_dup2(dn_e, 2); sys_close(dn_e); }
-        var argv[3];
+        var argv[40];   # N BYTES (CLAUDE.md buffer contract): cmd + arg + NUL = 24 B
         store64(&argv,     bin_path);
         store64(&argv + 8, arg);
         store64(&argv + 16, 0);
@@ -377,7 +377,7 @@ fn regression_exec_with_arg_capture_both(bin_path, arg, buf, buflen, envp): i64 
         sys_close(out_fd);
         var dn_r = sys_open("/dev/null", 0, 0);
         if (dn_r >= 0) { sys_dup2(dn_r, 0); sys_close(dn_r); }
-        var argv[3];
+        var argv[40];   # N BYTES (CLAUDE.md buffer contract): cmd + arg + NUL = 24 B
         store64(&argv,     bin_path);
         store64(&argv + 8, arg);
         store64(&argv + 16, 0);
@@ -449,16 +449,16 @@ fn regression_ssh_skip_check(target): i64 {
         if (dn1 >= 0) { sys_dup2(dn1, 1); sys_close(dn1); }
         var dn2 = sys_open("/dev/null", 1, 0);
         if (dn2 >= 0) { sys_dup2(dn2, 2); sys_close(dn2); }
-        var argv[8];
-        store64(&argv,      "ssh");
-        store64(&argv + 8,  "-o");
-        store64(&argv + 16, "BatchMode=yes");
+        var argv[72];   # N BYTES (CLAUDE.md buffer contract): 8 ptrs + NUL = 72 B.
+        store64(&argv,      "ssh");      # was argv[8]/envp[1] = 8 B each: the 8
+        store64(&argv + 8,  "-o");       # arg writes overran by 56 B and envp[0]
+        store64(&argv + 16, "BatchMode=yes");  # aliased argv[1] → ssh got no args.
         store64(&argv + 24, "-o");
         store64(&argv + 32, "ConnectTimeout=2");
         store64(&argv + 40, target);
         store64(&argv + 48, "echo alive");
         store64(&argv + 56, 0);
-        var envp[1];
+        var envp[16];
         store64(&envp, 0);
         sys_execve("/usr/bin/ssh", &argv, &envp);
         sys_execve("/bin/ssh",     &argv, &envp);
@@ -484,7 +484,7 @@ fn regression_scp_to(target, local_path, remote_path, envp): i64 {
     if (pid == 0) {
         var dn = sys_open("/dev/null", 1, 0);
         if (dn >= 0) { sys_dup2(dn, 1); sys_close(dn); }
-        var argv[5];
+        var argv[48];   # N BYTES (CLAUDE.md buffer contract): 5 ptrs = 40 B
         store64(&argv,      "scp");
         store64(&argv + 8,  "-q");
         store64(&argv + 16, local_path);
@@ -515,7 +515,7 @@ fn regression_ssh_remote_exit(target, command, envp): i64 {
         if (dn1 >= 0) { sys_dup2(dn1, 1); sys_close(dn1); }
         var dn2 = sys_open("/dev/null", 1, 0);
         if (dn2 >= 0) { sys_dup2(dn2, 2); sys_close(dn2); }
-        var argv[4];
+        var argv[40];   # N BYTES (CLAUDE.md buffer contract): 4 ptrs = 32 B
         store64(&argv,      "ssh");
         store64(&argv + 8,  target);
         store64(&argv + 16, command);
@@ -546,7 +546,7 @@ fn regression_ssh_remote_exec_capture(target, command, out_path, envp): i64 {
         sys_close(out_fd);
         var dn2 = sys_open("/dev/null", 1, 0);
         if (dn2 >= 0) { sys_dup2(dn2, 2); sys_close(dn2); }
-        var argv[4];
+        var argv[40];   # N BYTES (CLAUDE.md buffer contract): 4 ptrs = 32 B
         store64(&argv,      "ssh");
         store64(&argv + 8,  target);
         store64(&argv + 16, command);
@@ -604,7 +604,7 @@ fn regression_exec_in_dir3(work_dir, bin_path, arg1, arg2, arg3, out_path, envp)
         var dn2 = sys_open("/dev/null", 1, 0);
         if (dn2 >= 0) { sys_dup2(dn2, 2); sys_close(dn2); }
         sys_chdir(work_dir);
-        var argv[5];
+        var argv[48];   # N BYTES (CLAUDE.md buffer contract): cmd + 3 args + NUL = 40 B
         var ai = 0;
         store64(&argv + ai * 8, bin_path); ai = ai + 1;
         if (arg1 != 0) { store64(&argv + ai * 8, arg1); ai = ai + 1; }

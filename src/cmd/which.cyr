@@ -20,7 +20,7 @@
 #     printed; with `-a`, all matches are printed.
 #
 # "Executable" means: `sys_stat` succeeds, `S_ISREG`, and
-# `sys_access(path, X_OK)` returns 0. Symlinks are followed (POSIX
+# `k_access(path, X_OK)` returns 0. Symlinks are followed (POSIX
 # `which` semantics — what the shell would invoke from `$PATH`).
 #
 # Exit code: `EXIT_SUCCESS` if every PROGRAM was found at least
@@ -53,11 +53,12 @@ fn _wh_init_spec(): i64 {
 # (what the shell sees when invoking).
 fn _wh_is_exec(candidate): i64 {
     var st[144];
-    var sr = sys_stat(candidate, &st);
+    var sr = k_stat(candidate, &st);
     if (sr != 0) { return 0; }
     if (fs_is_reg(&st) == 0) { return 0; }
-    # X_OK = 1. sys_access follows symlinks (matches stat above).
-    var ar = sys_access(candidate, 1);
+    # X_OK = 1. k_access follows symlinks (matches stat above). On agnos
+    # (no permission model) X_OK collapses to an existence check.
+    var ar = k_access(candidate, 1);
     if (ar != 0) { return 0; }
     return 1;
 }

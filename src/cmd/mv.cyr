@@ -30,8 +30,8 @@
 #     explicit, or use `ln -sfn target linkdir` for atomic retarget.
 #
 # Cross-filesystem moves (rename(2) returns -EXDEV / -18):
-#   - Regular file: fall back to `_cp_one` + `sys_unlink(src)`.
-#   - Symlink: readlink + sys_symlink at dst + sys_unlink(src).
+#   - Regular file: fall back to `_cp_one` + `k_unlink(src)`.
+#   - Symlink: readlink + sys_symlink at dst + k_unlink(src).
 #   - Directory: `_cp_recursive_one` with POLICY_P (preserve symlinks
 #     per ADR 0003, preserve mode + timestamps) followed by `_rm_dir_at`
 #     to drain the source tree. On either failure the destination
@@ -90,9 +90,10 @@ fn _mv_report(operand, errno): i64 {
 }
 
 fn _mv_isatty(fd): i64 {
-    var tio[96];
-    var r = syscall(16, fd, 21505, &tio);  # SYS_IOCTL, TCGETS
-    if (r == 0) { return 1; }
+    # Portable tty probe: k_isatty does the ioctl(TCGETS) on Linux and
+    # returns 0 on agnos (no ioctl/termios) — so -i prompting is never
+    # interactive on agnos and falls through to the non-tty path.
+    if (k_isatty(fd) == 1) { return 1; }
     return 0;
 }
 
@@ -101,7 +102,7 @@ fn _mv_prompt(dst): i64 {
     syscall(1, 2, dst, strlen(dst));
     syscall(1, 2, "'? ", 3);
     var c[8];
-    var n = syscall(0, 0, &c, 8);
+    var n = k_read( 0, &c, 8);
     if (n < 1) { return 0; }
     var ch = load8(&c);
     if (ch == 121) { return 1; }
@@ -111,7 +112,7 @@ fn _mv_prompt(dst): i64 {
 
 fn _mv_is_dir_path(path): i64 {
     var buf[144];
-    var r = sys_stat(path, &buf);
+    var r = k_stat(path, &buf);
     if (r != 0) { return 0; }
     if (fs_is_dir(&buf) == 1) { return 1; }
     return 0;
@@ -121,11 +122,11 @@ fn _mv_is_dir_path(path): i64 {
 # ADR 0003 hard refusal: mv must not overwrite a symlink-to-dir.
 fn _mv_is_symlink_to_dir(path): i64 {
     var l[144];
-    var lr = syscall(262, 0 - 100, path, &l, 256);  # lstat
+    var lr = fs_lstat_at(0 - 100, path, &l);  # lstat
     if (lr != 0) { return 0; }
     if (fs_is_lnk(&l) == 0) { return 0; }
     var s[144];
-    var sr = sys_stat(path, &s);
+    var sr = k_stat(path, &s);
     if (sr != 0) { return 0; }
     if (fs_is_dir(&s) == 1) { return 1; }
     return 0;
@@ -145,8 +146,10 @@ fn _mv_verbose(src, dst): i64 {
 fn _mv_cross_fs(src, dst, src_st, verbose): i64 {
     if (fs_is_lnk(src_st) == 1) {
         # Symlink: replicate by reading the target text and recreating.
+        # k_readlink does readlink(2) on Linux and returns -38 (ENOSYS)
+        # on agnos (no symlinks) — n < 0 there routes to the error path.
         var link_buf = alloc(4096);
-        var n = sys_readlink(src, link_buf, 4095);
+        var n = k_readlink(src, link_buf, 4095);
         if (n < 0) {
             _mv_report(src, 0 - n);
             return n;
@@ -155,14 +158,14 @@ fn _mv_cross_fs(src, dst, src_st, verbose): i64 {
         # If dst already exists as a symlink or regular file, we already
         # would have handled the existence check. Symlink creation
         # needs a clean target; remove whatever's there.
-        sys_unlink(dst);
-        var sr = sys_symlink(link_buf, dst);
+        k_unlink(dst);
+        var sr = k_symlink(link_buf, dst);
         if (sr != 0) {
             _mv_report(dst, 0 - sr);
             return sr;
         }
         # Unlink the source symlink.
-        var ur = sys_unlink(src);
+        var ur = k_unlink(src);
         if (ur != 0) {
             _mv_report(src, 0 - ur);
             return ur;
@@ -206,12 +209,12 @@ fn _mv_cross_fs(src, dst, src_st, verbose): i64 {
     var r = _cp_one(src, dst, 1, 0, 1, 0);  # force=1, interactive=0, preserve=1, verbose=0
     if (r != 0) { return r; }
 
-    var ur = sys_unlink(src);
+    var ur = k_unlink(src);
     if (ur != 0) {
         # cp succeeded but src couldn't be unlinked. Roll back the
         # destination so the user doesn't end up with two copies that
         # both look authoritative.
-        sys_unlink(dst);
+        k_unlink(dst);
         _mv_report(src, 0 - ur);
         return ur;
     }
@@ -226,7 +229,7 @@ fn _mv_one(src, dst, force, interactive, no_clobber, verbose): i64 {
     # self-move and cross-FS checks. Use lstat so a source-symlink
     # is treated as a link (POSIX).
     var src_st[144];
-    var sr = syscall(262, 0 - 100, src, &src_st, 256);  # fstatat AT_SYMLINK_NOFOLLOW
+    var sr = fs_lstat_at(0 - 100, src, &src_st);  # fstatat AT_SYMLINK_NOFOLLOW
     if (sr != 0) {
         _mv_report(src, 0 - sr);
         return sr;
@@ -234,7 +237,7 @@ fn _mv_one(src, dst, force, interactive, no_clobber, verbose): i64 {
 
     # Destination existence + ADR 0003 hard rule #3 check.
     var dst_st[144];
-    var dr = syscall(262, 0 - 100, dst, &dst_st, 256);  # lstat dst
+    var dr = fs_lstat_at(0 - 100, dst, &dst_st);  # lstat dst
     if (dr == 0) {
         # Self-move: same dev + ino — silent no-op per POSIX/GNU.
         if (load64(&src_st + 0) == load64(&dst_st + 0)) {

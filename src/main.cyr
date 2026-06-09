@@ -10,6 +10,7 @@
 include "src/version_str.cyr"
 include "src/lib/exit.cyr"
 include "src/lib/errmsg.cyr"
+include "src/lib/sys.cyr"
 include "src/lib/path.cyr"
 include "src/lib/fs.cyr"
 include "src/lib/protected.cyr"
@@ -132,5 +133,14 @@ fn main(): i64 {
     return dispatch(name, start);
 }
 
-var r = main();
-syscall(SYS_EXIT, r);
+# Entry: a BARE top-level call (NOT `var r = main()`). On agnos a module-
+# scope `var r = main()` runs main during gvar-init — before cycc emits the
+# init-rsp capture — so argc()/argv() would read 0/null. A bare statement
+# runs in PARSE_PROG, after the capture. SYS_EXIT is 0 on agnos, 60 on Linux
+# (per-target constant), so this form is correct on both. (CLAUDE.md)
+fn _entry(): i64 {
+    var r = main();
+    syscall(SYS_EXIT, r);
+    return 0;
+}
+_entry();

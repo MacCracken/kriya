@@ -35,6 +35,7 @@
 var TLOCAL_BLOCK_SIZE = 4096;
 var TLOCAL_MAX_SLOTS = 16;
 
+#ifndef CYRIUS_TARGET_WIN
 # Install `tls` as the current thread's thread-pointer register base.
 # x86_64: syscall(158, ARCH_SET_FS=0x1002, tls)
 # aarch64: msr TPIDR_EL0, tls
@@ -118,3 +119,58 @@ fn thread_local_set(slot, val): i64 {
     #endif
     return 0;
 }
+#endif
+
+#ifdef CYRIUS_TARGET_WIN
+# Windows (PE/x86_64) thread-local storage — v6.0.54.
+#
+# The Linux/macOS body above installs a per-thread block via the CPU
+# thread-pointer register (`%fs` / `TPIDR_EL0`). Windows has neither
+# arch_prctl(158) nor a settable fs base at ring 3 (the TEB lives at gs,
+# managed by the OS), so that path SIGILLs. Under the v6.0.53 serial
+# thread_win.cyr model, `thread_create` runs each fn INLINE to completion
+# before returning — strictly one logical thread is ever live — so
+# thread-local storage degenerates to a single process-global slot array.
+# No TlsAlloc / kernel32 / compiler reroute is needed.
+#
+# CAVEAT (load-bearing): this is correct ONLY while thread_win.cyr is
+# serial. When real Windows threads land (CreateThread/WaitForSingleObject/
+# SRWLOCK — the future upgrade noted in lib/thread_win.cyr), this MUST
+# become real per-thread storage (TlsAlloc/TlsGetValue via new 0xF0xx
+# reroutes), or concurrent workers will collide on the shared slots. Keep
+# this in lockstep with docs/development/issues/
+# 2026-06-03-windows-threading-stdlib-gap.md.
+#
+# Satisfies sigil 3.6.x's crypto-bank contract: slot 0 only, values masked
+# 0..7, a fresh slot reads 0, init idempotent (sigil src/crypto_scratch.cyr).
+
+# 16 i64 slots = 128 bytes. A GLOBAL var x[N] reserves N i64 slots (N*8
+# bytes); only a LOCAL var x[N] is N bytes (the well-known gotcha).
+var _TLOCAL_WIN_SLOTS[16];
+var _tlocal_win_inited = 0;
+
+# Zero the slot array once (guarded so a re-init never wipes a live bank).
+# The flag is a scalar with an explicit 0 initializer, so it is reliably
+# zero at load even where a static array's zero-init is not guaranteed.
+fn thread_local_init(): i64 {
+    if (_tlocal_win_inited == 1) { return 1; }
+    var i = 0;
+    while (i < 128) {
+        store8(&_TLOCAL_WIN_SLOTS + i, 0);
+        i = i + 1;
+    }
+    _tlocal_win_inited = 1;
+    return 1;
+}
+
+# Read the i64 at `slot` (0 on a fresh slot).
+fn thread_local_get(slot): i64 {
+    return load64(&_TLOCAL_WIN_SLOTS + slot * 8);
+}
+
+# Write `val` into `slot`.
+fn thread_local_set(slot, val): i64 {
+    store64(&_TLOCAL_WIN_SLOTS + slot * 8, val);
+    return 0;
+}
+#endif

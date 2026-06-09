@@ -29,21 +29,27 @@ var _heap_end = 0;
 # startup + more RSS).
 var _WIN_HEAP_SIZE = 0x1000000;
 
-# Initialize the heap. On Windows, syscall(12, ...) is rerouted
-# by the PE backend to VirtualAlloc. First call with addr=0 gets
-# a fresh reservation of _WIN_HEAP_SIZE bytes (MEM_COMMIT |
-# MEM_RESERVE, PAGE_READWRITE). Returns the base address; bump
-# allocation proceeds upward inside that region.
+# Initialize the heap via mmap (syscall 9), which the PE backend
+# routes to VirtualAlloc(NULL, size, MEM_COMMIT|MEM_RESERVE,
+# PAGE_READWRITE) — the SAME reroute the main compiler heap uses.
 #
-# Second/subsequent `syscall(12, addr)` calls are treated as
-# no-op by the PE reroute (Windows can't grow a committed
-# region in-place). `alloc()` below detects overflow and
-# returns 0 rather than silently corrupting.
+# v6.0.39 FIX: this used `syscall(12)` (brk), assuming a
+# "PE-reroutes-brk-to-VirtualAlloc" that was NEVER implemented — the
+# PE syscall dispatch (parse_expr.cyr) has cases for 0/1/2/3/8/9/60/228
+# but NOT 12, so `syscall(12)` fell through to a raw SYSCALL instruction,
+# illegal on Windows → STATUS_ACCESS_VIOLATION. cycc's own `vec_new()`
+# at startup hit it on the first `alloc()` and crashed before reading a
+# single byte of source — which is why no program ever compiled on
+# Windows. It shipped since v5.5.0 because CI only ran EMITTED programs,
+# never compiled one THROUGH cycc on real Windows. mmap is rerouted and
+# works on both hosts (Linux: real mmap; Windows: VirtualAlloc). No grow
+# on Windows: `alloc()` returns 0 on overflow rather than corrupting.
+# See CHANGELOG [6.0.39].
 fn alloc_init() {
-    # Pass the desired size as the addr arg; PE reroute
-    # recognises the first-call shape and issues a
-    # VirtualAlloc(NULL, size, MEM_COMMIT|MEM_RESERVE, PAGE_RW).
-    _heap_base = syscall(12, _WIN_HEAP_SIZE);
+    # mmap(addr=0, len=_WIN_HEAP_SIZE, prot=RW(3), MAP_PRIVATE|ANON(0x22),
+    # fd=-1, off=0). PE EMMAP_PE ignores prot/flags/fd/off and always
+    # COMMIT|RESERVE + PAGE_READWRITE.
+    _heap_base = syscall(9, 0, _WIN_HEAP_SIZE, 3, 0x22, 0 - 1, 0);
     _heap_end = _heap_base + _WIN_HEAP_SIZE;
     _heap_ptr = _heap_base;
     return _heap_base;

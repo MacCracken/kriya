@@ -25,6 +25,13 @@ var SYS_BIND    = 0x2000068;
 var SYS_LISTEN  = 0x200006A;
 var SYS_ACCEPT  = 0x200001E;
 
+# Standard file descriptors (same as every other platform). Defined
+# here so wrapper sources (cbt/core.cyr etc.) that reference STDERR_FD
+# build for macOS — the linux/windows syscall files already carry these.
+var STDIN_FD  = 0;
+var STDOUT_FD = 1;
+var STDERR_FD = 2;
+
 # mmap constants (same as Linux)
 var MAP_PRIVATE = 0x02;
 var MAP_ANON    = 0x1000;

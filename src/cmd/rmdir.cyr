@@ -84,7 +84,7 @@ fn _rmdir_one(path, verbose, ignore_non_empty): i64 {
         _rmdir_report(path, 2);
         return 0 - 2;
     }
-    var r = sys_rmdir(path);
+    var r = k_rmdir(path);
     if (r == 0) {
         if (verbose == 1) { _rmdir_verbose_print(path); }
         return 0;

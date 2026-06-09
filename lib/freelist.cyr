@@ -1,6 +1,6 @@
 # freelist.cyr — allocator with individual free
 # Usage: include "lib/freelist.cyr"
-# Requires: syscalls.cyr (for SYS_MMAP, SYS_MUNMAP)
+# Requires: syscalls.cyr (for SYS_MMAP, SYS_MUNMAP), mmap.cyr (PROT_*)
 #
 # Segregated free-list allocator. Allocations are rounded up to
 # size classes (16, 32, 64, 128, 256, 512, 1024, 2048, 4096).
@@ -9,6 +9,14 @@
 #
 # Layout per block: { next_free: i64, size_class: i64, data... }
 # Header = 16 bytes. Returned pointer skips the header.
+#
+# >>> include "lib/mmap.cyr"
+
+# v6.0.52: explicit include of mmap.cyr for the PROT_READ/PROT_WRITE enum used
+# in the large-allocation mmap path below. Previously free-rode on the Linux
+# closure pulling mmap.cyr transitively, which broke under CYRIUS_TARGET_WIN
+# (`undefined PROT_READ` on a Windows cross-build). include-once dedupes.
+include "lib/mmap.cyr"
 
 # Size classes: 16 32 64 128 256 512 1024 2048 4096
 var _fl_heads[72];

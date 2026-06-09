@@ -114,7 +114,7 @@ fn _head_emit(fd, limit, count_lines): i64 {
     var emitted_lines: i64 = 0;
     var loop: i64 = 1;
     while (loop == 1) {
-        var n = syscall(0, fd, buf, bufsz);
+        var n = k_read( fd, buf, bufsz);
         if (n < 0) {
             if ((0 - n) == 4) {
                 # EINTR — retry.
@@ -239,7 +239,7 @@ fn cmd_head(start: i64): i64 {
             }
         }
         if (is_stdin == 0) {
-            fd = sys_open(p, 0, 0);
+            fd = k_open(p, 0, 0);
             if (fd < 0) {
                 _head_report(p, 0 - fd);
                 any_failed = 1;
@@ -253,7 +253,7 @@ fn cmd_head(start: i64): i64 {
             _head_report(name, 0 - r);
             any_failed = 1;
         }
-        if (is_stdin == 0) { syscall(3, fd); }
+        if (is_stdin == 0) { k_close( fd); }
         first = 0;
         i = i + 1;
     }

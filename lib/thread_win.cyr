@@ -1,0 +1,109 @@
+# thread_win.cyr — Windows (PE) threading: SERIAL-FALLBACK (v6.0.53).
+# Usage: included by lib/thread.cyr under #ifdef CYRIUS_TARGET_WIN.
+# Requires: alloc.cyr, fnptr.cyr.
+#
+# Win32 has no clone/futex, and the Linux thread.cyr body (SYS_CLONE +
+# CLONE_* + futex + hand-assembled trampolines) can't even parse under
+# CYRIUS_TARGET_WIN. This variant runs "threads" INLINE (serially) and
+# provides trivial single-threaded mutexes — enough for consumers whose
+# threading is a parallelism optimization rather than a correctness need
+# (e.g. ai-hwaccel's parallel probe-spawn detection: serial is correct,
+# just one-at-a-time). Real preemptive Windows threads (CreateThread +
+# WaitForSingleObject join + SRWLOCK mutexes) are the future upgrade —
+# see issue 2026-06-03-windows-threading-stdlib-gap.md (approach B here).
+#
+# The public surface MUST match lib/thread.cyr's so consumers stay
+# target-agnostic: thread_create / thread_join / gettid / mutex_new /
+# mutex_lock / mutex_unlock / chan_new / chan_send / chan_recv /
+# chan_close / chan_try_recv.
+#
+# >>> include "lib/fnptr.cyr"
+include "lib/fnptr.cyr"
+
+# Create a "thread": run fp(arg) INLINE to completion, then return a
+# non-zero handle (matches thread.cyr's "pointer or 0" contract). Because
+# it ran synchronously, the thread is already finished when this returns.
+fn thread_create(fp, arg): i64 {
+    alloc_init();
+    var t = alloc(8);
+    fncall1(fp, arg);          # run the body now (serial); result via shared arg
+    store64(t, 0);             # mark "done" (mirrors the cleared-tid sentinel)
+    return t;
+}
+
+# Join: the inline thread already ran. Mirror thread.cyr's returns
+# (-1 on a null handle, 0 on success).
+fn thread_join(t): i64 {
+    if (t == 0) { return 0 - 1; }
+    return 0;
+}
+
+# Single logical thread under serial execution.
+fn gettid(): i64 { return 1; }
+
+# Mutexes are no-ops under serial execution — there is never a second
+# thread to contend. mutex_new returns a non-zero pointer so callers'
+# null-checks pass; lock/unlock do nothing. Layout-compatible with
+# thread.cyr (8-byte state cell).
+fn mutex_new(): i64 {
+    alloc_init();
+    var m = alloc(8);
+    store64(m, 0);
+    return m;
+}
+# Lock — a no-op under serial execution (no second thread can contend).
+fn mutex_lock(m): i64 { return 0; }
+# Unlock — a no-op (pairs with the no-op lock).
+fn mutex_unlock(m): i64 { return 0; }
+
+# Channel — a simple single-threaded FIFO over the SAME 56-byte layout
+# as thread.cyr ({buf, cap, head, tail, count, mutex, closed}). Under
+# serial execution the producer "thread" runs to completion before the
+# consumer "thread" starts, so a plain ring buffer suffices; recv on an
+# empty channel returns 0 (no blocking is possible single-threaded).
+fn chan_new(cap): i64 {
+    alloc_init();
+    var ch = alloc(56);
+    var buf = alloc(cap * 8);
+    store64(ch, buf);          # buf
+    store64(ch + 8, cap);      # cap
+    store64(ch + 16, 0);       # head
+    store64(ch + 24, 0);       # tail
+    store64(ch + 32, 0);       # count
+    store64(ch + 40, 0);       # mutex (unused serially)
+    store64(ch + 48, 0);       # closed
+    return ch;
+}
+# Enqueue val (FIFO ring). Returns 0, or -1 if the channel is full.
+fn chan_send(ch, val): i64 {
+    var cap = load64(ch + 8);
+    var count = load64(ch + 32);
+    if (count >= cap) { return 0 - 1; }
+    var buf = load64(ch);
+    var tail = load64(ch + 24);
+    store64(buf + tail * 8, val);
+    store64(ch + 24, (tail + 1) % cap);
+    store64(ch + 32, count + 1);
+    return 0;
+}
+# Dequeue the oldest value (FIFO), or 0 if empty (never blocks).
+fn chan_try_recv(ch): i64 {
+    var count = load64(ch + 32);
+    if (count == 0) { return 0; }
+    var buf = load64(ch);
+    var cap = load64(ch + 8);
+    var head = load64(ch + 16);
+    var val = load64(buf + head * 8);
+    store64(ch + 16, (head + 1) % cap);
+    store64(ch + 32, count - 1);
+    return val;
+}
+# Serial recv cannot block; identical to try_recv (0 when empty).
+fn chan_recv(ch): i64 {
+    return chan_try_recv(ch);
+}
+# Mark the channel closed (informational under serial execution).
+fn chan_close(ch): i64 {
+    store64(ch + 48, 1);
+    return 0;
+}
