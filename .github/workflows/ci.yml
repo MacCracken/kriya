@@ -33,17 +33,22 @@ jobs:
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
       - name: Resolve dependencies
+        # The vendored ./lib/ snapshot is NOT committed (.gitignore) — re-vendor
+        # it from the pinned toolchain before building.
         run: cyrius deps
 
-      - name: Build
+      - name: Build (host + agnos)
+        # kriya is now agnos-capable; build BOTH targets so a PR can't break the
+        # CYRIUS_TARGET_AGNOS path undetected.
         run: |
           mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          cyrius build src/main.cyr build/kriya
+          cyrius build --agnos src/main.cyr build/kriya_agnos
 
       - name: Test
-        # Explicit test paths — robust against any Cyrius version's
-        # auto-discovery behavior. Add new tcyr files here when they
-        # land; CI is then deterministic about what runs.
+        # Explicit .tcyr paths — the version-stable form across the 6.0.x line
+        # (bare `cyrius test` stopped auto-discovering; `cyrius tests` postdates
+        # the pin). Add new tcyr files here when they land.
         run: |
           cyrius test tests/kriya.tcyr
           cyrius test tests/kriya-posix.tcyr

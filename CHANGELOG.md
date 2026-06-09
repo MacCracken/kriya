@@ -8,6 +8,33 @@ This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity f
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-06-09
+
+### Added
+
+- **AGNOS target support — kriya now builds `--agnos` and its verbs run on the
+  sovereign OS** (the M10 consumer-burn substrate; folds into agnoshi next). A new
+  portable syscall layer `src/lib/sys.cyr` (`k_*` wrappers + `K_HAVE_*` capability
+  flags) routes every syscall per-target: agnos numbers differ from Linux
+  (`read`=#5 not #0, `close`=#6 not #3, `open`=#7), paths are length-counted, and
+  `k_open` translates Linux open-flags to agnos `AO_*` bits. `k_stat`/`k_lstat`/
+  `k_getdents` translate agnos's native 48-byte `stat` / packed dirents into the
+  canonical Linux 144-byte `stat` / `linux_dirent64` so `fs.cyr` and every caller
+  read one layout unchanged. `fs.cyr`'s `*at` family routes `AT_FDCWD` to
+  path-based syscalls and returns `-ENOSYS` for dirfd-relative calls (agnos has no
+  `*at`/cwd/symlinks); `fs_stat_entry` stats directory entries by absolute path on
+  agnos so `ls -l`/`du` show real metadata. Verbs needing absent primitives
+  (`df`→statfs, `ln -s`/`readlink`→symlinks) refuse cleanly via the `K_HAVE_*`
+  gates. Host behavior is unchanged (the Linux branch of every wrapper matches the
+  prior raw syscall, verified by smoke). Entry point uses a bare top-level call so
+  `argv` is captured on agnos.
+
+### Fixed
+
+- **Undersized `stat` buffers** — `grep`/`find`/`xargs` declared `var st[36]`
+  (36 *bytes* under the Cyrius function-local-array contract) for a 144-byte `stat`
+  write — a latent stack overflow on Linux too. Corrected to `var st[144]`.
+
 ## [1.0.0] — 2026-05-18
 
 **v1.0 freeze.** Closes **M9**. Tag `1.0.0`.
