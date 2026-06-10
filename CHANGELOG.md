@@ -8,6 +8,19 @@ This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity f
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-06-09
+
+### Fixed
+
+- **agnos: `ls` / `find` / `du` (any vec/heap-using applet) wedged on AGNOS.** The
+  vendored `lib/fnptr.cyr` (cyrius pin 6.0.56) carried no `CYRIUS_TARGET_AGNOS` fncall
+  branch, so `alloc_via` — the allocator vtable, dispatched through `fncallN` —
+  returned 0 on agnos. `vec_new`/`vec_push` then produced null-backed vecs, and `ls`
+  infinite-looped on its first `vec_push`. **cyrius pin 6.0.56 → 6.1.14** (ships the
+  native agnos fncall branch) + re-vendored `lib/`. Surfaced by AGNOS's
+  `agnsh-delegation-test.py` (the 1.44.x agnsh→kriya coreutils-delegation cycle); same
+  class as the agnoshi 1.4.9 fnptr fix. Host build + behavior unchanged.
+
 ## [1.1.1] — 2026-06-09
 
 ### Added
