@@ -646,7 +646,17 @@ fn cmd_ls(start: i64): i64 {
 
     # No operands → list cwd.
     if (npos < 1) {
-        var r = _ls_list_dir(".", all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, 0);
+        var dir = ".";
+        #ifdef CYRIUS_TARGET_AGNOS
+        # AGNOS-only: the AGNOS VFS rejects relative paths (vfs.cyr requires a
+        # leading '/'), so the literal "." opens nothing and ls fails. Resolve
+        # to an absolute path via k_getcwd (returns "/" on agnos). On Linux we
+        # KEEP "." so `ls -R` section headers stay GNU-relative ("./sub:").
+        var cwd[4096];
+        var clen = k_getcwd(&cwd, 4096);
+        if (clen > 0) { dir = &cwd; }
+        #endif
+        var r = _ls_list_dir(dir, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, 0);
         if (r != 0) { return EXIT_FAILURE; }
         return EXIT_SUCCESS;
     }

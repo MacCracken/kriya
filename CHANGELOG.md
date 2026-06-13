@@ -8,6 +8,20 @@ This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity f
 
 ## [Unreleased]
 
+## [1.1.3] — 2026-06-13
+
+### Fixed
+
+- **agnos: bare `ls` (no operand) failed.** `cmd_ls` passed the literal `"."` to
+  `_ls_list_dir` when given no path argument. The AGNOS VFS hard-requires absolute
+  paths (rejects any path whose first byte isn't `/`), so `"."` opened nothing and
+  `ls` returned `EXIT_FAILURE` with no output. Now resolves the no-operand case via
+  `k_getcwd` first (returns `"/"` on agnos, the real cwd on Linux — both absolute),
+  falling back to `"."` only if `getcwd` fails. Surfaced on AGNOS iron burn 3
+  (2026-06-13): the QEMU delegation smoke only ever exercised `ls /` (absolute arg),
+  so the relative-path default never tripped. Host behavior unchanged. Independent of
+  the agnos-kernel keyboard fix shipped the same day.
+
 ## [1.1.2] — 2026-06-09
 
 ### Fixed
