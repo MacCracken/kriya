@@ -8,6 +8,28 @@ This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity f
 
 ## [Unreleased]
 
+## [1.1.4] — 2026-06-14
+
+### Fixed
+
+- **agnos: EVERY applet hung on launch — stale cyrius pin (6.1.14) miscompiled the
+  dispatcher binary.** On AGNOS (iron and QEMU) `echo`/`ls`/`mkdir`/`kriya true` —
+  all of them — hung the moment they were exec'd from `agnsh`, looping in the first
+  `strlen` of `main()` (on the pointer `path_basename_ptr(argv(0))` returns). The
+  kernel loaded the 934 KB ELF and entered ring 3 correctly (verified with
+  `execwait #37` markers — identical to a working `bnrmr`); the hang was a **codegen
+  miscompile** inside kriya, not a logic/kernel/exec bug. It was **size-gated**: the
+  same toolchain (cycc 6.2.2) + same pin built a working `bnrmr` (167 KB) but a
+  hanging kriya (934 KB, the largest agnos `/bin` tool); doom (589 KB) escaped it by
+  riding cyrius 6.1.37. The deciding variable was the stdlib pin — a clean re-vendor
+  at **6.1.14 hangs, at 6.1.39 works**. **cyrius pin 6.1.14 → 6.1.39** + re-vendored
+  `lib/`. Verified in QEMU (`agnos/scripts/agnsh-delegation-test.py` PASS:
+  `echo`/`mkdir`/`cp`/`ls`/`owl` all green; new repro harness
+  `agnos/scripts/kriya-crash-probe.py`). The underlying compiler bug is already fixed
+  upstream (≥ 6.1.37), so this is a consumer re-pin, not a cyrius-side action. Host
+  build + behavior unchanged. Surfaced kriya's M10 consumer-burn signal; details in
+  [`docs/development/issue/2026-06-14-bin-applets-crash-on-agnos-iron.md`](docs/development/issue/2026-06-14-bin-applets-crash-on-agnos-iron.md).
+
 ## [1.1.3] — 2026-06-13
 
 ### Fixed
