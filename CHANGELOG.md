@@ -8,6 +8,17 @@ This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity f
 
 ## [Unreleased]
 
+## [1.1.5] — 2026-06-19
+
+### Changed
+
+- **cyrius pin 6.1.39 → 6.2.24 + re-vendored `lib/`.** Aligns the manifest pin
+  (`cyrius.cyml [package].cyrius`) to the installed toolchain — the wrapper had
+  advanced to 6.2.24 while the pin stayed at 6.1.39 (drift). `cyrius lib sync`
+  re-vendored the stdlib snapshot (98 `.cyr` files) to the new pin. Host build +
+  behavior unchanged: dispatcher compiles clean, 86/86 unit + 18/18 POSIX
+  assertions pass, `lint`/`vet` green (0 warnings, 0 untrusted deps).
+
 ## [1.1.4] — 2026-06-14
 
 ### Fixed

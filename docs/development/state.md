@@ -5,6 +5,8 @@
 
 ## Version
 
+**1.1.5** — released 2026-06-19. **Toolchain alignment.** cyrius pin 6.1.39 → 6.2.24 + re-vendored `lib/` (98 stdlib `.cyr` files via `cyrius lib sync`); the manifest pin had drifted behind the installed wrapper. Host build + behavior unchanged — 86/86 unit + 18/18 POSIX assertions pass, `lint`/`vet` green.
+
 **1.1.4** — released 2026-05-18. **v1.0 freeze.** Closes M9. **38 POSIX-style utilities** + dispatcher; **8 ADRs**; **2 audits** (POSIX compliance + security); per-utility benchmarks vs GNU; fuzz harnesses for the three parser-style utilities. **7 of 8 v1.0 criteria met**; the 8th (downstream-consumer-green via AGNOS boot-burn) is deferred to a post-1.0 consumer-burn cycle per user direction (parallel signal, not blocker). Test totals: **104 in-process assertions** (86 unit + 18 POSIX-blessed), **1529 fuzz assertions** (1127 grep + 201 find + 201 printf), **644 smoke cases** across 27 shell scripts. Cold-start median **1.196 ms** (RUNS=100; 60% of the 2 ms v1.0 budget).
 
 **1.1.4** — released 2026-05-18. **Closes M8** (security audit + per-utility benchmarks). Two deliverables: (1) `docs/audit/2026-05-18-security.md` — security audit with external CVE/0-day research, primary input the Canonical-commissioned uutils-coreutils audit (CVE-2026-35338 through CVE-2026-35381, 41 CVEs against the exact surface kriya occupies). Cross-walk: 34 N/A or already-mitigated, **3 newly exposed and patched here** (F1 cp recursive source NOFOLLOW, F4 find -empty NOFOLLOW, F5 grep -r NOFOLLOW), 2 documented as POSIX-conformant (F2 cp -f dst, F6 non-recursive grep operand). (2) `docs/benchmarks.md` + `scripts/bench-throughput.sh` — per-utility throughput vs GNU with named optimization follow-ups for the visible gaps (`wc -c` short-circuit, niyama literal Boyer-Moore, `tail` seek-from-end). Cold-start median **1.201ms** (RUNS=100; flat from v0.8.0). **6 of 8 v1.0 criteria now checked** — remaining: fuzz harnesses for parser-style utilities, one downstream consumer green (AGNOS kernel boot-burn).
@@ -21,7 +23,7 @@ Coreutils-equivalent for AGNOS — the small POSIX-style utilities (`cp`, `mv`, 
 
 ## Toolchain
 
-- **Cyrius pin**: `5.11.61` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.2.24` (in `cyrius.cyml [package].cyrius`)
 
 ## Source
 
