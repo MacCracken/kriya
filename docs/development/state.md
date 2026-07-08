@@ -5,6 +5,8 @@
 
 ## Version
 
+**1.1.6** — released 2026-07-08. **agnos build unblocked + toolchain alignment.** Fixed a duplicate-variable error that broke `cyrius build --agnos` (`_gr_process_fd` in `src/cmd/grep.cyr` redeclared its one-byte line-terminator scratch buffer at all five grep emit sites; Cyrius hoists a branch-local `var` to the nearest enclosing loop/function, so the two in the same `if/elif/else` chain collided — now filled once in the function's top var-block and reused). cyrius pin 6.2.24 → 6.4.20 + re-vendored `lib/` (aligns the manifest pin to the installed toolchain). Host + agnos builds compile clean; 86/86 unit + 18/18 POSIX assertions pass; grep emit paths verified on the agnos artifact under `mirshi`. Unblocks kriya in the agnosticos agnos-dev docker (`docker/build-dev.sh`), which had been skipping it (agnsh's file-verb builtins delegate to kriya).
+
 **1.1.5** — released 2026-06-19. **Toolchain alignment.** cyrius pin 6.1.39 → 6.2.24 + re-vendored `lib/` (98 stdlib `.cyr` files via `cyrius lib sync`); the manifest pin had drifted behind the installed wrapper. Host build + behavior unchanged — 86/86 unit + 18/18 POSIX assertions pass, `lint`/`vet` green.
 
 **1.1.4** — released 2026-05-18. **v1.0 freeze.** Closes M9. **38 POSIX-style utilities** + dispatcher; **8 ADRs**; **2 audits** (POSIX compliance + security); per-utility benchmarks vs GNU; fuzz harnesses for the three parser-style utilities. **7 of 8 v1.0 criteria met**; the 8th (downstream-consumer-green via AGNOS boot-burn) is deferred to a post-1.0 consumer-burn cycle per user direction (parallel signal, not blocker). Test totals: **104 in-process assertions** (86 unit + 18 POSIX-blessed), **1529 fuzz assertions** (1127 grep + 201 find + 201 printf), **644 smoke cases** across 27 shell scripts. Cold-start median **1.196 ms** (RUNS=100; 60% of the 2 ms v1.0 budget).
@@ -23,7 +25,7 @@ Coreutils-equivalent for AGNOS — the small POSIX-style utilities (`cp`, `mv`, 
 
 ## Toolchain
 
-- **Cyrius pin**: `6.2.24` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.4.20` (in `cyrius.cyml [package].cyrius`)
 
 ## Source
 

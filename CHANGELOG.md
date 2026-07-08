@@ -8,6 +8,31 @@ This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity f
 
 ## [Unreleased]
 
+## [1.1.6] — 2026-07-08
+
+### Fixed
+
+- **agnos build was broken — `duplicate variable` aborted `cyrius build --agnos`.**
+  `_gr_process_fd` in `src/cmd/grep.cyr` declared its one-byte line-terminator
+  scratch buffer (`var tb[2]; store8(&tb, term_byte);`) separately at all five grep
+  emit sites (list / only-match / default / count / list-nomatch). Cyrius hoists a
+  branch-local `var` up to the nearest enclosing loop/function scope, so the two
+  copies in the same `if/elif/else` chain collided and the compiler aborted with
+  `error:src/cmd/grep.cyr:696: duplicate variable`. Since `term_byte` is a constant
+  parameter, the buffer is now filled once in the function's top var-block and reused
+  at every site — zero behavior change. Unblocks kriya in the agnosticos agnos-dev
+  docker image (`docker/build-dev.sh`), which had been skipping it; agnsh's file-verb
+  builtins (`cp`/`mv`/`rm`/`ls`/`grep`/…) delegate to kriya. Host + behavior
+  unchanged; grep emit paths verified on the agnos artifact under `mirshi`.
+
+### Changed
+
+- **cyrius pin 6.2.24 → 6.4.20 + re-vendored `lib/`.** Aligns the manifest pin
+  (`cyrius.cyml [package].cyrius`) to the installed toolchain — the wrapper had
+  advanced to 6.4.20 while the pin stayed at 6.2.24 (drift). Host + agnos builds
+  compile clean against 6.4.20 (no pin-drift or shadow-lib warnings); 86/86 unit +
+  18/18 POSIX assertions pass.
+
 ## [1.1.5] — 2026-06-19
 
 ### Changed
