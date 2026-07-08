@@ -122,7 +122,8 @@ Each symlink is a separate command; the dispatcher reads `argv[0]` to determine 
 - All struct fields are 8 bytes (`i64`), accessed via `load64` / `store64` with offset
 - Heap allocation via `fl_alloc()` / `fl_free()` for data with individual lifetimes
 - Bump allocation via `alloc()` for long-lived data
-- Enum values for constants — don't consume `gvar_toks` slots (256 initialized globals limit)
+- Enum values for constants — don't consume `gvar_toks` slots (4,096 initialized globals limit)
+- Counting rule: only a top-level `var NAME = <non-literal>;` (call / identifier / expression initializer) consumes an initialized-globals slot; a bare integer-literal init (`var x = 42;`) takes the static-init fast path and enum members are const-folded, so neither counts. See the cyrius guide's **Global Initializers** section (`docs/guides/cyrius-guide.md` in the cyrius repo)
 - `break` in while loops with `var` declarations is unreliable — use flag + `continue`
 - No negative literals — write `(0 - N)` not `-N`
 - No mixed `&&` / `||` in one expression — nest `if` blocks instead

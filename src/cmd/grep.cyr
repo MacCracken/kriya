@@ -578,6 +578,11 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
     var truncated_warned: i64 = 0;
     var loop: i64 = 1;
     var early_exit: i64 = 0;
+    # Single-byte line-terminator scratch buffer. term_byte is a constant
+    # parameter, so fill it once here and reuse &tb at every emit site
+    # (Cyrius hoists branch-local `var`s to the enclosing scope, so per-site
+    # redeclaration would collide as a duplicate variable).
+    var tb[2]; store8(&tb, term_byte);
     while (loop == 1) {
         var n = k_read( fd, read_buf, _GR_READ_SZ);
         if (n < 0) {
@@ -644,7 +649,6 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                             loop = 0;
                         } elif (list_match == 1) {
                             syscall(1, 1, name, strlen(name));
-                            var tb[2]; store8(&tb, term_byte);
                             syscall(1, 1, &tb, 1);
                             early_exit = 1;
                             done_chunk = 1;
@@ -672,7 +676,6 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                                 if (cur_me > cur_ms) {
                                     syscall(1, 1, line_buf + cur_ms, cur_me - cur_ms);
                                 }
-                                var tb[2]; store8(&tb, term_byte);
                                 syscall(1, 1, &tb, 1);
                                 # Advance past this match to find the next.
                                 var next_from = cur_me;
@@ -693,7 +696,6 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                             if (line_len > 0) {
                                 syscall(1, 1, line_buf, line_len);
                             }
-                            var tb[2]; store8(&tb, term_byte);
                             syscall(1, 1, &tb, 1);
                         }
                     }
@@ -711,7 +713,6 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                     syscall(1, 1, ":", 1);
                 }
                 _gr_emit_dec(matches);
-                var tb[2]; store8(&tb, term_byte);
                 syscall(1, 1, &tb, 1);
             }
         } elif (list_nomatch == 1) {
@@ -719,7 +720,6 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
             if (any_match == 0) {
                 if (quiet_mode == 0) {
                     syscall(1, 1, name, strlen(name));
-                    var tb[2]; store8(&tb, term_byte);
                     syscall(1, 1, &tb, 1);
                 }
             }
