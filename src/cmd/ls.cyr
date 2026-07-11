@@ -516,31 +516,39 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width): i64 {
         i = i + 1;
     }
     var gutter: i64 = 2;
-    # Largest column count (1..min(n,width)) whose column-major layout fits `width`.
+    # Column selection, matching GNU ls `calculate_columns` exactly. Iterate candidate COLUMN counts
+    # c; the canonical row count for c columns is rows = ceil(n/c). SKIP "degenerate" counts whose
+    # last column would be empty ((c-1)*rows >= n) — GNU never uses them (this is why d2's 5/6-column
+    # layouts never appear). Each column reserves its widest entry + a 2-space gap for every column
+    # EXCEPT the last, and every column is floored at MIN_COLUMN_WIDTH (3) — the floor only bites a
+    # tiny final column. A layout is valid when its total reserved width is STRICTLY < the terminal
+    # width. The most columns that fits wins; fall back to one column.
     var best_c: i64 = 1;
-    var maxc = n;
-    if (width < maxc) { maxc = width; }
     var c: i64 = 1;
-    while (c <= maxc) {
-        var rows = (n + c - 1) / c;
-        var total: i64 = 0;
-        var k: i64 = 0;
-        while (k < c) {
-            var colmax: i64 = 0;
-            var r: i64 = 0;
-            while (r < rows) {
-                var idx = k * rows + r;
-                if (idx < n) {
-                    var v = load64(ew + idx * 8);
-                    if (v > colmax) { colmax = v; }
+    while (c <= n) {
+        var rows_c = (n + c - 1) / c;
+        if (((c - 1) * rows_c) < n) {                       # non-degenerate: last column non-empty
+            var total: i64 = 0;
+            var k: i64 = 0;
+            while (k < c) {
+                var colmax: i64 = 0;
+                var r: i64 = 0;
+                while (r < rows_c) {
+                    var idx = k * rows_c + r;
+                    if (idx < n) {
+                        var v = load64(ew + idx * 8);
+                        if (v > colmax) { colmax = v; }
+                    }
+                    r = r + 1;
                 }
-                r = r + 1;
+                var field = colmax;
+                if (k < c - 1) { field = colmax + gutter; }
+                if (field < 3) { field = 3; }
+                total = total + field;
+                k = k + 1;
             }
-            total = total + colmax;
-            if (k > 0) { total = total + gutter; }
-            k = k + 1;
+            if (total < width) { best_c = c; }
         }
-        if (total <= width) { best_c = c; }
         c = c + 1;
     }
     var cols = best_c;

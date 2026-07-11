@@ -8,6 +8,8 @@ This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity f
 
 ## [Unreleased]
 
+## [1.1.7] — 2026-07-10 — GNU-style multi-column `ls`
+
 ### Added
 - **`ls` default output is now GNU-style multi-column** (`src/cmd/ls.cyr`). Entries pack
   column-major (fill down, then across) sized to the terminal — layout byte-identical to
