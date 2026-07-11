@@ -14,8 +14,10 @@
 #   -h / --human-readable   human-readable size suffixes (B/K/M/G/T/P)
 #                           in -l form.
 #   -r / --reverse          reverse the alphabetical sort.
-#   -1                      one entry per line (the default for this
-#                           ship — flag accepted for ergonomics).
+#   -1                      force one entry per line (overrides the
+#                           default multi-column layout).
+#   -w / --width COLS       assume terminal width COLS for column
+#                           packing (0 = auto-detect).
 #   -F                      append type indicator (`/` dir, `*` exec,
 #                           `@` symlink, `|` fifo, `=` socket).
 #   -i / --inode            prepend the inode number.
@@ -23,10 +25,12 @@
 #                           themselves, not their contents.
 #   -R / --recursive        descend into subdirectories.
 #
+# Default output is GNU-style multi-column (column-major, fill down then
+# across) sized to the terminal — ioctl(TIOCGWINSZ) on Linux, winsize()#60
+# on agnos, else $COLUMNS / -w, falling back to 80. Off a tty with no width
+# hint it degrades to one-per-line (script-safe, like GNU ls piped).
+#
 # Deferred (each a named follow-up):
-#   Multi-column packing on tty stdout — needs `ioctl(TIOCGWINSZ)`
-#     for terminal width + column-width math. Ships when there's
-#     consumer demand; default one-per-line is already script-safe.
 #   `-t` / `-S`           alternate sort keys (mtime / size). Trivial
 #                         once a comparator-by-flag indirection lands.
 #   `-n` / `--numeric-uid-gid`  alias for the current default of
@@ -55,6 +59,7 @@ var _ls_F_idx  = 0;
 var _ls_i_idx  = 0;
 var _ls_d_idx  = 0;
 var _ls_R_idx  = 0;
+var _ls_w_idx  = 0;
 
 fn _ls_init_spec(): i64 {
     if (_ls_spec != 0) { return 0; }
@@ -64,11 +69,12 @@ fn _ls_init_spec(): i64 {
     _ls_l_idx = flags_add_bool(s, 108, "",                0, "long form");
     _ls_h_idx = flags_add_bool(s, 104, "human-readable",  0, "human-readable size suffixes (with -l)");
     _ls_r_idx = flags_add_bool(s, 114, "reverse",         0, "reverse sort order");
-    _ls_1_idx = flags_add_bool(s, 49,  "",                0, "one entry per line (default)");
+    _ls_1_idx = flags_add_bool(s, 49,  "",                0, "force one entry per line");
     _ls_F_idx = flags_add_bool(s, 70,  "",                0, "append type indicator");
     _ls_i_idx = flags_add_bool(s, 105, "inode",           0, "print inode number");
     _ls_d_idx = flags_add_bool(s, 100, "directory",       0, "list dir operands as entries, not contents");
     _ls_R_idx = flags_add_bool(s, 82,  "recursive",       0, "descend into subdirectories");
+    _ls_w_idx = flags_add_int(s, 119, "width",            0, "assume terminal width COLS (0 = auto)");
     _ls_spec = s;
     return 0;
 }
@@ -438,7 +444,167 @@ fn _ls_collect(dir_path, all_mode, almost_all): i64 {
 
 # --- output ---
 
+# Terminal width for multi-column packing. Priority: -w flag, then $COLUMNS, then the platform's
+# live console geometry. Returns 0 to mean "not a terminal / unknown" → the caller falls back to
+# one-per-line (script-safe, matching GNU ls piped output). An explicit -w or $COLUMNS forces
+# columns even off a tty (a real GNU affordance + the host test hook).
+fn _ls_term_width(): i64 {
+    var wf = flags_get_int(_ls_spec, _ls_w_idx);
+    if (wf > 0) { return wf; }
+    var ce = getenv("COLUMNS");
+    if (ce != 0) {
+        var cw = atoi(ce);
+        if (cw > 0) { return cw; }
+    }
+    #ifdef CYRIUS_TARGET_AGNOS
+    # agnos has no isatty; winsize()#60 returns the live console grid as (cols<<16 | rows) from the
+    # framebuffer geometry (same source kii/chakshu use), so we always column to the console.
+    var packed = syscall(60);
+    var acols = packed >> 16;
+    if (acols > 0) { return acols; }
+    return 80;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    # Linux: only column to a real terminal (script-safe otherwise). ioctl(TIOCGWINSZ) → ws_col @2.
+    if (k_isatty(1) == 0) { return 0; }
+    var ws[8];
+    var r = syscall(16, 1, 21523, &ws);              # SYS_IOCTL, TIOCGWINSZ = 0x5413
+    if (r != 0) { return 80; }
+    var lcols = load16(&ws + 2) & 65535;
+    if (lcols > 0) { return lcols; }
+    return 80;
+    #endif
+}
+
+# Emit `n` spaces (column padding).
+fn _ls_emit_spaces(n): i64 {
+    var i: i64 = 0;
+    while (i < n) { syscall(1, 1, " ", 1); i = i + 1; }
+    return 0;
+}
+
+# Display width of one entry's cell: optional inode prefix (ino_w digits + a space), the name, and
+# the -F type suffix if present. Matches exactly what _ls_print_columns emits per cell.
+fn _ls_entry_width(rec, F_mode, inode_mode, ino_w): i64 {
+    var dw = strlen(_ls_rec_name(rec));
+    if (F_mode == 1) { if (_ls_type_suffix(_ls_rec_st(rec)) != 0) { dw = dw + 1; } }
+    if (inode_mode == 1) { dw = dw + ino_w + 1; }
+    return dw;
+}
+
+# GNU-style multi-column listing, COLUMN-major (fill down each column, then across) — the default
+# `ls` layout to a terminal. Packs into the widest column count whose per-column widths + a 2-space
+# gutter fit `width`; a single over-wide name degrades to one column.
+fn _ls_print_columns(entries, F_mode, inode_mode, width): i64 {
+    var n = vec_len(entries);
+    if (n == 0) { return 0; }
+    # Shared inode-column width (-i).
+    var ino_w: i64 = 0;
+    if (inode_mode == 1) {
+        var i: i64 = 0;
+        while (i < n) {
+            var w = _ls_dec_width(load64(_ls_rec_st(vec_get(entries, i)) + 8));
+            if (w > ino_w) { ino_w = w; }
+            i = i + 1;
+        }
+    }
+    # Per-entry display widths.
+    var ew = alloc(n * 8);
+    var i: i64 = 0;
+    while (i < n) {
+        store64(ew + i * 8, _ls_entry_width(vec_get(entries, i), F_mode, inode_mode, ino_w));
+        i = i + 1;
+    }
+    var gutter: i64 = 2;
+    # Largest column count (1..min(n,width)) whose column-major layout fits `width`.
+    var best_c: i64 = 1;
+    var maxc = n;
+    if (width < maxc) { maxc = width; }
+    var c: i64 = 1;
+    while (c <= maxc) {
+        var rows = (n + c - 1) / c;
+        var total: i64 = 0;
+        var k: i64 = 0;
+        while (k < c) {
+            var colmax: i64 = 0;
+            var r: i64 = 0;
+            while (r < rows) {
+                var idx = k * rows + r;
+                if (idx < n) {
+                    var v = load64(ew + idx * 8);
+                    if (v > colmax) { colmax = v; }
+                }
+                r = r + 1;
+            }
+            total = total + colmax;
+            if (k > 0) { total = total + gutter; }
+            k = k + 1;
+        }
+        if (total <= width) { best_c = c; }
+        c = c + 1;
+    }
+    var cols = best_c;
+    var rows = (n + cols - 1) / cols;
+    # Per-column max widths for the chosen layout.
+    var colw = alloc(cols * 8);
+    var k: i64 = 0;
+    while (k < cols) {
+        var colmax: i64 = 0;
+        var r: i64 = 0;
+        while (r < rows) {
+            var idx = k * rows + r;
+            if (idx < n) {
+                var v = load64(ew + idx * 8);
+                if (v > colmax) { colmax = v; }
+            }
+            r = r + 1;
+        }
+        store64(colw + k * 8, colmax);
+        k = k + 1;
+    }
+    # Emit row by row; cell (row r, col k) is entry index k*rows + r (column-major).
+    var r: i64 = 0;
+    while (r < rows) {
+        var last_k: i64 = 0;
+        var kk: i64 = 0;
+        while (kk < cols) {
+            if (kk * rows + r < n) { last_k = kk; }
+            kk = kk + 1;
+        }
+        var k2: i64 = 0;
+        while (k2 <= last_k) {
+            var idx = k2 * rows + r;
+            if (idx < n) {
+                var rec = vec_get(entries, idx);
+                var st = _ls_rec_st(rec);
+                if (inode_mode == 1) {
+                    _ls_emit_dec_padded(load64(st + 8), ino_w);
+                    syscall(1, 1, " ", 1);
+                }
+                var name = _ls_rec_name(rec);
+                syscall(1, 1, name, strlen(name));
+                if (F_mode == 1) { _ls_emit_suffix(st); }
+                if (k2 < last_k) {
+                    var pad = load64(colw + k2 * 8) - load64(ew + idx * 8);
+                    _ls_emit_spaces(pad + gutter);
+                }
+            }
+            k2 = k2 + 1;
+        }
+        syscall(1, 1, "\n", 1);
+        r = r + 1;
+    }
+    return 0;
+}
+
 fn _ls_print_simple(entries, F_mode, inode_mode): i64 {
+    # Default to GNU-style multi-column packing sized to the terminal; -1 forces one-per-line, and a
+    # non-tty with no -w/$COLUMNS falls through to one-per-line (script-safe).
+    var one_per_line = flags_get_bool(_ls_spec, _ls_1_idx);
+    var width: i64 = 0;
+    if (one_per_line == 0) { width = _ls_term_width(); }
+    if (width > 0) { return _ls_print_columns(entries, F_mode, inode_mode, width); }
+
     var n = vec_len(entries);
     # Compute inode column width if -i.
     var ino_w: i64 = 0;

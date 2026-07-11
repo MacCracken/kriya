@@ -8,6 +8,17 @@ This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity f
 
 ## [Unreleased]
 
+### Added
+- **`ls` default output is now GNU-style multi-column** (`src/cmd/ls.cyr`). Entries pack
+  column-major (fill down, then across) sized to the terminal — layout byte-identical to
+  `ls -C` (only the inter-column gutter differs: spaces vs GNU's tabs). Terminal width comes
+  from `ioctl(TIOCGWINSZ)` on Linux (only when stdout is a tty) and the `winsize()` #60 syscall
+  on agnos (the console FB grid, as `kii`/`chakshu` use), with `$COLUMNS` and a new `-w`/`--width
+  COLS` flag as overrides, falling back to 80. **Off a tty with no width hint it stays
+  one-per-line** — script-safe, matching GNU `ls` piped. `-1` now *forces* one-per-line (it was a
+  documented no-op when one-per-line was the default). `-l` long form is unchanged (already emits
+  size + mtime). New `-w`/`--width` flag.
+
 ## [1.1.6] — 2026-07-08
 
 ### Fixed
