@@ -26,11 +26,11 @@ fn _pwd_init_spec(): i64 {
 fn cmd_pwd(start: i64): i64 {
     _pwd_init_spec();
     if (kriya_args_parse(_pwd_spec, start) != 0) {
-        syscall(1, 2, "kriya pwd: error: bad option (see ADR 0002 for accepted syntax)\n", 64);
+        k_write( 2, "kriya pwd: error: bad option (see ADR 0002 for accepted syntax)\n", 64);
         return EXIT_USAGE;
     }
     if (flags_positional_count(_pwd_spec) > 0) {
-        syscall(1, 2, "kriya pwd: error: takes no positional arguments\n", 48);
+        k_write( 2, "kriya pwd: error: takes no positional arguments\n", 48);
         return EXIT_USAGE;
     }
 
@@ -42,8 +42,8 @@ fn cmd_pwd(start: i64): i64 {
         var pwd_env = getenv("PWD");
         if (pwd_env != 0) {
             if (load8(pwd_env) == 47) {
-                syscall(1, 1, pwd_env, strlen(pwd_env));
-                syscall(1, 1, "\n", 1);
+                k_write( 1, pwd_env, strlen(pwd_env));
+                k_write( 1, "\n", 1);
                 return EXIT_SUCCESS;
             }
         }
@@ -52,10 +52,10 @@ fn cmd_pwd(start: i64): i64 {
     var buf[4096];
     var len = k_getcwd(&buf, 4096);
     if (len < 0) {
-        syscall(1, 2, "kriya pwd: error: getcwd failed\n", 32);
+        k_write( 2, "kriya pwd: error: getcwd failed\n", 32);
         return EXIT_FAILURE;
     }
-    syscall(1, 1, &buf, len - 1);
-    syscall(1, 1, "\n", 1);
+    k_write( 1, &buf, len - 1);
+    k_write( 1, "\n", 1);
     return EXIT_SUCCESS;
 }

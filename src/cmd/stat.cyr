@@ -72,14 +72,14 @@ fn _st_init_spec(): i64 {
 }
 
 fn _st_report(operand, errno): i64 {
-    syscall(1, 2, "kriya stat: ", 12);
-    syscall(1, 2, operand, strlen(operand));
-    syscall(1, 2, ": ", 2);
+    k_write( 2, "kriya stat: ", 12);
+    k_write( 2, operand, strlen(operand));
+    k_write( 2, ": ", 2);
     if (errmsg_is_known(errno) == 1) {
         var m = errmsg_for(errno);
-        syscall(1, 2, m, strlen(m));
+        k_write( 2, m, strlen(m));
     } else {
-        syscall(1, 2, "errno ", 6);
+        k_write( 2, "errno ", 6);
         var buf[8];
         var i: i64 = 7;
         store8(&buf + i, 0);
@@ -91,9 +91,9 @@ fn _st_report(operand, errno): i64 {
             v = v / 10;
             i = i - 1;
         }
-        syscall(1, 2, &buf + i + 1, 6 - i);
+        k_write( 2, &buf + i + 1, 6 - i);
     }
-    syscall(1, 2, "\n", 1);
+    k_write( 2, "\n", 1);
     return 0;
 }
 
@@ -234,7 +234,7 @@ fn _st_emit_spec(c, st, name): i64 {
     var buf[64];
     var n: i64 = 0;
     if (c == 110) {  # n
-        syscall(1, 1, name, strlen(name));
+        k_write( 1, name, strlen(name));
         return 0;
     }
     if (c == 115) {  # s
@@ -247,7 +247,7 @@ fn _st_emit_spec(c, st, name): i64 {
         n = _st_render_hex(load64(st + 24) & 4294967295, &buf);
     } else { if (c == 70) {  # F (type name)
         var t = _st_type_name(load64(st + 24));
-        syscall(1, 1, t, strlen(t));
+        k_write( 1, t, strlen(t));
         return 0;
     } else { if (c == 117) {  # u
         n = _st_render_dec(load64(st + 28) & 4294967295, &buf);
@@ -292,7 +292,7 @@ fn _st_emit_spec(c, st, name): i64 {
         store8(&buf + 1, c);
         n = 2;
     } } } } } } } } } } } } } } } } } } } } }
-    syscall(1, 1, &buf, n);
+    k_write( 1, &buf, n);
     return 0;
 }
 
@@ -308,7 +308,7 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
                 # Trailing lone '%' — emit as-is.
                 var bb[2];
                 store8(&bb, 37);
-                syscall(1, 1, &bb, 1);
+                k_write( 1, &bb, 1);
             } else {
                 _st_emit_spec(sc, st, name);
                 i = i + 1;
@@ -334,21 +334,21 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
                     } else {
                         # Unknown — keep backslash + char.
                         store8(&bb2, 92);
-                        syscall(1, 1, &bb2, 1);
+                        k_write( 1, &bb2, 1);
                         store8(&bb2, ec);
                     } } } } } } } }
-                    syscall(1, 1, &bb2, 1);
+                    k_write( 1, &bb2, 1);
                     if (ec != 0) { i = i + 1; }
                 } else {
                     var bb3[2];
                     store8(&bb3, c);
-                    syscall(1, 1, &bb3, 1);
+                    k_write( 1, &bb3, 1);
                     i = i + 1;
                 }
             } else {
                 var bb4[2];
                 store8(&bb4, c);
-                syscall(1, 1, &bb4, 1);
+                k_write( 1, &bb4, 1);
                 i = i + 1;
             }
         }
@@ -356,7 +356,7 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
     if (auto_newline == 1) {
         var nl[2];
         store8(&nl, 10);
-        syscall(1, 1, &nl, 1);
+        k_write( 1, &nl, 1);
     }
     return 0;
 }
@@ -375,13 +375,13 @@ fn _st_terse_format(): i64 {
 fn cmd_stat(start: i64): i64 {
     _st_init_spec();
     if (kriya_args_parse(_st_spec, start) != 0) {
-        syscall(1, 2, "kriya stat: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
+        k_write( 2, "kriya stat: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
         return EXIT_USAGE;
     }
 
     var npos = flags_positional_count(_st_spec);
     if (npos < 1) {
-        syscall(1, 2, "kriya stat: error: missing operand\n", 35);
+        k_write( 2, "kriya stat: error: missing operand\n", 35);
         return EXIT_USAGE;
     }
 

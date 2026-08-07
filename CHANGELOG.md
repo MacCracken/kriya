@@ -6,6 +6,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.1.8] - 2026-08-07 — kriya survives a pipe (agnos ipc bite 11)
+
+### Fixed — 542 raw writes ignored short writes, silently dropping data
+
+⛔ **EVERY APPLET WROTE WITH A RAW `syscall(1, …)` AND NEVER LOOKED AT THE RESULT.** agnos 1.56.40's
+`pipe_write` refuses to overwrite unread bytes, so a producer faster than its consumer gets back FEWER
+bytes than it offered — the POSIX contract. Measured: `grep . /etc/ssl/cert.pem | wc` delivered
+**70347 of 185311 bytes**, and the missing 62% looked exactly like a plausible answer.
+
+All 542 sites across 38 files now route through `k_write`, which loops until the whole buffer is
+accepted. ⛔ Its stall bound is **not a timeout on success** — every accepted byte resets it, so a
+merely-slow consumer never trips it however long it takes. It fires only when the ring stays full with
+no progress at all (a reader that died or stopped reading), where the alternative is spinning forever,
+since a pipe has no reader-gone signal to test.
+
+### Fixed — `k_read` treated WOULD_BLOCK as EOF
+
+⛔ Callers branch on `n <= 0`, so without a retry a `wc`/`grep`/`tee` reading from a **concurrent**
+producer stopped the first moment it out-ran the writer and reported a truncated result. -2 means "not
+yet"; 0 means EOF. One chokepoint covers every applet.
+
+⭐ The loop needs no timeout: the kernel returns 0 the instant the last write end closes, which is
+exactly what Linux's blocking `read()` does in the same situation.
+
+⛔ Both waits are preemptible spins, never `sleep_ms#41` — that is `preempt_disable; sti; hlt` and
+would starve the very peer being waited on.
+
+Result: **185191 bytes / 3112 lines byte-exact against the host's own `grep | wc`**, through a
+4080-byte pipe.
+
+⚠ **Pre-existing, untouched by this release:** `cyrius fmt` drift in 12 files and `line exceeds 120
+characters` lint warnings in 13, all in code this change did not modify (the drifting blocks contain no
+`k_write`, and the long lines are function signatures — the substitution makes lines *shorter*). kriya's
+CI gates neither, which is consistent with how long they have been there. Left alone deliberately:
+reformatting 12 files inside a release cut would bury the change that matters in unrelated diff.
+
 ## [Unreleased]
 
 ## [1.1.7] — 2026-07-10 — GNU-style multi-column `ls`

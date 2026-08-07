@@ -334,7 +334,7 @@ fn _df_emit_row(dev, mp, fs_type, st): i64 {
     pos = pos + mp_len;
     store8(buf + pos, 10);
     pos = pos + 1;
-    syscall(1, 1, buf, pos);
+    k_write( 1, buf, pos);
     return 0;
 }
 
@@ -379,7 +379,7 @@ fn _df_emit_header(): i64 {
     pos = pos + 10;
     store8(buf + pos, 10);
     pos = pos + 1;
-    syscall(1, 1, buf, pos);
+    k_write( 1, buf, pos);
     return 0;
 }
 
@@ -423,7 +423,7 @@ fn cmd_df(start: i64): i64 {
     # (K_HAVE_STATFS == 0). Refuse cleanly up front rather than walking a
     # mount table that does not exist. On Linux this branch is DCE'd.
     if (K_HAVE_STATFS == 0) {
-        syscall(1, 2, "kriya df: not supported on AGNOS (no statfs)\n", 45);
+        k_write( 2, "kriya df: not supported on AGNOS (no statfs)\n", 45);
         return EXIT_FAILURE;
     }
 
@@ -464,7 +464,7 @@ fn cmd_df(start: i64): i64 {
                         if (_seq_bytes_eq(name, "portability", 11) == 1) { _df_portable = 1; hit = 1; }
                     }
                     if (hit == 0) {
-                        syscall(1, 2, "kriya df: error: unknown long option\n", 37);
+                        k_write( 2, "kriya df: error: unknown long option\n", 37);
                         return EXIT_USAGE;
                     }
                     i = i + 1;
@@ -486,7 +486,7 @@ fn cmd_df(start: i64): i64 {
                     } } } } } }
                 }
                 if (ok == 0) {
-                    syscall(1, 2, "kriya df: error: unknown short option\n", 38);
+                    k_write( 2, "kriya df: error: unknown short option\n", 38);
                     return EXIT_USAGE;
                 }
                 i = i + 1;
@@ -500,7 +500,7 @@ fn cmd_df(start: i64): i64 {
 
     var mounts_pack = _df_load_mounts();
     if (mounts_pack == 0) {
-        syscall(1, 2, "kriya df: error: cannot read /proc/self/mounts\n", 47);
+        k_write( 2, "kriya df: error: cannot read /proc/self/mounts\n", 47);
         return EXIT_FAILURE;
     }
     var mbuf = load64(mounts_pack);

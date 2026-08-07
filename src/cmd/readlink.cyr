@@ -50,14 +50,14 @@ fn _rl_init_spec(): i64 {
 }
 
 fn _rl_report(operand, errno): i64 {
-    syscall(1, 2, "kriya readlink: ", 16);
-    syscall(1, 2, operand, strlen(operand));
-    syscall(1, 2, ": ", 2);
+    k_write( 2, "kriya readlink: ", 16);
+    k_write( 2, operand, strlen(operand));
+    k_write( 2, ": ", 2);
     if (errmsg_is_known(errno) == 1) {
         var m = errmsg_for(errno);
-        syscall(1, 2, m, strlen(m));
+        k_write( 2, m, strlen(m));
     } else {
-        syscall(1, 2, "errno ", 6);
+        k_write( 2, "errno ", 6);
         var buf[8];
         var i: i64 = 7;
         store8(&buf + i, 0);
@@ -69,22 +69,22 @@ fn _rl_report(operand, errno): i64 {
             v = v / 10;
             i = i - 1;
         }
-        syscall(1, 2, &buf + i + 1, 6 - i);
+        k_write( 2, &buf + i + 1, 6 - i);
     }
-    syscall(1, 2, "\n", 1);
+    k_write( 2, "\n", 1);
     return 0;
 }
 
 fn cmd_readlink(start: i64): i64 {
     _rl_init_spec();
     if (kriya_args_parse(_rl_spec, start) != 0) {
-        syscall(1, 2, "kriya readlink: error: bad option (see ADR 0002 for accepted syntax)\n", 69);
+        k_write( 2, "kriya readlink: error: bad option (see ADR 0002 for accepted syntax)\n", 69);
         return EXIT_USAGE;
     }
 
     var npos = flags_positional_count(_rl_spec);
     if (npos < 1) {
-        syscall(1, 2, "kriya readlink: error: missing operand\n", 39);
+        k_write( 2, "kriya readlink: error: missing operand\n", 39);
         return EXIT_USAGE;
     }
 
@@ -128,7 +128,7 @@ fn cmd_readlink(start: i64): i64 {
             # branch is DCE'd and the native k_readlink path is taken.
             if (K_HAVE_SYMLINK == 0) {
                 if (quiet == 0) {
-                    syscall(1, 2, "kriya readlink: symbolic links not supported on AGNOS\n", 54);
+                    k_write( 2, "kriya readlink: symbolic links not supported on AGNOS\n", 54);
                 }
                 any_failed = 1;
                 i = i + 1;
@@ -146,7 +146,7 @@ fn cmd_readlink(start: i64): i64 {
             if (quiet == 0) { _rl_report(p, 0 - n); }
             any_failed = 1;
         } else {
-            syscall(1, 1, out_buf, n);
+            k_write( 1, out_buf, n);
             # Emit terminator: skip ONLY when -n is set, -z is not,
             # and this is the final operand.
             var emit: i64 = 1;
@@ -156,7 +156,7 @@ fn cmd_readlink(start: i64): i64 {
                 }
             }
             if (emit == 1) {
-                syscall(1, 1, &term_buf, 1);
+                k_write( 1, &term_buf, 1);
             }
         }
         i = i + 1;

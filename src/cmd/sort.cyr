@@ -80,14 +80,14 @@ fn _so_init_spec(): i64 {
 }
 
 fn _so_report(operand, errno): i64 {
-    syscall(1, 2, "kriya sort: ", 12);
-    syscall(1, 2, operand, strlen(operand));
-    syscall(1, 2, ": ", 2);
+    k_write( 2, "kriya sort: ", 12);
+    k_write( 2, operand, strlen(operand));
+    k_write( 2, ": ", 2);
     if (errmsg_is_known(errno) == 1) {
         var m = errmsg_for(errno);
-        syscall(1, 2, m, strlen(m));
+        k_write( 2, m, strlen(m));
     } else {
-        syscall(1, 2, "errno ", 6);
+        k_write( 2, "errno ", 6);
         var buf[8];
         var i: i64 = 7;
         store8(&buf + i, 0);
@@ -99,9 +99,9 @@ fn _so_report(operand, errno): i64 {
             v = v / 10;
             i = i - 1;
         }
-        syscall(1, 2, &buf + i + 1, 6 - i);
+        k_write( 2, &buf + i + 1, 6 - i);
     }
-    syscall(1, 2, "\n", 1);
+    k_write( 2, "\n", 1);
     return 0;
 }
 
@@ -505,7 +505,7 @@ fn _so_merge_sort(records, buf, numeric, reverse, fold, ignore_blanks, has_key, 
 fn _so_write_all(fd, buf, n): i64 {
     var w: i64 = 0;
     while (w < n) {
-        var wr = syscall(1, fd, buf + w, n - w);
+        var wr = k_write( fd, buf + w, n - w);
         if (wr < 0) {
             if ((0 - wr) == 4) {
                 # EINTR retry.
@@ -518,7 +518,7 @@ fn _so_write_all(fd, buf, n): i64 {
 fn cmd_sort(start: i64): i64 {
     _so_init_spec();
     if (kriya_args_parse(_so_spec, start) != 0) {
-        syscall(1, 2, "kriya sort: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
+        k_write( 2, "kriya sort: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
         return EXIT_USAGE;
     }
 
@@ -546,7 +546,7 @@ fn cmd_sort(start: i64): i64 {
     if (t_arg != 0) {
         if (load8(t_arg) != 0) {
             if (load8(t_arg + 1) != 0) {
-                syscall(1, 2, "kriya sort: error: --field-separator must be a single byte\n", 59);
+                k_write( 2, "kriya sort: error: --field-separator must be a single byte\n", 59);
                 return EXIT_USAGE;
             }
             has_delim = 1;
@@ -576,7 +576,7 @@ fn cmd_sort(start: i64): i64 {
                 if (n > 0) { v = n; }
             }
             if (v < 1) {
-                syscall(1, 2, "kriya sort: error: --key must be a positive integer\n", 52);
+                k_write( 2, "kriya sort: error: --key must be a positive integer\n", 52);
                 return EXIT_USAGE;
             }
             has_key = 1;
@@ -628,7 +628,7 @@ fn cmd_sort(start: i64): i64 {
     }
 
     if (load64(&overflow_box) == 1) {
-        syscall(1, 2, "kriya sort: warning: input exceeds 256 MiB; external-sort fallback deferred — truncating\n", 90);
+        k_write( 2, "kriya sort: warning: input exceeds 256 MiB; external-sort fallback deferred — truncating\n", 90);
     }
 
     var records = _so_build_records(buf, have, term_byte);
@@ -642,7 +642,7 @@ fn cmd_sort(start: i64): i64 {
             var b = vec_get(records, i);
             var cmp = _so_compare(buf, a, b, numeric, reverse, fold, ignore_blanks, has_key, key_field, has_delim, delim);
             if (cmp > 0) {
-                syscall(1, 2, "kriya sort: disorder at line ", 29);
+                k_write( 2, "kriya sort: disorder at line ", 29);
                 # Render i+1.
                 var nb[32];
                 var nlen: i64 = 0;
@@ -663,8 +663,8 @@ fn cmd_sort(start: i64): i64 {
                     }
                     nlen = t;
                 }
-                syscall(1, 2, &nb, nlen);
-                syscall(1, 2, "\n", 1);
+                k_write( 2, &nb, nlen);
+                k_write( 2, "\n", 1);
                 return EXIT_FAILURE;
             }
             i = i + 1;

@@ -60,13 +60,13 @@ fn _pf_buf_get(): i64 {
 fn _pf_putc(c): i64 {
     var b[2];
     store8(&b, c);
-    syscall(1, 1, &b, 1);
+    k_write( 1, &b, 1);
     return 0;
 }
 
 # Emit `n` bytes from `p`.
 fn _pf_puts(p, n): i64 {
-    syscall(1, 1, p, n);
+    k_write( 1, p, n);
     return 0;
 }
 
@@ -75,7 +75,7 @@ fn _pf_pad(c, n): i64 {
     store8(&b, c);
     var i: i64 = 0;
     while (i < n) {
-        syscall(1, 1, &b, 1);
+        k_write( 1, &b, 1);
         i = i + 1;
     }
     return 0;
@@ -566,9 +566,9 @@ fn _pf_process(fmt, arg_count): i64 {
                                 any_conversion = 1;
                             } else {
                                 # Unknown specifier — emit '%' + literal char.
-                                syscall(1, 2, "kriya printf: warning: unknown specifier %", 42);
+                                k_write( 2, "kriya printf: warning: unknown specifier %", 42);
                                 _pf_putc(conv);
-                                syscall(1, 2, "\n", 1);
+                                k_write( 2, "\n", 1);
                             } } } } } } } } } }
                         }
                     } else {
@@ -593,13 +593,13 @@ fn _pf_process(fmt, arg_count): i64 {
 fn cmd_printf(start: i64): i64 {
     _pf_init_spec();
     if (kriya_args_parse(_pf_spec, start) != 0) {
-        syscall(1, 2, "kriya printf: error: bad option (see ADR 0002 for accepted syntax)\n", 67);
+        k_write( 2, "kriya printf: error: bad option (see ADR 0002 for accepted syntax)\n", 67);
         return EXIT_USAGE;
     }
 
     var npos = flags_positional_count(_pf_spec);
     if (npos < 1) {
-        syscall(1, 2, "kriya printf: error: missing FORMAT\n", 36);
+        k_write( 2, "kriya printf: error: missing FORMAT\n", 36);
         return EXIT_USAGE;
     }
 

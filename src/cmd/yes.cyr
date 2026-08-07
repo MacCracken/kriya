@@ -36,7 +36,7 @@ fn cmd_yes(start: i64): i64 {
 
     var go: i64 = 1;
     while (go == 1) {
-        var w = syscall(1, 1, buf, blen);
+        var w = k_write( 1, buf, blen);
         if (w <= 0) { go = 0; }
     }
     return EXIT_SUCCESS;

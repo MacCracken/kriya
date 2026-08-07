@@ -67,14 +67,14 @@ fn _nl_line_get(): i64 {
 }
 
 fn _nl_report(operand, errno): i64 {
-    syscall(1, 2, "kriya nl: ", 10);
-    syscall(1, 2, operand, strlen(operand));
-    syscall(1, 2, ": ", 2);
+    k_write( 2, "kriya nl: ", 10);
+    k_write( 2, operand, strlen(operand));
+    k_write( 2, ": ", 2);
     if (errmsg_is_known(errno) == 1) {
         var m = errmsg_for(errno);
-        syscall(1, 2, m, strlen(m));
+        k_write( 2, m, strlen(m));
     } else {
-        syscall(1, 2, "errno ", 6);
+        k_write( 2, "errno ", 6);
         var buf[8];
         var i: i64 = 7;
         store8(&buf + i, 0);
@@ -86,9 +86,9 @@ fn _nl_report(operand, errno): i64 {
             v = v / 10;
             i = i - 1;
         }
-        syscall(1, 2, &buf + i + 1, 6 - i);
+        k_write( 2, &buf + i + 1, 6 - i);
     }
-    syscall(1, 2, "\n", 1);
+    k_write( 2, "\n", 1);
     return 0;
 }
 
@@ -117,25 +117,25 @@ fn _nl_emit_number(num, fmt, width): i64 {
     var n = _nl_render_dec(num, &buf);
     if (n >= width) {
         # Number is at least as wide as the column — print bare digits.
-        syscall(1, 1, &buf, n);
+        k_write( 1, &buf, n);
         return 0;
     }
     var pad = width - n;
     var pad_buf[1];
     if (fmt == 1) {
         # Left-justified: digits then spaces.
-        syscall(1, 1, &buf, n);
+        k_write( 1, &buf, n);
         store8(&pad_buf, 32);
         var i: i64 = 0;
-        while (i < pad) { syscall(1, 1, &pad_buf, 1); i = i + 1; }
+        while (i < pad) { k_write( 1, &pad_buf, 1); i = i + 1; }
     } else {
         # Right-justified. fmt 0 (rn) pads with space; fmt 2 (rz) with '0'.
         var pad_char: i64 = 32;
         if (fmt == 2) { pad_char = 48; }
         store8(&pad_buf, pad_char);
         var i: i64 = 0;
-        while (i < pad) { syscall(1, 1, &pad_buf, 1); i = i + 1; }
-        syscall(1, 1, &buf, n);
+        while (i < pad) { k_write( 1, &pad_buf, 1); i = i + 1; }
+        k_write( 1, &buf, n);
     }
     return 0;
 }
@@ -146,7 +146,7 @@ fn _nl_emit_blank_column(width): i64 {
     store8(&sp, 32);
     var i: i64 = 0;
     while (i < width) {
-        syscall(1, 1, &sp, 1);
+        k_write( 1, &sp, 1);
         i = i + 1;
     }
     return 0;
@@ -165,15 +165,15 @@ fn _nl_emit_line(line, len, body_type, counter_p, increment, fmt, width, sep, se
         var c = load64(counter_p);
         _nl_emit_number(c, fmt, width);
         store64(counter_p, c + increment);
-        syscall(1, 1, sep, sep_len);
+        k_write( 1, sep, sep_len);
     } else {
         # Unnumbered: GNU emits `width + sep_len` spaces of padding
         # so the unnumbered-line content column-aligns with the
         # numbered-line content column.
         _nl_emit_blank_column(width + sep_len);
     }
-    if (len > 0) { syscall(1, 1, line, len); }
-    syscall(1, 1, "\n", 1);
+    if (len > 0) { k_write( 1, line, len); }
+    k_write( 1, "\n", 1);
     return 0;
 }
 
@@ -210,7 +210,7 @@ fn _nl_run(fd, body_type, counter_p, increment, fmt, width, sep, sep_len): i64 {
                             line_len = line_len + 1;
                         } else {
                             if (truncated_warned == 0) {
-                                syscall(1, 2, "kriya nl: warning: line exceeds 64 KiB; truncating\n", 51);
+                                k_write( 2, "kriya nl: warning: line exceeds 64 KiB; truncating\n", 51);
                                 truncated_warned = 1;
                             }
                         }
@@ -226,7 +226,7 @@ fn _nl_run(fd, body_type, counter_p, increment, fmt, width, sep, sep_len): i64 {
 fn cmd_nl(start: i64): i64 {
     _nl_init_spec();
     if (kriya_args_parse(_nl_spec, start) != 0) {
-        syscall(1, 2, "kriya nl: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        k_write( 2, "kriya nl: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
         return EXIT_USAGE;
     }
 
@@ -239,7 +239,7 @@ fn cmd_nl(start: i64): i64 {
             else { if (load8(b_arg) == 116) { body_type = 1; }   # t
             else { if (load8(b_arg) == 110) { body_type = 2; }   # n
             else {
-                syscall(1, 2, "kriya nl: error: --body-numbering must be a, t, or n\n", 53);
+                k_write( 2, "kriya nl: error: --body-numbering must be a, t, or n\n", 53);
                 return EXIT_USAGE;
             } } }
         }
@@ -252,7 +252,7 @@ fn cmd_nl(start: i64): i64 {
         if (load8(i_arg) != 0) {
             var v = kriya_parse_nonneg_int(i_arg);
             if (v < 0) {
-                syscall(1, 2, "kriya nl: error: --line-increment requires a non-negative integer\n", 65);
+                k_write( 2, "kriya nl: error: --line-increment requires a non-negative integer\n", 65);
                 return EXIT_USAGE;
             }
             increment = v;
@@ -269,24 +269,24 @@ fn cmd_nl(start: i64): i64 {
             var c1 = load8(n_arg + 1);
             var c2 = load8(n_arg + 2);
             if (c2 != 0) {
-                syscall(1, 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
+                k_write( 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
                 return EXIT_USAGE;
             }
             if (c0 == 108) {
                 if (c1 == 110) { fmt = 1; }   # ln
                 else {
-                    syscall(1, 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
+                    k_write( 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
                     return EXIT_USAGE;
                 }
             } else { if (c0 == 114) {
                 if (c1 == 110)      { fmt = 0; }  # rn
                 else { if (c1 == 122) { fmt = 2; }  # rz
                 else {
-                    syscall(1, 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
+                    k_write( 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
                     return EXIT_USAGE;
                 } }
             } else {
-                syscall(1, 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
+                k_write( 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
                 return EXIT_USAGE;
             } }
         }
@@ -309,7 +309,7 @@ fn cmd_nl(start: i64): i64 {
         if (load8(v_arg) != 0) {
             var v = kriya_parse_nonneg_int(v_arg);
             if (v < 0) {
-                syscall(1, 2, "kriya nl: error: --starting-line-number requires a non-negative integer\n", 71);
+                k_write( 2, "kriya nl: error: --starting-line-number requires a non-negative integer\n", 71);
                 return EXIT_USAGE;
             }
             start_num = v;
@@ -323,7 +323,7 @@ fn cmd_nl(start: i64): i64 {
         if (load8(w_arg) != 0) {
             var v = kriya_parse_nonneg_int(w_arg);
             if (v < 0) {
-                syscall(1, 2, "kriya nl: error: --number-width requires a non-negative integer\n", 63);
+                k_write( 2, "kriya nl: error: --number-width requires a non-negative integer\n", 63);
                 return EXIT_USAGE;
             }
             width = v;

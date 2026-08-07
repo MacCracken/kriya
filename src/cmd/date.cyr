@@ -315,7 +315,7 @@ fn _date_format(fmt, epoch, buf, bufsz): i64 {
         var c = load8(src + i);
         if (pos >= bufsz - 32) {
             # Safety margin — flush early.
-            syscall(1, 1, buf, pos);
+            k_write( 1, buf, pos);
             pos = 0;
         }
         if (c == 37) {                          # `%`
@@ -353,7 +353,7 @@ fn _date_format(fmt, epoch, buf, bufsz): i64 {
     }
     store8(buf + pos, 10);                       # trailing newline
     pos = pos + 1;
-    syscall(1, 1, buf, pos);
+    k_write( 1, buf, pos);
     return 0;
 }
 
@@ -372,7 +372,7 @@ fn cmd_date(start: i64): i64 {
             }
             if (load8(tok) == 45) {
                 if (tlen == 1) {
-                    syscall(1, 2, "kriya date: error: lone `-` is not a valid operand\n", 51);
+                    k_write( 2, "kriya date: error: lone `-` is not a valid operand\n", 51);
                     return EXIT_USAGE;
                 }
                 if (load8(tok + 1) == 45) {
@@ -394,7 +394,7 @@ fn cmd_date(start: i64): i64 {
                         i = i + 1;
                         continue;
                     }
-                    syscall(1, 2, "kriya date: error: unknown long option (only --utc/--universal accepted at v0.7.0)\n", 84);
+                    k_write( 2, "kriya date: error: unknown long option (only --utc/--universal accepted at v0.7.0)\n", 84);
                     return EXIT_USAGE;
                 }
                 # Short option(s): only `-u` accepted at v0.7.0.
@@ -411,14 +411,14 @@ fn cmd_date(start: i64): i64 {
                     }
                 }
                 if (ok == 0) {
-                    syscall(1, 2, "kriya date: error: unknown short option (only -u accepted at v0.7.0; -d/-r/-R/-I deferred)\n", 92);
+                    k_write( 2, "kriya date: error: unknown short option (only -u accepted at v0.7.0; -d/-r/-R/-I deferred)\n", 92);
                     return EXIT_USAGE;
                 }
                 i = i + 1;
                 continue;
             }
         }
-        syscall(1, 2, "kriya date: error: unexpected operand (use +FORMAT)\n", 52);
+        k_write( 2, "kriya date: error: unexpected operand (use +FORMAT)\n", 52);
         return EXIT_USAGE;
     }
 

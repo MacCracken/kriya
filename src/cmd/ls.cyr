@@ -80,14 +80,14 @@ fn _ls_init_spec(): i64 {
 }
 
 fn _ls_report(operand, errno): i64 {
-    syscall(1, 2, "kriya ls: ", 10);
-    syscall(1, 2, operand, strlen(operand));
-    syscall(1, 2, ": ", 2);
+    k_write( 2, "kriya ls: ", 10);
+    k_write( 2, operand, strlen(operand));
+    k_write( 2, ": ", 2);
     if (errmsg_is_known(errno) == 1) {
         var m = errmsg_for(errno);
-        syscall(1, 2, m, strlen(m));
+        k_write( 2, m, strlen(m));
     } else {
-        syscall(1, 2, "errno ", 6);
+        k_write( 2, "errno ", 6);
         var buf[8];
         var i: i64 = 7;
         store8(&buf + i, 0);
@@ -99,9 +99,9 @@ fn _ls_report(operand, errno): i64 {
             v = v / 10;
             i = i - 1;
         }
-        syscall(1, 2, &buf + i + 1, 6 - i);
+        k_write( 2, &buf + i + 1, 6 - i);
     }
-    syscall(1, 2, "\n", 1);
+    k_write( 2, "\n", 1);
     return 0;
 }
 
@@ -169,10 +169,10 @@ fn _ls_emit_dec_padded(v, width): i64 {
     var sp[2];
     store8(&sp, 32);
     while (pad > 0) {
-        syscall(1, 1, &sp, 1);
+        k_write( 1, &sp, 1);
         pad = pad - 1;
     }
-    syscall(1, 1, &buf, n);
+    k_write( 1, &buf, n);
     return 0;
 }
 
@@ -255,10 +255,10 @@ fn _ls_emit_human_padded(v, width): i64 {
     var sp[2];
     store8(&sp, 32);
     while (pad > 0) {
-        syscall(1, 1, &sp, 1);
+        k_write( 1, &sp, 1);
         pad = pad - 1;
     }
-    syscall(1, 1, &buf, n);
+    k_write( 1, &buf, n);
     return 0;
 }
 
@@ -295,7 +295,7 @@ fn _ls_emit_mtime(epoch): i64 {
     store8(&buf + 14, 48 + (min / 10));
     store8(&buf + 15, 48 + (min - (min / 10) * 10));
     store8(&buf + 16, 32);  # trailing space
-    syscall(1, 1, &buf, 17);
+    k_write( 1, &buf, 17);
     return 0;
 }
 
@@ -319,7 +319,7 @@ fn _ls_emit_suffix(st): i64 {
     if (c != 0) {
         var sb[2];
         store8(&sb, c);
-        syscall(1, 1, &sb, 1);
+        k_write( 1, &sb, 1);
     }
     return 0;
 }
@@ -479,7 +479,7 @@ fn _ls_term_width(): i64 {
 # Emit `n` spaces (column padding).
 fn _ls_emit_spaces(n): i64 {
     var i: i64 = 0;
-    while (i < n) { syscall(1, 1, " ", 1); i = i + 1; }
+    while (i < n) { k_write( 1, " ", 1); i = i + 1; }
     return 0;
 }
 
@@ -587,10 +587,10 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width): i64 {
                 var st = _ls_rec_st(rec);
                 if (inode_mode == 1) {
                     _ls_emit_dec_padded(load64(st + 8), ino_w);
-                    syscall(1, 1, " ", 1);
+                    k_write( 1, " ", 1);
                 }
                 var name = _ls_rec_name(rec);
-                syscall(1, 1, name, strlen(name));
+                k_write( 1, name, strlen(name));
                 if (F_mode == 1) { _ls_emit_suffix(st); }
                 if (k2 < last_k) {
                     var pad = load64(colw + k2 * 8) - load64(ew + idx * 8);
@@ -599,7 +599,7 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width): i64 {
             }
             k2 = k2 + 1;
         }
-        syscall(1, 1, "\n", 1);
+        k_write( 1, "\n", 1);
         r = r + 1;
     }
     return 0;
@@ -632,11 +632,11 @@ fn _ls_print_simple(entries, F_mode, inode_mode): i64 {
         var st = _ls_rec_st(rec);
         if (inode_mode == 1) {
             _ls_emit_dec_padded(load64(st + 8), ino_w);
-            syscall(1, 1, " ", 1);
+            k_write( 1, " ", 1);
         }
-        syscall(1, 1, name, strlen(name));
+        k_write( 1, name, strlen(name));
         if (F_mode == 1) { _ls_emit_suffix(st); }
-        syscall(1, 1, "\n", 1);
+        k_write( 1, "\n", 1);
         i = i + 1;
     }
     return 0;
@@ -681,36 +681,36 @@ fn _ls_print_long(entries, human, F_mode, inode_mode): i64 {
         var name = _ls_rec_name(rec);
         if (inode_mode == 1) {
             _ls_emit_dec_padded(load64(st + 8), w_ino);
-            syscall(1, 1, " ", 1);
+            k_write( 1, " ", 1);
         }
         var perm_buf[16];
         _ls_render_symperm(load64(st + 24), &perm_buf);
-        syscall(1, 1, &perm_buf, 10);
-        syscall(1, 1, " ", 1);
+        k_write( 1, &perm_buf, 10);
+        k_write( 1, " ", 1);
         _ls_emit_dec_padded(load64(st + 16), w_nlink);
-        syscall(1, 1, " ", 1);
+        k_write( 1, " ", 1);
         _ls_emit_dec_padded(load64(st + 28) & 4294967295, w_uid);
-        syscall(1, 1, " ", 1);
+        k_write( 1, " ", 1);
         _ls_emit_dec_padded(load64(st + 32) & 4294967295, w_gid);
-        syscall(1, 1, " ", 1);
+        k_write( 1, " ", 1);
         if (human == 1) {
             _ls_emit_human_padded(load64(st + 48), w_size);
         } else {
             _ls_emit_dec_padded(load64(st + 48), w_size);
         }
-        syscall(1, 1, " ", 1);
+        k_write( 1, " ", 1);
         _ls_emit_mtime(load64(st + 88));
-        syscall(1, 1, name, strlen(name));
+        k_write( 1, name, strlen(name));
         # Symlink target.
         if (fs_is_lnk(st) == 1) {
             var tgt = _ls_rec_link_target(rec);
             if (tgt != 0) {
-                syscall(1, 1, " -> ", 4);
-                syscall(1, 1, tgt, strlen(tgt));
+                k_write( 1, " -> ", 4);
+                k_write( 1, tgt, strlen(tgt));
             }
         }
         if (F_mode == 1) { _ls_emit_suffix(st); }
-        syscall(1, 1, "\n", 1);
+        k_write( 1, "\n", 1);
         i = i + 1;
     }
     return 0;
@@ -727,8 +727,8 @@ fn _ls_print_dir(entries, long_mode, human, F_mode, inode_mode): i64 {
 # means emit "path:\n" header before the entries (used in -R / multi-dir).
 fn _ls_list_dir(dir_path, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, header): i64 {
     if (header == 1) {
-        syscall(1, 1, dir_path, strlen(dir_path));
-        syscall(1, 1, ":\n", 2);
+        k_write( 1, dir_path, strlen(dir_path));
+        k_write( 1, ":\n", 2);
     }
     var entries_or_err = _ls_collect(dir_path, all_mode, almost_all);
     if (entries_or_err < 0) {
@@ -759,7 +759,7 @@ fn _ls_list_dir(dir_path, all_mode, almost_all, long_mode, human, reverse, F_mod
                 var st = _ls_rec_st(rec);
                 # Only descend into REAL directories (not symlinks-to-dir).
                 if (fs_is_dir(st) == 1) {
-                    syscall(1, 1, "\n", 1);
+                    k_write( 1, "\n", 1);
                     var child = path_join(dir_path, name);
                     _ls_list_dir(child, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, 1);
                 }
@@ -793,7 +793,7 @@ fn _ls_print_entry(name, st_buf, long_mode, human, F_mode, inode_mode): i64 {
 fn cmd_ls(start: i64): i64 {
     _ls_init_spec();
     if (kriya_args_parse(_ls_spec, start) != 0) {
-        syscall(1, 2, "kriya ls: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        k_write( 2, "kriya ls: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
         return EXIT_USAGE;
     }
 
@@ -892,9 +892,9 @@ fn cmd_ls(start: i64): i64 {
         if (multi_dir == 1) { header = 1; }
         if (any_nondir == 1) { header = 1; }
         # Separate sections with a blank line.
-        if (di > 0) { syscall(1, 1, "\n", 1); }
+        if (di > 0) { k_write( 1, "\n", 1); }
         else {
-            if (any_nondir == 1) { syscall(1, 1, "\n", 1); }
+            if (any_nondir == 1) { k_write( 1, "\n", 1); }
         }
         var r = _ls_list_dir(dp, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, header);
         if (r != 0) { any_failed = 1; }

@@ -36,10 +36,10 @@ fn cmd_echo(start: i64): i64 {
     var first = i;
     while (i < n) {
         var arg = argv(i);
-        if (i > first) { syscall(1, 1, " ", 1); }
-        syscall(1, 1, arg, strlen(arg));
+        if (i > first) { k_write( 1, " ", 1); }
+        k_write( 1, arg, strlen(arg));
         i = i + 1;
     }
-    if (omit_newline == 0) { syscall(1, 1, "\n", 1); }
+    if (omit_newline == 0) { k_write( 1, "\n", 1); }
     return EXIT_SUCCESS;
 }

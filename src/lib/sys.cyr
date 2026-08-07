@@ -59,7 +59,30 @@ fn k_at_fdcwd(): i64 { return 0 - 100; }
 
 fn k_read(fd, buf, n): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    return syscall(SYS_READ, fd, buf, n);          # agnos #5
+    # ⛔ -2 IS "NOT YET", NOT EOF — AND EVERY kriya APPLET DEPENDS ON THIS ONE FUNCTION GETTING IT
+    # RIGHT. agnos 1.56.40 makes `read()` answer -2 (WOULD_BLOCK) for an empty pipe whose write end
+    # is still open, reserving 0 for a genuine EOF. Callers here branch on `n <= 0`, so without this
+    # retry a `wc`/`grep`/`tee` reading from a CONCURRENT producer would stop at the first moment it
+    # out-ran the writer and silently report a truncated result — the worst failure shape available,
+    # because the output looks plausible.
+    #
+    # ⭐ THE LOOP TERMINATES ON THE KERNEL'S OWN ANSWER, so it needs no timeout: the kernel returns 0
+    # the instant the last write end closes (`pipe_writers_open` scans real fd tables), and 0 exits
+    # this loop. A producer that neither writes nor exits blocks us forever — which is exactly what
+    # Linux's blocking `read()` does in the same situation, so it is the correct semantic, not a hang
+    # we failed to bound.
+    #
+    # ⛔ THE WAIT IS A PREEMPTIBLE SPIN, NOT `sleep_ms#41`. sleep_ms is `preempt_disable; sti; hlt` —
+    # it would starve the very producer this read is waiting for. `sched_yield` is donated first, but
+    # it is a documented silent no-op under several guards, so it cannot be the only thing here.
+    var r = syscall(SYS_READ, fd, buf, n);         # agnos #5
+    while (r == 0 - 2) {
+        syscall(44);                               # donate the rest of the slice to the producer
+        var sp = 0;
+        while (sp < 20000) { sp = sp + 1; }        # preemptible: the timer can take us off here
+        r = syscall(SYS_READ, fd, buf, n);
+    }
+    return r;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     return syscall(0, fd, buf, n);                 # linux read #0
@@ -68,7 +91,39 @@ fn k_read(fd, buf, n): i64 {
 
 fn k_write(fd, buf, n): i64 {
     # write is #1 on BOTH targets, but route it for one consistent layer.
+    #ifdef CYRIUS_TARGET_AGNOS
+    # ⛔ A SHORT WRITE IS NORMAL ON A PIPE, AND IGNORING IT SILENTLY DROPS DATA. agnos 1.56.40's
+    # `pipe_write` refuses to overwrite unread bytes (ipc bite 10), so a producer faster than its
+    # consumer gets back FEWER bytes than it offered — the POSIX contract, and one every caller here
+    # used to ignore because it wrote with a raw `syscall(1, …)` and never looked at the result.
+    # Measured: `grep . /etc/ssl/cert.pem | wc` delivered 70347 of 185311 bytes — streaming, but
+    # lossy, and the missing 62% looked exactly like a plausible answer.
+    #
+    # ⛔ THE STALL BOUND IS NOT A TIMEOUT ON SUCCESS, IT IS A GUARD AGAINST AN ABANDONED PIPE. Every
+    # accepted byte resets it, so a merely-slow consumer never trips it however long it takes. It only
+    # fires when the ring stays full with NO progress at all — a reader that died or stopped reading —
+    # where the alternative is spinning forever, since a pipe has no reader-gone signal to test.
+    # ⛔ The wait is a preemptible spin, not `sleep_ms#41`: that is `preempt_disable; sti; hlt` and
+    # would starve the very consumer whose progress we are waiting for.
+    var done = 0;
+    var stall = 0;
+    while (done < n) {
+        var r = syscall(1, fd, buf + done, n - done);
+        if (r > 0) { done = done + r; stall = 0; }
+        else {
+            if (r < 0) { return r; }               # a real error — surface it, do not spin on it
+            stall = stall + 1;
+            if (stall > 20000) { return done; }    # abandoned pipe: report the short count honestly
+            syscall(44);
+            var sp = 0;
+            while (sp < 2000) { sp = sp + 1; }
+        }
+    }
+    return done;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return syscall(1, fd, buf, n);
+    #endif
 }
 
 fn k_close(fd): i64 {

@@ -55,14 +55,14 @@ fn _ln_init_spec(): i64 {
 }
 
 fn _ln_report(operand, errno): i64 {
-    syscall(1, 2, "kriya ln: ", 10);
-    syscall(1, 2, operand, strlen(operand));
-    syscall(1, 2, ": ", 2);
+    k_write( 2, "kriya ln: ", 10);
+    k_write( 2, operand, strlen(operand));
+    k_write( 2, ": ", 2);
     if (errmsg_is_known(errno) == 1) {
         var m = errmsg_for(errno);
-        syscall(1, 2, m, strlen(m));
+        k_write( 2, m, strlen(m));
     } else {
-        syscall(1, 2, "errno ", 6);
+        k_write( 2, "errno ", 6);
         var buf[8];
         var i: i64 = 7;
         store8(&buf + i, 0);
@@ -74,9 +74,9 @@ fn _ln_report(operand, errno): i64 {
             v = v / 10;
             i = i - 1;
         }
-        syscall(1, 2, &buf + i + 1, 6 - i);
+        k_write( 2, &buf + i + 1, 6 - i);
     }
-    syscall(1, 2, "\n", 1);
+    k_write( 2, "\n", 1);
     return 0;
 }
 
@@ -143,7 +143,7 @@ fn _ln_make(target, link, symbolic, physical, force, verbose): i64 {
         # agnos has no symlinks (K_HAVE_SYMLINK == 0); refuse cleanly
         # rather than silently misbehaving. On Linux this branch is DCE'd.
         if (K_HAVE_SYMLINK == 0) {
-            syscall(1, 2, "kriya ln: symbolic links not supported on AGNOS\n", 48);
+            k_write( 2, "kriya ln: symbolic links not supported on AGNOS\n", 48);
             return EXIT_FAILURE;
         }
         r = k_symlink(target, link);
@@ -166,15 +166,15 @@ fn _ln_make(target, link, symbolic, physical, force, verbose): i64 {
         return r;
     }
     if (verbose == 1) {
-        syscall(1, 1, "kriya ln: '", 11);
-        syscall(1, 1, link, strlen(link));
+        k_write( 1, "kriya ln: '", 11);
+        k_write( 1, link, strlen(link));
         if (symbolic == 1) {
-            syscall(1, 1, "' -> '", 6);
+            k_write( 1, "' -> '", 6);
         } else {
-            syscall(1, 1, "' => '", 6);  # => for hard, -> for symbolic
+            k_write( 1, "' => '", 6);  # => for hard, -> for symbolic
         }
-        syscall(1, 1, target, strlen(target));
-        syscall(1, 1, "'\n", 2);
+        k_write( 1, target, strlen(target));
+        k_write( 1, "'\n", 2);
     }
     return 0;
 }
@@ -182,13 +182,13 @@ fn _ln_make(target, link, symbolic, physical, force, verbose): i64 {
 fn cmd_ln(start: i64): i64 {
     _ln_init_spec();
     if (kriya_args_parse(_ln_spec, start) != 0) {
-        syscall(1, 2, "kriya ln: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        k_write( 2, "kriya ln: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
         return EXIT_USAGE;
     }
 
     var npos = flags_positional_count(_ln_spec);
     if (npos < 1) {
-        syscall(1, 2, "kriya ln: error: missing operand\n", 33);
+        k_write( 2, "kriya ln: error: missing operand\n", 33);
         return EXIT_USAGE;
     }
 
@@ -227,7 +227,7 @@ fn cmd_ln(start: i64): i64 {
 
         if (dest_is_dir == 0) {
             if (npos != 2) {
-                syscall(1, 2, "kriya ln: error: with multiple sources, the last operand must be a directory\n", 76);
+                k_write( 2, "kriya ln: error: with multiple sources, the last operand must be a directory\n", 76);
                 return EXIT_USAGE;
             }
             var target = flags_positional(_ln_spec, 0);
