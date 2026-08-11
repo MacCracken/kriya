@@ -57,7 +57,11 @@ expect_eq "default nonl"   "$(wc nonl)"         "$($BIN wc nonl)"
 expect_eq "-l"             "$(wc -l simple)"    "$($BIN wc -l simple)"
 expect_eq "-w"             "$(wc -w simple)"    "$($BIN wc -w simple)"
 expect_eq "-c"             "$(wc -c simple)"    "$($BIN wc -c simple)"
-expect_eq "-m UTF-8"       "$(wc -m utf8)"      "$($BIN wc -m utf8)"
+# ⚠ The oracle MUST name a UTF-8 locale. GNU `wc -m` counts CHARACTERS only when the locale is
+# multibyte; with LANG/LC_ALL unset it silently degrades to counting BYTES, so this line compared
+# kriya's (correct) 12 against GNU's byte count of 14 and reported kriya as broken. kriya decodes
+# UTF-8 unconditionally and has no locale to degrade to — the test was wrong, not the code.
+expect_eq "-m UTF-8"       "$(LC_ALL=C.UTF-8 wc -m utf8)" "$($BIN wc -m utf8)"
 expect_eq "-c UTF-8"       "$(wc -c utf8)"      "$($BIN wc -c utf8)"
 expect_eq "-L max-line"    "$(wc -L simple)"    "$($BIN wc -L simple)"
 

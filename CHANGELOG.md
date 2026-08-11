@@ -6,6 +6,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.1.9] - 2026-08-11 — symlinks on agnos; the stack smash cyrius 6.5 uncovered
+
+Toolchain pin moved **6.4.20 → 6.5.18** (`lib sync --full`), which is what surfaced the `find` bug below.
+
+### Added — `ln -s` and `readlink` work on agnos
+
+`K_HAVE_SYMLINK` and the new `K_HAVE_READLINK` are both 1 on the agnos arm. The flags were stale, not
+blocked: agnos shipped `symlink`#63 and `readlink`#70 some time ago and kriya kept refusing the verbs.
+
+⛔ **A bare capability-flag flip would have been a serious bug, and the reason is worth keeping.** The
+old agnos arms carried dead `syscall(88, …)` / `syscall(89, …)` bodies behind an `#ifdef` — the Linux
+numbers. On agnos **88 is `gpu_fill_rect` and 89 is `gpu_caps`**, so an un-gate that merely set the
+flag to 1 would have made `ln -s` paint a rectangle and `readlink` return framebuffer geometry. Both
+arms now go through the named `SYS_SYMLINK` / `SYS_READLINK`, which resolve per-target. agnos also
+takes explicit **lengths** (4-arg, a4 in r10) where Linux takes NUL-terminated pointers.
+
+⚠ **`readlink` is now the only no-follow primitive on agnos.** There is no `lstat`, and path-based
+`sys_stat`#33 follows the final component, so kriya's `k_lstat` follows symlinks on that target. The
+one shape this gets wrong is telling a symlink-to-directory apart from a directory
+(`_ln_is_real_dir`); plain `ln -s a b` does not touch it. agnos carries `lstat` as unslotted pending a
+consumer — this is that consumer.
+
+### Fixed — `find` walked one level and stopped (a 32-byte write into a 4-byte local)
+
+`_f_walk` built a 4-field context with `var ctx[4]` and then wrote **32 bytes** into it. A
+function-local `var X[N]` is **N bytes** — the ×8 u64 unit applies only at module scope — so this
+smashed 24 bytes of neighbouring stack.
+
+⭐ **It was silent for a year and the pin bump is what exposed it.** The old register allocator left
+dead space where the overflow landed. cyrius 6.5.x is the codegen-quality line; it repacked the frame,
+the clobber started hitting live state — specifically the `st_buf` whose `st_mode` the is-a-directory
+test reads — and `find` went from **40/40 to 8/40**, printing the root and never descending.
+
+⚠ The unit rule is non-uniform enough to be worth **measuring** rather than assuming. Measured here at
+6.5.18 with a two-local probe: `&b - &a` = 8 for `var x[4]`. A repo-wide scan for the same shape
+(small local + 64-bit stores past its end) found this as the only true instance.
+
+### Fixed — `df PATH` printed a header and no rows unless PATH was itself a mount point
+
+`df` matched operands against mountpoints by **exact string equality**, so `df /` worked and
+`df /home` produced nothing whenever `/home` was not separately mounted. The file header documented
+the correct behaviour and the loop carried a `# TODO: proper "filesystem containing operand path"
+match` — the doc was the honest one, and the TODO had been open since v0.7.0.
+
+Operands now resolve by **longest mountpoint prefix**, which is what the kernel's own lookup resolves
+to: with `/` and `/home` both mounted, `/home/x` belongs to `/home`, not `/`. Matching breaks on a
+component boundary, so `/var` does not cover `/variable`. Verified byte-identical to GNU `df` on `/`,
+`/home`, a deep path, and `/dev`.
+
+Naming a path is an unambiguous request for that filesystem, so an operand now bypasses both the
+pseudo-FS filter and the zero-blocks drop (`df /dev` used to print an empty table). A nonexistent
+operand reports `No such file or directory` and, when no operand resolves, suppresses the header
+rather than printing a bare one that reads as "empty filesystem".
+
+### Fixed — the `wc -m` UTF-8 test asserted the wrong thing
+
+`smoke-wc.sh` compared kriya against GNU `wc -m` with no locale set, where GNU silently degrades to
+counting **bytes**. kriya decodes UTF-8 unconditionally and has no locale to degrade to, so it
+answered 12 for an 11-character-plus-newline string and GNU answered 14 — and the suite blamed kriya.
+The oracle now names `LC_ALL=C.UTF-8`. **No kriya code changed; the test was wrong.**
+
+Suite at this cut: **86 unit assertions + 31/31 smoke scripts green** on the host arm.
+
+⚠ The agnos arm builds clean but `ln -s` / `readlink` are **not** verified on agnos by anything above
+— host smokes cannot reach that arm by construction. They are carried on the next agnos burn card.
+
 ## [1.1.8] - 2026-08-07 — kriya survives a pipe (agnos ipc bite 11)
 
 ### Fixed — 542 raw writes ignored short writes, silently dropping data

@@ -12,8 +12,8 @@
 #     `stat(path,pathlen,buf)`, `rename(old,oldlen,new,newlen)`), Linux
 #     paths are NUL-terminated. These wrappers take a NUL-terminated
 #     path and compute the length for agnos via `strlen`.
-#   - Missing primitives: agnos has no cwd / symlinks / lseek / statfs /
-#     ioctl / chmod / utimensat. The wrapper returns a negative error and
+#   - Missing primitives: agnos has no cwd / lseek / statfs / ioctl /
+#     chmod / utimensat / lstat. The wrapper returns a negative error and
 #     the matching `K_HAVE_*` flag is 0, so a verb refuses cleanly rather
 #     than misbehaving (e.g. `df` prints "not supported on this system").
 #
@@ -30,7 +30,8 @@ enum KSysCap {
     K_HAVE_CWD      = 0;   # no per-process cwd — paths must be absolute
     K_HAVE_LSEEK    = 0;   # no lseek
     K_HAVE_STATFS   = 0;   # no statfs
-    K_HAVE_SYMLINK  = 0;   # no symlink / readlink
+    K_HAVE_SYMLINK  = 1;   # symlink#63 (un-gated 2026-08-11; ⚠ no lstat peer — k_lstat FOLLOWS)
+    K_HAVE_READLINK = 1;   # readlink#70 — no-follow; the ONLY no-follow primitive agnos has
     K_HAVE_CHMOD    = 0;   # no chmod
     K_HAVE_UTIMES   = 0;   # no utimensat
     K_HAVE_ATFAMILY = 0;   # no *at(); fs.cyr uses abspath emulation
@@ -43,6 +44,7 @@ enum KSysCap {
     K_HAVE_LSEEK    = 1;
     K_HAVE_STATFS   = 1;
     K_HAVE_SYMLINK  = 1;
+    K_HAVE_READLINK = 1;
     K_HAVE_CHMOD    = 1;
     K_HAVE_UTIMES   = 1;
     K_HAVE_ATFAMILY = 1;
@@ -245,9 +247,15 @@ fn k_stat(path, buf): i64 {
 
 # lstat — like stat but does NOT follow a final symlink. agnos has no
 # symlinks, so it is identical to k_stat there.
+# ⚠ NOT a true lstat on agnos, and since the 2026-08-11 K_HAVE_SYMLINK un-gate that is no longer
+# harmless. agnos has no lstat peer at all, so this routes to path-based sys_stat#33 — which
+# FOLLOWS the final symlink. Callers that exist specifically to tell a symlink-to-directory apart
+# from a directory (_ln_is_real_dir) therefore get the wrong answer on agnos for that one shape.
+# The plain `ln -s a b` path does not touch it. agnos roadmap carries `lstat` as unslotted-pending-
+# a-consumer; this is that consumer. Until it lands, readlink#70 is the only no-follow primitive.
 fn k_lstat(path, buf): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    return _k_agnos_stat(path, buf);                       # agnos: no symlinks → same as stat
+    return _k_agnos_stat(path, buf);                       # ⚠ FOLLOWS symlinks — see above
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     return syscall(262, k_at_fdcwd(), path, buf, 256);     # linux AT_SYMLINK_NOFOLLOW=256
@@ -350,18 +358,28 @@ fn k_statfs(path, buf): i64 {
     #endif
 }
 
+# ⛔ The two arms below MUST stay symbolic on the agnos side. agnos reuses the Linux numbers for
+# something else entirely — 88 is gpu_fill_rect and 89 is gpu_caps — so a "just flip the capability
+# flag" un-gate that left `syscall(88, …)` reachable would have `ln -s` painting a rectangle. The
+# named SYS_SYMLINK / SYS_READLINK resolve to 63 / 70 on agnos and to the right numbers on Linux.
+# ⚠ agnos also takes explicit LENGTHS (4-arg, a4 in r10) where Linux takes NUL-terminated pointers,
+# and it answers 0/-1 rather than a negative errno — see the note on _ln_report's caller.
 fn k_symlink(target, linkpath): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    return 0 - 38;                                         # no symlinks on agnos
+    return syscall(SYS_SYMLINK, target, strlen(target), linkpath, strlen(linkpath));  # agnos #63 (a4)
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     return syscall(88, target, linkpath);                  # linux symlink #88
     #endif
 }
 
+# agnos readlink#70 is the NO-FOLLOW introspection peer of symlink#63: it resolves the final path
+# component WITHOUT following it and returns the target byte count (NOT NUL-terminated) or -1.
+# ⚠ It is the ONLY no-follow primitive on agnos — there is no lstat, and path-based sys_stat#33
+# follows. So anything that must SEE a link rather than its target has to come through here.
 fn k_readlink(path, buf, bufsize): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    return 0 - 38;                                         # no symlinks on agnos
+    return syscall(SYS_READLINK, path, strlen(path), buf, bufsize);   # agnos #70 (a4)
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     return syscall(89, path, buf, bufsize);                # linux readlink #89

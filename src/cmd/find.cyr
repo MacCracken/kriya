@@ -902,7 +902,15 @@ fn _f_walk(path, depth, max_depth): i64 {
         _f_any_failed = 1;
         return 0;
     }
-    var ctx[4];
+    # ⛔ 32, NOT 4. A FUNCTION-LOCAL `var X[N]` IS N BYTES — the ×8 u64 unit applies only at module
+    # scope. This held four i64 fields in a 4-byte slot and smashed 24 bytes of neighbouring stack.
+    # It was SILENT for a year: the old register allocator happened to leave dead space there. The
+    # cyrius 6.5.x codegen-quality work repacked the frame, the overflow started landing on live
+    # state, and `find` regressed from 40/40 to 8/40 — it printed the root and never descended,
+    # because the clobber reached the very `st_buf` the is-a-directory test reads.
+    # ⚠ The unit rule is non-uniform enough to be worth MEASURING rather than assuming; measured
+    # here at 6.5.18 with a two-local probe (`&b - &a` = 8 for `var x[4]`).
+    var ctx[32];
     store64(&ctx + 0,  path);
     var slash = path_basename_ptr(path);
     if (slash == 0) { slash = path; }

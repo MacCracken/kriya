@@ -82,7 +82,16 @@ EOF
 if [ -f "$ROOT/docs/development/state.md" ]; then
     TODAY=$(date +%Y-%m-%d)
     # Match: `**X.Y.Z** — ...` at start of a line.
-    sed -i -E "s#^\*\*[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?\*\* — #\*\*$NEW\*\* — #" "$ROOT/docs/development/state.md"
+    # ⛔ `0,/re/` IS LOAD-BEARING — WITHOUT IT THIS DESTROYS THE RELEASE HISTORY. state.md's Version
+    # section is a REVERSE-CHRONOLOGICAL LIST: the newest release on top, every prior release below
+    # it, each opening with the same `**X.Y.Z** — released DATE.` shape. An unaddressed `s###` applies
+    # to EVERY line it matches, so each bump silently rewrote every historical heading to the new
+    # number — leaving a run of identically-numbered entries carrying different dates and different
+    # content. It is invisible at bump time (the script prints "Bumped to X" and exits 0) and only
+    # shows up later when someone reads the file. Caught 2026-08-11 at the 1.1.9 cut, by which point
+    # seven headings had been flattened; they were reconstructed from CHANGELOG.md, which is
+    # hand-curated and was therefore untouched. `0,/re/` bounds the substitution to the FIRST match.
+    sed -i -E "0,/^\*\*[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?\*\* — /s##\*\*$NEW\*\* — #" "$ROOT/docs/development/state.md"
 fi
 
 echo "Bumped to $NEW."

@@ -339,6 +339,57 @@ fn _df_emit_row(dev, mp, fs_type, st): i64 {
 }
 
 # Print the header row.
+# --- operand -> containing filesystem -------------------------------------------------
+# ⚠ df's operand form is "the filesystem this path LIVES ON", not "this path is a mount
+# point". The original code compared the operand to each mountpoint for exact string
+# equality, so `df /` worked and `df /home` printed a header and no rows whenever /home
+# was not itself a mount. The file header claimed the correct behaviour and the loop
+# carried a `# TODO: proper "filesystem containing operand path" match` — doc and code
+# disagreed, and the doc was the honest one. Implemented 2026-08-11.
+#
+# Match is LONGEST MOUNTPOINT PREFIX, which is what the kernel's own lookup resolves to:
+# with / and /home both mounted, /home/x belongs to /home (5 chars) not / (1 char).
+
+# Does mountpoint `mp` cover path `op`? "/" covers everything; otherwise `op` must start
+# with `mp` AND break on a component boundary, so /var does NOT cover /variable.
+fn _df_mp_covers(mp, mplen, op, oplen): i64 {
+    if (mplen > oplen) { return 0; }
+    if (_seq_bytes_eq(op, mp, mplen) == 0) { return 0; }
+    if (mplen == 1) { return 1; }
+    if (oplen == mplen) { return 1; }
+    if (load8(op + mplen) == 47) { return 1; }
+    return 0;
+}
+
+# Longest covering mountpoint for `op`, copied NUL-terminated into `out`.
+# Returns its length, or -1 when nothing covers the path (impossible with / mounted,
+# but not an assumption worth baking in).
+fn _df_best_mp(mbuf, mused, op, out): i64 {
+    var best: i64 = 0 - 1;
+    var oplen = strlen(op);
+    var mp_tmp = alloc(1024);
+    var line_start: i64 = 0;
+    var li: i64 = 0;
+    while (li < mused) {
+        if (load8(mbuf + li) == 10) {
+            var p = line_start;
+            p = p + _df_skip_to_next_field(mbuf + p);   # field 1 is the device; field 2 is the mp
+            _df_decode_field(mbuf + p, mp_tmp);
+            var mplen = strlen(mp_tmp);
+            if (_df_mp_covers(mp_tmp, mplen, op, oplen) == 1) {
+                if (mplen > best) {
+                    best = mplen;
+                    memcpy(out, mp_tmp, mplen);
+                    store8(out + mplen, 0);
+                }
+            }
+            line_start = li + 1;
+        }
+        li = li + 1;
+    }
+    return best;
+}
+
 fn _df_emit_header(): i64 {
     var buf = alloc(512);
     var pos: i64 = 0;
@@ -506,6 +557,40 @@ fn cmd_df(start: i64): i64 {
     var mbuf = load64(mounts_pack);
     var mused = load64(mounts_pack + 8);
 
+    # Resolve every operand to the mountpoint of the filesystem it lives on, BEFORE emitting,
+    # because longest-prefix is a property of the whole mount table and cannot be decided from
+    # one line at a time. An operand that does not exist is reported here (GNU does the same)
+    # and contributes no target, so it cannot silently select the wrong filesystem.
+    var op_mp = alloc(64 * 8);
+    var n_targets: i64 = 0;
+    var oi: i64 = 0;
+    while (oi < n_operands) {
+        var op = load64(operands_buf + oi * 8);
+        var canon = alloc(4096);
+        var rp = fs_realpath(op, FS_REALPATH_REQUIRE_ALL, canon, 4096);
+        if (rp < 0) {
+            k_write( 2, "kriya df: ", 10);
+            k_write( 2, op, strlen(op));
+            k_write( 2, ": No such file or directory\n", 28);
+            _df_any_failed = 1;
+        }
+        if (rp >= 0) {
+            var mp_out = alloc(1024);
+            if (_df_best_mp(mbuf, mused, canon, mp_out) >= 0) {
+                store64(op_mp + n_targets * 8, mp_out);
+                n_targets = n_targets + 1;
+            }
+        }
+        oi = oi + 1;
+    }
+
+    # Every operand failed to resolve => there is nothing to tabulate, and GNU prints the error
+    # alone with no header. Emitting a bare header here would read as "this filesystem is empty"
+    # rather than "that path does not exist".
+    if (n_operands > 0) {
+        if (n_targets == 0) { return EXIT_FAILURE; }
+    }
+
     _df_emit_header();
 
     # Walk lines.
@@ -526,25 +611,25 @@ fn cmd_df(start: i64): i64 {
 
             # Filter.
             var keep: i64 = 1;
-            if (_df_all == 0) {
-                if (_df_is_pseudo_fs(ft_buf) == 1) { keep = 0; }
+            # The pseudo-FS filter is a convenience for the no-operand listing only. Naming a
+            # path explicitly is an unambiguous request for THAT filesystem, so an operand
+            # bypasses the filter — otherwise `df /dev` would print a header and nothing.
+            if (n_operands == 0) {
+                if (_df_all == 0) {
+                    if (_df_is_pseudo_fs(ft_buf) == 1) { keep = 0; }
+                }
             }
-            # Skip if operands present and this mp doesn't match any.
             if (keep == 1) {
                 if (n_operands > 0) {
                     keep = 0;
-                    # TODO: proper "filesystem containing operand path" match
-                    # via stat(operand).st_dev. v0.7.0 only supports exact
-                    # mp match for simplicity (documented).
-                    var oi: i64 = 0;
-                    while (oi < n_operands) {
-                        var op = load64(operands_buf + oi * 8);
-                        var oplen = strlen(op);
-                        var mplen = strlen(mp_buf);
-                        if (oplen == mplen) {
-                            if (_seq_bytes_eq(op, mp_buf, oplen) == 1) { keep = 1; oi = n_operands; }
+                    var ti: i64 = 0;
+                    var mplen = strlen(mp_buf);
+                    while (ti < n_targets) {
+                        var tmp = load64(op_mp + ti * 8);
+                        if (strlen(tmp) == mplen) {
+                            if (_seq_bytes_eq(tmp, mp_buf, mplen) == 1) { keep = 1; ti = n_targets; }
                         }
-                        oi = oi + 1;
+                        ti = ti + 1;
                     }
                 }
             }
@@ -554,7 +639,9 @@ fn cmd_df(start: i64): i64 {
                 if (sr == 0) {
                     var f_blocks = load64(&st + 16);
                     if (_df_all == 0) {
-                        if (f_blocks == 0) { keep = 0; }
+                        if (n_operands == 0) {
+                            if (f_blocks == 0) { keep = 0; }
+                        }
                     }
                     if (keep == 1) {
                         _df_emit_row(dev_buf, mp_buf, ft_buf, &st);

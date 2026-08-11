@@ -11,10 +11,10 @@
 # pre-v5.6.39 the per-binary literals drifted across hotfix bumps).
 #
 # `_VERSION_LEN_KRIYA` is the BYTE length of `_VERSION_STR_KRIYA`
-# including the trailing `\n` — used directly with `k_write( fd,
+# including the trailing `\n` — used directly with `syscall(1, fd,
 # &str, len)` so the writer never needs `strlen()` at the version
 # print site.
 
-var _VERSION_STR_KRIYA = "kriya 1.1.7\n";
+var _VERSION_STR_KRIYA = "kriya 1.1.9\n";
 var _VERSION_LEN_KRIYA = 12;
-var _VERSION_KRIYA     = "1.1.7";
+var _VERSION_KRIYA     = "1.1.9";
