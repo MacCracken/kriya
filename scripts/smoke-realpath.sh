@@ -169,6 +169,29 @@ expect_eq "-z emits 0 newlines"  "0" "$nl_count"
 expect_exit "no operands"        2 "$BIN" realpath
 expect_exit "empty operand"      1 "$BIN" realpath ""
 
+# --- operands past the old 16 KiB ceiling (M17j, v1.2.6) ---------------
+# ⚠ v1.1.11 bounded `fs_realpath`'s previously unchecked seed copies, turning a
+# silently wrong answer into an honest ENAMETOOLONG — but it left kriya REFUSING
+# 16 KiB operands that GNU resolves. The buffer was never a limit worth having,
+# just a constant nobody had revisited. It is sized from the operand now, and
+# grows for symlink expansion beyond that.
+mkdir -p longp/d
+touch longp/d/f
+ln -s d longp/ld
+for n in 8300 20000; do
+    if command -v python3 >/dev/null 2>&1; then
+        dots=$(python3 -c "print('/.'*$n)")
+        P="$PWD/longp/ld${dots}/f"
+        expect_eq "operand of ${#P} bytes matches GNU" \
+            "$(realpath -m "$P" 2>&1)" "$("$BIN" realpath -m "$P" 2>&1)"
+    fi
+done
+# ⚠ Growth must not weaken the cycle guard — that bound is the ELOOP counter,
+# not the buffer size.
+ln -sf cyc_b cyc_a
+ln -sf cyc_a cyc_b
+expect_exit "symlink cycle still ELOOPs" 1 "$BIN" realpath cyc_a
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

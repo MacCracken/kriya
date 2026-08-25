@@ -21,7 +21,7 @@ Earlier revisions of this file tracked work as milestone buckets **M0–M17**, a
 entries reference them. Those numbers are **historical identifiers, not a live index** — the arcs
 above are the running order now. Where a bucket is still open and still has a natural name, the
 number is kept (**M10** consumer-burn, **M11** proposal sweeps, **M14** getenv, **M15** watchlist,
-**M16** agnos target, **M17g/h/j** in 1.2.6). The rest have been dissolved into the arcs:
+**M16** agnos target). The rest are shipped or dissolved into the arcs:
 
 | Old bucket | Where it went |
 |---|---|
@@ -31,7 +31,7 @@ number is kept (**M10** consumer-burn, **M11** proposal sweeps, **M14** getenv, 
 | M12c (stdlib helpers) | distributed across 1.4.x–1.6.x by enabler |
 | M12d (per-utility) | distributed across 1.4.x–1.8.x by theme |
 | M13 (performance) | 1.9.x |
-| M17a–f, M17i | shipped in 1.2.0–1.2.4 |
+| M17 (all of a–j) | shipped across 1.2.0–1.2.6; the bucket is retired |
 
 Two rules hold across the arcs, both learned the hard way:
 
@@ -47,7 +47,6 @@ Two rules hold across the arcs, both learned the hard way:
 
 | Arc | Theme | Enabler | Gate |
 |---|---|---|---|
-| **1.2.6** | Close the defect arc | none — all local | ready |
 | **1.3.x** | Discoverability | spec-renderer atop `flags.cyr` | ready; **consumer waiting** (agnoshi) |
 | **1.4.x** | Pattern & text parity | repeatable-option collector, UTF-8 decoder | ready |
 | **1.5.x** | Identity & listing | passwd/group parser, comparator indirection | ready |
@@ -56,30 +55,13 @@ Two rules hold across the arcs, both learned the hard way:
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | ready |
 | **1.9.x** | Performance | niyama literal fast path (upstream, partial) | partly gated |
 
-Nothing after 1.2.6 is ordered by dependency between arcs — they are independent and could be
-resequenced by consumer demand. The order below reflects **who is waiting**: 1.3.x first because
-agnoshi has a named, external need for it.
+No arc depends on another — they are independent and can be resequenced by consumer demand. The
+order below reflects **who is waiting**: 1.3.x first because agnoshi has a named, external need for
+it.
 
----
-
-## 1.2.6 — Close the defect arc
-
-The last three confirmed defects from the v1.1.11 P-1 sweep. Closing these retires **M17** entirely
-and ends the 1.2.x correctness arc.
-
-- **M17g — `ls -l` fabricates metadata when a per-entry stat fails.** In a readable-but-not-searchable
-  directory it prints `---------- 0 0 0 0 1970-01-01 00:00` and exits 0, rendering a symlink as a
-  regular file. GNU prints `?` for the unknown fields, reports `cannot access` on stderr, exits 1.
-  ⚠ The fix is not the renderer — it is making `fs_stat_entry`'s failure a per-record state that the
-  column-width computation, the long-format renderer and the exit-status rollup all understand.
-- **M17h — `grep` retains ~320 bytes of heap per byte of input under BRE/ERE.** A 13.6 MB file
-  segfaults under `ulimit -v 1048576`; GNU handles it in constant memory. ⭐ The kriya-side half is
-  independent of upstream: route a pattern with no metacharacters to the already-present
-  `GR_ENG_FIXED` handle instead of compiling an NFA. The general case stays with the niyama work in
-  1.9.x.
-- **M17j — `realpath` refuses inputs over 16 KiB where GNU still resolves them.** v1.1.11 bounded
-  `fs_realpath`'s previously unchecked copies, turning a silently wrong answer into an honest
-  `ENAMETOOLONG`. Making `result`/`remaining` growable finishes the job.
+⚠ **The 1.2.x correctness arc closed at 1.2.6.** Everything below is new capability rather than
+defect repair, which is a different kind of risk: these change what kriya *does*, not what it gets
+wrong. Expect more ADRs and more GNU-comparison work per item than 1.2.x needed.
 
 ---
 
@@ -213,8 +195,12 @@ The named gaps in [`docs/benchmarks.md`](../benchmarks.md), each with a measured
   closes a 200× gap.
 - **`tail` seek-from-end** — `lseek(SEEK_END)` + backward scan in 8 KiB chunks for seekable input.
   Removes the 16 MiB cap and closes most of a 12× gap.
-- **niyama literal Boyer-Moore** — ⚠ upstream Cyrius. Closes a 2300× literal-scan gap and the general
-  half of M17h. Measured locally at 1.2.3: kriya scans 32 MB in 6.7 s where GNU takes 6 ms.
+- **niyama regex memory + speed** — ⚠ upstream Cyrius. ⛔ **This is still a crash, not just a slow
+  path:** `grep 'line.*005'` over 13.6 MB segfaults under `ulimit -v 1048576`, because the NFA retains
+  roughly 320 bytes per input byte. 1.2.6 fixed the half that needed no upstream — metacharacter-free
+  patterns now take the byte scanner (6.7 s → 115 ms, no crash) — but any pattern with a
+  metacharacter still compiles an NFA and still blows up. A literal Boyer-Moore path would also close
+  the remaining ~23× gap on the fast path.
 - **`cp` `copy_file_range(2)`** — accelerated copy with reflink where the filesystem supports it.
   Speculative; check AGNOS kernel availability before committing.
 - **`find` predicate JIT** — compile the predicate AST to a flat eval loop. ⚠ Not committed; revisit
@@ -378,7 +364,7 @@ What actually gates the arcs. Ship the enabler and everything under it becomes s
 | ARG_MAX argv chunking | `src/lib/` | `find -exec +`, `xargs -L`/`-x` | 1.7.x |
 | Float formatting | `src/cmd/printf.cyr` | `printf %e/%f/%g/%a`, `seq -f` | 1.8.x |
 | Byte-suffix parser | `src/lib/args.cyr` | `head -c 1K`, `tail -c 1K`, `sort -S` | 1.8.x |
-| niyama literal fast path | **upstream** | `grep` literal speedup, M17h general case | 1.9.x, gated |
+| niyama regex memory + speed | **upstream** | `grep` on metacharacter patterns — still segfaults under a 1 GiB cap | 1.9.x, gated |
 | chrono tzfile reader | **upstream** | `date` local time, `ls -l` locale mtime | gated |
 
 ---

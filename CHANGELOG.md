@@ -6,6 +6,92 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.2.6] - 2026-08-25 — closing the defect arc
+
+The last three confirmed defects from the v1.1.11 P-1 sweep. **M17 is retired**, and with it the
+1.2.x correctness arc: ten reproduced defects, all closed across 1.2.0–1.2.6.
+
+### Fixed — `ls -l` fabricated metadata when a per-entry stat failed (M17g)
+
+⛔ **`fs_stat_entry`'s return was discarded and the all-zero buffer rendered.** In a
+readable-but-not-searchable directory (`chmod 444`), where every per-entry stat fails EACCES, `ls -l`
+printed `---------- 0 0 0 0 1970-01-01 00:00` and **exited 0** — a symlink shown as a regular file, an
+epoch-zero date, every field a plausible-looking lie. GNU prints `?` for what it cannot know, reports
+`cannot access` per entry on stderr, and exits 1.
+
+⚠ **The fix was not the renderer.** A failed stat had to become a *per-record state* that three
+separate places understand: the column-width pass (a `?` is one column wide, not the width of a
+fabricated zero), the long-format emitter, and the exit-status rollup.
+
+⭐ **The type character survives**, because it comes from the **dirent**, not the stat — which is what
+lets a symlink still read as `l?????????` when it could not be stat'd at all. That is how GNU does it
+too, and it is the one field worth keeping when everything else is unknown.
+
+### Fixed — a literal `grep` pattern compiled to an NFA (M17h, kriya-side half)
+
+⛔ **`grep -c "line 000005"` over a 13.6 MB file SEGFAULTED under `ulimit -v 1048576`** — roughly
+320 bytes of heap retained per input byte — while GNU answers in constant memory. The pattern is a
+plain word; nothing about it needed a regex engine.
+
+Metacharacter-free patterns now route to the already-present `GR_ENG_FIXED` byte scanner.
+⭐ **Behaviour-preserving, not an approximation:** `-F` was always a full citizen of the match path —
+verified that `-w`, `-x`, `-i`, `-o`, `-v` and `-c` produce identical output on both engines, so the
+only thing that changes is which matcher runs underneath.
+
+Measured on the same 13.6 MB file: **no longer crashes**, and a literal scan went from **6.7 s to
+115 ms**. The gap to GNU is now ~23×, not the 2300× the roadmap recorded.
+
+⚠ **The regex path still blows up** — `grep 'line.*005'` still segfaults under the same cap. That is
+the upstream niyama half, and it stays in the 1.9.x performance arc. This release fixes the case that
+needed no upstream at all.
+
+⛔ **This fix introduced a bug that the smoke suite caught immediately, and it is the interesting
+part.** `fold_active` — whether `-i` pre-folds the *input* — was keyed off the **invocation** flag
+(`-E`/`-F`/`-G`) rather than the engine each pattern actually compiled to. So `grep -i -E foo` folded
+the pattern (fixed-engine behaviour) but not the input (RE2 behaviour) and **silently stopped matching
+`FOO BAR`**: a wrong answer with exit 0, from a change meant to be invisible. `fold_active` is now
+derived from the compiled handles. ⚠ Folding the input is safe for a mixed pattern set — the fold is
+ASCII and length-preserving, so `-o` offsets still line up and `(?i)` matches a folded input fine.
+
+### Fixed — `realpath` refused what GNU resolves (M17j)
+
+⚠ v1.1.11 bounded `fs_realpath`'s previously unchecked seed copies, turning a silently wrong answer
+into an honest `ENAMETOOLONG` — but it left kriya **refusing 16 KiB operands GNU handles fine**. The
+buffer was never a limit worth having; it was a constant nobody had revisited.
+
+The buffers are **sized from the operand** at entry and **grow** for symlink expansion beyond it.
+Verified against GNU at 8 KB, 16 KB, 40 KB and **120 KB** operands. ⚠ Growth does not weaken the cycle
+guard — that bound is the ELOOP counter (40), not the buffer size, and a `a -> b -> a` cycle still
+exits 1.
+
+### The arc, closed
+
+| Release | What it fixed |
+|---|---|
+| 1.2.0 | clustered/attached options; `xargs` eating the child's flags and its `--` |
+| 1.2.1 | six "accepts and lies" cases — success returned while doing the wrong thing |
+| 1.2.2 | the spawn helper: child stderr, and two wrong rungs of the POSIX exit ladder |
+| 1.2.3 | `grep -r`'s path-based descent; `cp -R` never prompting |
+| 1.2.4 | `mv` deleting the only surviving copy; `rm -r link/` half-completing (ADRs 0009, 0010) |
+| 1.2.5 | the chrono batch — and the discovery that two-thirds of it was never blocked |
+| **1.2.6** | the last three: fabricated metadata, the literal NFA, the realpath ceiling |
+
+### Tests
+
+**1,315 smoke cases across 34 scripts** (up from 1,295), 119 unit + 18 POSIX, 1,529 fuzz assertions
+green under the poisoned allocator. Both targets build.
+
+- `smoke-ls.sh` 36 → 43: the unstattable row asserted per type character, the absence of any
+  fabricated date, `cannot access` on stderr, exit 1, and a healthy listing still exiting 0.
+- `smoke-grep.sh` 76 → 86: eight literal/fold forms against GNU (the `-i -E` regression above is
+  pinned by name), a mixed literal-plus-regex `-e` pair, and the 13.6 MB scan under a 1 GiB cap.
+- `smoke-realpath.sh` 30 → 33: operands past the old ceiling compared against GNU, and the cycle
+  guard verified still intact.
+
+⚠ Three of these test blocks needed `|| true` on a capturing assignment: the command under test is
+*expected* to exit non-zero, and under `set -e` a bare assignment aborts the script — in `smoke-ls.sh`
+that happened before the `chmod` restore, leaving the trap unable to clean up.
+
 ## [1.2.5] - 2026-08-25 — the chrono batch, minus what is actually blocked
 
 Last scheduled batch of the **1.2.x arc**. The roadmap had all six items gated on upstream

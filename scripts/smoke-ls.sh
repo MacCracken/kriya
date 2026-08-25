@@ -194,6 +194,52 @@ out=$("$BIN" ls regfile ghost 2>/dev/null) || rc=$?
 expect_eq "partial rc"            "1" "$rc"
 expect_match "partial preserves"  "^regfile\$" "$out"
 
+# --- an unstattable entry is `?`, not a fabrication (M17g, v1.2.6) ------
+# ⛔ `ls -l` discarded `fs_stat_entry`'s return and rendered the all-zero buffer:
+# `---------- 0 0 0 0 1970-01-01 00:00`, exit 0 — a symlink shown as a regular
+# file, an epoch-zero date, every field a plausible-looking lie. Reproduced in a
+# readable-but-not-searchable directory, where every per-entry stat fails EACCES.
+mkdir -p unstat
+touch unstat/afile
+ln -s /tmp unstat/alink
+mkdir unstat/adir
+chmod 444 unstat
+
+# ⚠ `|| true` on the capturing assignments is load-bearing under `set -e`: this
+# invocation is EXPECTED to exit 1, and a bare assignment would abort the script
+# there — before the chmod below, leaving the trap unable to clean up.
+out=$("$BIN" ls -l unstat 2>/dev/null || true)
+rc=0; "$BIN" ls -l unstat >/dev/null 2>&1 || rc=$?
+err=$("$BIN" ls -l unstat 2>&1 >/dev/null || true)
+chmod 755 unstat
+
+expect_eq "M17g: exits 1" "1" "$rc"
+# ⭐ The TYPE character survives — it comes from the dirent, not the stat, which
+# is what lets a symlink still read as `l` when it could not be stat'd at all.
+case "$out" in
+    *"d?????????"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL M17g: dir row not d?????????: %s\n" "$out" >&2 ;;
+esac
+case "$out" in
+    *"l?????????"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL M17g: symlink row not l?????????: %s\n" "$out" >&2 ;;
+esac
+case "$out" in
+    *"-?????????"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL M17g: file row not -?????????: %s\n" "$out" >&2 ;;
+esac
+# No fabricated values anywhere in the row.
+case "$out" in
+    *"1970-01-01"*) FAIL=$((FAIL + 1)); printf "FAIL M17g: still fabricates an epoch date\n" >&2 ;;
+    *) PASS=$((PASS + 1)) ;;
+esac
+case "$err" in
+    *"cannot access"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL M17g: no 'cannot access' on stderr: %s\n" "$err" >&2 ;;
+esac
+# A healthy listing is untouched — same fields, exit 0.
+expect_exit "M17g: healthy listing still exits 0" 0 "$BIN" ls -l .
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

@@ -458,11 +458,36 @@ fn _fs_strip_last_component(result, ri): i64 {
     return p;
 }
 
+# Smallest doubling of `cap` that reaches `need`.
+fn _fs_grow_cap(cap, need): i64 {
+    var c = cap;
+    if (c < 1) { c = 1; }
+    while (c < need) { c = c * 2; }
+    return c;
+}
+
+# Copy `used` bytes of `buf` into a fresh `need`-byte allocation.
+# ⚠ Bump allocation, so the old block is not reclaimed. `realpath` is one-shot
+# per process and grows at most a handful of times, so the waste is bounded and
+# the alternative (a free-list for a path buffer) is not worth the machinery.
+fn _fs_regrow(buf, used, need): i64 {
+    var nb = alloc(need);
+    memcpy(nb, buf, used);
+    return nb;
+}
+
 fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
     if (input == 0)        { return 0 - 2; }
     if (load8(input) == 0) { return 0 - 2; }
 
-    var BUFSZ: i64 = 16384;
+    # ⭐ SIZED FROM THE INPUT, NOT A FIXED CEILING. v1.1.11 bounded the previously
+    # unchecked seed copies, which turned a silently wrong answer into an honest
+    # ENAMETOOLONG — but it left kriya refusing 16 KiB operands that GNU resolves
+    # fine. The buffer was never a limit worth having; it was a constant nobody
+    # had revisited. Starting from the operand's own length removes the refusal,
+    # and `_fs_grow_cap` handles the symlink expansion beyond it.
+    var in_len = strlen(input);
+    var BUFSZ = _fs_grow_cap(16384, in_len + 2);
     var result    = alloc(BUFSZ);
     var remaining = alloc(BUFSZ);
     var ri: i64 = 0;
@@ -482,16 +507,14 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
         store8(result, 47);
         store8(result + 1, 0);
         ri = 1;
-        var ilen = strlen(input);
-        if (ilen + 1 > BUFSZ) { return 0 - 36; }   # ENAMETOOLONG
+        var ilen = in_len;                   # BUFSZ was sized from this
         memcpy(remaining, input + 1, ilen);  # also copies the null
     } else {
         var n = k_getcwd(result, BUFSZ);
         if (n < 0) { return n; }
         ri = n - 1;  # SYS_GETCWD returns length INCLUDING null
         if (ri < 1) { ri = 1; }
-        var ilen = strlen(input);
-        if (ilen + 2 > BUFSZ) { return 0 - 36; }   # ENAMETOOLONG
+        var ilen = in_len;                   # BUFSZ was sized from this
         memcpy(remaining, input, ilen + 1);
     }
 
@@ -541,7 +564,14 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
                     if (ri == 1) {
                         if (load8(result) == 47) { sep = 0; }
                     }
-                    if (ri + sep + seg_len + 1 > BUFSZ) { return 0 - 36; }
+                    # Grow rather than refuse. Only `result` carries state here;
+                    # `remaining` is read-only until the symlink branch replaces
+                    # it wholesale, and the scratch buffers are freshly allocated.
+                    if (ri + sep + seg_len + 1 > BUFSZ) {
+                        var need = ri + sep + seg_len + 1;
+                        BUFSZ = _fs_grow_cap(BUFSZ, need);
+                        result = _fs_regrow(result, ri + 1, BUFSZ);
+                    }
                     if (sep == 1) {
                         store8(result + ri, 47);
                         ri = ri + 1;
@@ -608,11 +638,15 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
                                 var rest_off = seg_end;
                                 while (load8(remaining + rest_off) == 47) { rest_off = rest_off + 1; }
                                 var rest_len = strlen(remaining + rest_off);
-                                # ⚠ Same class as the seed above: `tl` is bounded by the
-                                # readlink limit and `rest_len` by BUFSZ, so their SUM can be
-                                # nearly twice BUFSZ. Each round of symlink expansion grows
-                                # `remaining`, so a chain of links is the natural way to reach it.
-                                if (tl + rest_len + 2 > BUFSZ) { return 0 - 36; }   # ENAMETOOLONG
+                                # ⚠ `tl` is bounded by the readlink limit and `rest_len` by
+                                # BUFSZ, so their SUM can approach twice BUFSZ — and each round
+                                # of expansion grows `remaining`, so a chain of links is the
+                                # natural way to reach it. Grow rather than refuse; the ELOOP
+                                # counter above (40) is what actually bounds the chain.
+                                if (tl + rest_len + 2 > BUFSZ) {
+                                    BUFSZ = _fs_grow_cap(BUFSZ, tl + rest_len + 2);
+                                    new_remaining = _fs_regrow(new_remaining, tl, BUFSZ);
+                                }
                                 if (rest_len > 0) {
                                     store8(new_remaining + tl, 47);
                                     memcpy(new_remaining + tl + 1, remaining + rest_off, rest_len + 1);

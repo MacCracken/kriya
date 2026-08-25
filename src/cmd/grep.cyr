@@ -250,11 +250,59 @@ fn _gr_handle_new(kind, nfa, pat, pat_len, fold): i64 {
     return h;
 }
 
+# 1 if `pat` contains no character that is special in EITHER BRE or ERE, so it
+# means the same thing as a literal byte string under both.
+#
+# ⛔ WITHOUT THIS, A PLAIN WORD COMPILED TO AN NFA AND THE NFA ATE THE HEAP.
+# Measured: `grep -c "line 000005"` over a 13.6 MB file SEGFAULTS under
+# `ulimit -v 1048576` — roughly 320 bytes retained per input byte — while GNU
+# answers in constant memory. The pattern is a literal; nothing about it needed
+# a regex engine.
+#
+# ⭐ Routing to `GR_ENG_FIXED` is behaviour-preserving, not an approximation:
+# `-F` is already a full citizen of the match path. Verified that `-w`, `-x`,
+# `-i`, `-o`, `-v` and `-c` produce identical output on both engines, so the only
+# thing that changes is which matcher runs underneath.
+#
+# ⚠ The set is the UNION of both dialects, deliberately over-broad. `+` and `?`
+# are literal in BRE and special in ERE; treating them as special everywhere
+# costs one NFA compile for `grep "a+b"` and removes a whole class of
+# "which dialect am I in" reasoning from the fast path. A false negative here is
+# a missed optimisation; a false positive would be a wrong answer.
+fn _gr_is_literal(pat, pat_len): i64 {
+    var i: i64 = 0;
+    while (i < pat_len) {
+        var c = load8(pat + i);
+        if (c == 46)  { return 0; }    # .
+        if (c == 42)  { return 0; }    # *
+        if (c == 43)  { return 0; }    # +
+        if (c == 63)  { return 0; }    # ?
+        if (c == 91)  { return 0; }    # [
+        if (c == 93)  { return 0; }    # ]
+        if (c == 94)  { return 0; }    # ^
+        if (c == 36)  { return 0; }    # $
+        if (c == 40)  { return 0; }    # (
+        if (c == 41)  { return 0; }    # )
+        if (c == 123) { return 0; }    # {
+        if (c == 125) { return 0; }    # }
+        if (c == 124) { return 0; }    # |
+        if (c == 92)  { return 0; }    # backslash
+        i = i + 1;
+    }
+    return 1;
+}
+
 # Compile one pattern under the chosen engine flag set. Returns handle or 0.
 # `engine_flag`: 0=BRE, 1=RE2, 2=fixed. `ignore_case`: 1 if -i.
 fn _gr_compile(pat, engine_flag, ignore_case): i64 {
     var pat_len = strlen(pat);
-    if (engine_flag == GR_ENG_FIXED) {
+    # A metacharacter-free pattern is a literal in every dialect — take the byte
+    # scanner and skip the NFA entirely. See `_gr_is_literal`.
+    var eff_engine = engine_flag;
+    if (eff_engine != GR_ENG_FIXED) {
+        if (_gr_is_literal(pat, pat_len) == 1) { eff_engine = GR_ENG_FIXED; }
+    }
+    if (eff_engine == GR_ENG_FIXED) {
         if (ignore_case == 1) {
             var folded_len: i64 = 0;
             var folded = alloc(pat_len + 1);
@@ -264,7 +312,7 @@ fn _gr_compile(pat, engine_flag, ignore_case): i64 {
         }
         return _gr_handle_new(GR_ENG_FIXED, 0, pat, pat_len, 0);
     }
-    if (engine_flag == GR_ENG_RE2) {
+    if (eff_engine == GR_ENG_RE2) {
         # Prepend (?i) for case-insensitive — niyama_re2 honors the inline flag.
         var compile_pat = pat;
         if (ignore_case == 1) {
@@ -935,10 +983,28 @@ fn cmd_grep(start: i64): i64 {
     var n_handles = vec_len(handles);
 
     # Decide whether input pre-fold is needed.
+    #
+    # ⛔ DERIVED FROM THE HANDLES, NOT FROM THE INVOCATION FLAG. `engine` is what
+    # the user asked for (`-E`/`-F`/`-G`); `_gr_compile` may legitimately choose
+    # something else per pattern, because a metacharacter-free pattern is routed
+    # to the fixed engine regardless of dialect. Keying off `engine` meant
+    # `grep -i -E foo` folded the PATTERN (fixed-engine behaviour) but not the
+    # INPUT (RE2 behaviour) and silently stopped matching `FOO BAR` — a wrong
+    # answer with exit 0, caught by the smoke suite the moment the fast path
+    # landed.
+    #
+    # ⚠ Folding the input is safe for an RE2 handle in the mixed case: the fold
+    # is ASCII and length-preserving, so match offsets still line up for `-o`,
+    # and `(?i)` matches a folded input fine. The printed line is always the
+    # original, never the folded copy.
     var fold_active: i64 = 0;
     if (ignore_case == 1) {
-        if (engine == GR_ENG_BRE)   { fold_active = 1; }
-        if (engine == GR_ENG_FIXED) { fold_active = 1; }
+        if (engine == GR_ENG_BRE) { fold_active = 1; }
+        var fh: i64 = 0;
+        while (fh < n_handles) {
+            if (load64(vec_get(handles, fh)) == GR_ENG_FIXED) { fold_active = 1; }
+            fh = fh + 1;
+        }
     }
 
     # Compute file operand list (positional after the pattern slot).

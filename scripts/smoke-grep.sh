@@ -247,6 +247,43 @@ echo DECOY  > slt/other/d
 ln -s real slt/aslink
 expect_eq "-r skips a symlinked dir" "slt/real/sub/s:SECRET" "$("$BIN" grep -r SECRET slt 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')"
 
+# --- a literal pattern skips the NFA (M17h, v1.2.6) --------------------
+# ⛔ A plain word compiled to an NFA that retained ~320 bytes per INPUT byte:
+# `grep -c "line 000005"` over 13.6 MB SEGFAULTED under `ulimit -v 1048576`
+# while GNU answered in constant memory. Routing metacharacter-free patterns to
+# the already-present fixed engine is behaviour-preserving — `-F` was always a
+# full citizen of the match path.
+#
+# ⚠ The regression this introduced is the interesting part: `fold_active` was
+# keyed off the INVOCATION flag (`-E`/`-F`/`-G`) rather than the engine each
+# pattern actually compiled to, so `grep -i -E foo` folded the pattern but not
+# the input and silently stopped matching `FOO BAR`. These cases pin both halves.
+printf 'foo\nFOO BAR\nfoo bar baz\n' > litfold
+for form in "-i -E foo" "-i foo" "-i -F foo" "-E foo" "foo" "-F foo" "-i -E -o foo" "-i -E -c foo"; do
+    expect_eq "literal/fold [$form]" \
+        "$(grep $form litfold 2>&1 | tr '\n' '|')" "$($BIN grep $form litfold 2>&1 | tr '\n' '|')"
+done
+# Mixed literal + regex under -i: the literal takes the fixed engine, the regex
+# stays on RE2, and folding the input must be safe for both.
+expect_eq "mixed -e literal + regex" \
+    "$(grep -i -e foo -e 'b.r' litfold | tr '\n' '|')" "$($BIN grep -i -e foo -e 'b.r' litfold | tr '\n' '|')"
+
+# The memory fix itself, bounded so a regression fails rather than hangs.
+if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import sys
+f = open(sys.argv[1], "w")
+for i in range(400000):
+    f.write("line %06d abcdefghij klmnopqrst\n" % i)
+f.close()' bigmem 2>/dev/null || true
+    if [ -f bigmem ]; then
+        rc=0
+        ( ulimit -v 1048576 2>/dev/null; timeout 120 "$BIN" grep -c 'line 000005' bigmem >/dev/null 2>&1 ) || rc=$?
+        expect_eq "M17h: literal scan under a 1GiB cap" "0" "$rc"
+        rm -f bigmem
+    fi
+fi
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

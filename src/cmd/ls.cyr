@@ -112,11 +112,42 @@ fn _ls_report(operand, errno): i64 {
 #   offset 8   : 144-byte stat buffer
 #   offset 152 : pointer to symlink target cstring (or 0)
 
+# ⛔ A RECORD WHOSE STAT FAILED IS A STATE, NOT A ZEROED STRUCT. `ls -l` used to
+# discard `fs_stat_entry`'s return and render the all-zero buffer, printing
+# `---------- 0 0 0 0 1970-01-01 00:00` and exiting 0 — a symlink shown as a
+# regular file, an epoch-zero date, and every field a plausible-looking lie.
+# Reproduced in a readable-but-not-searchable directory (`chmod 444`), where
+# every per-entry stat fails with EACCES. GNU prints `?` for what it cannot know,
+# reports `cannot access` per entry on stderr, and exits 1.
+#
+# ⚠ The fix is not the renderer alone: the flag has to reach the column-width
+# pass (a `?` is one column wide, not the width of a fabricated zero), the
+# long-format emitter, AND the exit-status rollup.
+var _ls_stat_failed = 0;
+
 fn _ls_rec_new(name_cstr): i64 {
-    var rec = alloc(160);
+    var rec = alloc(168);
     store64(rec, name_cstr);
     store64(rec + 152, 0);
+    store64(rec + 160, 0);          # 1 = stat failed; fields are unknown
     return rec;
+}
+
+fn _ls_rec_bad(rec): i64        { return load64(rec + 160); }
+fn _ls_rec_set_bad(rec): i64    { store64(rec + 160, 1); return 0; }
+
+# Map a dirent d_type to the S_IF* bits, so the TYPE character stays correct even
+# when the stat failed — which is what lets `ls -l` show `l?????????` for a
+# symlink it could not stat, exactly as GNU does.
+fn _ls_mode_from_dtype(dt): i64 {
+    if (dt == 4)  { return 16384; }   # DT_DIR  -> S_IFDIR
+    if (dt == 8)  { return 32768; }   # DT_REG  -> S_IFREG
+    if (dt == 10) { return 40960; }   # DT_LNK  -> S_IFLNK
+    if (dt == 2)  { return 8192;  }   # DT_CHR  -> S_IFCHR
+    if (dt == 6)  { return 24576; }   # DT_BLK  -> S_IFBLK
+    if (dt == 1)  { return 4096;  }   # DT_FIFO -> S_IFIFO
+    if (dt == 12) { return 49152; }   # DT_SOCK -> S_IFSOCK
+    return 0;
 }
 
 fn _ls_rec_name(rec): i64 { return load64(rec); }
@@ -177,6 +208,14 @@ fn _ls_emit_dec_padded(v, width): i64 {
 }
 
 # Symbolic permissions (10-byte sequence: type + ugo rwx triples).
+# Right-align a single `?` in a `width` column, matching the numeric emitters.
+fn _ls_emit_q_padded(width): i64 {
+    var pad = width - 1;
+    while (pad > 0) { k_write( 1, " ", 1); pad = pad - 1; }
+    k_write( 1, "?", 1);
+    return 0;
+}
+
 fn _ls_render_symperm(mode, buf): i64 {
     var typ = mode & 61440;
     var c: i64 = 45;  # '-'
@@ -426,10 +465,29 @@ fn _ls_collect(dir_path, all_mode, almost_all): i64 {
                         memcpy(name_copy, name, nlen + 1);
                         var rec = _ls_rec_new(name_copy);
                         var ent_fp = path_join(dir_path, name);
-                        fs_stat_entry(dir_fd, ent_fp, name, _ls_rec_st(rec), 0);
+                        var sr = fs_stat_entry(dir_fd, ent_fp, name, _ls_rec_st(rec), 0);
+                        if (sr != 0) {
+                            # Keep the type from the dirent so the row still says
+                            # WHAT it is; everything else becomes `?`.
+                            _ls_rec_set_bad(rec);
+                            store64(_ls_rec_st(rec) + 24, _ls_mode_from_dtype(fs_dent_type(ent)));
+                            k_write( 2, "kriya ls: cannot access '", 25);
+                            k_write( 2, ent_fp, strlen(ent_fp));
+                            k_write( 2, "': ", 3);
+                            if (errmsg_is_known(0 - sr) == 1) {
+                                var em = errmsg_for(0 - sr);
+                                k_write( 2, em, strlen(em));
+                            } else {
+                                k_write( 2, "cannot stat", 11);
+                            }
+                            k_write( 2, "\n", 1);
+                            _ls_stat_failed = 1;
+                        }
                         # Cache symlink target if it'll be needed by -l.
-                        if (fs_is_lnk(_ls_rec_st(rec)) == 1) {
-                            _ls_load_link_target(dir_fd, rec);
+                        if (sr == 0) {
+                            if (fs_is_lnk(_ls_rec_st(rec)) == 1) {
+                                _ls_load_link_target(dir_fd, rec);
+                            }
                         }
                         vec_push(entries, rec);
                     }
@@ -654,6 +712,12 @@ fn _ls_print_long(entries, human, F_mode, inode_mode): i64 {
     while (i < n) {
         var rec = vec_get(entries, i);
         var st = _ls_rec_st(rec);
+        if (_ls_rec_bad(rec) == 1) {
+            # Every numeric field renders as a single `?`; contributing the
+            # fabricated zeros here would pad the whole listing to their width.
+            i = i + 1;
+            continue;
+        }
         var wn = _ls_dec_width(load64(st + 16));
         if (wn > w_nlink) { w_nlink = wn; }
         var wu = _ls_dec_width(load64(st + 28) & 4294967295);
@@ -679,27 +743,43 @@ fn _ls_print_long(entries, human, F_mode, inode_mode): i64 {
         var rec = vec_get(entries, i);
         var st = _ls_rec_st(rec);
         var name = _ls_rec_name(rec);
+        var bad = _ls_rec_bad(rec);
         if (inode_mode == 1) {
-            _ls_emit_dec_padded(load64(st + 8), w_ino);
+            if (bad == 1) { _ls_emit_q_padded(w_ino); }
+            else { _ls_emit_dec_padded(load64(st + 8), w_ino); }
             k_write( 1, " ", 1);
         }
         var perm_buf[16];
         _ls_render_symperm(load64(st + 24), &perm_buf);
+        if (bad == 1) {
+            # Type character survives (from the dirent); the nine permission
+            # bits are genuinely unknown.
+            var q: i64 = 1;
+            while (q < 10) { store8(&perm_buf + q, 63); q = q + 1; }
+        }
         k_write( 1, &perm_buf, 10);
         k_write( 1, " ", 1);
-        _ls_emit_dec_padded(load64(st + 16), w_nlink);
-        k_write( 1, " ", 1);
-        _ls_emit_dec_padded(load64(st + 28) & 4294967295, w_uid);
-        k_write( 1, " ", 1);
-        _ls_emit_dec_padded(load64(st + 32) & 4294967295, w_gid);
-        k_write( 1, " ", 1);
-        if (human == 1) {
-            _ls_emit_human_padded(load64(st + 48), w_size);
+        if (bad == 1) {
+            _ls_emit_q_padded(w_nlink); k_write( 1, " ", 1);
+            _ls_emit_q_padded(w_uid);   k_write( 1, " ", 1);
+            _ls_emit_q_padded(w_gid);   k_write( 1, " ", 1);
+            _ls_emit_q_padded(w_size);  k_write( 1, " ", 1);
+            k_write( 1, "               ? ", 17);      # mtime column, right-aligned
         } else {
-            _ls_emit_dec_padded(load64(st + 48), w_size);
+            _ls_emit_dec_padded(load64(st + 16), w_nlink);
+            k_write( 1, " ", 1);
+            _ls_emit_dec_padded(load64(st + 28) & 4294967295, w_uid);
+            k_write( 1, " ", 1);
+            _ls_emit_dec_padded(load64(st + 32) & 4294967295, w_gid);
+            k_write( 1, " ", 1);
+            if (human == 1) {
+                _ls_emit_human_padded(load64(st + 48), w_size);
+            } else {
+                _ls_emit_dec_padded(load64(st + 48), w_size);
+            }
+            k_write( 1, " ", 1);
+            _ls_emit_mtime(load64(st + 88));
         }
-        k_write( 1, " ", 1);
-        _ls_emit_mtime(load64(st + 88));
         k_write( 1, name, strlen(name));
         # Symlink target.
         if (fs_is_lnk(st) == 1) {
@@ -902,5 +982,7 @@ fn cmd_ls(start: i64): i64 {
     }
 
     if (any_failed == 1) { return EXIT_FAILURE; }
+    # An entry we could not stat is a failure even when the listing printed.
+    if (_ls_stat_failed == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
 }
