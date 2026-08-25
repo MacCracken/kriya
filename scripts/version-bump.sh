@@ -6,10 +6,15 @@
 # Touches:
 #   - VERSION                              (the bare semver string)
 #   - src/version_str.cyr                  (regenerated; banner + bare-version vars)
-#   - docs/development/state.md            (`## Version` line + "Refreshed" date)
+#   - docs/development/state.md            (INSERTS a stub `## Version` entry above the
+#                                           newest one; syncs the `## Toolchain` Cyrius-pin
+#                                           line from cyrius.cyml)
 #
 # Does NOT touch:
-#   - cyrius.cyml                          (reads VERSION via ${file:VERSION})
+#   - existing `## Version` entries        (released history is APPEND-ONLY — see §3a; the
+#                                           inserted entry's prose is written by hand)
+#   - cyrius.cyml                          (version comes from `${file:VERSION}`; the
+#                                           `[package].cyrius` pin is READ here, never written)
 #   - CHANGELOG.md                         (manual; per-release section is human-curated)
 #   - ADRs / arch notes                    (point-in-time docs; references stay frozen)
 #
@@ -77,21 +82,122 @@ var _VERSION_LEN_KRIYA = $KLEN;
 var _VERSION_KRIYA     = "$NEW";
 EOF
 
-# 3. docs/development/state.md — bump the `## Version` line and the
-#    "Refreshed every release" footer if it carries a date.
-if [ -f "$ROOT/docs/development/state.md" ]; then
+# 3. docs/development/state.md — two independent edits (3a entry, 3b pin).
+STATE="$ROOT/docs/development/state.md"
+
+# Shape of a `## Version` entry line: `**X.Y.Z** — released DATE. …`.
+# Written with bracket expressions rather than backslash escapes so the same
+# pattern is safe through `awk -v` (which runs escape processing over the
+# assignment, and would eat `\*`) as well as `grep -E`.
+ENTRY_RE='^[*][*][0-9]+[.][0-9]+[.][0-9]+(-[a-zA-Z0-9.]+)?[*][*] — '
+
+if [ -f "$STATE" ]; then
     TODAY=$(date +%Y-%m-%d)
-    # Match: `**X.Y.Z** — ...` at start of a line.
-    # ⛔ `0,/re/` IS LOAD-BEARING — WITHOUT IT THIS DESTROYS THE RELEASE HISTORY. state.md's Version
-    # section is a REVERSE-CHRONOLOGICAL LIST: the newest release on top, every prior release below
-    # it, each opening with the same `**X.Y.Z** — released DATE.` shape. An unaddressed `s###` applies
-    # to EVERY line it matches, so each bump silently rewrote every historical heading to the new
-    # number — leaving a run of identically-numbered entries carrying different dates and different
-    # content. It is invisible at bump time (the script prints "Bumped to X" and exits 0) and only
-    # shows up later when someone reads the file. Caught 2026-08-11 at the 1.1.9 cut, by which point
-    # seven headings had been flattened; they were reconstructed from CHANGELOG.md, which is
-    # hand-curated and was therefore untouched. `0,/re/` bounds the substitution to the FIRST match.
-    sed -i -E "0,/^\*\*[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?\*\* — /s##\*\*$NEW\*\* — #" "$ROOT/docs/development/state.md"
+
+    # 3a. `## Version` — INSERT a stub entry above the newest one.
+    #
+    # ⛔ THE `## Version` SECTION IS APPEND-ONLY RELEASE HISTORY, NOT A "current version"
+    # FIELD. It is a REVERSE-CHRONOLOGICAL LIST of *released* entries — newest on top, every
+    # prior release below it, each opening with the same `**X.Y.Z** — released DATE.` shape.
+    # Two consecutive cuts were damaged by editing it with `sed s###`, the second a narrower
+    # instance of the first:
+    #
+    #   at 1.1.9  — an UNADDRESSED `s###` applied to EVERY line it matched, so each bump
+    #               silently renumbered all of history to the new version, leaving a run of
+    #               identically-numbered entries carrying different dates and different
+    #               content. By the time it was caught, seven headings had been flattened;
+    #               they were reconstructed from CHANGELOG.md, which is hand-curated and was
+    #               therefore untouched. Fixed by bounding the substitution with `0,/re/`.
+    #   at 1.1.10 — `0,/re/` correctly stopped the flattening, but the substitution still
+    #               REWROTE THE FIRST heading IN PLACE: `**1.1.9** — released 2026-08-11.`
+    #               became `**1.1.10** — released 2026-08-11.` still sitting above 1.1.9's
+    #               prose, and 1.1.9 disappeared from the file entirely. Repaired by hand in
+    #               the 1.1.10 commit.
+    #
+    # Both are invisible at bump time (the script prints "Bumped to X" and exits 0) and only
+    # surface when a human next reads the file. So the fix targets the family, not the
+    # instance: this script only ever INSERTS a new entry above the current top one and never
+    # edits a line it did not just write. The stub's prose is a TODO for the human — release
+    # summaries are hand-curated from CHANGELOG.md. If the top entry is already $NEW the
+    # insert is skipped, so re-running the bump is safe.
+    TOP=$(awk -v re="$ENTRY_RE" '$0 ~ re { v = $1; gsub(/[*]/, "", v); print v; exit }' "$STATE")
+    STUB="**$NEW** — released $TODAY. **TODO: release summary.** Write it by hand from CHANGELOG.md \`[$NEW]\` — \`scripts/version-bump.sh\` inserts the entry, never the prose."
+
+    if [ "$TOP" = "$NEW" ]; then
+        echo "  state.md: '## Version' already opens with $NEW — nothing inserted"
+    else
+        TMP="$STATE.bump.$$"
+        if [ -n "$TOP" ]; then
+            # Normal path: insert above the newest existing entry.
+            awk -v re="$ENTRY_RE" -v stub="$STUB" '
+                !ins && $0 ~ re { print stub; print ""; ins = 1 }
+                { print }
+            ' "$STATE" > "$TMP" || { rm -f "$TMP"; exit 1; }
+        elif grep -q '^## Version[[:space:]]*$' "$STATE"; then
+            # Empty history: anchor on the section heading instead, absorbing the
+            # blank line that follows it so spacing stays one-blank-between-entries.
+            awk -v stub="$STUB" '
+                !ins && /^## Version[[:space:]]*$/ {
+                    print; print ""; print stub; print ""
+                    ins = 1; eatblank = 1
+                    next
+                }
+                eatblank { eatblank = 0; if ($0 == "") next }
+                { print }
+            ' "$STATE" > "$TMP" || { rm -f "$TMP"; exit 1; }
+        else
+            rm -f "$TMP"
+            echo "  ⚠ state.md: no '## Version' section found — add the $NEW entry by hand" >&2
+            TMP=""
+        fi
+
+        if [ -n "$TMP" ]; then
+            # Copy back through the original file (not `mv`) so its mode, ownership
+            # and inode survive; $TMP is already a complete, valid file here.
+            cat "$TMP" > "$STATE" || { rm -f "$TMP"; exit 1; }
+            rm -f "$TMP"
+            NOW_TOP=$(awk -v re="$ENTRY_RE" '$0 ~ re { v = $1; gsub(/[*]/, "", v); print v; exit }' "$STATE")
+            if [ "$NOW_TOP" = "$NEW" ]; then
+                if [ -n "$TOP" ]; then
+                    echo "  state.md: inserted a $NEW entry above $TOP (prose is yours to write)"
+                else
+                    echo "  state.md: inserted a $NEW entry under '## Version' (prose is yours to write)"
+                fi
+            else
+                echo "  ⚠ state.md: $NEW entry insert did not take — add it by hand" >&2
+            fi
+        fi
+    fi
+
+    # 3b. `## Toolchain` Cyrius pin — a MIRROR of cyrius.cyml `[package].cyrius`, which is
+    # the single source of truth (CI derives the installer version from it). Nothing kept the
+    # two in sync, so the doc line sat at 6.4.20 while the manifest said 6.5.18 — two pin
+    # bumps behind. Read the manifest and rewrite the doc line; the manifest is never written.
+    PIN=$(awk -F'"' '
+        /^[[:space:]]*\[/ { in_pkg = ($0 ~ /^[[:space:]]*\[package\][[:space:]]*$/) }
+        in_pkg && /^[[:space:]]*cyrius[[:space:]]*=/ { print $2; exit }
+    ' "$ROOT/cyrius.cyml")
+    DOC_PIN=$(sed -n -E 's/^- \*\*Cyrius pin\*\*: `([^`]*)`.*/\1/p' "$STATE" | head -1)
+
+    if [ -z "$PIN" ]; then
+        echo "  ⚠ state.md: no [package].cyrius pin in cyrius.cyml — pin line left alone" >&2
+    elif ! echo "$PIN" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+        echo "  ⚠ state.md: cyrius.cyml pin '$PIN' is not semver — pin line left alone" >&2
+    elif [ -z "$DOC_PIN" ]; then
+        echo "  ⚠ state.md: no '- **Cyrius pin**: \`X.Y.Z\`' line under ## Toolchain — add it by hand ($PIN)" >&2
+    elif [ "$DOC_PIN" = "$PIN" ]; then
+        echo "  state.md: Cyrius pin already in sync ($PIN)"
+    else
+        # `0,/re/`-bounded like every other substitution in this file — the line is unique
+        # today, and an unaddressed `s###` is exactly how §3a's history got flattened.
+        sed -i -E "0,/^- \*\*Cyrius pin\*\*: /s|(^- \*\*Cyrius pin\*\*: \`)[^\`]*|\1$PIN|" "$STATE"
+        NOW_PIN=$(sed -n -E 's/^- \*\*Cyrius pin\*\*: `([^`]*)`.*/\1/p' "$STATE" | head -1)
+        if [ "$NOW_PIN" = "$PIN" ]; then
+            echo "  state.md: Cyrius pin $DOC_PIN -> $PIN (from cyrius.cyml)"
+        else
+            echo "  ⚠ state.md: Cyrius pin rewrite did not take ($DOC_PIN, want $PIN)" >&2
+        fi
+    fi
 fi
 
 echo "Bumped to $NEW."
@@ -99,5 +205,6 @@ echo "Next:"
 echo "  - cyrius build src/main.cyr build/kriya"
 echo "  - cyrius test"
 echo "  - update CHANGELOG.md: add a [$NEW] section, move [Unreleased] entries into it, set the release date"
+echo "  - fill in the docs/development/state.md [$NEW] entry (stub inserted above the previous release; prose is hand-written)"
 echo "  - git commit -am 'release: $NEW'"
 echo "  - git tag v$NEW"

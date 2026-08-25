@@ -195,6 +195,21 @@ reformatting 12 files inside a release cut would bury the change that matters in
 
 ## [Unreleased]
 
+### Changed
+
+- **`scripts/fuzz.sh` now drives the harnesses through `cyrius fuzz --poison` instead of `cyrius test`.**
+  Only the `fuzz` verb injects `CYRIUS_POISON=1` as a compile-time predefine, which enables the freelist
+  allocator's redzones, `0xA5` fill, and quarantine-on-free; `cyrius test` does not. Without poison, an
+  out-of-bounds **read** lands in mapped memory and never faults — so every `fuzz: no crashes` line the
+  script printed was silent about exactly the failure class the harnesses exist to catch. That is the
+  whole point of `kriya-grep.fcyr` (the niyama BRE/RE2 engine) and `kriya-printf.fcyr` (kriya's own
+  format engine): both are parser surfaces where a read one byte past a bracket class or a conversion
+  spec is the realistic bug, not a write. Per-harness output shape is unchanged, plus a
+  `poison mode: ... ACTIVE` line per block so a run that quietly lost poison is visible rather than
+  inferred. **Raises the script's toolchain floor to cyrius >= 6.5.29**, the release that added the flag;
+  older toolchains reject `--poison` outright rather than fuzzing unpoisoned. Noted in the script header.
+  Green at pin 6.5.35: **1529** assertions (1127 grep + 201 find + 201 printf), 3 passed / 0 failed.
+
 ## [1.1.7] — 2026-07-10 — GNU-style multi-column `ls`
 
 ### Added
