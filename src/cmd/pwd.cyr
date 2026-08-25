@@ -22,6 +22,7 @@ fn _pwd_init_spec(): i64 {
     _pwd_spec = s;
     help_begin("pwd", "Print the working directory.",
                "pwd [OPTIONS]");
+    help_positional(0, 0, 0);
     help_example("pwd");
     help_example("pwd -P");
     return 0;

@@ -59,6 +59,7 @@ fn _tail_init_spec(): i64 {
     _tail_spec = s;
     help_begin("tail", "Print the last part of files.",
                "tail [OPTIONS] [FILE...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_operands("Defaults to 10 lines. ⚠ -f follows a single file by polling its path; multi-file follow is not supported.");
     help_exit(1, "a file could not be read");
     help_example("tail -n 50 app.log");

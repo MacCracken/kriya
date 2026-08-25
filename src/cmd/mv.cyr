@@ -62,6 +62,8 @@ fn _mv_init_spec(): i64 {
     _mv_spec = s;
     help_begin("mv", "Move or rename files and directories.",
                "mv [OPTIONS] SOURCE... DEST");
+    help_positional(2, HELP_POS_UNBOUNDED, "SOURCE,DEST");
+    help_destructive(1);
     help_operands("A same-filesystem move is a rename; across filesystems it is a copy followed by a removal. ⚠ If the copy succeeds and the source removal fails, the destination is KEPT and the failure reported (ADR 0009).");
     help_exit(1, "a move failed");
     help_example("mv old.txt new.txt");

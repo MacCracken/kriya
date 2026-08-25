@@ -38,6 +38,8 @@ fn _mkdir_init_spec(): i64 {
     _mkdir_spec = s;
     help_begin("mkdir", "Create directories.",
                "mkdir [OPTIONS] DIRECTORY...");
+    help_positional(1, HELP_POS_UNBOUNDED, "DIRECTORY");
+    help_destructive(1);
     help_exit(1, "a directory could not be created");
     help_example("mkdir build");
     help_example("mkdir -p a/b/c");

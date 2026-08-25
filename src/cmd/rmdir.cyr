@@ -42,6 +42,8 @@ fn _rmdir_init_spec(): i64 {
     _rmdir_spec = s;
     help_begin("rmdir", "Remove empty directories.",
                "rmdir [OPTIONS] DIRECTORY...");
+    help_positional(1, HELP_POS_UNBOUNDED, "DIRECTORY");
+    help_destructive(1);
     help_operands("Only empty directories are removed; use `rm -r` for a populated tree.");
     help_exit(1, "a directory was not empty or could not be removed");
     help_example("rmdir empty");

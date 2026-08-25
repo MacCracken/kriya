@@ -76,6 +76,7 @@ fn _st_init_spec(): i64 {
     _st_spec = s;
     help_begin("stat", "Print file metadata.",
                "stat [OPTIONS] FILE...");
+    help_positional(1, HELP_POS_UNBOUNDED, "FILE");
     help_operands("⚠ Times render in UTC with a +0000 offset until tzfile support lands (ADR 0007). Specifiers kriya cannot render are refused by name rather than echoed back.");
     help_exit(1, "a file could not be stat'd, or the format asked for something unimplemented");
     help_example("stat file.txt");

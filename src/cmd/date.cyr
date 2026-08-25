@@ -391,6 +391,7 @@ fn _date_format(fmt, epoch, buf, bufsz): i64 {
 fn cmd_date(start: i64): i64 {
     help_begin("date", "Print the current date and time.",
                "date [OPTIONS] [+FORMAT]");
+    help_positional(0, 1, "+FORMAT");
     help_operands("UTC only until tzfile parsing lands (ADR 0007); -u is accepted as a no-op. Specifiers kriya cannot render are refused rather than echoed back.");
     help_example("date");
     help_example("date '+%Y-%m-%d'");

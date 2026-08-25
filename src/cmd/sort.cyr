@@ -79,6 +79,8 @@ fn _so_init_spec(): i64 {
     _so_spec = s;
     help_begin("sort", "Sort lines of text.",
                "sort [OPTIONS] [FILE...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "FILE");
+    help_destructive(1);
     help_operands("⚠ Sorts in memory with a 256 MiB cap; an external-sort fallback is a named follow-up.");
     help_exit(1, "-c found the input unsorted, or a file could not be read");
     help_example("sort names.txt");

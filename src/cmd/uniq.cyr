@@ -63,6 +63,8 @@ fn _uq_init_spec(): i64 {
     _uq_spec = s;
     help_begin("uniq", "Report or filter repeated adjacent lines.",
                "uniq [OPTIONS] [INPUT [OUTPUT]]");
+    help_positional(0, 2, "INPUT,OUTPUT");
+    help_destructive(1);
     help_operands("⚠ Only ADJACENT duplicates are considered — sort the input first if that is not already true.");
     help_exit(1, "input or output could not be handled");
     help_example("sort f | uniq");

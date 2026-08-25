@@ -28,6 +28,7 @@ fn _dn_init_spec(): i64 {
     _dn_spec = s;
     help_begin("dirname", "Strip the last component from a path.",
                "dirname NAME...");
+    help_positional(1, HELP_POS_UNBOUNDED, "NAME");
     help_example("dirname /usr/bin/cp");
     help_example("dirname -z a/b/c");
     return 0;

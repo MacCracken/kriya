@@ -112,7 +112,8 @@ fn _gr_init_spec(): i64 {
     _grep_spec = s;
     help_begin("grep", "Search files for lines matching a pattern.",
                "grep [OPTIONS] PATTERN [FILE...]");
-    help_operands("BRE by default; -E for ERE, -F for fixed strings. ⚠ -r skips symlinks (ADR 0003). -P is rejected (ADR 0005).");
+    help_positional(0, HELP_POS_UNBOUNDED, "PATTERN,FILE");
+    help_operands("PATTERN is an operand only when neither -e nor -f supplies it. BRE by default; -E for ERE, -F for fixed strings. ⚠ -r skips symlinks (ADR 0003). -P is rejected (ADR 0005).");
     help_exit(0, "at least one line matched");
     help_exit(1, "no line matched");
     help_exit(2, "an error occurred");

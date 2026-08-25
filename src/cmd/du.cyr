@@ -308,6 +308,7 @@ var _du_any_failed: i64 = 0;
 fn cmd_du(start: i64): i64 {
     help_begin("du", "Summarise disk usage of files and directories.",
                "du [OPTIONS] [FILE...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_operands("Reports 1024-byte blocks by default. Hard links are counted once per path today; dedup is a named follow-up.");
     help_exit(1, "a path could not be read");
     help_example("du -sh .");

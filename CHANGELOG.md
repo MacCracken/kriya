@@ -6,6 +6,105 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.3.1] - 2026-08-25 — `--help=json`, the machine form
+
+Second of the **1.3.x discoverability arc**, and the ADR-0002 commitment that has been open since
+v0.2.0. All 38 utilities now answer `--help=json` with a document conforming to
+[ADR 0002 Appendix A](docs/adr/0002-option-parsing-humans-and-agents.md#appendix-a---help=json-schema-v1).
+
+⚠ **This output is a public interface.** agnoshi's tab-completion parses it. Adding a field is allowed
+within a major; removing or retyping one bumps `KRIYA_HELP_SCHEMA_VERSION` in `src/lib/args.cyr` and
+needs an ADR.
+
+### Added — `--help=json` on every utility
+
+⭐ **The schema tag is built from the version constant, not written as a literal** —
+`"kriya-help/v" + KRIYA_HELP_SCHEMA_VERSION` — so the tag cannot claim a version the constant has
+moved past. Same discipline as 1.3.0's OPTIONS table: the thing that could drift is derived, not
+duplicated.
+
+Options come from the same `flags_new()` spec the parser uses, so **the machine form and the human
+form are one source read twice** — pinned by a test that scrapes the OPTIONS section out of `--help`
+and diffs it against the JSON array.
+
+### Three schema decisions worth the words
+
+⛔ **`options` is three-way, not two.** An array is the option table; `[]` means the utility genuinely
+takes no options; **`null` means the utility hand-rolls its argv walk and its options are not
+machine-declared.** Ten utilities parse argv themselves, and seven of them — `find`, `date`, `du`,
+`df`, `env`, `echo`, `seq` — have real options that are simply not in a spec to read back. Emitting
+`[]` for those would tell an agent that **`du` has no `-h`**, which is false. `null` says "read the
+human form". The remaining four (`true`, `false`, `yes`, `sleep`) are genuinely optionless and say so
+with `[]`.
+
+⛔ **`notes` was added, because the safety prose was not reaching the machine form.** The JSON carried
+`summary` and `synopsis` but not the second DESCRIPTION paragraph — which is exactly where
+`rm`'s *"refuses `/` with no escape hatch (ADR 0004)"*, its symlink refusals, and `grep`'s operand
+conditions live. **An agent reading only the machine form would never have seen the part of the page
+written specifically to stop it doing damage.** Caught by asking the round-trip test where the `⚠`
+went.
+
+⚠ **`positional.min` is the smallest count *any valid invocation* may have — not the usual one.**
+`grep -e PATTERN` and `rm -f` both take zero operands legitimately, so both declare `min: 0` even
+though the bare forms need one. The rule is that a validator using this field must never reject a
+correct invocation; the conditions are spelled out in `notes`. The initial survey had `grep` at
+`min: 1`, which would have made a completer append a bogus operand to `grep -e foo`.
+
+### `destructive`, the field agnoshi asked for
+
+True when running the utility can modify persistent state, **either directly or by executing a command
+the caller supplies**. ⚠ Delegation counts: `xargs`, `env` and `find` (via `-exec`, which kriya
+implements) mutate nothing themselves, but **`xargs rm` is precisely the invocation a completer should
+warn about**. Thirteen utilities are true: `cp`, `mv`, `rm`, `ln`, `mkdir`, `rmdir`, `touch`,
+`sort` (`-o`), `tee`, `uniq` (its `OUTPUT` operand), `env`, `xargs`, `find`.
+
+### Fixed
+
+⛔ **ADR 0002 contradicted itself on `-h`.** The Decision section listed **"`-h` / `--help` — human
+form"** while the Consequences section said `-h` is reassigned per utility and `--help` carries help
+duty alone. The implementation has always followed the second, and 1.3.0 pinned it with tests; the
+first is now corrected rather than left for a reader to pick between.
+
+### The escaping is not optional
+
+⛔ Six help strings already contain a literal backslash — `printf '%s=%d\n'`, `tr -d '\r'`, `stat`'s
+`\-escapes`. Emitted raw they produce **invalid JSON that a strict parser rejects outright.** Full
+RFC 8259 escaping, with `\u00XX` for the control characters that have no short form. ⚠ UTF-8 passes
+through as UTF-8 (`load8` zero-extends — verified — so a lead byte reads as 194..244 and never trips
+the control-character test).
+
+### Tests
+
+**3,030 smoke cases across 36 scripts** (up from 1,595 across 35), 119 unit + 18 POSIX, fuzz green
+under the poisoned allocator. Both targets build.
+
+- `scripts/smoke-help-json.sh` — new, 1,432 cases. ⭐ **The load-bearing test is not "is it valid
+  JSON" — it is boundary enforcement: the `positional.min` and `positional.max` each utility
+  advertises are fed back to the real binary and must actually be enforced.** One operand under a
+  declared minimum, or one over a finite maximum, has to be a usage error; `grep -e`, `grep -f` and
+  `rm -f` have to be accepted with zero operands. **A schema that lies about operand counts is worse
+  than no schema, because an agent trusts it.** Plus: every required field present and correctly
+  typed, `options` three-way, escaping round-trips, UTF-8 survives, `--help=json` routing for `xargs`
+  and `find -exec`, `--` still terminating, unknown formats naming the valid set, and `> /dev/full`
+  exiting 1.
+
+⚠ The anti-drift check failed on first run for `--complement`, `--printf` and
+`--ignore-fail-on-non-empty` — **the renderer was right and the test was wrong.** A long-only option
+indents six spaces so its `--` aligns under the long names beside it; the scraper only understood the
+two-space short+long shape.
+
+### Notes
+
+**Cold start is flat, and now actually measured** — the number 1.3.0 could not take. Interleaved A/B
+against a 1.3.0 binary built from its own commit, arms swapped each pair, 500 pairs:
+**0.474 ms → 0.477 ms** (+0.6%, noise). By `scripts/bench-coldstart.sh`'s own methodology, 300 runs
+each: **median 1.382 ms → 1.396 ms**.
+
+⚠ **Both arms read ~180 µs above the 1.196 ms v1.0.0 baseline, and that is the box, not the release.**
+The 15-minute load average was still 58 while these ran. The A/B is sound — both binaries measured
+under identical conditions, alternating — but **the absolute figure should not be entered in the
+history table as a regression.** Binary 986,416 → 995,280 bytes (+8,864, +0.9%).
+
 ## [1.3.0] - 2026-08-25 — `--help`, on all 38 utilities
 
 Opens the **1.3.x discoverability arc**. First of the post-defect arcs, and the first release since

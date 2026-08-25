@@ -52,6 +52,7 @@ fn _tr_init_spec(): i64 {
     _tr_spec = s;
     help_begin("tr", "Translate, squeeze or delete characters.",
                "tr [OPTIONS] SET1 [SET2]");
+    help_positional(1, 2, "SET1,SET2");
     help_operands("Reads stdin and writes stdout. SETs accept ranges, POSIX character classes and escapes.");
     help_example("tr a-z A-Z < f");
     help_example("tr -d '\\r' < dos.txt");

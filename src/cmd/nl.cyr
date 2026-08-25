@@ -55,6 +55,7 @@ fn _nl_init_spec(): i64 {
     _nl_spec = s;
     help_begin("nl", "Number lines of files.",
                "nl [OPTIONS] [FILE...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_exit(1, "a file could not be read");
     help_example("nl notes.txt");
     help_example("nl -b a -w 4 file");

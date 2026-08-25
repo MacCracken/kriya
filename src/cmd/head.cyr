@@ -45,6 +45,7 @@ fn _head_init_spec(): i64 {
     _head_spec = s;
     help_begin("head", "Print the first part of files.",
                "head [OPTIONS] [FILE...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_operands("Defaults to 10 lines. The obsolescent `head -5` form is accepted as `-n 5`.");
     help_exit(1, "a file could not be read");
     help_example("head -n 20 file.txt");

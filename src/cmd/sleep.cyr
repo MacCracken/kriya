@@ -16,6 +16,8 @@
 fn cmd_sleep(start: i64): i64 {
     help_begin("sleep", "Pause for a duration.",
                "sleep DURATION");
+    help_positional(1, 1, "DURATION");
+    help_no_options();
     help_operands("DURATION is a non-negative number with an optional s/m/h/d suffix. One operand only; GNU sums several, POSIX specifies one.");
     help_example("sleep 5");
     help_example("sleep 0.25");

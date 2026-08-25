@@ -116,14 +116,23 @@ expect_eq "find --help is find's"       "NAME" "$("$BIN" find --help 2>&1 | head
 expect_eq "-- guards a literal --help operand" "0" \
     "$(touch -- '--help' 2>/dev/null && "$BIN" ls -- --help >/dev/null 2>&1; echo $?)"
 
-# --- the machine form is named, not rejected as unknown ----------------
-# ⚠ `--help=json` lands in 1.3.1. Answering "bad option" would read as "no such
-# flag", which is the wrong thing to tell an agent probing for the interface.
-rc=0; err=$("$BIN" ls --help=json 2>&1 >/dev/null) || rc=$?
-expect_eq "--help=json exits 2" "2" "$rc"
+# --- the two forms are distinct and both answer ------------------------
+# `--help=json` shipped in 1.3.1; it is covered in full by
+# `scripts/smoke-help-json.sh`. All that belongs here is that asking for the
+# machine form does NOT get the human one, and vice versa.
+rc=0; "$BIN" ls --help=json >/dev/null 2>&1 || rc=$?
+expect_eq "--help=json exits 0" "0" "$rc"
+expect_eq "--help=json is JSON, not the human page" "{" \
+    "$("$BIN" ls --help=json 2>/dev/null | head -1)"
+expect_eq "--help is the human page, not JSON" "NAME" \
+    "$("$BIN" ls --help 2>/dev/null | head -1)"
+# ⚠ An unknown format must name the valid set: the caller is an agent that
+# guessed, and the reply is its only chance to guess right.
+rc=0; err=$("$BIN" ls --help=yaml 2>&1 >/dev/null) || rc=$?
+expect_eq "--help=yaml exits 2" "2" "$rc"
 case "$err" in
-    *"not implemented yet"*) PASS=$((PASS + 1)) ;;
-    *) FAIL=$((FAIL + 1)); printf "FAIL --help=json message: %s\n" "$err" >&2 ;;
+    *"valid formats: json"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL --help=yaml message: %s\n" "$err" >&2 ;;
 esac
 
 # --- summary ---

@@ -48,6 +48,7 @@ fn _wc_init_spec(): i64 {
     _wc_spec = s;
     help_begin("wc", "Count lines, words, bytes and characters.",
                "wc [OPTIONS] [FILE...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_operands("With no operand, reads stdin. With several, a total line is printed. With no count option, lines, words and bytes are shown.");
     help_exit(1, "a file could not be read");
     help_example("wc -l access.log");

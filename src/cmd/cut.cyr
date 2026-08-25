@@ -62,6 +62,7 @@ fn _cut_init_spec(): i64 {
     _cut_spec = s;
     help_begin("cut", "Print selected parts of each line.",
                "cut OPTIONS [FILE...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_operands("Exactly one of -b, -c or -f selects what LIST means. ⚠ -c is byte-based today; multi-byte support is a named follow-up.");
     help_exit(1, "a file could not be read");
     help_example("cut -d: -f1 /etc/passwd");

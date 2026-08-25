@@ -48,7 +48,7 @@ POSIX gives a floor: short flags, `--` terminator, exit 2 on usage error. GNU ad
 
 Every utility supports two help forms with the same content, different shape:
 
-- **`-h` / `--help`** — human form. Sections in fixed order: `NAME`, `SYNOPSIS`, `DESCRIPTION`, `OPTIONS`, `EXIT CODES`, `EXAMPLES`. Wrapped at 80 columns. ANSI styling only when stdout is a tty.
+- **`--help`** — human form. ⚠ **Not `-h`**: see the `-h` note under *Consequences → Neutral*. `-h` is reassigned per utility (`du -h`, `ls -h`, `sort -h` all mean human-readable) and `--help` carries help duty alone. Sections in fixed order: `NAME`, `SYNOPSIS`, `DESCRIPTION`, `OPTIONS`, `EXIT CODES`, `EXAMPLES`. Wrapped at 80 columns. ANSI styling only when stdout is a tty.
 - **`--help=json`** — machine form. Schema in [Appendix A](#appendix-a-help-schema). Stable per major version. An agent that has not seen kriya before can `kriya <util> --help=json` and parse the flag table without prior knowledge.
 
 Top-level `kriya --list` returns the full utility table as JSON: one entry per utility, with `name`, `summary`, `exit_codes`. This is the agent's entry point for discovering what kriya can do without grepping docs.
@@ -115,51 +115,97 @@ The spec is built at startup (gvar bump-allocated, no `gvar_toks` cost — the s
 
 ## Appendix A — `--help=json` schema (v1)
 
+> **Amended 2026-08-25 (kriya 1.3.1), schema version 1 — additive only.** The
+> original sketch shipped with three changes, all forward-additive and therefore
+> *not* a version bump: `destructive` and `notes` were added, and `options`
+> gained a `null` form. Consumers written against the original sketch keep
+> working; they ignore fields they do not know, which v1 already required.
+
 ```json
 {
   "schema": "kriya-help/v1",
   "name": "cp",
-  "summary": "Copy files and directories.",
+  "summary": "Copy files and directory trees.",
   "synopsis": "cp [OPTIONS] SOURCE... DEST",
+  "notes": "⚠ cp under -R does not follow symlinks unless -L or -H says so (ADR 0003).",
+  "destructive": true,
   "options": [
-    {
-      "long": "recursive",
-      "short": "r",
-      "kind": "bool",
-      "description": "Copy directories recursively."
-    },
-    {
-      "long": "force",
-      "short": "f",
-      "kind": "bool",
-      "description": "Overwrite destination without prompting."
-    },
-    {
-      "long": "dry-run",
-      "short": null,
-      "kind": "bool",
-      "description": "Print actions; do not modify the filesystem."
-    }
+    { "long": "recursive", "short": "r", "kind": "bool", "description": "Copy directories recursively." },
+    { "long": "force", "short": "f", "kind": "bool", "description": "Overwrite destination without prompting." },
+    { "long": "dry-run", "short": null, "kind": "bool", "description": "Print actions; do not modify the filesystem." }
   ],
-  "positional": {
-    "min": 2,
-    "max": null,
-    "names": ["SOURCE", "DEST"]
-  },
+  "positional": { "min": 2, "max": null, "names": ["SOURCE", "DEST"] },
   "exit_codes": {
-    "0": "Success.",
-    "1": "Copy failed (permission, disk, target).",
-    "2": "Usage error."
+    "0": "success",
+    "1": "a copy failed, or a destination existed without -f",
+    "2": "usage error"
   },
   "examples": [
-    "cp foo bar",
-    "cp -r dir1 dir2",
-    "cp --dry-run *.txt /tmp/"
+    "cp notes.txt backup.txt",
+    "cp -r src/ dest/"
   ]
 }
 ```
 
-Fields are required unless explicitly nullable. Unknown fields are reserved (agents must tolerate forward-additive changes within v1).
+Fields are required unless explicitly nullable. Unknown fields are reserved
+(agents must tolerate forward-additive changes within v1).
+
+### Field semantics
+
+- **`schema`** — `"kriya-help/v" + KRIYA_HELP_SCHEMA_VERSION`. The renderer
+  builds this from the constant rather than writing a literal, so the tag cannot
+  drift from the version it claims.
+
+- **`notes`** — nullable. The second DESCRIPTION paragraph: per-utility operand
+  semantics and safety caveats, with ADR references. ⛔ **This is where the
+  refusals live** — `rm`'s "refuses `/` with no escape hatch (ADR 0004)",
+  `grep`'s "PATTERN is an operand only when neither `-e` nor `-f` supplies it".
+  An agent reading only the machine form would otherwise never see the part of
+  the page written specifically to stop it doing damage.
+
+- **`destructive`** — true when running the utility can modify persistent state
+  (file content, file metadata, or filesystem structure), **either directly or
+  by executing a command the caller supplies**. Writing to stdout is not
+  destructive. ⚠ Delegation counts: `xargs`, `env` and `find` (via `-exec`)
+  mutate nothing themselves, but `xargs rm` is exactly the invocation a completer
+  should warn about. As of 1.3.1 the true set is `cp`, `mv`, `rm`, `ln`, `mkdir`,
+  `rmdir`, `touch`, `sort` (`-o`), `tee`, `uniq` (`OUTPUT`), `env`, `xargs`,
+  `find`.
+
+- **`options`** — **three-way, not two.**
+  - an array — the option table, read back out of the same `flags_new()` spec the
+    parser uses, so it cannot drift from what is actually accepted;
+  - `[]` — the utility genuinely accepts no options;
+  - `null` — the utility hand-rolls its argv walk and its options are **not
+    machine-declared**. ⛔ Collapsing `null` into `[]` would tell an agent that
+    `du` has no `-h`, which is false. `null` means "read the human form".
+    As of 1.3.1: `find`, `date`, `du`, `df`, `env`, `echo`, `seq`.
+
+- **`positional.min`** — the smallest operand count **any valid invocation** may
+  have. ⚠ An option that supplies the operand's role (`grep -e PATTERN`) or
+  waives the requirement (`rm -f`) lowers it. The rule: a validator using this
+  field must never reject a correct invocation. The conditions themselves are
+  spelled out in `notes`.
+
+- **`positional.max`** — `null` when unbounded. An integer only where the code
+  actually rejects a higher count.
+
+- **`positional.names`** — the placeholders used in `synopsis`, in order, so the
+  two forms agree. A repeated operand contributes its name once
+  (`cp [OPTIONS] SOURCE... DEST` gives `["SOURCE", "DEST"]`).
+
+- **`exit_codes`** — JSON object keys are strings, so codes are quoted. ADR 0008's
+  0/1/2 are the floor; a utility overrides or extends.
+
+### Stability
+
+⚠ **This output is a public interface.** Adding a field is allowed within a major
+and needs no bump. Removing or retyping one is a break: bump
+`KRIYA_HELP_SCHEMA_VERSION` in `src/lib/args.cyr` and write an ADR.
+`scripts/smoke-help-json.sh` pins every field above, and — the load-bearing part
+— **feeds the advertised `positional` bounds back to the real binary to confirm
+they are enforced.** A schema that lies about operand counts is worse than no
+schema, because an agent trusts it.
 
 ## Implementation status (as of v0.2.0 cut)
 
@@ -167,9 +213,13 @@ The first consumer (`src/lib/args.cyr`, used by `pwd` and any future flag-taking
 
 - **Short flag clustering** (`-rfv` = `-r -f -v`). Each short flag must currently be a separate token.
 - **Attached short values** (`-n10` = `-n 10`). Short value-taking flags require a separated token.
-- **`--help` (human form)** auto-rendered from the spec.
-- **`--help=json`** schema emission per Appendix A.
-- **`kriya --list`** top-level utility enumeration.
+- ~~**`--help` (human form)** auto-rendered from the spec.~~ **Closed in 1.3.0**
+  (`src/lib/help.cyr`), all 38 utilities.
+- ~~**`--help=json`** schema emission per Appendix A.~~ **Closed in 1.3.1**, all
+  38 utilities, with the amendments recorded in Appendix A above.
+- **`kriya --list`** top-level utility enumeration. ⚠ Still open — and with it the
+  CI lint this ADR promises, which is what would make a non-conforming schema fail
+  the build rather than reach a consumer.
 - **`--dry-run` cross-utility enforcement** (lands when the first destructive utility ships in M2).
 - **`isatty(0)` check for `-i` flags** (lands with M2 cp/mv/rm).
 

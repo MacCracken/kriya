@@ -13,6 +13,7 @@
 fn cmd_echo(start: i64): i64 {
     help_begin("echo", "Print arguments separated by spaces.",
                "echo [-n] [STRING...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "STRING");
     help_example("echo hello");
     help_example("echo -n no-newline");
     help_if_requested(0, start);

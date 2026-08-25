@@ -998,6 +998,8 @@ fn _f_walk(path, depth, max_depth): i64 {
 fn cmd_find(start: i64): i64 {
     help_begin("find", "Walk a file tree and evaluate predicates.",
                "find [STARTPATH...] [EXPRESSION]");
+    help_positional(0, HELP_POS_UNBOUNDED, "STARTPATH,EXPRESSION");
+    help_destructive(1);
     help_operands("Predicates combine with ! , -a and -o; parentheses group. The default action is -print. Symlinks are not followed unless -L is given (ADR 0003).");
     help_exit(1, "an entry could not be read, or -exec reported failure");
     help_example("find . -name '*.log'");

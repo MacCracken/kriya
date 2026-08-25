@@ -3,6 +3,8 @@
 fn cmd_false(start: i64): i64 {
     help_begin("false", "Do nothing, unsuccessfully.",
                "false [ignored...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "IGNORED");
+    help_no_options();
     help_example("false || echo failed");
     help_if_requested(0, start);
     return EXIT_FAILURE;

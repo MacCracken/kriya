@@ -9,6 +9,8 @@
 fn cmd_yes(start: i64): i64 {
     help_begin("yes", "Print a string repeatedly until killed.",
                "yes [STRING...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "STRING");
+    help_no_options();
     help_example("yes");
     help_example("yes | head -3");
     help_if_requested(0, start);

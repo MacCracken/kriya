@@ -59,6 +59,8 @@ fn _xa_init_spec(): i64 {
     _xa_spec = s;
     help_begin("xargs", "Build command lines from stdin and run them.",
                "xargs [OPTIONS] [COMMAND [ARG...]]");
+    help_positional(0, HELP_POS_UNBOUNDED, "COMMAND,ARG");
+    help_destructive(1);
     help_operands("⚠ Option recognition stops at the first operand — everything after reaches COMMAND verbatim, including its own flags and its `--`.");
     help_exit(123, "a command exited non-zero");
     help_exit(124, "a command exited 255; xargs aborted");

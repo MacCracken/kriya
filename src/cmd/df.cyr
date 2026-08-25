@@ -472,6 +472,7 @@ fn _df_load_mounts(): i64 {
 fn cmd_df(start: i64): i64 {
     help_begin("df", "Report filesystem disk space usage.",
                "df [OPTIONS] [FILE...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_operands("With no operand, every mounted filesystem is listed. An operand resolves to the filesystem CONTAINING it, by longest mountpoint prefix.");
     help_exit(1, "an operand could not be resolved");
     help_example("df");

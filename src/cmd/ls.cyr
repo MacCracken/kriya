@@ -78,6 +78,7 @@ fn _ls_init_spec(): i64 {
     _ls_spec = s;
     help_begin("ls", "List directory contents. With no operand, lists the current directory.",
                "ls [OPTIONS] [FILE...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_operands("Operands are files or directories. A directory is listed by its contents unless -d is given.");
     help_exit(1, "one or more operands could not be read");
     help_example("ls");

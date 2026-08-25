@@ -47,6 +47,7 @@ fn _rp_init_spec(): i64 {
     _rp_spec = s;
     help_begin("realpath", "Resolve a path to its canonical absolute form.",
                "realpath [OPTIONS] PATH...");
+    help_positional(1, HELP_POS_UNBOUNDED, "PATH");
     help_operands("Symlinks are followed and `.`/`..` resolved. -e requires every component to exist, -m allows a missing tail.");
     help_exit(1, "a path could not be resolved");
     help_example("realpath ./src/../README.md");

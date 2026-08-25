@@ -19,6 +19,14 @@
 # EXIT CODES, EXAMPLES. Wrapped at 80 columns. ANSI only on a tty.
 
 var HELP_WIDTH = 80;
+
+# ⚠ Cyrius has no negative literals, so "unbounded" cannot be -1. A sentinel it
+# is; `positional.max` renders as JSON `null` at or above this. No utility takes
+# a million operands — ARG_MAX stops the kernel long before.
+enum HelpPos {
+    HELP_POS_UNBOUNDED = 1000000;
+}
+
 var HELP_MAX_EXITS = 12;
 var HELP_MAX_EXAMPLES = 8;
 
@@ -33,6 +41,14 @@ var _help_exit_n    = 0;
 var _help_examples  = 0;    # cstr array
 var _help_example_n = 0;
 
+# Machine-form state (`--help=json`, ADR 0002 Appendix A).
+var _help_pos_min      = 0;
+var _help_pos_max      = 0;
+var _help_pos_names    = 0;   # "SOURCE,DEST" or 0
+var _help_pos_declared = 0;   # 0 => emit `"positional": null`
+var _help_destructive  = 0;
+var _help_opts_none    = 0;   # utility genuinely takes no options
+
 # Begin a utility's help record. Seeds the ADR-0008 three-tier exit codes, which
 # most utilities use verbatim; `help_exit` overrides or extends.
 fn help_begin(name, summary, synopsis): i64 {
@@ -45,6 +61,12 @@ fn help_begin(name, summary, synopsis): i64 {
     _help_exit_n    = 0;
     _help_examples  = alloc(HELP_MAX_EXAMPLES * 8);
     _help_example_n = 0;
+    _help_pos_min      = 0;
+    _help_pos_max      = HELP_POS_UNBOUNDED;
+    _help_pos_names    = 0;
+    _help_pos_declared = 0;
+    _help_destructive  = 0;
+    _help_opts_none    = 0;
     help_exit(0, "success");
     help_exit(1, "operation failed");
     help_exit(2, "usage error");
@@ -77,6 +99,40 @@ fn help_example(text): i64 {
 
 fn help_operands(names): i64 {
     _help_operands = names;
+    return 0;
+}
+
+# Declare the operand contract for the machine form. `min`/`max` are what THE
+# CODE ENFORCES, not what POSIX asks for — a utility that reads stdin when given
+# no operand has min 0. `max` is `HELP_POS_UNBOUNDED` when unbounded. `names` is
+# a comma-separated list of the placeholders used in the SYNOPSIS, so the two
+# forms agree; 0 when the utility takes no operands.
+#
+# ⚠ A utility that never calls this renders `"positional": null` rather than a
+# plausible-looking default. A wrong operand count silently handed to an agent is
+# worse than an absent one, and `smoke-help-json.sh` fails on any null.
+fn help_positional(min, max, names): i64 {
+    _help_pos_min      = min;
+    _help_pos_max      = max;
+    _help_pos_names    = names;
+    _help_pos_declared = 1;
+    return 0;
+}
+
+# ⛔ True when running this utility can modify persistent state — file content,
+# file metadata, or filesystem structure — EITHER DIRECTLY OR BY EXECUTING A
+# COMMAND THE CALLER SUPPLIES. `xargs` and `env` are true by delegation: they
+# mutate nothing themselves, but `xargs rm` is exactly the invocation a completer
+# should warn about. Writing to stdout is not destructive.
+fn help_destructive(v): i64 {
+    _help_destructive = v;
+    return 0;
+}
+
+# Declare that this utility genuinely accepts NO options. Distinct from having a
+# hand-rolled parser: see the `options` note in `help_render_json`.
+fn help_no_options(): i64 {
+    _help_opts_none = 1;
     return 0;
 }
 
@@ -288,6 +344,291 @@ fn help_render(spec): i64 {
     return 0;
 }
 
+# --- machine form (`--help=json`, ADR 0002 Appendix A) -----------------
+
+# Emit `c` as a JSON `\u00XX` escape. Only reached for control bytes with no
+# short form; everything printable, and every UTF-8 continuation byte, goes out
+# verbatim (JSON strings are Unicode, and kriya's help text is already UTF-8).
+fn _json_u_esc(c): i64 {
+    var hex = "0123456789abcdef";
+    var b[6];
+    store8(&b,     92);         # backslash
+    store8(&b + 1, 117);        # 'u'
+    store8(&b + 2, 48);
+    store8(&b + 3, 48);
+    store8(&b + 4, load8(hex + ((c >> 4) & 15)));
+    store8(&b + 5, load8(hex + (c & 15)));
+    k_write( 1, &b, 6);
+    return 0;
+}
+
+# Write `s[0..n)` as a JSON string literal, surrounding quotes included, escaped
+# per RFC 8259.
+#
+# ⛔ THIS IS NOT OPTIONAL. Six help strings already contain a literal backslash
+# (`printf '%s=%d\n'`, `tr -d '\r'`, stat's `\-escapes`); emitted raw they
+# produce invalid JSON that a strict parser rejects outright. Quotes are handled
+# for the same reason even though no help string carries one today.
+#
+# Runs are written in bulk and only broken at a byte needing an escape, so the
+# common case is one `k_write` for the whole string.
+fn _json_strn(s, n): i64 {
+    k_write( 1, "\"", 1);
+    if (s == 0) { k_write( 1, "\"", 1); return 0; }
+    var i: i64 = 0;
+    var run: i64 = 0;
+    while (i < n) {
+        # ⚠ `load8` zero-extends (verified), so a UTF-8 lead byte reads as
+        # 194..244 and never trips the `< 32` control-character test. The mask
+        # keeps that true if the codegen ever changes.
+        var c = load8(s + i) & 255;
+        var esc: i64 = 0;
+        if (c == 34)      { esc = "\\\""; }
+        elif (c == 92)    { esc = "\\\\"; }
+        elif (c == 10)    { esc = "\\n"; }
+        elif (c == 13)    { esc = "\\r"; }
+        elif (c == 9)     { esc = "\\t"; }
+        elif (c == 8)     { esc = "\\b"; }
+        elif (c == 12)    { esc = "\\f"; }
+        if (esc != 0) {
+            if (i > run) { k_write( 1, s + run, i - run); }
+            k_write( 1, esc, strlen(esc));
+            run = i + 1;
+        } elif (c < 32) {
+            if (i > run) { k_write( 1, s + run, i - run); }
+            _json_u_esc(c);
+            run = i + 1;
+        }
+        i = i + 1;
+    }
+    if (n > run) { k_write( 1, s + run, n - run); }
+    k_write( 1, "\"", 1);
+    return 0;
+}
+
+fn _json_str(s): i64 {
+    if (s == 0) { k_write( 1, "\"\"", 2); return 0; }
+    return _json_strn(s, strlen(s));
+}
+
+fn _json_int(v): i64 {
+    var nb[24];
+    var nl = fmt_int_buf(v, &nb);
+    k_write( 1, &nb, nl);
+    return 0;
+}
+
+fn _json_bool(v): i64 {
+    if (v == 1) { k_write( 1, "true", 4); }
+    else { k_write( 1, "false", 5); }
+    return 0;
+}
+
+# `"KEY": ` at two-space indent.
+fn _json_key(name): i64 {
+    k_write( 1, "  ", 2);
+    _json_str(name);
+    k_write( 1, ": ", 2);
+    return 0;
+}
+
+# Emit the comma-separated operand placeholders as a JSON array of strings.
+fn _json_pos_names(csv): i64 {
+    k_write( 1, "[", 1);
+    if (csv == 0) { k_write( 1, "]", 1); return 0; }
+    var n = strlen(csv);
+    if (n == 0) { k_write( 1, "]", 1); return 0; }
+    var start: i64 = 0;
+    var i: i64 = 0;
+    var first: i64 = 1;
+    while (i <= n) {
+        var cut: i64 = 0;
+        if (i == n) { cut = 1; }
+        elif (load8(csv + i) == 44) { cut = 1; }
+        if (cut == 1) {
+            if (first == 0) { k_write( 1, ", ", 2); }
+            first = 0;
+            _json_strn(csv + start, i - start);
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    k_write( 1, "]", 1);
+    return 0;
+}
+
+fn _json_kind(ty): i64 {
+    if (ty == FLAG_BOOL) { return _json_str("bool"); }
+    if (ty == FLAG_INT)  { return _json_str("int"); }
+    return _json_str("str");
+}
+
+fn _json_options(spec): i64 {
+    # ⛔ THREE-WAY, NOT TWO. `null` means "this utility's option table is not
+    # machine-declared" — the ten hand-rolled parsers (`find`'s expression
+    # grammar, `date`'s `+FORMAT`, `du`/`df`/`env`/`echo`/`seq`) have real
+    # options that simply are not in a spec to read back. `[]` means "genuinely
+    # accepts no options". Collapsing them would tell an agent that `du` has no
+    # `-h`, which is a lie; saying `null` tells it to read the human page.
+    if (spec == 0) {
+        if (_help_opts_none == 1) { k_write( 1, "[]", 2); }
+        else { k_write( 1, "null", 4); }
+        return 0;
+    }
+    var entries = load64(spec);
+    var count   = load64(spec + 16);
+    if (count == 0) { k_write( 1, "[]", 2); return 0; }
+    k_write( 1, "[\n", 2);
+    var i: i64 = 0;
+    while (i < count) {
+        var ep = entries + i * FLAGS_ENTRY_SIZE;
+        var sh = load64(ep);
+        var ln = load64(ep + 8);
+        k_write( 1, "    { \"long\": ", 14);
+        var has_long: i64 = 0;
+        if (ln != 0) {
+            if (strlen(ln) > 0) { has_long = 1; }
+        }
+        if (has_long == 1) { _json_str(ln); }
+        else { k_write( 1, "null", 4); }
+        k_write( 1, ", \"short\": ", 11);
+        if (sh != 0) {
+            var sb[2];
+            store8(&sb, sh);
+            _json_strn(&sb, 1);
+        } else { k_write( 1, "null", 4); }
+        k_write( 1, ", \"kind\": ", 10);
+        _json_kind(load64(ep + 16));
+        k_write( 1, ", \"description\": ", 17);
+        _json_str(load64(ep + 40));
+        k_write( 1, " }", 2);
+        if (i + 1 < count) { k_write( 1, ",", 1); }
+        k_write( 1, "\n", 1);
+        i = i + 1;
+    }
+    k_write( 1, "  ]", 3);
+    return 0;
+}
+
+fn _json_exit_codes(): i64 {
+    k_write( 1, "{\n", 2);
+    var i: i64 = 0;
+    while (i < _help_exit_n) {
+        k_write( 1, "    ", 4);
+        # ⚠ JSON object keys are strings, so the code is quoted: `"0"`, not `0`.
+        var nb[24];
+        var nl = fmt_int_buf(load64(_help_exit_code + i * 8), &nb);
+        _json_strn(&nb, nl);
+        k_write( 1, ": ", 2);
+        _json_str(load64(_help_exit_text + i * 8));
+        if (i + 1 < _help_exit_n) { k_write( 1, ",", 1); }
+        k_write( 1, "\n", 1);
+        i = i + 1;
+    }
+    k_write( 1, "  }", 3);
+    return 0;
+}
+
+fn _json_examples(): i64 {
+    if (_help_example_n == 0) { k_write( 1, "[]", 2); return 0; }
+    k_write( 1, "[\n", 2);
+    var i: i64 = 0;
+    while (i < _help_example_n) {
+        k_write( 1, "    ", 4);
+        _json_str(load64(_help_examples + i * 8));
+        if (i + 1 < _help_example_n) { k_write( 1, ",", 1); }
+        k_write( 1, "\n", 1);
+        i = i + 1;
+    }
+    k_write( 1, "  ]", 3);
+    return 0;
+}
+
+# ⚠ THIS OUTPUT IS A PUBLIC INTERFACE (ADR 0002). Adding a field is fine —
+# consumers must tolerate forward-additive changes within a major. Removing or
+# retyping one is a schema break: bump `KRIYA_HELP_SCHEMA_VERSION` in
+# `src/lib/args.cyr` and write an ADR.
+#
+# ⛔ Never style this stream. It is parsed, not read.
+fn help_render_json(spec): i64 {
+    if (_help_name == 0) { return 0; }
+
+    k_write( 1, "{\n", 2);
+
+    # The version constant IS the schema string — built here rather than written
+    # as a literal, so the two cannot drift on a bump.
+    _json_key("schema");
+    k_write( 1, "\"kriya-help/v", 13);
+    _json_int(KRIYA_HELP_SCHEMA_VERSION);
+    k_write( 1, "\",\n", 3);
+
+    _json_key("name");     _json_str(_help_name);      k_write( 1, ",\n", 2);
+    _json_key("summary");  _json_str(_help_summary);   k_write( 1, ",\n", 2);
+    _json_key("synopsis"); _json_str(_help_synopsis);  k_write( 1, ",\n", 2);
+
+    # ⛔ THE SAFETY PROSE HAS TO REACH THE MACHINE FORM TOO. This is the second
+    # DESCRIPTION paragraph — `rm`'s "refuses `/` with no escape hatch", `grep`'s
+    # "PATTERN is an operand only when neither -e nor -f supplies it", the ADR
+    # references. An agent that reads only JSON would otherwise never see the one
+    # part of the page written specifically to stop it doing damage.
+    # Additive within v1; consumers must tolerate fields they do not know.
+    _json_key("notes");
+    if (_help_operands == 0) { k_write( 1, "null", 4); }
+    else { _json_str(_help_operands); }
+    k_write( 1, ",\n", 2);
+
+    _json_key("destructive");
+    _json_bool(_help_destructive);
+    k_write( 1, ",\n", 2);
+
+    _json_key("options");
+    _json_options(spec);
+    k_write( 1, ",\n", 2);
+
+    _json_key("positional");
+    if (_help_pos_declared == 0) {
+        k_write( 1, "null", 4);
+    } else {
+        k_write( 1, "{ \"min\": ", 9);
+        _json_int(_help_pos_min);
+        k_write( 1, ", \"max\": ", 9);
+        if (_help_pos_max >= HELP_POS_UNBOUNDED) { k_write( 1, "null", 4); }
+        else { _json_int(_help_pos_max); }
+        k_write( 1, ", \"names\": ", 11);
+        _json_pos_names(_help_pos_names);
+        k_write( 1, " }", 2);
+    }
+    k_write( 1, ",\n", 2);
+
+    _json_key("exit_codes");
+    _json_exit_codes();
+    k_write( 1, ",\n", 2);
+
+    _json_key("examples");
+    _json_examples();
+    k_write( 1, "\n", 1);
+
+    k_write( 1, "}\n", 2);
+    return 0;
+}
+
+# Act on a `--help=FORMAT` token. Never returns when the format is known.
+fn help_format_dispatch(spec, tok): i64 {
+    var fmt = tok + 7;             # past "--help="
+    if (streq(fmt, "json") == 1) {
+        help_render_json(spec);
+        if (k_write_failed() == 1) { syscall(SYS_EXIT, 1); }
+        syscall(SYS_EXIT, 0);
+    }
+    # ⚠ Naming the valid set matters more here than anywhere else: the caller is
+    # an agent that guessed, and the reply is its only chance to guess right.
+    k_write( 2, "kriya: error: unknown --help format '", 37);
+    k_write( 2, fmt, strlen(fmt));
+    k_write( 2, "'; valid formats: json\n", 23);
+    syscall(SYS_EXIT, 2);
+    return 0;
+}
+
 # Render and exit if argv[start..] asks for help. For the utilities that walk
 # argv themselves and never reach `kriya_args_parse` — they call this first.
 # `spec` may be 0; OPTIONS is then omitted.
@@ -309,8 +650,7 @@ fn help_if_requested(spec, start: i64): i64 {
         syscall(SYS_EXIT, 0);
     }
     if (hw == 2) {
-        k_write( 2, "kriya: --help=FORMAT is not implemented yet; use --help for the human form\n", 74);
-        syscall(SYS_EXIT, 2);
+        help_format_dispatch(spec, tok);
     }
     return 0;
 }
