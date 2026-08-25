@@ -124,6 +124,31 @@ compare "0 octal arg"         "%d\n" "0177"
 # --- errors ---
 expect_exit "no FORMAT"  2 "$BIN" printf
 
+# --- invalid directives fail instead of lying (v1.2.1) ---
+# ⛔ printf used to WARN on stderr, write the bare conversion LETTER to stdout
+# (dropping the `%`) and exit 0 — so `printf '%f' 1.5` produced the text "f" and
+# reported success. GNU exits 1 and prints nothing for an invalid conversion.
+for d in %f %e %g %a; do
+    rc=0; out=$("$BIN" printf "$d" 1.5 2>/dev/null) || rc=$?
+    expect_eq "$d exits 1"       "1" "$rc"
+    expect_eq "$d prints nothing" ""  "$out"
+done
+rc=0; out=$("$BIN" printf '%Z' 2>/dev/null) || rc=$?
+expect_eq "%Z exits 1"        "1" "$rc"
+expect_eq "%Z prints nothing" ""  "$out"
+# Output already written before the error is kept, and processing STOPS —
+# byte-for-byte what GNU does.
+expect_eq "abc%Zdef stops after abc" "$(/usr/bin/printf 'abc%Zdef' 2>/dev/null)" "$("$BIN" printf 'abc%Zdef' 2>/dev/null)"
+
+# --- \xHH hex escape (v1.2.1) ---
+# Used to fall through to the unknown-escape path and print a literal "x41".
+for e in '\x41' '\x7a' '\x4' '\x41B' '\101' '\n' '\t'; do
+    expect_eq "escape $e" "$(/usr/bin/printf "$e" | od -An -c)" "$("$BIN" printf "$e" | od -An -c)"
+done
+rc=0; "$BIN" printf '\xZ' >/dev/null 2>&1 || rc=$?
+expect_eq "\\xZ exits 1" "1" "$rc"
+expect_eq "abc\\xZdef stops after abc" "$(/usr/bin/printf 'abc\xZdef' 2>/dev/null)" "$("$BIN" printf 'abc\xZdef' 2>/dev/null)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

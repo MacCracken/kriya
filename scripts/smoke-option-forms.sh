@@ -115,6 +115,56 @@ expect_exit "unknown cluster still errors" 2 "$BIN" ls -laZ tree
 same "find -name"        find tree -name b
 expect_eq "seq -5 bare negative" "-5 -4 -3" "$("$BIN" seq -5 -3 | tr '\n' ' ' | sed 's/ $//')"
 
+# --- a bool long option must refuse an argument (v1.2.1) --------------
+# ⛔ `--boolopt=VALUE` used to be ACCEPTED WITH THE VALUE THROWN AWAY, in every
+# utility. `sort --reverse=nonsense` sorted and exited 0; so did
+# `rm --force=nonsense`, `grep --count=nonsense`, `wc --lines=nonsense`. GNU
+# answers "option '--x' doesn't allow an argument" and refuses. Accepting a flag
+# while discarding what the user attached to it is the worst kind of gap — it
+# looks like it worked.
+expect_exit "sort --reverse=x refused"  2 "$BIN" sort --reverse=x nums
+expect_exit "wc --lines=x refused"      2 "$BIN" wc --lines=x f
+expect_exit "grep --count=x refused"    2 "$BIN" grep --count=x bravo f
+expect_exit "ls --all=x refused"        2 "$BIN" ls --all=x tree
+expect_exit "rm --force=x refused"      2 "$BIN" rm --force=x nosuchfile
+# The message names the offending option, as GNU's does.
+err=$("$BIN" sort --reverse=x nums 2>&1 >/dev/null | head -1)
+case "$err" in
+    *"'--reverse'"*"doesn't allow an argument"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL bool= message: %s\n" "$err" >&2 ;;
+esac
+# Bare bools and genuine value-taking longs are untouched.
+same "bare --reverse"   sort --reverse nums
+same "bare --lines"     wc --lines f
+same "--key= value"     sort --key=1 f
+same "--lines= value"   head --lines=2 nums
+same "--bytes= value"   cut --bytes=1 f
+
+# --- the three options GNU DOES allow a value on (v1.2.1) -------------
+# ⚠ The parser cannot represent an optional-value long (registering one as a
+# string would make bare `--preserve` swallow the next operand), so the utility
+# opts in by name and reads the value back. These three are the whole set.
+echo pv > pv.txt
+expect_exit "cp --preserve=mode"            0 "$BIN" cp --preserve=mode pv.txt pv1
+expect_exit "cp --preserve=timestamps"      0 "$BIN" cp --preserve=timestamps pv.txt pv2
+expect_exit "cp --preserve=mode,timestamps" 0 "$BIN" cp --preserve=mode,timestamps pv.txt pv3
+expect_exit "cp --preserve=links refused"   2 "$BIN" cp --preserve=links pv.txt pv4
+expect_exit "cp --preserve=all refused"     2 "$BIN" cp --preserve=all pv.txt pv5
+expect_exit "cp --preserve bare"            0 "$BIN" cp --preserve pv.txt pv6
+expect_eq   "refused preserve copied nothing" "no" "$([ -e pv4 ] && echo yes || echo no)"
+
+printf 'b\na\n' > unsorted.txt
+expect_exit "sort --check=quiet exit 1"     1 "$BIN" sort --check=quiet unsorted.txt
+expect_eq   "sort --check=quiet is silent"  "" "$("$BIN" sort --check=quiet unsorted.txt 2>&1)"
+expect_exit "sort --check=bogus refused"    2 "$BIN" sort --check=bogus unsorted.txt
+# ...and the diagnostic still appears without the value.
+err=$("$BIN" sort --check unsorted.txt 2>&1 >/dev/null | head -1)
+case "$err" in
+    *disorder*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL --check diagnostic: %s\n" "$err" >&2 ;;
+esac
+expect_exit "tail --follow=bogus refused"   2 "$BIN" tail --follow=bogus nums
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

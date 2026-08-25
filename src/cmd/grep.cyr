@@ -859,7 +859,13 @@ fn cmd_grep(start: i64): i64 {
 
     # Collect patterns: -e first, then -f, then positional[0].
     var patterns = vec_new();
-    var e_arg = flags_get_str(_grep_spec, _gr_e_idx);
+    # ⛔ EVERY `-e`, NOT JUST THE LAST. `grep -e alpha -e gamma` used to match only
+    # `gamma` — the spec has one value slot, so earlier patterns were overwritten
+    # during parsing with no diagnostic and exit 0. grep's matcher has always been
+    # multi-pattern (that is how `-f` works); only the collection was lossy.
+    var e_count = kriya_argv_collect(101, "regexp", patterns);
+    var e_arg: i64 = 0;
+    if (e_count == 0) { e_arg = flags_get_str(_grep_spec, _gr_e_idx); }
     if (e_arg != 0) {
         if (load8(e_arg) != 0 || strlen(e_arg) == 0) {
             # Even empty -e is a valid pattern (matches every position).

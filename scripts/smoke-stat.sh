@@ -145,9 +145,27 @@ expected="regfile
 alink"
 expect_eq "partial-failure out" "$expected" "$out"
 
-# --- unknown specifier emitted literally (GNU quirk we match) ---
+# --- unknown vs unimplemented specifiers (v1.2.1) ---
 out=$("$BIN" stat -c "%q" regfile)
-expect_eq "unknown %q literal" "%q" "$out"
+# ⚠ GNU prints '?' for an unknown specifier, NOT the source bytes — verified
+# with `stat -c '%q'`. This case asserted "%q" until v1.2.1 and was wrong; the
+# source comment it was written from claimed the literal echo was "GNU
+# behaviour". A test that pins the wrong oracle is worse than no test.
+expect_eq "unknown %q -> '?' (as GNU)" "?" "$out"
+
+# ⛔ A specifier GNU DEFINES that kriya cannot render must not be echoed back as
+# its own source text. `stat -c %y` printed the two bytes "%y" where a timestamp
+# belonged and exited 0 — a script substituting that into a filename or a
+# comparison got literal garbage with every sign of success.
+for spec in %y %x %z %U %G %N %w; do
+    rc=0
+    out=$("$BIN" stat -c "$spec" regfile 2>/dev/null) || rc=$?
+    expect_eq "deferred $spec exits 1"     "1"  "$rc"
+    expect_eq "deferred $spec prints none" ""   "$out"
+done
+# ...while implemented ones are untouched.
+expect_eq "%s still works" "$(stat -c %s regfile)" "$("$BIN" stat -c %s regfile)"
+expect_eq "%n still works" "$(stat -c %n regfile)" "$("$BIN" stat -c %n regfile)"
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

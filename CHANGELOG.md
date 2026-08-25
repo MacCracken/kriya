@@ -6,6 +6,97 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.2.1] - 2026-08-25 — accepts-and-lies
+
+Second batch of the **1.2.x arc**. Not a feature release: every change here is a place kriya returned
+**success while doing the wrong thing**. An option refused with exit 2 is a visible gap a user works
+around; one accepted and silently ignored is a correctness defect wearing a feature's clothes, and
+those now outrank the clean refusals in the running order.
+
+The sweep found the class to be wider than the roadmap had it. Two items were catalogued; six shipped.
+
+### Fixed — every bool long option silently swallowed `=VALUE`
+
+⛔ **`sort --reverse=nonsense` sorted the file and exited 0.** So did `rm --force=nonsense`,
+`grep --count=nonsense`, `wc --lines=nonsense`, `ls --all=nonsense` — **every long option registered
+as a bool, in all 28 utilities on the shared parser**. GNU answers `option '--reverse' doesn't allow
+an argument` and refuses.
+
+The stdlib parser accepts `--name=value` for a bool and drops the value on the floor. kriya's
+pre-expansion pass now catches it and reports GNU's diagnostic, naming the offending option, exit 2.
+One fix, whole surface.
+
+⚠ **Three options legitimately take a value** and must not be caught by that: `cp --preserve=LIST`,
+`sort --check=quiet`, `tail --follow=name`. The parser has no representation for an optional-value
+long — registering one as a string would make the bare `--preserve` swallow the next operand — so the
+utility opts in by name via `kriya_args_parse_optval` and reads the value back with
+`kriya_long_value()`. One slot; no utility needs two.
+
+- **`cp --preserve=LIST`** — `mode` and `timestamps` are honoured (that is what `-p` does). `links`,
+  `ownership`, `all`, `xattr` and anything unrecognised are **refused by name**, because accepting
+  them is the exact bug: `--preserve=links` used to exit 0 while turning hard links into independent
+  copies. Implementing them waits on the inode-set helper (roadmap M12c).
+- **`sort --check=quiet|silent`** now actually suppresses the disorder line it exists to suppress,
+  keeping exit 1; `diagnose-first` is the default; anything else is refused.
+- **`tail --follow=name|descriptor`** is accepted rather than refused, because scripts pass it
+  routinely. ⚠ kriya's follow is a stat-cadence poll on the **path**, so `=name` is exact and
+  `=descriptor` is an approximation — the difference only shows under rotation.
+
+### Fixed — `grep -e A -e B` silently used only the last pattern
+
+⛔ **`grep -e alpha -e gamma` matched only `gamma`.** No diagnostic, exit 0 — a filter that quietly
+dropped half its patterns. `flags_add_str` has one value slot, so earlier occurrences were overwritten
+during parsing and there was nothing left to recover afterwards.
+
+⭐ **grep's matcher was always multi-pattern** — that is how `-f FILE` works. Only the *collection* was
+lossy. The new `kriya_argv_collect` walks the **expanded** argv, so `-ealpha`, `-ie alpha` and
+`--regexp=alpha` all arrive in one normalised shape. Verified against GNU across eleven spellings,
+including combinations with `-i`, `-v`, `-c` and `-E`.
+
+### Fixed — `printf` printed the conversion letter and called it success
+
+⛔ **`printf '%f' 1.5` produced the text `f` and exited 0.** It warned on stderr, then wrote the bare
+conversion character to stdout — dropping the `%` — and reported success. GNU exits 1 and prints
+nothing for an invalid conversion.
+
+Now: floating-point conversions (`%e %E %f %F %g %G %a %A`) get their own message naming them as a
+kriya gap rather than a user typo; anything else gets `invalid conversion specification`. Both exit 1
+with nothing on stdout. Output already written before the error is kept and processing **stops** —
+`printf 'abc%Zdef'` emits `abc`, byte-for-byte what GNU does.
+
+**`\xHH` also landed** rather than being refused. It was cheap, and it had been falling through to the
+unknown-escape path and printing a literal `x41`. Byte-exact with GNU across `\x41`, `\x7a`, `\x4`,
+`\x41B`, `\101`, `\n`, `\t`, and `\xZ` (which errors with GNU's own wording).
+
+### Fixed — `stat` and `date` echoed specifiers they could not render
+
+⛔ **`stat -c %y file` printed the two bytes `%y`** where a timestamp belonged, and exited 0. A script
+substituting that into a filename or a comparison got literal garbage with every sign of success. Same
+for `%x %z %U %G %N %w`, and for `date +%V %G %g %c %x %X %r %q`.
+
+Those are now refused by name with a pointer at the milestone that will render them (chrono for the
+times, a passwd/group parser for the names). ⚠ kriya therefore **fails where GNU succeeds** on these —
+the honest trade, and tracked.
+
+**A genuinely unknown specifier is a different thing and keeps passing through** — but the two
+utilities differ, and the old code had `stat` wrong:
+
+- `date +%@` prints `%@`, matching GNU.
+- `stat -c %q` now prints `?`, **which is what GNU does** — verified. The old code emitted the source
+  bytes under a comment claiming that *was* GNU behaviour, and `scripts/smoke-stat.sh` had a case
+  pinning the mistake. ⛔ A test that pins the wrong oracle is worse than no test; it was corrected
+  with the measurement recorded next to it.
+
+### Tests
+
+**1,215 smoke cases across 33 scripts** (up from 1,131), 119 unit + 18 POSIX, 1,529 fuzz assertions
+green under the poisoned allocator.
+
+- `smoke-option-forms.sh` 31 → 54: `--bool=VALUE` refused across five utilities with the message
+  checked, bare bools and genuine `--opt=value` longs untouched, and the full `cp --preserve` /
+  `sort --check` / `tail --follow` matrices including "the refused copy created nothing".
+- `smoke-grep.sh` 66 → 73, `smoke-printf.sh` 48 → 68, `smoke-stat.sh` 37 → 53, `smoke-date.sh` 44 → 62.
+
 ## [1.2.0] - 2026-08-25 — option handling: `rm -rf` works
 
 Opens the **1.2.x arc** (see [roadmap.md](docs/development/roadmap.md)), which puts a running order on

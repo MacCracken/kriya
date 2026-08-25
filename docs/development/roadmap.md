@@ -169,24 +169,29 @@ M17 defects that live in the same code: **M17b** (`xargs` parsing the child's co
 own, including deleting its `--` guard) and **M17c** (`xargs -I` splitting on blanks instead of
 lines). Closes **M12b**'s parser half.
 
-### 1.2.1 — Accepts-and-lies
+### 1.2.1 — Accepts-and-lies ✅ shipped 2026-08-25
 
-The class above, swept in one pass. Not a feature release — every item is a case where kriya returns
-success while doing the wrong thing, which is strictly worse than the exit-2 gaps around it.
+The class swept in one pass. Wider than catalogued: two items were listed, six shipped.
 
-- **`grep -e A -e B` silently uses only the LAST pattern.** Verified: kriya matches `gamma` where GNU
-  matches `alpha` and `gamma`. The spec registers `-e` as a single string, so earlier occurrences are
-  overwritten with no diagnostic. Needs `flags_add_str_multi` (or a kriya-side accumulator) — the
-  other half of **M12b**.
-- **`cp --preserve=links` is accepted and ignored**, exit 0. `--preserve` is registered as a bool, so
-  any `=VALUE` is swallowed. Either implement it (needs the inode-set helper, **M12c**) or reject the
-  unimplemented value explicitly.
-- **`stat -c %y`, `%x`, `%z` emit the literal specifier** rather than a time. Documented as
-  "unknown-specifier literal emission", but for a *known* POSIX specifier that is a wrong answer, not
-  a passthrough. Either render it (**M12a**, chrono) or reject it.
-- **`printf %f` warns and continues** rather than failing, so a script gets partial output and exit 0.
-- Audit sweep: every remaining option registered as a bool that GNU accepts a value for, and every
-  "unknown specifier passes through literally" path, checked for the same shape.
+- **Every bool long option silently swallowed `=VALUE`**, in all 28 utilities on the shared parser —
+  not just the three the catalogue named. Now refused with GNU's diagnostic. The three options GNU
+  *does* allow a value on (`cp --preserve`, `sort --check`, `tail --follow`) opt in by name via
+  `kriya_args_parse_optval`, since the parser cannot represent an optional-value long.
+- **`grep -e A -e B`** collects every occurrence via the new `kriya_argv_collect`.
+- **`printf %f`** and every invalid directive exit 1 with nothing on stdout, stopping at the error
+  like GNU. **`\xHH`** implemented while there.
+- **`stat` / `date`** refuse specifiers they cannot render instead of echoing the source bytes.
+  `stat`'s unknown-specifier output corrected to `?` (GNU's actual behaviour, which an existing smoke
+  case had pinned wrongly).
+
+Carried forward, each blocked on a different enabler:
+
+- `cp --preserve=links` / `ownership` — needs the inode-set helper (**M12c**). Refused by name today.
+- `stat %x/%y/%z`, `date %V/%c/%x/%X/%r` — need chrono's strftime formatter (**M12a**, batch 1.2.5).
+- `stat %U/%G` — needs a passwd/group parser (**M12c**).
+- `stat %N` — needs a quoting helper, shared with the `ls` quoting story (**M12d**).
+- `printf %e/%f/%g/%a` — needs a float-formatting story (**M12d**). ⚠ The stdlib's `fmt_float_buf`
+  carry bug was only fixed at cyrius 6.5.30 (see `[1.1.10]`), so this would have inherited it.
 
 ### 1.2.2 — The spawn helper
 

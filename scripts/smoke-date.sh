@@ -149,6 +149,19 @@ expect_exit "unknown short"         2 "$BIN" date -X
 expect_exit "unknown long"          2 "$BIN" date --bogus
 expect_exit "lone dash"             2 "$BIN" date -
 
+# --- unimplemented vs unknown specifiers (v1.2.1) ---
+# ⛔ `date +%V` used to print the two bytes "%V" and exit 0. A specifier GNU
+# defines is a wrong answer when echoed back; one that is not a specifier at all
+# is passed through, which is exactly what GNU does (`date +%@` -> `%@` on both).
+for spec in %V %G %g %c %x %X %r %q; do
+    rc=0
+    out=$("$BIN" date -u "+$spec" 2>/dev/null) || rc=$?
+    expect_eq "deferred $spec exits 1"     "1" "$rc"
+    expect_eq "deferred $spec prints none" ""  "$out"
+done
+expect_eq "unknown %@ passes through (as GNU)" "$(date -u '+%@')" "$("$BIN" date -u '+%@')"
+expect_eq "%Y still works" "$(date -u +%Y)" "$("$BIN" date -u +%Y)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

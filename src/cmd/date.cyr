@@ -201,6 +201,24 @@ fn _date_wint(buf, pos, v): i64 {
 # Render a single conversion spec `c` into buf at pos. `parts` is
 # the epoch_to_date struct; `wkday` is 0..6 (Sun..Sat); `epoch` is
 # raw seconds. Returns the new buf offset.
+# Set when the format asked for a specifier kriya cannot render.
+var _date_bad: i64 = 0;
+
+# strftime specifiers GNU defines that kriya does not render yet. All of them
+# want either locale data or ISO-week arithmetic, which is the chrono work in
+# roadmap M12a.
+fn _date_is_deferred_spec(c): i64 {
+    if (c == 86) { return 1; }   # V  ISO week number
+    if (c == 71) { return 1; }   # G  ISO week-based year
+    if (c == 103) { return 1; }  # g  ISO week-based year, 2-digit
+    if (c == 99) { return 1; }   # c  locale date and time
+    if (c == 120) { return 1; }  # x  locale date
+    if (c == 88) { return 1; }   # X  locale time
+    if (c == 114) { return 1; }  # r  locale 12-hour time
+    if (c == 113) { return 1; }  # q  quarter
+    return 0;
+}
+
 fn _date_render_spec(buf, pos, c, parts, wkday, epoch): i64 {
     if (c == 89) { return _date_w4(buf, pos, load64(parts)); }                              # %Y
     if (c == 121) {                                                                          # %y
@@ -296,7 +314,20 @@ fn _date_render_spec(buf, pos, c, parts, wkday, epoch): i64 {
     if (c == 110) { store8(buf + pos, 10); return pos + 1; }                                # %n
     if (c == 116) { store8(buf + pos, 9);  return pos + 1; }                                # %t
     if (c == 37)  { store8(buf + pos, 37); return pos + 1; }                                # %%
-    # Unknown — emit `%X` source verbatim.
+    # ⚠ Two different failures. A specifier GNU DEFINES and kriya does not render
+    # is a wrong answer if emitted verbatim — `date +%V` printing the two bytes
+    # "%V" where a week number belonged, exit 0. A specifier that is not a
+    # specifier at all is passed through verbatim, which IS what GNU does
+    # (verified: `date +%@` prints `%@` on both).
+    if (_date_is_deferred_spec(c) == 1) {
+        k_write( 2, "kriya date: %", 13);
+        var eb[8];
+        store8(&eb, c);
+        k_write( 2, &eb, 1);
+        k_write( 2, ": specifier not implemented (see roadmap M12a)\n", 47);
+        _date_bad = 1;
+        return pos;
+    }
     store8(buf + pos, 37);
     store8(buf + pos + 1, c);
     return pos + 2;
@@ -425,5 +456,6 @@ fn cmd_date(start: i64): i64 {
     var epoch = clock_epoch_secs();
     var buf = alloc(4096);
     _date_format(fmt, epoch, buf, 4096);
+    if (_date_bad == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
 }

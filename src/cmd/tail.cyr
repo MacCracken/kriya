@@ -330,7 +330,7 @@ fn cmd_tail(start: i64): i64 {
     # 110 = 'n': the obsolescent bare-digit form. POSIX marks `head -5` / `tail -5`
     # obsolescent but every shell script in existence still uses it, and it is only
     # unambiguous here because neither utility registers a digit as a short option.
-    if (kriya_args_parse_obsnum(_tail_spec, start, 110) != 0) {
+    if (kriya_args_parse_optval(_tail_spec, start, 110, "follow") != 0) {
         k_write( 2, "kriya tail: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
         return EXIT_USAGE;
     }
@@ -341,6 +341,26 @@ fn cmd_tail(start: i64): i64 {
     if (flags_get_bool(_tail_spec, _tail_v_idx) == 1) { verbose = 1; }
     var follow: i64 = 0;
     if (flags_get_bool(_tail_spec, _tail_f_idx) == 1) { follow = 1; }
+    # GNU's `--follow[=name|descriptor]`. The value used to be swallowed.
+    # ⚠ kriya's follow is a stat-cadence poll on the PATH, so `=name` is exact
+    # and `=descriptor` is an approximation — a file replaced under the same
+    # name is followed either way, where GNU's `=descriptor` would stay with the
+    # old fd. Accepted rather than refused because scripts pass it routinely and
+    # the difference only shows under rotation; `-F` (the retry compound) stays
+    # deferred.
+    if (follow == 1) {
+        var fv = kriya_long_value();
+        if (fv != 0) {
+            if (streq(fv, "name") == 1) { }
+            elif (streq(fv, "descriptor") == 1) { }
+            else {
+                k_write( 2, "kriya tail: --follow: '", 23);
+                k_write( 2, fv, strlen(fv));
+                k_write( 2, "' is not a follow mode (use name or descriptor)\n", 48);
+                return EXIT_USAGE;
+            }
+        }
+    }
 
     var mode_bytes: i64 = 0;
     var limit: i64 = 10;

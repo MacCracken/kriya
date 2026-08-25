@@ -635,9 +635,64 @@ fn _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose): i
     return 0 - 22;
 }
 
+# Validate a `--preserve=` attribute list. Returns 0 when every attribute is one
+# kriya actually preserves, or -1 (after reporting) when it is not.
+#
+# ⚠ Accepting an attribute kriya does not implement would be the exact bug this
+# release is about: `cp --preserve=links` exited 0 while making independent
+# copies of what the user asked to stay hard-linked. Naming the unimplemented
+# attribute is the honest answer until the inode-set helper lands (roadmap M12c).
+fn _cp_check_preserve_list(attrs): i64 {
+    var len = strlen(attrs);
+    var seg_start: i64 = 0;
+    var i: i64 = 0;
+    var bad: i64 = 0;
+    while (i <= len) {
+        var at_end: i64 = 0;
+        if (i == len) { at_end = 1; }
+        else { if (load8(attrs + i) == 44) { at_end = 1; } }      # ','
+        if (at_end == 1) {
+            var slen = i - seg_start;
+            var ok: i64 = 0;
+            if (slen == 4) {
+                if (_cp_seg_eq(attrs + seg_start, "mode", 4) == 1) { ok = 1; }
+            }
+            if (slen == 10) {
+                if (_cp_seg_eq(attrs + seg_start, "timestamps", 10) == 1) { ok = 1; }
+            }
+            if (ok == 0) {
+                if (bad == 0) {
+                    k_write( 2, "kriya cp: --preserve: '", 23);
+                    k_write( 2, attrs + seg_start, slen);
+                    k_write( 2, "' is not preserved by kriya (supported: mode, timestamps)\n", 58);
+                    bad = 1;
+                }
+            }
+            seg_start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (bad == 1) { return 0 - 1; }
+    return 0;
+}
+
+fn _cp_seg_eq(p, lit, n): i64 {
+    var i: i64 = 0;
+    while (i < n) {
+        if (load8(p + i) != load8(lit + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 fn cmd_cp(start: i64): i64 {
     _cp_init_spec();
-    if (kriya_args_parse(_cp_spec, start) != 0) {
+    # GNU's `--preserve[=ATTR_LIST]`. kriya's `-p` preserves mode + atime/mtime,
+    # so `mode` and `timestamps` are honoured and the attributes kriya does not
+    # implement are REFUSED BY NAME rather than silently ignored — which is what
+    # `--preserve=links` used to do: accepted, discarded, exit 0, hard links
+    # quietly turned into independent copies.
+    if (kriya_args_parse_optval(_cp_spec, start, 0, "preserve") != 0) {
         k_write( 2, "kriya cp: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
         return EXIT_USAGE;
     }
@@ -654,6 +709,12 @@ fn cmd_cp(start: i64): i64 {
     if (flags_get_bool(_cp_spec, _cp_i_idx) == 1) { interactive = 1; }
     var preserve: i64 = 0;
     if (flags_get_bool(_cp_spec, _cp_p_idx) == 1) { preserve = 1; }
+    if (preserve == 1) {
+        var attrs = kriya_long_value();
+        if (attrs != 0) {
+            if (_cp_check_preserve_list(attrs) != 0) { return EXIT_USAGE; }
+        }
+    }
     var verbose: i64 = 0;
     if (flags_get_bool(_cp_spec, _cp_v_idx) == 1) { verbose = 1; }
     var recursive: i64 = 0;

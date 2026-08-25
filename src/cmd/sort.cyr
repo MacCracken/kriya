@@ -518,7 +518,10 @@ fn _so_write_all(fd, buf, n): i64 {
 
 fn cmd_sort(start: i64): i64 {
     _so_init_spec();
-    if (kriya_args_parse(_so_spec, start) != 0) {
+    # GNU's `--check[=quiet|silent|diagnose-first]`. The value used to be
+    # swallowed, so `--check=quiet` still printed the disorder line it exists to
+    # suppress.
+    if (kriya_args_parse_optval(_so_spec, start, 0, "check") != 0) {
         k_write( 2, "kriya sort: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
         return EXIT_USAGE;
     }
@@ -535,6 +538,23 @@ fn cmd_sort(start: i64): i64 {
     if (flags_get_bool(_so_spec, _so_b_idx) == 1) { ignore_blanks = 1; }
     var check_mode: i64 = 0;
     if (flags_get_bool(_so_spec, _so_c_idx) == 1) { check_mode = 1; }
+    # `quiet`/`silent` suppress the diagnostic but keep the exit status;
+    # `diagnose-first` is the default. Anything else is refused by name.
+    var check_quiet: i64 = 0;
+    if (check_mode == 1) {
+        var cv = kriya_long_value();
+        if (cv != 0) {
+            if (streq(cv, "quiet") == 1)             { check_quiet = 1; }
+            elif (streq(cv, "silent") == 1)          { check_quiet = 1; }
+            elif (streq(cv, "diagnose-first") == 1)  { check_quiet = 0; }
+            else {
+                k_write( 2, "kriya sort: --check: '", 22);
+                k_write( 2, cv, strlen(cv));
+                k_write( 2, "' is not a check mode (use quiet, silent or diagnose-first)\n", 60);
+                return EXIT_USAGE;
+            }
+        }
+    }
     var zero_term: i64 = 0;
     if (flags_get_bool(_so_spec, _so_z_idx) == 1) { zero_term = 1; }
 
@@ -643,6 +663,7 @@ fn cmd_sort(start: i64): i64 {
             var b = vec_get(records, i);
             var cmp = _so_compare(buf, a, b, numeric, reverse, fold, ignore_blanks, has_key, key_field, has_delim, delim);
             if (cmp > 0) {
+                if (check_quiet == 1) { return EXIT_FAILURE; }
                 k_write( 2, "kriya sort: disorder at line ", 29);
                 # Render i+1.
                 var nb[32];

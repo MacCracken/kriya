@@ -54,6 +54,12 @@
 # (operates on the link itself) per POSIX / GNU; `-L` follows.
 # ADR 0003's matrix doesn't apply.
 
+# Set when a format asked for something kriya cannot render. `stat` used to emit
+# the specifier's own text and exit 0 — so `stat -c %y f` printed the two bytes
+# "%y" where a timestamp belonged, and a script substituting that into a
+# filename or a comparison got literal garbage back with every sign of success.
+var _st_bad: i64 = 0;
+
 var _st_spec    = 0;
 var _st_c_idx   = 0;
 var _st_pr_idx  = 0;
@@ -287,12 +293,40 @@ fn _st_emit_spec(c, st, name): i64 {
         store8(&buf, 37);
         n = 1;
     } else {
-        # Unknown specifier — emit '%' + the char literally (GNU behaviour).
-        store8(&buf, 37);
-        store8(&buf + 1, c);
-        n = 2;
+        # ⚠ Two different failures, and they deserve different answers.
+        if (_st_is_deferred_spec(c) == 1) {
+            # A REAL specifier kriya has not implemented. Emitting its source
+            # text would be a wrong answer dressed as output; say so instead.
+            k_write( 2, "kriya stat: %", 13);
+            var eb[8];
+            store8(&eb, c);
+            k_write( 2, &eb, 1);
+            k_write( 2, ": not implemented (see roadmap M12a/M12c)\n", 42);
+            _st_bad = 1;
+            n = 0;
+        } else {
+            # Genuinely unknown. GNU prints '?' — verified against `stat -c %@`,
+            # which is what the previous "emit the source bytes, GNU behaviour"
+            # comment here got wrong.
+            store8(&buf, 63);
+            n = 1;
+        }
     } } } } } } } } } } } } } } } } } } } } }
     k_write( 1, &buf, n);
+    return 0;
+}
+
+# Specifiers GNU defines and kriya does not yet render, as opposed to ones that
+# are simply not specifiers. %x/%y/%z wait on chrono's strftime formatter, %U/%G
+# on a passwd/group parser, %N on a quoting helper, %w on statx(2).
+fn _st_is_deferred_spec(c): i64 {
+    if (c == 120) { return 1; }   # x
+    if (c == 121) { return 1; }   # y
+    if (c == 122) { return 1; }   # z
+    if (c == 85)  { return 1; }   # U
+    if (c == 71)  { return 1; }   # G
+    if (c == 78)  { return 1; }   # N
+    if (c == 119) { return 1; }   # w
     return 0;
 }
 
@@ -439,5 +473,6 @@ fn cmd_stat(start: i64): i64 {
     }
 
     if (any_failed == 1) { return EXIT_FAILURE; }
+    if (_st_bad == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
 }

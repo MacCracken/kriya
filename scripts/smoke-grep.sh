@@ -192,6 +192,20 @@ expect_exit '-q match exit 0'      0 "$BIN" grep -q foo basic
 expect_exit '-q no match exit 1'   1 "$BIN" grep -q zzz basic
 expect_exit '-s missing file'      1 "$BIN" grep -s foo no_such_file
 
+# --- every -e, not just the last (v1.2.1) ---
+# ⛔ `grep -e alpha -e gamma` matched only `gamma`. The spec has ONE value slot,
+# so earlier patterns were overwritten during parsing — no diagnostic, exit 0,
+# and a filter that silently dropped half its patterns. grep's matcher was
+# always multi-pattern (that is how -f works); only the collection was lossy.
+printf 'alpha\nbeta\ngamma\ndelta\n' > multi.txt
+for form in "-e alpha -e gamma" "--regexp=alpha --regexp=gamma" "-ealpha -egamma"; do
+    expect_eq "multi -e [$form]" "$(grep $form multi.txt | tr '\n' ' ')" "$($BIN grep $form multi.txt | tr '\n' ' ')"
+done
+expect_eq "multi -e with -i"  "$(grep -i -e ALPHA -e GAMMA multi.txt | tr '\n' ' ')" "$($BIN grep -i -e ALPHA -e GAMMA multi.txt | tr '\n' ' ')"
+expect_eq "multi -e with -v"  "$(grep -v -e alpha -e gamma multi.txt | tr '\n' ' ')" "$($BIN grep -v -e alpha -e gamma multi.txt | tr '\n' ' ')"
+expect_eq "multi -e with -c"  "$(grep -c -e alpha -e gamma multi.txt)" "$($BIN grep -c -e alpha -e gamma multi.txt)"
+expect_eq "single -e unchanged" "$(grep -e alpha multi.txt)" "$($BIN grep -e alpha multi.txt)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

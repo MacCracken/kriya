@@ -14,6 +14,33 @@
 var _kriya_argv_flat = 0;
 var _kriya_argv_n    = 0;
 
+# ⛔ `--boolopt=VALUE` USED TO BE ACCEPTED WITH THE VALUE THROWN AWAY, in every
+# utility. `sort --reverse=nonsense` sorted and exited 0; so did
+# `rm --force=nonsense`, `grep --count=nonsense`, `wc --lines=nonsense`. GNU
+# answers "option '--reverse' doesn't allow an argument" and refuses. Accepting
+# a flag while discarding what the user attached to it is the worst kind of
+# gap — it looks like it worked.
+#
+# ⚠ THREE OPTIONS LEGITIMATELY TAKE A VALUE and must not be caught by that:
+# `cp --preserve=LIST`, `sort --check=quiet`, `tail --follow=name`. The parser
+# has no representation for an optional-value long (registering one as a string
+# would make the bare `--preserve` swallow the next operand), so the utility
+# opts in by name and reads the value back here. One slot is enough — no
+# utility has two.
+# The last expanded argv (clusters split, attached values separated). Exposed so
+# a utility can collect EVERY occurrence of a repeatable option, which
+# `flags_get_str` cannot do — it keeps only the last.
+var _kriya_expanded   = 0;
+var _kriya_expanded_n = 0;
+
+var _kriya_optval_want = 0;    # long name allowed to carry "=VALUE", or 0
+var _kriya_optval_val  = 0;    # the captured value, or 0
+var _kriya_optval_bad  = 0;    # 1 once a bool long was given an argument
+
+# The `=VALUE` captured for the long name passed to `kriya_args_parse_optval`,
+# or 0 when the option was absent or given bare.
+fn kriya_long_value(): i64 { return _kriya_optval_val; }
+
 # Build (once) and return a pointer to argv as a flat array of cstr*.
 # Length is kriya_argv_count(). The array is allocated on the heap on
 # first call; subsequent calls are O(1).
@@ -112,7 +139,66 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
                 }
             }
             if (passthrough == 0) {
+                # `--NAME=VALUE`. A bool long must refuse the argument; the one
+                # long the caller opted in gets it stripped and stashed so
+                # flags_parse still sees a plain `--NAME`.
+                if (tlen > 3) {
+                    if (load8(tok) == 45) {
+                        if (load8(tok + 1) == 45) {
+                            var eq: i64 = 0;
+                            var e: i64 = 2;
+                            while (e < tlen) {
+                                if (load8(tok + e) == 61) {
+                                    if (eq == 0) { eq = e; }
+                                }
+                                e = e + 1;
+                            }
+                            if (eq > 0) {
+                                var nlen = eq - 2;
+                                var lt = kriya_long_type(spec, tok + 2, nlen);
+                                if (lt == 0) {                       # FLAG_BOOL
+                                    var opted: i64 = 0;
+                                    if (_kriya_optval_want != 0) {
+                                        if (strlen(_kriya_optval_want) == nlen) {
+                                            var q: i64 = 0;
+                                            var eqn: i64 = 1;
+                                            while (q < nlen) {
+                                                if (load8(_kriya_optval_want + q) != load8(tok + 2 + q)) { eqn = 0; }
+                                                q = q + 1;
+                                            }
+                                            if (eqn == 1) { opted = 1; }
+                                        }
+                                    }
+                                    if (opted == 1) {
+                                        _kriya_optval_val = tok + eq + 1;
+                                        var bare = alloc(nlen + 3);
+                                        store8(bare, 45);
+                                        store8(bare + 1, 45);
+                                        var b: i64 = 0;
+                                        while (b < nlen) {
+                                            store8(bare + 2 + b, load8(tok + 2 + b));
+                                            b = b + 1;
+                                        }
+                                        store8(bare + 2 + nlen, 0);
+                                        store64(out + oi * 8, bare);
+                                        oi = oi + 1;
+                                        handled = 1;
+                                    } else {
+                                        k_write( 2, "kriya ", 6);
+                                        k_write( 2, load64(av), strlen(load64(av)));
+                                        k_write( 2, ": option '--", 12);
+                                        k_write( 2, tok + 2, nlen);
+                                        k_write( 2, "' doesn't allow an argument\n", 28);
+                                        _kriya_optval_bad = 1;
+                                        handled = 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if (tlen > 2) {
+                    if (handled == 0) {
                     if (load8(tok) == 45) {
                         if (load8(tok + 1) != 45) {
                             # ⚠ Only expand when the FIRST letter is a REGISTERED short.
@@ -152,6 +238,7 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
                                 handled = 1;
                             }
                         }
+                    }
                     }
                 }
                 # Obsolescent `head -5` / `tail -5` → `-n 5`.
@@ -325,7 +412,18 @@ fn kriya_args_parse_obsnum(spec, start: i64, obs_num): i64 {
 # Parse only argv[start..end) against `spec`. `end` is exclusive. Utilities
 # whose operands are themselves a command line (`xargs`) use this with
 # `kriya_argv_option_end` so the child's flags are never interpreted.
+# As `kriya_args_parse`, plus one long option allowed to carry `=VALUE` — read
+# it back with `kriya_long_value()` after parsing. Used by `cp --preserve=LIST`,
+# `sort --check=quiet` and `tail --follow=name`, the three places where GNU
+# defines an optional value that the stdlib parser cannot represent.
+fn kriya_args_parse_optval(spec, start: i64, obs_num, optval_long): i64 {
+    _kriya_optval_want = optval_long;
+    _kriya_optval_val  = 0;
+    return kriya_args_parse_range(spec, start, kriya_argv_count(), obs_num);
+}
+
 fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
+    _kriya_optval_bad = 0;
     var flat = kriya_argv_flat();
     var n = end;
     var head = start - 1;
@@ -343,12 +441,86 @@ fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
     }
     var out = alloc(cap * 8);
     var m = kriya_expand_shorts(spec, slice_argc, slice_argv, out, obs_num);
+    _kriya_expanded   = out;
+    _kriya_expanded_n = m;
+    # The expander already printed the precise diagnostic ("option '--x' doesn't
+    # allow an argument"), so return a plain failure and let the caller's usage
+    # exit stand — a second, vaguer message on top would be noise.
+    if (_kriya_optval_bad == 1) { return 0 - 1; }
     return flags_parse(spec, m, out);
 }
 
 # Parse a null-terminated cstring as a non-negative base-10 integer.
 # Returns the value, or -1 on any of: null pointer, empty string,
 # non-digit character, leading sign. Used by sleep/seq/sort/head/tail.
+# Push every value given for the repeatable option `short_ch` / `--long_name`
+# into `out` (a vec), in argv order. Returns how many were found.
+#
+# ⛔ THE STDLIB SPEC KEEPS ONLY THE LAST VALUE, and for a repeatable option that
+# is a silent wrong answer rather than a missing feature: `grep -e alpha -e
+# gamma` matched only `gamma`, with no diagnostic and exit 0, where GNU matched
+# both. `flags_add_str` has one value slot, so the earlier occurrences were
+# overwritten during parsing and there was nothing left to recover afterwards.
+#
+# ⭐ Walks the EXPANDED argv, not the raw one, so every spelling has already been
+# normalised to `-e VALUE` — `-ealpha`, `-ie alpha` and `--regexp=alpha` all
+# arrive here in the same shape. Call after `kriya_args_parse*`.
+fn kriya_argv_collect(short_ch, long_name, out): i64 {
+    var av = _kriya_expanded;
+    var n  = _kriya_expanded_n;
+    if (av == 0) { return 0; }
+    var found: i64 = 0;
+    var llen: i64 = 0;
+    if (long_name != 0) { llen = strlen(long_name); }
+    var i: i64 = 1;
+    while (i < n) {
+        var tok  = load64(av + i * 8);
+        var tlen = strlen(tok);
+        var take: i64 = 0;         # 1 = value is the next token
+        var inline_at: i64 = 0;    # >0 = value starts at this offset in tok
+        if (tlen == 2) {
+            if (load8(tok) == 45) {
+                if (load8(tok + 1) == short_ch) { take = 1; }
+            }
+        }
+        if (tlen > 2) {
+            if (load8(tok) == 45) {
+                if (load8(tok + 1) == 45) {
+                    if (llen > 0) {
+                        # --long=VALUE or --long VALUE
+                        var same: i64 = 1;
+                        var j: i64 = 0;
+                        while (j < llen) {
+                            if (load8(tok + 2 + j) != load8(long_name + j)) { same = 0; }
+                            j = j + 1;
+                        }
+                        if (same == 1) {
+                            if (tlen == llen + 2) { take = 1; }
+                            else {
+                                if (load8(tok + 2 + llen) == 61) { inline_at = 2 + llen + 1; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (inline_at > 0) {
+            vec_push(out, tok + inline_at);
+            found = found + 1;
+        } else {
+            if (take == 1) {
+                if (i + 1 < n) {
+                    vec_push(out, load64(av + (i + 1) * 8));
+                    found = found + 1;
+                    i = i + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
 fn kriya_parse_nonneg_int(s): i64 {
     if (s == 0) { return 0 - 1; }
     if (load8(s) == 0) { return 0 - 1; }

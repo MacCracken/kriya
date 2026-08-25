@@ -40,6 +40,11 @@
 #   `\xHH` hex escape (GNU extension; `\NNN` octal covers the cases).
 #   Positional args `%N$s`.
 
+# Set when a directive or escape could not be honoured. printf used to WARN on
+# stderr, write the bare conversion character to stdout and exit 0 — so a script
+# using `%f` got the letter "f" where a number belonged and believed it worked.
+var _pf_bad: i64 = 0;
+
 var _pf_spec = 0;
 var _pf_buf  = 0;
 var _PF_BUFSZ: i64 = 4096;  # per-conversion scratch
@@ -373,8 +378,63 @@ fn _pf_emit_escape(s, i, slen): i64 {
             out_byte = val & 255;
         }
     }
+    # `\xHH` — 1-2 hex digits. A GNU extension, but a common one, and cheap
+    # enough that erroring on it would have been the wrong trade. Before this it
+    # fell through to the "unknown escape" path and printed a literal `x41`.
+    if (nx == 120) {
+        var hv: i64 = 0;
+        var ndig: i64 = 0;
+        var hp = i + 2;
+        var scanning: i64 = 1;
+        while (scanning == 1) {
+            if (ndig >= 2) { scanning = 0; }
+            elif (hp >= slen) { scanning = 0; }
+            else {
+                var hc = load8(s + hp);
+                var d: i64 = 0 - 1;
+                if (hc >= 48) { if (hc <= 57)  { d = hc - 48; } }
+                if (hc >= 97) { if (hc <= 102) { d = hc - 87; } }
+                if (hc >= 65) { if (hc <= 70)  { d = hc - 55; } }
+                if (d < 0) { scanning = 0; }
+                else {
+                    hv = hv * 16 + d;
+                    ndig = ndig + 1;
+                    hp = hp + 1;
+                }
+            }
+        }
+        if (ndig == 0) {
+            k_write( 2, "kriya printf: missing hexadecimal number in escape\n", 51);
+            _pf_bad = 1;
+            return 2;
+        }
+        _pf_putc(hv & 255);
+        return 2 + ndig;
+    }
     _pf_putc(out_byte);
     return consumed;
+}
+
+# One byte to stderr — the conversion letter inside a diagnostic.
+fn _pf_errc(c): i64 {
+    var b[8];
+    store8(&b, c);
+    k_write( 2, &b, 1);
+    return 0;
+}
+
+# e E f F g G a A — the conversions kriya does not implement, as opposed to ones
+# that are simply invalid. Worth telling apart in the diagnostic.
+fn _pf_is_float_conv(c): i64 {
+    if (c == 101) { return 1; }   # e
+    if (c == 69)  { return 1; }   # E
+    if (c == 102) { return 1; }   # f
+    if (c == 70)  { return 1; }   # F
+    if (c == 103) { return 1; }   # g
+    if (c == 71)  { return 1; }   # G
+    if (c == 97)  { return 1; }   # a
+    if (c == 65)  { return 1; }   # A
+    return 0;
 }
 
 fn _pf_process(fmt, arg_count): i64 {
@@ -387,7 +447,12 @@ fn _pf_process(fmt, arg_count): i64 {
         var any_conversion: i64 = 0;
         var i: i64 = 0;
         while (i < slen) {
+            # ⚠ A bad escape or directive STOPS processing, matching GNU: output
+            # already written stays (`printf 'abc\xZdef'` emits "abc"), but
+            # nothing after the error is emitted. Without this the offending
+            # bytes were printed as literals — `\xZ` left a stray `Z` on stdout.
             if (stop == 1) { i = slen; }
+            elif (_pf_bad == 1) { i = slen; }
             else {
                 var b = load8(fmt + i);
                 if (b == 92) {
@@ -565,10 +630,23 @@ fn _pf_process(fmt, arg_count): i64 {
                                 _pf_emit_int(v, 16, 1, left, plus, space, hash, zero, width, prec, 1);
                                 any_conversion = 1;
                             } else {
-                                # Unknown specifier — emit '%' + literal char.
-                                k_write( 2, "kriya printf: warning: unknown specifier %", 42);
-                                _pf_putc(conv);
-                                k_write( 2, "\n", 1);
+                                # ⛔ NOT A WARNING, AND NOTHING GOES TO STDOUT. This used to
+                                # write a warning to stderr, emit the bare conversion letter
+                                # to stdout (dropping the `%`) and exit 0 — so `printf '%f'
+                                # 1.5` produced the text "f" and reported success. GNU exits 1
+                                # on an invalid conversion and prints nothing.
+                                # The float conversions get their own message: they are a
+                                # named kriya gap, not a user typo.
+                                _pf_bad = 1;
+                                if (_pf_is_float_conv(conv) == 1) {
+                                    k_write( 2, "kriya printf: %", 15);
+                                    _pf_errc(conv);
+                                    k_write( 2, ": floating-point conversions are not implemented\n", 49);
+                                } else {
+                                    k_write( 2, "kriya printf: %", 15);
+                                    _pf_errc(conv);
+                                    k_write( 2, ": invalid conversion specification\n", 35);
+                                }
                             } } } } } } } } } }
                         }
                     } else {
@@ -579,6 +657,7 @@ fn _pf_process(fmt, arg_count): i64 {
             }
         }
         # End-of-format pass.
+        if (_pf_bad == 1) { loop_outer = 0; }
         if (stop == 1) { loop_outer = 0; }
         else {
             if (any_conversion == 0) { loop_outer = 0; }
@@ -637,5 +716,6 @@ fn cmd_printf(start: i64): i64 {
     # use the global spec; to shift past FORMAT, we set a global
     # `_pf_arg_base` (added below) that the helper uses.
     _pf_process(fmt, arg_count);
+    if (_pf_bad == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
 }
