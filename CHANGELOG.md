@@ -6,6 +6,120 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.2.0] - 2026-08-25 — option handling: `rm -rf` works
+
+Opens the **1.2.x arc** (see [roadmap.md](docs/development/roadmap.md)), which puts a running order on
+post-1.0 work by batching it around shared enablers rather than by utility. This is the first batch:
+one enabler in `src/lib/args.cyr`, and the two confirmed defects that live in the same code.
+
+### Added — clustered and attached short options, across 28 utilities
+
+⛔ **`rm -rf` exited 2.** So did `ls -la`, `grep -in`, `wc -lw`, `sort -rn`, `cp -rp`, `uniq -cd`,
+`tail -n5` and `cut -c1-3`. For a coreutils replacement heading into an OS userland that is the
+most-typed gap there is — `rm -rf` alone appears in essentially every shell script ever written, and
+kriya answered "bad option".
+
+The stdlib parser puts both forms explicitly out of scope (`lib/flags.cyr`: *"NOT supported … `-xyz`
+bundled short bool flags … `-xvalue` attached short value"*), so kriya **expands them before handing
+argv over** rather than reaching into upstream. `-rf` becomes `-r -f`; `-n5` becomes `-n 5`.
+
+⭐ **The expansion is spec-driven, not a guess.** It asks the caller's own flags spec whether each
+letter is a bool or takes a value — so `-rf` splits into two bools while `-c1-3` splits into an option
+and its value, with no per-utility table to drift out of sync. `kriya_short_type` and
+`kriya_long_type` read `lib/flags.cyr`'s entry layout, which the stdlib documents as a published
+contract in its header. ⚠ That is still a coupling; it is now the first thing to re-read at a pin
+bump (roadmap M15).
+
+Also **the obsolescent bare-digit form** — `head -5`, `tail -3` — via
+`kriya_args_parse_obsnum(spec, start, 110)`. POSIX marks it obsolescent; every shell script still uses
+it. It is only unambiguous because neither utility registers a digit as a short option, which is
+exactly the condition the code checks.
+
+⚠ **Eleven utilities are deliberately untouched.** `find`, `seq`, `env`, `du`, `df`, `date`, `echo`,
+`sleep`, `yes`, `true` and `false` walk argv themselves. That is *why* `find -name`, `seq -5` and
+`du -sh` keep working: a multi-character single-dash token that is a **predicate** or a **negative
+number** never reaches the expander. Expansion also only fires when the **first** letter is a
+registered short — the one condition that keeps a `printf` format or a `tr` set that merely starts
+with a dash byte-identical to what it was.
+
+An unknown letter mid-cluster is emitted as its own `-X` on purpose, so `ls -laZ` names the offending
+letter instead of rejecting the whole cluster.
+
+### Fixed — `xargs` was parsing the child's command line as its own
+
+⛔ **`echo t.txt | kriya xargs sort -r` silently sorted ASCENDING.** `-r` was eaten as
+`--no-run-if-empty` and `sort` ran with no options at all — wrong output, exit 0.
+`xargs head -n 2` ran `head` with no options the same way.
+
+⛔ **And the `--` guard was consumed and deleted.** `ls -1 | xargs rm --` handed `rm` an argument list
+beginning `-r` and **recursively deleted a directory the `--` existed to protect**.
+
+POSIX stops option recognition at the first operand, and when the operands *are* another command line
+that is not a nicety. `kriya_argv_option_end` finds the boundary and everything from it is passed to
+the child **verbatim** — taken from argv directly rather than from `flags_positional`, because the
+whole point is that those tokens were never interpreted.
+
+⚠ Value-taking options are the entire difficulty: the scan has to know `-n 5` swallows the following
+token while `-n5` does not, or the boundary lands one token off and the child loses its first
+argument. That is why it is spec-driven rather than a dash-counting heuristic.
+
+### Fixed — `xargs -I` split on blanks instead of lines
+
+⛔ **`printf 'a b\n' | kriya xargs -I{} rm -- {}` deleted files named `a` and `b`, and left `a b`.**
+The wrong files, silently. The everyday `ls | xargs -I{} mv {} dest/` idiom mangled every filename
+containing a space the same way.
+
+POSIX gives a replacement string one **line** per invocation. `-I` now splits on newline only.
+Verified against GNU across eight shapes: leading blanks stripped, **trailing ones kept**
+(`"  a b  "` → `a b  `), quotes and backslashes still honoured, empty lines producing no item, tabs
+preserved inside the item. `-0` is unaffected — NUL splitting already means one record per item — and
+without `-I`, blank splitting is unchanged.
+
+### Fixed — two stale source comments
+
+Comments rot, and a deferred-item list that lies costs someone a re-investigation:
+
+- `src/cmd/tail.cyr` listed **`-f` as deferred**. It shipped at v0.5.0 and follows a growing file
+  correctly. The single-file restriction *is* real and is now described as such, rather than the
+  whole feature being written off.
+- `src/cmd/sort.cyr` listed **`-k F1,F2` end-field key ranges as deferred**. Verified byte-identical
+  to GNU for `-t: -k1,1` and `-t: -k2,2`.
+
+### Added — the 1.2.x arc and an enabler map
+
+[roadmap.md](docs/development/roadmap.md) now carries a **running order** alongside the M10–M17
+catalogue, with the two views' jobs stated explicitly so items are not tracked in only one of them.
+Batches: 1.2.0 option handling (this release), 1.2.1 accepts-and-lies, 1.2.2 the spawn helper, 1.2.3
+walk safety, 1.2.4 destructive-verb semantics (ADR-gated), 1.2.5 the chrono batch.
+
+The **enabler map** is the part that makes the batching non-arbitrary: ten shared capabilities, and
+what each unblocks. `flags_add_str_multi` alone gates `grep -e`×N, `grep --include/--exclude` and
+multi-key `sort -k`; the chrono additions gate six utilities at once.
+
+⛔ **A new organising rule: "accepts and lies" outranks "rejects cleanly."** An option kriya refuses
+with exit 2 is a visible gap a user works around. One it *accepts and silently ignores* is a
+correctness defect wearing a feature's clothes. Auditing the deferred markers turned up two
+immediately, and they are pulled forward into **1.2.1**:
+
+- **`grep -e A -e B` silently uses only the last pattern** — kriya matches `gamma` where GNU matches
+  `alpha` and `gamma`. `-e` is registered as a single string, so earlier occurrences are overwritten
+  with no diagnostic.
+- **`cp --preserve=links` is accepted and ignored**, exit 0, because `--preserve` is a bool and any
+  `=VALUE` is swallowed.
+
+### Tests
+
+**1,131 smoke cases across 33 scripts** (up from 1,081 across 32 — 31 new option-form cases plus 19 in `xargs`), 119 unit + 18 POSIX assertions
+unchanged, 1,529 fuzz assertions green under the poisoned allocator.
+
+- `scripts/smoke-option-forms.sh` — 31 new cases pinning **both directions**: what must now be
+  accepted (clusters, attached values, `head -3`, `rm -rf` actually removing the tree) and what must
+  still be left completely alone (`grep --`, a `printf` format starting with a dash, `find -name`,
+  `seq -5` as a negative operand, `ls -laZ` still erroring). GNU is the oracle throughout.
+- `scripts/smoke-xargs.sh` grows 23 → 42: the child keeping its `-r` and `-n 2`, the `--` guard
+  removing a file literally named `-r` while its sibling directory survives, all eight `-I` splitting
+  shapes against GNU, and the destructive `a b` case end to end.
+
 ## [1.1.11] - 2026-08-25 — the P-1 sweep: nine repairs, six of them data loss, corruption or disclosure
 
 A priority-one audit across security, hardening, correctness, refactor and performance, and the

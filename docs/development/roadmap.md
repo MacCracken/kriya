@@ -130,7 +130,118 @@ Three fuzz harnesses land at M9 to close the last code-side v1.0 criterion: `tes
 
 ## Post-1.0 milestones
 
-v1.0 froze 2026-05-18 with 7 of 8 criteria checked. The 8th — downstream consumer green via AGNOS kernel boot-burn — is the trigger for **M10**. The remaining post-1.0 work falls into the buckets below (**M10–M16**), which can advance independently against tagged minor releases (1.x.y). They are listed in numeric order; the number is an identifier, not a priority.
+v1.0 froze 2026-05-18 with 7 of 8 criteria checked. The 8th — downstream consumer green via AGNOS kernel boot-burn — is the trigger for **M10**.
+
+Post-1.0 work is described **twice, on purpose**, and the two views serve different questions:
+
+- **The 1.2.x arc** (immediately below) is the RUNNING ORDER — what ships next, batched by shared
+  enabler. Read this to know what to work on.
+- **The milestone buckets M10–M17** (after it) are the CATALOGUE — every known item, grouped by
+  kind, in numeric order. The number is an identifier, not a priority. Read this to find whether
+  something is already tracked, and to see what the arc has not yet scheduled.
+
+Items live in the catalogue and are pulled into the arc when their enabler is ready. Nothing should
+appear only in the arc.
+
+## The 1.2.x arc
+
+Post-1.0 work up to now has been a **bucket list** (M10–M17): correct groupings, no sequence. The
+1.2.x arc puts a running order on it. Each release below is a coherent batch — its items share an
+enabler, a file, or a user-facing story, so one round of test work serves the whole batch instead of
+being re-derived per item.
+
+Two rules hold across the arc:
+
+- **A batch is defined by its enabler, not by its utility.** Half the open work is blocked on a small
+  number of shared capabilities (§ Enabler map below). Shipping the enabler is the release; the
+  features that ride on it are the release notes.
+- **"Accepts and lies" outranks "rejects cleanly."** An option kriya refuses with exit 2 is a visible
+  gap a user works around. An option it *accepts and silently ignores* — or answers wrongly — is a
+  correctness defect wearing a feature's clothes, and those are pulled forward regardless of which
+  bucket they came from. Two were found in the v1.2.0 cycle alone (see 1.2.1 below).
+
+### 1.2.0 — Option handling ✅ shipped 2026-08-25
+
+Clustered short options (`-rf`, `-la`, `-in`, `-lw`, `-cd`), attached short values (`-n5`, `-c1-3`),
+and the obsolescent bare-digit form (`head -5`, `tail -5`), via a spec-driven pre-expansion in
+`src/lib/args.cyr` that serves all 28 utilities routing through `kriya_args_parse`. Plus the two
+M17 defects that live in the same code: **M17b** (`xargs` parsing the child's command line as its
+own, including deleting its `--` guard) and **M17c** (`xargs -I` splitting on blanks instead of
+lines). Closes **M12b**'s parser half.
+
+### 1.2.1 — Accepts-and-lies
+
+The class above, swept in one pass. Not a feature release — every item is a case where kriya returns
+success while doing the wrong thing, which is strictly worse than the exit-2 gaps around it.
+
+- **`grep -e A -e B` silently uses only the LAST pattern.** Verified: kriya matches `gamma` where GNU
+  matches `alpha` and `gamma`. The spec registers `-e` as a single string, so earlier occurrences are
+  overwritten with no diagnostic. Needs `flags_add_str_multi` (or a kriya-side accumulator) — the
+  other half of **M12b**.
+- **`cp --preserve=links` is accepted and ignored**, exit 0. `--preserve` is registered as a bool, so
+  any `=VALUE` is swallowed. Either implement it (needs the inode-set helper, **M12c**) or reject the
+  unimplemented value explicitly.
+- **`stat -c %y`, `%x`, `%z` emit the literal specifier** rather than a time. Documented as
+  "unknown-specifier literal emission", but for a *known* POSIX specifier that is a wrong answer, not
+  a passthrough. Either render it (**M12a**, chrono) or reject it.
+- **`printf %f` warns and continues** rather than failing, so a script gets partial output and exit 0.
+- Audit sweep: every remaining option registered as a bool that GNU accepts a value for, and every
+  "unknown specifier passes through literally" path, checked for the same shape.
+
+### 1.2.2 — The spawn helper
+
+**M17a** — `find -exec` and `xargs` discard the child's stderr, because stdlib `exec_env` dup2s
+`/dev/null` onto fd 2. `find rot -name '*.tmp' -exec rm {} \;` on an unwritable directory prints
+nothing and exits 0 while deleting nothing. A kriya-local fork + execve + waitpid helper in
+`src/lib/`, with fds 0/1/2 inherited untouched and a raw wait status the callers can decode, fixes
+both utilities and is the prerequisite for `find -exec ... +` and `xargs -P` later.
+
+### 1.2.3 — Walk safety
+
+**M17d** (`grep -r` re-resolves from `AT_FDCWD` instead of descending from the parent dirfd — the
+TOCTOU that `rm`, `cp` and `find` already avoid) and **M17f** (`cp -R -i` never prompts; the
+recursive path ignores both `-i` and the no-clobber default). Both are threading work through an
+existing recursive walk, and both want the same ADR-0003 re-reading, so they batch.
+
+### 1.2.4 — Destructive-verb semantics (ADR-gated)
+
+**M17e** (`mv` cross-filesystem rollback deleting the only surviving copy) and **M17i** (`rm -r
+symlink/` following the link — matching GNU but contradicting kriya's own ADR-0003 stance). Both are
+behaviour decisions rather than bug fixes and want a successor ADR before code. Grouped because one
+ADR cycle can settle both.
+
+### 1.2.5 — The chrono batch
+
+**M12a** in full, once `lib/chrono.cyr` grows a duration parser, a date parser and a tz reader:
+`sleep 1.5` / `1m` / `1h`, `touch -r REF` / `-t STAMP` / `-d STR`, `date -d STR`, `date` local time
+(ADR 0007), `ls -l` locale mtime, `stat %x`/`%y`/`%z`. Six utilities, one upstream dependency —
+which is exactly why it is a batch and not six PRs.
+
+### Not yet scheduled
+
+**M17g** (`ls -l` fabricating metadata on stat failure), **M17h** (grep's per-byte heap retention),
+**M17j** (realpath's 16 KiB ceiling), the rest of **M12c**/**M12d**, and all of **M13**. These land
+against 1.2.x point releases as they become ready; the batches above are the ones with a settled
+running order.
+
+### Enabler map
+
+What actually gates the arc. Ship the enabler, and everything under it becomes small.
+
+| Enabler | Home | Unblocks |
+|---|---|---|
+| Option pre-expansion | `src/lib/args.cyr` | ✅ shipped 1.2.0 — clustering, attached values, `head -5` |
+| `flags_add_str_multi` | stdlib or kriya-side accumulator | `grep -e`×N, `grep --include/--exclude`, `sort -k`×N |
+| Spawn helper (fork/execve/waitpid, fds inherited) | `src/lib/` | M17a stderr, `find -exec +`, `xargs -P`, `xargs -p` |
+| chrono duration + date parser + tzfile | upstream `lib/chrono.cyr` | `sleep`, `touch -r/-t/-d`, `date -d`, `date` local, `ls -l` mtime, `stat %x/%y/%z` |
+| Inode-set helper | `src/lib/fs.cyr` | `cp --preserve=links`, `du` hardlink dedup |
+| UTF-8 decoder | stdlib `unicode/` (present) or kriya-side | `cut -c` multi-byte, `tr` locale fold, `uniq` multi-byte `-i` |
+| passwd/group parser | new `src/lib/` module | `ls -l` user/group names, `stat %U/%G`, `find -user/-group` |
+| Byte-suffix parser (`5K`, `1M`) | `src/lib/args.cyr` | `head -c 1K`, `tail -c 1K`, `sort -S` |
+| niyama literal fast path | upstream | `grep` literal speedup (M13), `grep` memory (M17h) |
+| Comparator-by-flag indirection | `src/cmd/ls.cyr` | `ls -t`, `-S`, and the `--color` table |
+
+## Milestone buckets (M10–M17) — the catalogue
 
 ### M10 — Consumer-burn (closes v1.0 criterion #8)
 

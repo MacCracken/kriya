@@ -41,7 +41,8 @@
 #   -d / --dictionary-order      only blanks + alnums compared.
 #   -i / --ignore-nonprinting    skip non-printable bytes.
 #   Multi-key sorting (-k F1 -k F2 ...) — first ship supports one key.
-#   `-k F1,F2` end-field key range.
+#   ⚠ `-k F1,F2` end-field key range SHIPS — verified byte-identical to GNU for
+#     `-t: -k1,1` and `-t: -k2,2`. Listed as deferred here until v1.2.0.
 #   External-sort fallback for inputs larger than 256 MiB.
 #   `-S SIZE` and `-T DIR` (only relevant under external-sort).
 

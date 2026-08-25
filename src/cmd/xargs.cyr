@@ -17,7 +17,15 @@
 # Item splitting:
 #   default: whitespace (HT, LF, VT, FF, CR, SP), with backslash and
 #            single/double quote escape handling — POSIX-faithful.
+#   -I     : NEWLINE ONLY. POSIX gives a replacement string one LINE per
+#            invocation, so blanks inside a line are part of the item. Leading
+#            blanks are stripped, trailing ones are not (verified against GNU).
+#            Quote/backslash handling stays active.
 #   -0     : items are NUL-separated; no escape handling.
+#
+# Option recognition STOPS AT THE FIRST OPERAND (`kriya_argv_option_end`),
+# because the operands here are another command's argv. Everything from that
+# point is passed to the child verbatim — its flags, and its `--`.
 #
 # Exit codes (subset of POSIX/GNU):
 #   0       all execs succeeded
@@ -153,7 +161,19 @@ fn _xa_is_ws(c): i64 {
 # cstr copies into `out`. `zero_mode`=1 means NUL-separated input (no
 # escape handling); 0 means whitespace-separated with backslash and
 # single/double-quote semantics.
-fn _xa_split(buf, len, zero_mode, out): i64 {
+#
+# ⛔ `line_mode`=1 SPLITS ON NEWLINE ONLY, and it is what `-I` requires. POSIX
+# says a replacement string consumes one LINE per invocation; kriya split on
+# blanks regardless, so `printf 'a b\n' | xargs -I{} rm -- {}` deleted files
+# named `a` and `b` and left `a b` untouched — the wrong files, silently. The
+# everyday `ls | xargs -I{} mv {} dest/` idiom mangled every name with a space
+# in it the same way.
+#
+# ⚠ Leading blanks are stripped but TRAILING ONES ARE NOT — verified against GNU,
+# which turns `"  a b  \n"` into `a b  `. Quote and backslash handling stay
+# active, so `"a b"` and `a\ b` both yield `a b`. Empty lines produce no item.
+# `-0` is unaffected: NUL splitting already means one item per record.
+fn _xa_split(buf, len, zero_mode, line_mode, out): i64 {
     if (zero_mode == 1) {
         var start: i64 = 0;
         var i: i64 = 0;
@@ -190,8 +210,27 @@ fn _xa_split(buf, len, zero_mode, out): i64 {
         var c = load8(buf + i);
         var emit: i64 = 0;
         if (quote == 0) {
-            if (_xa_is_ws(c) == 1) {
+            # In line mode only a newline ends an item; blanks before the item
+            # begins are dropped, blanks inside it are kept.
+            var is_term: i64 = 0;
+            if (line_mode == 1) {
+                if (c == 10) { is_term = 1; }
+            } else {
+                if (_xa_is_ws(c) == 1) { is_term = 1; }
+            }
+            var skip_lead: i64 = 0;
+            if (line_mode == 1) {
+                if (in_item == 0) {
+                    if (is_term == 0) {
+                        if (c == 32) { skip_lead = 1; }
+                        if (c == 9)  { skip_lead = 1; }
+                    }
+                }
+            }
+            if (is_term == 1) {
                 if (in_item == 1) { emit = 1; }
+            } elif (skip_lead == 1) {
+                # leading blank, before the item starts — POSIX says ignore it
             } elif (c == 92) {
                 # backslash: next byte literal
                 if (i + 1 < len) {
@@ -350,7 +389,14 @@ fn _xa_exec_one(args, trace_mode): i64 {
 
 fn cmd_xargs(start: i64): i64 {
     _xa_init_spec();
-    if (kriya_args_parse(_xa_spec, start) != 0) {
+    # ⛔ OPTION RECOGNITION STOPS AT THE FIRST OPERAND, BECAUSE THE OPERANDS ARE
+    # SOMEONE ELSE'S COMMAND LINE. Parsing the whole of argv meant xargs ate the
+    # child's flags: `xargs sort -r` silently sorted ascending (`-r` taken as
+    # --no-run-if-empty), `xargs head -n 2` ran head with no options, and
+    # `ls -1 | xargs rm --` had its `--` GUARD DELETED — handing `rm` a list
+    # starting `-r` and recursively deleting what the `--` existed to protect.
+    var cmd_at = kriya_argv_option_end(_xa_spec, start);
+    if (kriya_args_parse_range(_xa_spec, start, cmd_at, 0) != 0) {
         _xa_report("error: bad option (see ADR 0002 for accepted syntax)");
         return EXIT_USAGE;
     }
@@ -375,14 +421,19 @@ fn cmd_xargs(start: i64): i64 {
     }
 
     # Default command: /bin/echo.
-    var npos = flags_positional_count(_xa_spec);
+    # ⚠ Taken from argv VERBATIM starting at `cmd_at`, not from
+    # `flags_positional` — the whole point of the boundary above is that these
+    # tokens were never interpreted, so `-r`, `-n 2` and `--` reach the child
+    # exactly as the user typed them.
+    var argv_n = kriya_argv_count();
+    var flat = kriya_argv_flat();
     var cmd_base = vec_new();
-    if (npos == 0) {
+    if (cmd_at >= argv_n) {
         vec_push(cmd_base, "/bin/echo");
     } else {
-        var ci: i64 = 0;
-        while (ci < npos) {
-            vec_push(cmd_base, flags_positional(_xa_spec, ci));
+        var ci = cmd_at;
+        while (ci < argv_n) {
+            vec_push(cmd_base, load64(flat + ci * 8));
             ci = ci + 1;
         }
     }
@@ -399,7 +450,7 @@ fn cmd_xargs(start: i64): i64 {
     }
 
     var items = vec_new();
-    _xa_split(stdin_buf, stdin_len, zero_mode, items);
+    _xa_split(stdin_buf, stdin_len, zero_mode, per_item, items);
     var n_items = vec_len(items);
 
     if (n_items == 0) {

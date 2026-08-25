@@ -163,7 +163,10 @@ fn _head_emit(fd, limit, count_lines): i64 {
 
 fn cmd_head(start: i64): i64 {
     _head_init_spec();
-    if (kriya_args_parse(_head_spec, start) != 0) {
+    # 110 = 'n': the obsolescent bare-digit form. POSIX marks `head -5` / `tail -5`
+    # obsolescent but every shell script in existence still uses it, and it is only
+    # unambiguous here because neither utility registers a digit as a short option.
+    if (kriya_args_parse_obsnum(_head_spec, start, 110) != 0) {
         k_write( 2, "kriya head: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
         return EXIT_USAGE;
     }

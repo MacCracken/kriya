@@ -36,6 +36,163 @@ fn kriya_argv_count(): i64 {
     return _kriya_argv_n;
 }
 
+# =====================================================================
+# Clustered / attached short options
+#
+# ⛔ `rm -rf` DID NOT WORK, AND NEITHER DID `ls -la`, `grep -in`, `wc -lw`,
+# `sort -rn`, `cp -rp`, `uniq -cd`, `tail -n5` OR `cut -c1-3`. Every one exited
+# 2 with "bad option". For a coreutils replacement heading into an OS userland
+# that is the most-typed gap there is — `rm -rf` alone appears in essentially
+# every shell script ever written.
+#
+# The stdlib parser puts both forms explicitly out of scope (`lib/flags.cyr`
+# header: "NOT supported … -xyz bundled short bool flags … -xvalue attached
+# short value"), so kriya EXPANDS THEM BEFORE HANDING ARGV OVER rather than
+# reaching into upstream. `-rf` becomes `-r -f`; `-n5` becomes `-n 5`.
+#
+# ⭐ THE EXPANSION IS SPEC-DRIVEN, NOT A GUESS. It asks the caller's own flags
+# spec whether each letter is a bool or takes a value, so `-rf` splits into two
+# bools while `-c1-3` splits into an option and its value — with no per-utility
+# table to drift out of sync.
+#
+# ⚠ Only the 28 utilities that route through `kriya_args_parse` are affected.
+# `find`, `seq`, `env`, `du`, `df`, `date`, `echo`, `sleep`, `yes`, `true` and
+# `false` walk argv themselves, which is exactly why `find -name`, `seq -5` and
+# `du -sh` keep working: a multi-character single-dash token that is a PREDICATE
+# or a NEGATIVE NUMBER never reaches this code.
+# =====================================================================
+
+# FlagType of the short option `ch` in `spec`, or -1 when `ch` is not registered.
+# Reads `lib/flags.cyr`'s documented layout: context +0 entries_ptr,
+# +16 entries_count; entry +0 short_ch, +16 type.
+# ⚠ That layout is a published contract in the stdlib header, not a guess — but
+# it IS a coupling. If a pin bump ever changes it, this is the first thing to
+# re-read (roadmap M15).
+fn kriya_short_type(spec, ch): i64 {
+    if (spec == 0) { return 0 - 1; }
+    if (ch == 0)   { return 0 - 1; }
+    var entries = load64(spec);
+    var count   = load64(spec + 16);
+    var i: i64 = 0;
+    while (i < count) {
+        var ep = entries + i * FLAGS_ENTRY_SIZE;
+        if (load64(ep) == ch) { return load64(ep + 16); }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Rewrite `av[0..n)` with clusters expanded, returning the new count. The
+# expanded array is written to `out` (caller-allocated, see the cap computed in
+# `kriya_args_parse`). `av[0]` is the program name and passes through untouched.
+#
+# `obs_num` is the short option letter that an obsolescent bare-digit operand
+# maps to — `head -5` meaning `head -n 5` — or 0 for utilities with no such
+# form. It only fires on a token that is `-` followed by digits only, so a
+# registered numeric short (`ls -1`) is unaffected: that is matched as an
+# option first.
+fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
+    var oi: i64 = 0;
+    if (n > 0) {
+        store64(out, load64(av));
+        oi = 1;
+    }
+    var passthrough: i64 = 0;      # set once `--` is seen
+    var i: i64 = 1;
+    while (i < n) {
+        var tok  = load64(av + i * 8);
+        var tlen = strlen(tok);
+        var handled: i64 = 0;
+
+        if (passthrough == 0) {
+            # `--` terminator: copy it and stop interpreting.
+            if (tlen == 2) {
+                if (load8(tok) == 45) {
+                    if (load8(tok + 1) == 45) { passthrough = 1; }
+                }
+            }
+            if (passthrough == 0) {
+                if (tlen > 2) {
+                    if (load8(tok) == 45) {
+                        if (load8(tok + 1) != 45) {
+                            # ⚠ Only expand when the FIRST letter is a REGISTERED short.
+                            # That single condition is what keeps a non-option token that
+                            # merely starts with a dash — a `printf` format, a `tr` set,
+                            # a negative operand — byte-identical to what it is today.
+                            var t0 = kriya_short_type(spec, load8(tok + 1));
+                            if (t0 >= 0) {
+                                var k: i64 = 1;
+                                var stop: i64 = 0;
+                                while (k < tlen) {
+                                    if (stop == 0) {
+                                        var c  = load8(tok + k);
+                                        var ty = kriya_short_type(spec, c);
+                                        var f  = alloc(3);
+                                        store8(f, 45);          # '-'
+                                        store8(f + 1, c);
+                                        store8(f + 2, 0);
+                                        store64(out + oi * 8, f);
+                                        oi = oi + 1;
+                                        if (ty > 0) {
+                                            # INT or STR. Anything left in the token is the
+                                            # attached value — and it is already a valid
+                                            # cstring, so it needs no copy.
+                                            if (k + 1 < tlen) {
+                                                store64(out + oi * 8, tok + k + 1);
+                                                oi = oi + 1;
+                                            }
+                                            stop = 1;
+                                        }
+                                        # A bool keeps walking. An UNKNOWN letter is emitted
+                                        # as its own `-X` on purpose, so the parser names the
+                                        # offending letter instead of the whole cluster.
+                                    }
+                                    k = k + 1;
+                                }
+                                handled = 1;
+                            }
+                        }
+                    }
+                }
+                # Obsolescent `head -5` / `tail -5` → `-n 5`.
+                if (handled == 0) {
+                    if (obs_num != 0) {
+                        if (tlen > 1) {
+                            if (load8(tok) == 45) {
+                                var d: i64 = 1;
+                                var alldig: i64 = 1;
+                                while (d < tlen) {
+                                    if (load8(tok + d) < 48) { alldig = 0; }
+                                    if (load8(tok + d) > 57) { alldig = 0; }
+                                    d = d + 1;
+                                }
+                                if (alldig == 1) {
+                                    var g = alloc(3);
+                                    store8(g, 45);
+                                    store8(g + 1, obs_num);
+                                    store8(g + 2, 0);
+                                    store64(out + oi * 8, g);
+                                    oi = oi + 1;
+                                    store64(out + oi * 8, tok + 1);
+                                    oi = oi + 1;
+                                    handled = 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (handled == 0) {
+            store64(out + oi * 8, tok);
+            oi = oi + 1;
+        }
+        i = i + 1;
+    }
+    return oi;
+}
+
 # Parse argv[start..] against `spec` using stdlib `flags_parse`.
 # `start` is the dispatcher offset (1 for symlink form, 2 for
 # `kriya <util>` form). We slice argv so `flags_parse` sees its
@@ -43,12 +200,150 @@ fn kriya_argv_count(): i64 {
 # program name and otherwise ignored), argv[1..] are the args.
 # Returns 0 on success, non-zero on parse error.
 fn kriya_args_parse(spec, start: i64): i64 {
-    var flat = kriya_argv_flat();
+    return kriya_args_parse_obsnum(spec, start, 0);
+}
+
+# FlagType of the long option named by the `len` bytes at `name`, or -1 when it
+# is not registered. Same layout contract as `kriya_short_type`.
+fn kriya_long_type(spec, name, len): i64 {
+    if (spec == 0) { return 0 - 1; }
+    var entries = load64(spec);
+    var count   = load64(spec + 16);
+    var i: i64 = 0;
+    while (i < count) {
+        var ep = entries + i * FLAGS_ENTRY_SIZE;
+        var ln = load64(ep + 8);
+        if (ln != 0) {
+            if (strlen(ln) == len) {
+                var j: i64 = 0;
+                var same: i64 = 1;
+                while (j < len) {
+                    if (load8(ln + j) != load8(name + j)) { same = 0; }
+                    j = j + 1;
+                }
+                if (same == 1) { return load64(ep + 16); }
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Index of the first argv token at or after `start` that is NOT one of `spec`'s
+# own options (nor the value of one). A `--` terminator is consumed and the
+# index after it is returned.
+#
+# ⛔ THIS EXISTS BECAUSE `xargs` WAS PARSING THE CHILD'S COMMAND LINE AS ITS OWN.
+# `echo t.txt | xargs sort -r` silently sorted ASCENDING — `-r` was eaten as
+# `--no-run-if-empty` and `sort` ran with no options at all. `xargs head -n 2`
+# ate `-n 2` as `--max-args`. Worst of all the `--` GUARD WAS CONSUMED AND
+# DELETED, so `ls -1 | xargs rm --` handed `rm` an argument list beginning `-r`
+# and recursively deleted a directory the `--` was written to protect.
+#
+# POSIX is explicit that option recognition stops at the first operand, and for
+# a utility whose operands ARE another command line that is not a nicety.
+#
+# ⚠ Value-taking options are the whole difficulty: the scan has to know that
+# `-n 5` swallows the following token while `-n5` does not, or the boundary
+# lands one token off and the child loses its first argument. That is why this
+# is spec-driven rather than a dash-counting heuristic.
+fn kriya_argv_option_end(spec, start: i64): i64 {
     var n = kriya_argv_count();
+    var flat = kriya_argv_flat();
+    var i = start;
+    var done: i64 = 0;
+    while (done == 0) {
+        if (i >= n) { done = 1; }
+        else {
+            var tok  = load64(flat + i * 8);
+            var tlen = strlen(tok);
+            if (tlen < 2) { done = 1; }                       # "" or a bare "-" operand
+            else {
+                if (load8(tok) != 45) { done = 1; }           # no leading '-' → operand
+                else {
+                    if (load8(tok + 1) == 45) {
+                        if (tlen == 2) {
+                            i = i + 1;                        # "--": consume, then stop
+                            done = 1;
+                        } else {
+                            # "--name" or "--name=value".
+                            var eq: i64 = 0;
+                            var e: i64 = 2;
+                            while (e < tlen) {
+                                if (load8(tok + e) == 61) {   # '='
+                                    if (eq == 0) { eq = e; }
+                                }
+                                e = e + 1;
+                            }
+                            if (eq > 0) { i = i + 1; }        # value attached
+                            else {
+                                var lt = kriya_long_type(spec, tok + 2, tlen - 2);
+                                if (lt < 0) { done = 1; }     # not ours → operand boundary
+                                else {
+                                    i = i + 1;
+                                    if (lt > 0) { i = i + 1; }  # separate value token
+                                }
+                            }
+                        }
+                    } else {
+                        var t0 = kriya_short_type(spec, load8(tok + 1));
+                        if (t0 < 0) { done = 1; }             # not ours → operand boundary
+                        else {
+                            # Walk the cluster to find whether its LAST effective
+                            # option takes a value with nothing attached.
+                            var k: i64 = 1;
+                            var eats_next: i64 = 0;
+                            var stop: i64 = 0;
+                            while (k < tlen) {
+                                if (stop == 0) {
+                                    var ty = kriya_short_type(spec, load8(tok + k));
+                                    if (ty > 0) {
+                                        if (k + 1 >= tlen) { eats_next = 1; }
+                                        stop = 1;
+                                    }
+                                }
+                                k = k + 1;
+                            }
+                            i = i + 1;
+                            if (eats_next == 1) { i = i + 1; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (i > n) { i = n; }
+    return i;
+}
+
+# As `kriya_args_parse`, plus the obsolescent bare-digit form mapped onto the
+# short option `obs_num` (`head`/`tail` pass 110 = 'n').
+fn kriya_args_parse_obsnum(spec, start: i64, obs_num): i64 {
+    return kriya_args_parse_range(spec, start, kriya_argv_count(), obs_num);
+}
+
+# Parse only argv[start..end) against `spec`. `end` is exclusive. Utilities
+# whose operands are themselves a command line (`xargs`) use this with
+# `kriya_argv_option_end` so the child's flags are never interpreted.
+fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
+    var flat = kriya_argv_flat();
+    var n = end;
     var head = start - 1;
     var slice_argc = n - head;
+    if (slice_argc < 1) { slice_argc = 1; }
     var slice_argv = flat + head * 8;
-    return flags_parse(spec, slice_argc, slice_argv);
+
+    # Worst case one output token per byte of every input token (an all-bool
+    # cluster), plus the tokens themselves.
+    var cap: i64 = 0;
+    var i: i64 = 0;
+    while (i < slice_argc) {
+        cap = cap + 1 + strlen(load64(slice_argv + i * 8));
+        i = i + 1;
+    }
+    var out = alloc(cap * 8);
+    var m = kriya_expand_shorts(spec, slice_argc, slice_argv, out, obs_num);
+    return flags_parse(spec, m, out);
 }
 
 # Parse a null-terminated cstring as a non-negative base-10 integer.

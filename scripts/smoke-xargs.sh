@@ -128,6 +128,62 @@ expect_exit "missing command exits 127" 127 \
 # A real command still resolves and runs.
 expect_eq "PATH lookup still works" "a b" "$(printf 'a\nb\n' | "$BIN" xargs echo)"
 
+# --- option recognition stops at the first operand (v1.2.0) -------------
+# ⛔ xargs used to parse the CHILD's command line as its own. `xargs sort -r`
+# silently sorted ASCENDING (`-r` eaten as --no-run-if-empty) and
+# `xargs head -n 2` ran head with no options at all — wrong output, exit 0.
+# Worst of all the `--` GUARD WAS CONSUMED AND DELETED, so `ls -1 | xargs rm --`
+# handed rm a list beginning `-r` and recursively deleted what `--` protected.
+printf 'c\nb\na\n' > sortme.txt
+printf '1\n2\n3\n4\n5\n' > fivelines.txt
+
+expect_eq "child keeps -r" \
+    "$(echo sortme.txt | xargs sort -r | tr '\n' ' ')" \
+    "$(echo sortme.txt | "$BIN" xargs sort -r | tr '\n' ' ')"
+expect_eq "child keeps -n 2" \
+    "$(echo fivelines.txt | xargs head -n 2 | tr '\n' ' ')" \
+    "$(echo fivelines.txt | "$BIN" xargs head -n 2 | tr '\n' ' ')"
+
+# The `--` guard reaches the child. A file literally named `-r` must be removed
+# as a FILE, and the sibling directory must survive untouched.
+mkdir -p guard/keep
+touch guard/keep/important
+touch "guard/-r"
+( cd guard && ls -1 | "$BIN" xargs rm -- ) >/dev/null 2>&1 || true
+expect_eq "-- guard: directory survived"  "yes" "$([ -d guard/keep ] && echo yes || echo no)"
+expect_eq "-- guard: its contents too"    "yes" "$([ -f guard/keep/important ] && echo yes || echo no)"
+expect_eq "-- guard: the -r FILE removed" "no"  "$([ -e "guard/-r" ] && echo yes || echo no)"
+
+# xargs' own options are still recognised, in both spellings.
+expect_eq "own -n 1 still works"  "a b c" "$(printf 'a\nb\nc\n' | "$BIN" xargs -n 1 echo | tr '\n' ' ' | sed 's/ $//')"
+expect_eq "own -n1 attached"      "a b c" "$(printf 'a\nb\nc\n' | "$BIN" xargs -n1 echo | tr '\n' ' ' | sed 's/ $//')"
+
+# --- -I splits on LINES, not blanks (v1.2.0) ---------------------------
+# ⛔ POSIX gives a replacement string one LINE per invocation. Splitting on
+# blanks meant `printf 'a b\n' | xargs -I{} rm -- {}` deleted files named `a`
+# and `b` and left `a b` — the wrong files, silently. Same shape mangled every
+# spaced filename in the everyday `ls | xargs -I{} mv {} dest/` idiom.
+for spec in 'a b\n' '  a b  \n' 'a b\nc\n' '"a b"\n' 'a\\ b\n' 'a\n\nb\n' 'a\tb\n'; do
+    expect_eq "-I split [$spec]" \
+        "$(printf "$spec" | xargs      -I{} echo "[{}]" | tr '\n' ' ')" \
+        "$(printf "$spec" | "$BIN" xargs -I{} echo "[{}]" | tr '\n' ' ')"
+done
+
+# The destructive shape, end to end: only the spaced file goes.
+mkdir -p ispace && ( cd ispace && touch a b "a b" && printf 'a b\n' | "$BIN" xargs -I{} rm -- "{}" )
+expect_eq "-I: 'a' survives"   "yes" "$([ -f ispace/a ] && echo yes || echo no)"
+expect_eq "-I: 'b' survives"   "yes" "$([ -f ispace/b ] && echo yes || echo no)"
+expect_eq "-I: 'a b' removed"  "no"  "$([ -e "ispace/a b" ] && echo yes || echo no)"
+
+# -0 still splits on NUL even with -I.
+expect_eq "-0 with -I unaffected" \
+    "$(printf 'a b\0c\0' | xargs      -0 -I{} echo "[{}]" | tr '\n' ' ')" \
+    "$(printf 'a b\0c\0' | "$BIN" xargs -0 -I{} echo "[{}]" | tr '\n' ' ')"
+# ...and without -I, blank splitting is unchanged.
+expect_eq "non -I still blank-splits" \
+    "$(printf 'a b\nc\n' | xargs      echo | tr '\n' ' ')" \
+    "$(printf 'a b\nc\n' | "$BIN" xargs echo | tr '\n' ' ')"
+
 # --- summary ---------------------------------------------------------
 
 TOTAL=$((PASS + FAIL))
