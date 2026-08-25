@@ -203,6 +203,51 @@ mkdir -p intodir
 expect_exit "cp -r X existing-dir/"          0 "$BIN" cp -r self intodir/
 expect_type "nested under existing dir"      dir intodir/self
 
+# --- the recursive path honours -i and the no-clobber default (v1.2.3) ---
+# ⛔ `cp -R` opened every destination with O_TRUNC and never asked, so
+# `cp -i -R src dst` overwrote WITHOUT A SINGLE PROMPT (verified under a real
+# pty: GNU asks, kriya did not), and `cp -R src dst` with no -f silently
+# replaced existing files — while the NON-recursive path right beside it has
+# always refused that. cp was inconsistent with itself, and the recursive half
+# was the one contradicting CLAUDE.md's "no silent file overwrites without -f".
+mkdir -p iact/s iact/d/s
+echo NEW           > iact/s/f
+echo OLD-IMPORTANT > iact/d/s/f
+
+# No -f: refuse, and leave the destination alone.
+expect_exit "cp -R no -f refuses"     1 "$BIN" cp -R iact/s iact/d
+expect_eq   "…destination untouched"  "OLD-IMPORTANT" "$(cat iact/d/s/f)"
+# -f: overwrite.
+expect_exit "cp -R -f overwrites"     0 "$BIN" cp -R -f iact/s iact/d
+expect_eq   "…destination replaced"   "NEW" "$(cat iact/d/s/f)"
+
+# -i under a real pty. ⚠ `script(1)` is what makes the prompt reachable from a
+# shell script at all — kriya refuses -i on a non-tty stdin by design (ADR 0002),
+# so a plain pipe cannot exercise this path.
+if command -v script >/dev/null 2>&1; then
+    echo OLD-IMPORTANT > iact/d/s/f
+    # ⚠ `|| rc=$?` is load-bearing under `set -e`: declining is EXPECTED to exit
+    # 1, and a bare pipeline would abort the script at that status before the
+    # assertion ran.
+    rc=0
+    printf 'n\n' | script -qec "'$BIN' cp -i -R iact/s iact/d" /dev/null >/dev/null 2>&1 || rc=$?
+    expect_eq "cp -i -R declined: exit 1"     "1" "$rc"
+    expect_eq "cp -i -R declined: kept file"  "OLD-IMPORTANT" "$(cat iact/d/s/f)"
+
+    echo OLD-IMPORTANT > iact/d/s/f
+    rc=0
+    printf 'y\n' | script -qec "'$BIN' cp -i -R iact/s iact/d" /dev/null >/dev/null 2>&1 || rc=$?
+    expect_eq "cp -i -R accepted: exit 0"     "0" "$rc"
+    expect_eq "cp -i -R accepted: replaced"   "NEW" "$(cat iact/d/s/f)"
+else
+    echo "skip: script(1) unavailable — the -i prompt path was not exercised"
+fi
+
+# A fresh recursive copy is unaffected by any of the above.
+mkdir -p fresh_src/sub && echo A > fresh_src/a && echo B > fresh_src/sub/b
+expect_exit "fresh recursive copy"    0 "$BIN" cp -R fresh_src fresh_dst
+expect_eq   "…copied both files"      "a sub/b" "$(cd fresh_dst && find . -type f | sed 's|^\./||' | sort | tr '\n' ' ' | sed 's/ $//')"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

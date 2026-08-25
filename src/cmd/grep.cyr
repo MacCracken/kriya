@@ -733,11 +733,23 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
     return 0;
 }
 
-# Recursive directory walk. Each regular file under `path` (no symlink
-# follow) is grepped. Returns 1 if any match anywhere, 0 otherwise.
-# `path` is mutated locally via path_join into `subbuf` for descent.
-fn _gr_walk_dir(dir_path, handles, n_handles, opts, term_byte, suppress): i64 {
-    var dir_fd = fs_openat(0 - 100, dir_path, 65536, 0);  # O_RDONLY | O_DIRECTORY
+# Recursive directory walk. Each regular file under the entry
+# (`parent_dirfd`, `dir_name`) is grepped; symlinks are skipped per ADR 0003.
+# `dir_path` is the accumulated path, carried for DIAGNOSTICS AND agnos ONLY.
+# Returns 1 if any match anywhere, 0 otherwise.
+#
+# ⛔ THE DESCENT IS FROM A PARENT FD, NOT BY PATH — AND IT DID NOT USED TO BE.
+# Every level re-opened the accumulated path with `fs_openat(AT_FDCWD, …)`, so
+# each descent re-resolved every ancestor component. Replace a directory with a
+# symlink to `/etc` mid-walk and the walk follows it out of the tree and greps
+# whatever it lands on, reporting the hits under the ORIGINAL path. `O_NOFOLLOW`
+# on the file open was no defence: it guards the final component only.
+#
+# `rm`, `cp` and `find` have descended from a parent fd since M2 (ADR 0003 hard
+# rule); `grep -r` was the one recursive walk still doing it by path, and the M8
+# audit's per-file O_NOFOLLOW mitigation hid how much was left open.
+fn _gr_walk_dir(parent_dirfd, dir_name, dir_path, handles, n_handles, opts, term_byte, suppress): i64 {
+    var dir_fd = fs_open_entry_dir(parent_dirfd, dir_path, dir_name);
     if (dir_fd < 0) {
         _gr_report(dir_path, 0 - dir_fd, suppress);
         return 0;
@@ -766,22 +778,24 @@ fn _gr_walk_dir(dir_path, handles, n_handles, opts, term_byte, suppress): i64 {
                     var is_dd = fs_dent_is_dotdot(ent);
                     if (is_dd == 0) {
                         var st[144];  # 144 bytes (18 i64 slots)
-                        var r = fs_lstat_at(dir_fd, name, &st);
+                        # Built BEFORE the stat: `fs_stat_entry`'s agnos arm needs
+                        # the full path (no dirfd-relative stat there), and every
+                        # diagnostic below wants it too.
+                        var nlen = strlen(name);
+                        var dlen = strlen(dir_path);
+                        var sep = 1;
+                        if (dlen > 0) {
+                            if (load8(dir_path + dlen - 1) == 47) { sep = 0; }
+                        }
+                        var sub = alloc(dlen + sep + nlen + 1);
+                        memcpy(sub, dir_path, dlen);
+                        if (sep == 1) { store8(sub + dlen, 47); }
+                        memcpy(sub + dlen + sep, name, nlen);
+                        store8(sub + dlen + sep + nlen, 0);
+                        var r = fs_stat_entry(dir_fd, sub, name, &st, 0);
                         if (r == 0) {
-                            # Build full path: dir_path + "/" + name
-                            var nlen = strlen(name);
-                            var dlen = strlen(dir_path);
-                            var sep = 1;
-                            if (dlen > 0) {
-                                if (load8(dir_path + dlen - 1) == 47) { sep = 0; }
-                            }
-                            var sub = alloc(dlen + sep + nlen + 1);
-                            memcpy(sub, dir_path, dlen);
-                            if (sep == 1) { store8(sub + dlen, 47); }
-                            memcpy(sub + dlen + sep, name, nlen);
-                            store8(sub + dlen + sep + nlen, 0);
                             if (fs_is_dir(&st) == 1) {
-                                if (_gr_walk_dir(sub, handles, n_handles, opts, term_byte, suppress) == 1) {
+                                if (_gr_walk_dir(dir_fd, name, sub, handles, n_handles, opts, term_byte, suppress) == 1) {
                                     found_any = 1;
                                 }
                             } elif (fs_is_reg(&st) == 1) {
@@ -791,7 +805,7 @@ fn _gr_walk_dir(dir_path, handles, n_handles, opts, term_byte, suppress): i64 {
                                 # for a symlink, ELOOP — we report and skip
                                 # rather than leak the target's bytes.
                                 # See CVE-2026-35359 in uutils-coreutils.
-                                var fd = k_open(sub, 131072, 0);
+                                var fd = fs_open_entry_file(dir_fd, sub, name);
                                 if (fd < 0) {
                                     _gr_report(sub, 0 - fd, suppress);
                                 } else {
@@ -989,7 +1003,10 @@ fn cmd_grep(start: i64): i64 {
                     any_failed = 1;
                 } elif (fs_is_dir(&st) == 1) {
                     if (rec_mode == 1) {
-                        if (_gr_walk_dir(name, handles, n_handles, opts, term_byte, suppress) == 1) {
+                        # Top level: AT_FDCWD + the operand. A symlinked operand
+                        # never reaches here — the lstat above classifies it as
+                        # a non-directory.
+                        if (_gr_walk_dir(0 - 100, name, name, handles, n_handles, opts, term_byte, suppress) == 1) {
                             any_match = 1;
                         }
                     } else {

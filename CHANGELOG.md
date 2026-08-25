@@ -6,6 +6,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.2.3] - 2026-08-25 — walk safety
+
+Fourth batch of the **1.2.x arc**. Two recursive walks that were not doing what the rest of kriya
+does: one re-resolved paths from the cwd at every descent, the other never asked before overwriting.
+
+### Fixed — `grep -r` descended by path, not from a parent fd
+
+⛔ **Every level re-opened the accumulated path with `openat(AT_FDCWD, …)`**, re-resolving every
+ancestor component. Replace a directory with a symlink to `/etc` mid-walk and the walk follows it out
+of the tree, reporting what it finds there under the original path. The per-file `O_NOFOLLOW` added
+by the M8 audit was no defence — **it guards the final component only**, and it made the walk look
+protected.
+
+`rm`, `cp` and `find` have descended from a parent fd since M2 (ADR 0003 hard rule). `grep -r` was
+the last path-based walk in the tree.
+
+⭐ **A tree deeper than PATH_MAX is the deterministic discriminator, and it needs no race.** A
+path-based descent physically cannot open a 6 KB path; an fd-relative one only ever sees one short
+component at a time. Measured on a 500-level tree with a 6,524-byte accumulated path:
+
+| | result |
+|---|---|
+| before | `…/dddddddddd14: file name too long` at depth 14, nothing found, exit 1 |
+| after | needle found at depth 500, exit 0 — byte-identical to GNU |
+
+So this is also a **user-visible fix**, not only a hardening one: `grep -r` now works on deep trees.
+
+⚠ **agnos needed a second shape, not the same one.** `fs_opendir_nofollow(real_dirfd, …)` answers
+`-ENOSYS` there — agnos has no dirfd-relative call at all — so a naive dirfd rewrite would have made
+`grep -r` fail at depth 1 on the target kriya exists for. The new `fs_open_entry_dir` /
+`fs_open_entry_file` take **both** the dirfd and the full path and each target uses the half it can,
+following the `fs_stat_entry` precedent already in `fs.cyr`.
+
+### Fixed — `cp -R` never asked before overwriting
+
+⛔ **`cp -i -R src dst` overwrote without a single prompt.** Verified under a real pty: GNU asks,
+kriya did not. `interactive` was simply never threaded through
+`_cp_dir_top` → `_cp_dir_descend_at` → `_cp_file_at`, which opened every destination with `O_TRUNC`
+and never looked.
+
+⛔ **And `cp -R src dst` with no `-f` silently replaced existing files** — while the non-recursive
+`_cp_one` immediately above it has always refused exactly that. **cp was inconsistent with itself**,
+and the recursive half was the one contradicting CLAUDE.md's *"no silent file overwrites without
+`-f`"*. The recursive path now refuses too.
+
+⚠ That is a **deliberate divergence from GNU**, which overwrites in both shapes. It is the project's
+stated hard rule and the behaviour the other half of the same utility already had; being consistently
+stricter beats being inconsistently permissive on a destructive verb.
+
+**A declined prompt is now exit 1**, matching GNU (verified across three pty runs, in both the
+recursive and non-recursive paths). kriya returned 0 — so `cp -i … && next_step` proceeded on a copy
+the user had just refused.
+
+### Tests
+
+**1,243 smoke cases across 33 scripts** (up from 1,230), 119 unit + 18 POSIX, 1,529 fuzz assertions
+green under the poisoned allocator. Both targets build.
+
+- `smoke-grep.sh` 73 → 76: the PATH_MAX-deep walk against GNU (skipped honestly where the tree cannot
+  be built), and a symlinked directory inside the tree being skipped rather than descended.
+- `smoke-cp-recursive.sh` 50 → 60: the no-`-f` refusal with the destination verified untouched, `-f`
+  still overwriting, a fresh recursive copy unaffected, and — via `script(1)` — the `-i` prompt
+  answered both ways with its exit status. ⚠ `script(1)` is what makes that path reachable from a
+  shell script at all: kriya refuses `-i` on a non-tty stdin by design (ADR 0002), so a plain pipe
+  cannot exercise it. The case skips honestly where `script` is unavailable.
+
 ## [1.2.2] - 2026-08-25 — the spawn helper: children can speak again
 
 Third batch of the **1.2.x arc**, and the one the roadmap named as a prerequisite: a kriya-local

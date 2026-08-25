@@ -206,6 +206,47 @@ expect_eq "multi -e with -v"  "$(grep -v -e alpha -e gamma multi.txt | tr '\n' '
 expect_eq "multi -e with -c"  "$(grep -c -e alpha -e gamma multi.txt)" "$($BIN grep -c -e alpha -e gamma multi.txt)"
 expect_eq "single -e unchanged" "$(grep -e alpha multi.txt)" "$($BIN grep -e alpha multi.txt)"
 
+# --- -r descends from a parent fd, not by path (v1.2.3) ----------------
+# ⛔ Every level used to re-open the ACCUMULATED PATH with openat(AT_FDCWD, …),
+# re-resolving every ancestor component. Swap a directory for a symlink to /etc
+# mid-walk and the walk follows it out of the tree, reporting /etc's contents
+# under the original path. `O_NOFOLLOW` on the file open was no defence — it
+# guards the final component only. `rm`, `cp` and `find` have descended from a
+# parent fd since M2 (ADR 0003); grep -r was the last path-based walk.
+#
+# ⭐ A tree DEEPER THAN PATH_MAX is the deterministic discriminator, and it needs
+# no race: a path-based descent physically cannot open a 6 KB path, while an
+# fd-relative one only ever sees one short component at a time. Measured on the
+# pre-fix binary: "file name too long" at depth 14, nothing found.
+deep_built=0
+if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import os, sys
+root = sys.argv[1]
+os.makedirs(root, exist_ok=True); os.chdir(root)
+for i in range(500):
+    d = "dddddddddd%02d" % (i % 100)
+    os.mkdir(d); os.chdir(d)
+open("needle.txt","w").write("FOUND-AT-DEPTH\n")
+' "$WORK/deep" 2>/dev/null && deep_built=1
+fi
+if [ "$deep_built" = 1 ]; then
+    expect_eq "-r walks past PATH_MAX" \
+        "$(cd "$WORK" && grep -r FOUND-AT-DEPTH deep 2>/dev/null | wc -l | tr -d ' ')" \
+        "$(cd "$WORK" && "$BIN" grep -r FOUND-AT-DEPTH deep 2>/dev/null | wc -l | tr -d ' ')"
+    expect_eq "-r deep exit status" "0" "$(cd "$WORK" && "$BIN" grep -r FOUND-AT-DEPTH deep >/dev/null 2>&1; echo $?)"
+    find "$WORK/deep" -delete 2>/dev/null || true
+else
+    echo "skip: could not build the deep tree — PATH_MAX descent case not exercised"
+fi
+
+# A symlinked directory inside the tree is SKIPPED, not descended (ADR 0003).
+mkdir -p slt/real/sub slt/other
+echo SECRET > slt/real/sub/s
+echo DECOY  > slt/other/d
+ln -s real slt/aslink
+expect_eq "-r skips a symlinked dir" "slt/real/sub/s:SECRET" "$("$BIN" grep -r SECRET slt 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

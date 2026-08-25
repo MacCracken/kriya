@@ -210,12 +210,19 @@ CLOEXEC pipe so it is distinguishable from a child that exits with the same stat
 (interactive) — all need a spawn primitive that returns more than an exit code. They move from
 "blocked" to "schedulable" in **M12d**.
 
-### 1.2.3 — Walk safety
+### 1.2.3 — Walk safety ✅ shipped 2026-08-25
 
-**M17d** (`grep -r` re-resolves from `AT_FDCWD` instead of descending from the parent dirfd — the
-TOCTOU that `rm`, `cp` and `find` already avoid) and **M17f** (`cp -R -i` never prompts; the
-recursive path ignores both `-i` and the no-clobber default). Both are threading work through an
-existing recursive walk, and both want the same ADR-0003 re-reading, so they batch.
+**M17d** and **M17f** closed.
+
+- `grep -r` now descends from a parent fd like `rm`/`cp`/`find`. Proven with a PATH_MAX-deep tree
+  rather than a race — a path-based descent cannot open a 6 KB path, so the discriminator is
+  deterministic. Also a user-visible fix: deep trees now work.
+- ⚠ Required a new `fs_open_entry_dir`/`fs_open_entry_file` pair taking BOTH dirfd and full path,
+  because `fs_opendir_nofollow(real_dirfd, …)` is `-ENOSYS` on agnos — the obvious rewrite would have
+  broken `grep -r` at depth 1 there.
+- `cp -R` honours `-i` and the no-clobber default, matching what the non-recursive path always did.
+  A declined prompt is exit 1 (GNU parity). ⚠ The no-`-f` refusal is a deliberate GNU divergence per
+  CLAUDE.md's hard rule.
 
 ### 1.2.4 — Destructive-verb semantics (ADR-gated)
 

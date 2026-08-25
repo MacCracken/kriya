@@ -61,6 +61,11 @@ var _cp_BIG_P_idx = 0;
 var _cp_BIG_H_idx = 0;
 var _cp_BIG_L_idx = 0;
 
+# ⛔ A DECLINED `-i` PROMPT IS EXIT 1, NOT 0. GNU returns 1 when you answer `n`
+# — verified across three pty runs — and a script testing `cp -i ... && next`
+# must not proceed on a copy the user refused. kriya returned 0.
+var _cp_declined = 0;
+
 var _cp_buf   = 0;
 var _CP_BUFSZ = 65536;
 
@@ -241,7 +246,7 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
                     k_write( 2, "kriya cp: error: -i requires stdin to be a terminal\n", 53);
                     return 0 - 9999;
                 }
-                if (_cp_prompt(dst) == 0) { return 0; }
+                if (_cp_prompt(dst) == 0) { _cp_declined = 1; return 0; }
             } else {
                 _cp_report(dst, 17);
                 return 0 - 17;
@@ -335,13 +340,38 @@ fn _cp_symlink_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_dis
 # so we must open with O_NOFOLLOW to close the TOCTOU window where the
 # entry could be swapped for a symlink between classify and open
 # (M8 mitigation, see CVE-2026-35359 in uutils-coreutils).
-fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, preserve, verbose, src_st, follow): i64 {
+fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, interactive, preserve, verbose, src_st, follow): i64 {
     var src_open_flags: i64 = 0;
     if (follow == 0) { src_open_flags = 131072; }     # O_NOFOLLOW
     var src_fd = fs_openat(src_dirfd, src_name, src_open_flags, 0);
     if (src_fd < 0) {
         _cp_report(src_display, 0 - src_fd);
         return src_fd;
+    }
+
+    # ⛔ THE RECURSIVE PATH USED TO CLOBBER UNCONDITIONALLY. It opened the
+    # destination with O_TRUNC and never asked, so `cp -i -R src dst` overwrote
+    # without a single prompt (verified under a real pty: GNU asks, kriya did
+    # not), and `cp -R src dst` with no `-f` silently replaced existing files —
+    # while the NON-recursive `_cp_one` right above has always refused that
+    # without `-f`. cp was inconsistent with itself, and the recursive half was
+    # the one contradicting CLAUDE.md's "no silent file overwrites without -f".
+    var dst_probe[144];
+    var dpr = fs_fstatat(dst_dirfd, dst_name, &dst_probe, 256);   # AT_SYMLINK_NOFOLLOW
+    if (dpr == 0) {
+        if (force == 0) {
+            if (interactive == 1) {
+                if (_cp_prompt(dst_display) == 0) {
+                    fs_close(src_fd);
+                    _cp_declined = 1;
+                    return 0;                    # declined: not an error, but exit 1
+                }
+            } else {
+                fs_close(src_fd);
+                _cp_report(dst_display, 17);     # EEXIST
+                return 0 - 17;
+            }
+        }
     }
 
     var perms = fs_perms(src_st);
@@ -410,7 +440,7 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
 # source open omits O_NOFOLLOW so a symlink-to-directory is honored.
 # Under no-follow, the source open uses O_NOFOLLOW so a swapped-in
 # symlink fails ELOOP per ADR 0003.
-fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, policy, allow_follow, force, preserve, verbose, src_st): i64 {
+fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, policy, allow_follow, force, interactive, preserve, verbose, src_st): i64 {
     var src_fd: i64 = 0;
     if (allow_follow == 1) {
         # O_RDONLY | O_DIRECTORY = 65536. No NOFOLLOW: policy-driven follow.
@@ -507,12 +537,12 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
                                     # the dir open must also follow.
                                     rr = _cp_dir_descend_at(src_fd, name, child_src_disp,
                                                             dst_fd, name, child_dst_disp,
-                                                            policy, follow, force, preserve, verbose, &child_st);
+                                                            policy, follow, force, interactive, preserve, verbose, &child_st);
                                 } else {
                                     if (fs_is_reg(&child_st) == 1) {
                                         rr = _cp_file_at(src_fd, name, child_src_disp,
                                                          dst_fd, name, child_dst_disp,
-                                                         force, preserve, verbose, &child_st, follow);
+                                                         force, interactive, preserve, verbose, &child_st, follow);
                                     } else {
                                         k_write( 2, "kriya cp: ", 10);
                                         k_write( 2, child_src_disp, strlen(child_src_disp));
@@ -553,10 +583,10 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
 # resolved (or unresolved per policy) type is a directory. The
 # `allow_follow_top` flag carries the lstat-vs-stat decision that the
 # caller (`_cp_recursive_one`) already made.
-fn _cp_dir_top(src_path, dst_path, policy, allow_follow_top, force, preserve, verbose, src_st): i64 {
+fn _cp_dir_top(src_path, dst_path, policy, allow_follow_top, force, interactive, preserve, verbose, src_st): i64 {
     return _cp_dir_descend_at(0 - 100, src_path, src_path,
                               0 - 100, dst_path, dst_path,
-                              policy, allow_follow_top, force, preserve, verbose, src_st);
+                              policy, allow_follow_top, force, interactive, preserve, verbose, src_st);
 }
 
 # Recursive entry from the per-operand loop. Classifies src and
@@ -624,7 +654,7 @@ fn _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose): i
             return 0 - 22;                      # EINVAL
         }
         # follow already reflects whether we stat'd (1) or lstat'd (0).
-        return _cp_dir_top(src, dst, policy, follow, force, preserve, verbose, &st);
+        return _cp_dir_top(src, dst, policy, follow, force, interactive, preserve, verbose, &st);
     }
     if (fs_is_reg(&st) == 1) {
         return _cp_one(src, dst, force, interactive, preserve, verbose);
@@ -775,5 +805,7 @@ fn cmd_cp(start: i64): i64 {
     }
 
     if (any_failed == 1) { return EXIT_FAILURE; }
+    # A refused prompt is exit 1, matching GNU.
+    if (_cp_declined == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
 }

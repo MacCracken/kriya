@@ -191,6 +191,41 @@ fn fs_stat_entry(dirfd, fullpath, name, buf, follow): i64 {
     #endif
 }
 
+# Open a directory ENTRY for traversal during a readdir walk, the peer of
+# `fs_stat_entry` above and with the same bargain: Linux descends from the
+# `dirfd` with the bare `name` (TOCTOU-safe per ADR 0003), agnos opens
+# `fullpath` because it has no dirfd-relative call at all.
+#
+# ⛔ WHY THE PAIR EXISTS RATHER THAN JUST `fs_opendir_nofollow`. Re-opening an
+# accumulated PATH at each descent means every ancestor component is resolved
+# again, so a directory swapped for a symlink mid-walk redirects the walk out of
+# the tree. `O_NOFOLLOW` does not help — it guards only the FINAL component.
+# `rm`, `cp` and `find` have always descended from a parent fd; `grep -r` was the
+# one walk still re-resolving by path, and it could be steered into `/etc`.
+#
+# ⚠ `fs_opendir_nofollow(real_dirfd, …)` answers -ENOSYS on agnos, so a walk
+# built on it alone fails at depth 1 there. That is what this wrapper exists to
+# avoid: pass BOTH and each target uses the half it can.
+fn fs_open_entry_dir(dirfd, fullpath, name): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return k_open(fullpath, 65536, 0);            # O_DIRECTORY
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return fs_opendir_nofollow(dirfd, name);
+    #endif
+}
+
+# Same bargain for a regular file being read during a walk:
+# O_RDONLY | O_NOFOLLOW, dirfd-relative on Linux and path-based on agnos.
+fn fs_open_entry_file(dirfd, fullpath, name): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return k_open(fullpath, 131072, 0);           # O_NOFOLLOW
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return fs_openat(dirfd, name, 131072, 0);     # O_RDONLY | O_NOFOLLOW
+    #endif
+}
+
 # Open a directory for traversal in the safe shape required by
 # ADR 0003: O_RDONLY | O_DIRECTORY | O_NOFOLLOW. The mode argument
 # is unused for read-only opens but the syscall signature wants it.
