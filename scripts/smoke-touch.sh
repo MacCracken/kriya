@@ -128,6 +128,45 @@ expect_exit "missing parent dir"    1 "$BIN" touch nope/here
 expect_exit "partial fail"          1 "$BIN" touch nope/parent/bad good1
 expect_present "good1 created"      good1
 
+# --- -t STAMP and -r REF (v1.2.5) ---------------------------------------
+# ⚠ Both were deferred "until the wider duration/date parser lands in
+# lib/chrono.cyr". Checked at pin 6.5.35: chrono has `dt_strptime` but no POSIX
+# stamp parser, and `-r` needs no parser at all — just a stat. There was nothing
+# upstream to wait for.
+#
+# ⚠ Compared under TZ=UTC: kriya interprets the stamp as UTC (ADR 0007), so an
+# untagged GNU comparison would differ by the local offset, by design.
+for st in 202601011200 202601011200.30 2601011200 01011200 197001010000; do
+    "$BIN" touch -t "$st" tstamp_k 2>/dev/null
+    TZ=UTC touch  -t "$st" tstamp_g 2>/dev/null
+    expect_eq "-t $st matches GNU" \
+        "$(TZ=UTC stat -c %y tstamp_g | cut -c1-19)" "$(TZ=UTC stat -c %y tstamp_k | cut -c1-19)"
+done
+# The century rule: 69-99 -> 19xx, 00-68 -> 20xx (POSIX).
+"$BIN" touch -t 6901011200 cent_k 2>/dev/null
+expect_eq "-t century rule (69 -> 1969)" "1969-01-01" "$(TZ=UTC stat -c %y cent_k | cut -c1-10)"
+
+# Malformed stamps are refused, not silently coerced.
+for bad in "" abc 20260101120 202613011200 202601321200 202601012500 202601011260 202601011200.6a; do
+    expect_exit "-t rejects [$bad]" 2 "$BIN" touch -t "$bad" tbad
+done
+
+# -r REF copies the reference's mtime.
+"$BIN" touch -t 202503151030 tref 2>/dev/null
+expect_exit "-r REF"              0 "$BIN" touch -r tref tcopy
+expect_eq   "-r copied the time"  "$(TZ=UTC stat -c %y tref)" "$(TZ=UTC stat -c %y tcopy)"
+expect_exit "-r missing REF -> 1" 1 "$BIN" touch -r no_such_ref tz1
+# ⚠ -r and -t together are REFUSED rather than last-one-wins. Silently picking a
+# winner between two explicit time sources is the "accepts and lies" shape the
+# v1.2.1 sweep removed.
+expect_exit "-r with -t refused"  2 "$BIN" touch -r tref -t 202601011200 tz2
+
+# -a / -m stay selective when an explicit time is given.
+"$BIN" touch -t 202001010000 tsel 2>/dev/null
+"$BIN" touch -m -t 202101010000 tsel 2>/dev/null
+expect_eq "-m -t leaves atime alone" "2020-01-01" "$(TZ=UTC stat -c %x tsel | cut -c1-10)"
+expect_eq "-m -t sets mtime"         "2021-01-01" "$(TZ=UTC stat -c %y tsel | cut -c1-10)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

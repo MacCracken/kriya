@@ -1,10 +1,17 @@
 # sleep — POSIX `sleep(1)`: pause for the given number of seconds.
 #
-# kriya accepts a single non-negative integer-seconds operand. GNU
-# `sleep` extends this with fractional seconds and suffixes
-# (`1.5`, `1s`, `1m`, `1h`, `1d`); both extensions are deferred until
-# the wider duration-parser lands in `lib/chrono.cyr`. POSIX `sleep N`
-# (one integer) is the intersection that ships today.
+# Accepts a non-negative decimal with an optional unit suffix:
+# `1`, `1.5`, `0.25`, `1s`, `2m`, `1h`, `1d`. A bare number is seconds, as POSIX
+# requires; the fractional and suffix forms are the GNU extension.
+#
+# ⚠ The suffix/fraction support was deferred here "until the wider duration
+# parser lands in lib/chrono.cyr". Checked at pin 6.5.35: chrono has duration
+# CONSTRUCTORS but no duration STRING parser, so there was nothing to wait for —
+# it is `kriya_parse_duration_ms` in `src/lib/args.cyr` now.
+#
+# ⚠ Still one operand only. GNU sums multiple (`sleep 1m 30s`); POSIX specifies
+# exactly one, and summing would make `sleep 1 2` silently mean 3 rather than an
+# error. Named as a follow-up rather than assumed.
 
 fn cmd_sleep(start: i64): i64 {
     var n = kriya_argv_count();
@@ -17,13 +24,13 @@ fn cmd_sleep(start: i64): i64 {
         return EXIT_USAGE;
     }
     var arg = argv(start);
-    var secs = kriya_parse_nonneg_int(arg);
-    if (secs < 0) {
-        k_write( 2, "kriya sleep: error: SECONDS must be a non-negative integer\n", 60);
+    var ms = kriya_parse_duration_ms(arg);
+    if (ms < 0) {
+        k_write( 2, "kriya sleep: error: DURATION must be a non-negative number with an optional s/m/h/d suffix\n", 91);
         return EXIT_USAGE;
     }
-    if (secs > 0) {
-        sleep_ms(secs * 1000);
+    if (ms > 0) {
+        sleep_ms(ms);
     }
     return EXIT_SUCCESS;
 }

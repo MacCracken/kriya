@@ -6,6 +6,89 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.2.5] - 2026-08-25 — the chrono batch, minus what is actually blocked
+
+Last scheduled batch of the **1.2.x arc**. The roadmap had all six items gated on upstream
+`lib/chrono.cyr` growing a duration parser, a date parser and a tzfile reader. **That framing was
+partly stale**, so the first work here was checking rather than waiting.
+
+⭐ **What chrono at pin 6.5.35 actually has**, versus what the roadmap assumed:
+
+- `dt_format` exists — but covers only `%Y %y %m %d %e %H %M %S %j`, **less than kriya's own `date`
+  renderer** already does with 40 specifiers. Not the enabler it was filed as.
+- `dt_strptime` exists — but takes a format string, so it is not the free-form `-d` parser.
+- Duration **constructors** (`dur_seconds`, `dur_minutes`, …) exist; a duration **string parser** does
+  not, and never did.
+- No tzfile reader.
+
+So four of the six items were never blocked on anything. Two still are, and are named below rather
+than half-built.
+
+### Added — `sleep` takes fractions and unit suffixes
+
+`sleep 0.25`, `1.5`, `1s`, `2m`, `1h`, `1d`. A bare number is still seconds, as POSIX requires. The
+parser is `kriya_parse_duration_ms` in `src/lib/args.cyr` — shared, ~50 lines, and it works in
+**milliseconds** because that is `sleep_ms`'s unit and sub-second waits are the whole point.
+Fractions finer than a millisecond truncate rather than round, so `sleep 0.0001` is a no-op instead of
+a surprise. Timing verified against GNU across six forms, matching to the millisecond.
+
+⚠ Still one operand. GNU sums `sleep 1m 30s`; POSIX specifies exactly one, and summing would make
+`sleep 1 2` silently mean 3 rather than the usage error it is today.
+
+### Added — `touch -r REF` and `touch -t STAMP`
+
+`-r` needs no parser at all — it stats the reference and copies its mtime. `-t` takes the POSIX
+`[[CC]YY]MMDDhhmm[.ss]` form, including the century rule (69-99 → 19xx, 00-68 → 20xx). Verified
+byte-identical to GNU across six well-formed stamps and rejecting eight malformed ones.
+
+⛔ **The first cut of the stamp parser silently rejected every pre-1970 date.** It returned the epoch
+second and used a negative value to mean "malformed" — and a pre-epoch stamp *is* negative, so
+`touch -t 6901011200` (a valid 1969 date GNU accepts) exited 2. **A sentinel that overlaps the value
+domain is not a sentinel.** The parser now returns status and writes the epoch through an
+out-parameter, and `has_explicit` is a flag rather than `explicit_sec >= 0`. Verified back to 1950.
+
+⚠ `-r` and `-t` together are **refused**, where GNU takes the last one given. Silently picking a
+winner between two explicit time sources is precisely the "accepts and lies" shape the v1.2.1 sweep
+removed.
+
+### Added — `stat %x`, `%y`, `%z`
+
+Full `YYYY-MM-DD HH:MM:SS.nnnnnnnnn +0000`, nanoseconds included. **Byte-identical to `TZ=UTC stat`**,
+verified including the epoch-zero edge where the nanosecond padding is most likely to be wrong.
+
+⚠ kriya renders **UTC with a literal `+0000`**, so it differs from GNU's default local-time output by
+design (ADR 0007), not by defect — `date` has behaved this way since v0.7.0. Rendering the clock in
+UTC while printing a local offset would be a wrong answer; this is a true one that happens to differ.
+The smoke case compares under `TZ=UTC`, which is the only comparison that means anything.
+
+v1.2.1 made these *refuse* rather than emit their own source text; they now render, and left the
+deferred list.
+
+### Still deferred — and now for the right reason
+
+- **`date -d STR` / `touch -d STR`** — free-form human dates ("now", "yesterday", "2 hours ago"). GNU's
+  parser is famously large; `dt_strptime` needs a format string and does not substitute for it. A
+  real piece of work, not a missing upstream call.
+- **`date` local time / `ls -l` locale mtime** — need tzfile parsing. This is the genuine upstream
+  dependency, and it is the trigger ADR 0007 already names.
+- **`stat %U` / `%G`** (passwd/group parser), **`%N`** (quoting helper), **`%w`** (`statx(2)`) — each
+  still refuses by name.
+
+### Tests
+
+**1,295 smoke cases across 34 scripts** (up from 1,261 across 33), 119 unit + 18 POSIX, 1,529 fuzz
+assertions green under the poisoned allocator. Both targets build.
+
+- `scripts/smoke-sleep.sh` — new, 15 cases: six accepted forms timed against a floor and ceiling
+  (the point is that the duration *parsed*, not that the scheduler is precise), sub-millisecond
+  truncation, and eight rejected forms. ⚠ Each rejection asserts a **usage error**, because a
+  mis-parsed duration that returns instantly is a failure with no symptom.
+- `smoke-touch.sh` 26 → 46: the stamp forms against GNU under `TZ=UTC`, the century rule, the eight
+  malformed stamps, `-r` copying the reference time, `-r` with `-t` refused, and `-a`/`-m` staying
+  selective when an explicit time is given.
+- `smoke-stat.sh` 53 → 52: `%x`/`%y`/`%z` moved from the refusal list to a GNU comparison, plus the
+  epoch-zero case.
+
 ## [1.2.4] - 2026-08-25 — destructive-verb semantics
 
 Fifth batch of the **1.2.x arc**, and the ADR-gated one: two cases where a destructive verb destroyed

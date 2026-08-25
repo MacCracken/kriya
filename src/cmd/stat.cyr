@@ -236,6 +236,59 @@ fn _st_render_symperm(mode, buf): i64 {
 # `interpret_escapes` controls whether `\n` / `\t` / `\\` are processed.
 # `auto_newline` appends '\n' at the end (set for -c, unset for --printf).
 
+# Render `sec`.`nsec` as GNU's `%y` shape: `YYYY-MM-DD HH:MM:SS.nnnnnnnnn +0000`.
+# Returns the byte count written to `buf` (needs 40 bytes).
+#
+# ⚠ UTC, and the offset is a literal `+0000`. kriya is UTC-only until tzfile
+# parsing lands (ADR 0007), and `date` already behaves this way. Rendering the
+# clock in UTC while printing a local offset would be a wrong answer; printing
+# UTC with `+0000` is a true one that simply differs from GNU's default. Under
+# `TZ=UTC` the two are byte-identical, which is how the smoke case compares them.
+fn _st_render_time(sec, nsec, buf): i64 {
+    var d = epoch_to_date(sec);
+    var year  = load64(d);
+    var month = load64(d + 8);
+    var day   = load64(d + 16);
+    var hour  = load64(d + 24);
+    var minute= load64(d + 32);
+    var second= load64(d + 40);
+    var p: i64 = 0;
+    store8(buf + p, 48 + (year / 1000) % 10);       p = p + 1;
+    store8(buf + p, 48 + (year / 100) % 10);        p = p + 1;
+    store8(buf + p, 48 + (year / 10) % 10);         p = p + 1;
+    store8(buf + p, 48 + year % 10);                p = p + 1;
+    store8(buf + p, 45);                            p = p + 1;   # '-'
+    store8(buf + p, 48 + month / 10);               p = p + 1;
+    store8(buf + p, 48 + month % 10);               p = p + 1;
+    store8(buf + p, 45);                            p = p + 1;
+    store8(buf + p, 48 + day / 10);                 p = p + 1;
+    store8(buf + p, 48 + day % 10);                 p = p + 1;
+    store8(buf + p, 32);                            p = p + 1;   # ' '
+    store8(buf + p, 48 + hour / 10);                p = p + 1;
+    store8(buf + p, 48 + hour % 10);                p = p + 1;
+    store8(buf + p, 58);                            p = p + 1;   # ':'
+    store8(buf + p, 48 + minute / 10);              p = p + 1;
+    store8(buf + p, 48 + minute % 10);              p = p + 1;
+    store8(buf + p, 58);                            p = p + 1;
+    store8(buf + p, 48 + second / 10);              p = p + 1;
+    store8(buf + p, 48 + second % 10);              p = p + 1;
+    store8(buf + p, 46);                            p = p + 1;   # '.'
+    # Nine nanosecond digits, zero-padded, most significant first.
+    var div: i64 = 100000000;
+    while (div > 0) {
+        store8(buf + p, 48 + (nsec / div) % 10);
+        p = p + 1;
+        div = div / 10;
+    }
+    store8(buf + p, 32);   p = p + 1;
+    store8(buf + p, 43);   p = p + 1;               # '+'
+    store8(buf + p, 48);   p = p + 1;
+    store8(buf + p, 48);   p = p + 1;
+    store8(buf + p, 48);   p = p + 1;
+    store8(buf + p, 48);   p = p + 1;
+    return p;
+}
+
 fn _st_emit_spec(c, st, name): i64 {
     var buf[64];
     var n: i64 = 0;
@@ -292,6 +345,12 @@ fn _st_emit_spec(c, st, name): i64 {
     } else { if (c == 37) {  # literal %
         store8(&buf, 37);
         n = 1;
+    } elif (c == 120) {                                            # %x  atime
+        n = _st_render_time(load64(st + 72), load64(st + 80), &buf);
+    } elif (c == 121) {                                            # %y  mtime
+        n = _st_render_time(load64(st + 88), load64(st + 96), &buf);
+    } elif (c == 122) {                                            # %z  ctime
+        n = _st_render_time(load64(st + 104), load64(st + 112), &buf);
     } else {
         # ⚠ Two different failures, and they deserve different answers.
         if (_st_is_deferred_spec(c) == 1) {
@@ -320,9 +379,8 @@ fn _st_emit_spec(c, st, name): i64 {
 # are simply not specifiers. %x/%y/%z wait on chrono's strftime formatter, %U/%G
 # on a passwd/group parser, %N on a quoting helper, %w on statx(2).
 fn _st_is_deferred_spec(c): i64 {
-    if (c == 120) { return 1; }   # x
-    if (c == 121) { return 1; }   # y
-    if (c == 122) { return 1; }   # z
+    # ⚠ %x/%y/%z left this list at v1.2.5 — they render now. %U/%G still need a
+    # passwd/group parser, %N a quoting helper, %w statx(2).
     if (c == 85)  { return 1; }   # U
     if (c == 71)  { return 1; }   # G
     if (c == 78)  { return 1; }   # N

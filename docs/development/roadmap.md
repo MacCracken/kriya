@@ -237,12 +237,24 @@ fixes.
   refused rather than half-completed. ⚠ Deliberate GNU divergence, no `-f` bypass. ADR 0003's status
   updated to record the extension.
 
-### 1.2.5 — The chrono batch
+### 1.2.5 — The chrono batch ✅ shipped 2026-08-25 (partial, by design)
 
-**M12a** in full, once `lib/chrono.cyr` grows a duration parser, a date parser and a tz reader:
-`sleep 1.5` / `1m` / `1h`, `touch -r REF` / `-t STAMP` / `-d STR`, `date -d STR`, `date` local time
-(ADR 0007), `ls -l` locale mtime, `stat %x`/`%y`/`%z`. Six utilities, one upstream dependency —
-which is exactly why it is a batch and not six PRs.
+⭐ **The gate was partly imaginary.** chrono at pin 6.5.35 has `dt_format` (fewer specifiers than
+kriya's own `date`), `dt_strptime` (format-string based), duration constructors but **no duration
+string parser**, and no tzfile reader. Four of the six items were never blocked.
+
+Shipped: `sleep` fractions + suffixes (shared `kriya_parse_duration_ms`), `touch -r`, `touch -t`,
+`stat %x/%y/%z`.
+
+Still deferred, and now for an accurate reason:
+
+- **`date -d STR` / `touch -d STR`** — free-form human dates. A real parser to write; `dt_strptime`
+  needs a format string and does not substitute. Belongs to **M12a**.
+- **`date` local time / `ls -l` locale mtime** — the genuine tzfile dependency, and the trigger
+  [ADR 0007](../adr/0007-date-utc-only-at-v0-7-0.md) already names.
+
+⚠ Lesson for the remaining buckets: **re-check the enabler before scheduling around it.** This batch
+was filed as fully upstream-gated and was two-thirds actionable.
 
 ### Not yet scheduled
 

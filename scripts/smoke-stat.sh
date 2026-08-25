@@ -157,12 +157,31 @@ expect_eq "unknown %q -> '?' (as GNU)" "?" "$out"
 # its own source text. `stat -c %y` printed the two bytes "%y" where a timestamp
 # belonged and exited 0 — a script substituting that into a filename or a
 # comparison got literal garbage with every sign of success.
-for spec in %y %x %z %U %G %N %w; do
+# ⚠ %x/%y/%z LEFT THIS LIST AT v1.2.5 — they render now. The rest still need a
+# passwd/group parser (%U/%G), a quoting helper (%N) or statx(2) (%w).
+for spec in %U %G %N %w; do
     rc=0
     out=$("$BIN" stat -c "$spec" regfile 2>/dev/null) || rc=$?
     expect_eq "deferred $spec exits 1"     "1"  "$rc"
     expect_eq "deferred $spec prints none" ""   "$out"
 done
+# --- %x / %y / %z render (v1.2.5) ---
+# ⚠ Compared under TZ=UTC on the GNU side: kriya is UTC-only until tzfile
+# parsing lands (ADR 0007) and prints a literal +0000 offset. Under TZ=UTC the
+# two are byte-identical; without it GNU renders local time and they differ by
+# design, not by defect.
+"$BIN" touch -t 202503151030.45 timespec_ref
+for spec in %x %y %z; do
+    expect_eq "stat $spec matches GNU (UTC)" \
+        "$(TZ=UTC stat -c "$spec" timespec_ref)" "$("$BIN" stat -c "$spec" timespec_ref)"
+done
+expect_eq "combined format with %y" \
+    "$(TZ=UTC stat -c '%n %s %y' timespec_ref)" "$("$BIN" stat -c '%n %s %y' timespec_ref)"
+# Epoch zero, where the nanosecond padding is most likely to be wrong.
+"$BIN" touch -t 197001010000 epoch_zero
+expect_eq "stat %y at epoch zero" \
+    "$(TZ=UTC stat -c %y epoch_zero)" "$("$BIN" stat -c %y epoch_zero)"
+
 # ...while implemented ones are untouched.
 expect_eq "%s still works" "$(stat -c %s regfile)" "$("$BIN" stat -c %s regfile)"
 expect_eq "%n still works" "$(stat -c %n regfile)" "$("$BIN" stat -c %n regfile)"

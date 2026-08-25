@@ -29,6 +29,8 @@ var _touch_spec = 0;
 var _touch_a_idx = 0;
 var _touch_m_idx = 0;
 var _touch_c_idx = 0;
+var _touch_r_idx = 0;
+var _touch_t_idx = 0;
 
 fn _touch_init_spec(): i64 {
     if (_touch_spec != 0) { return 0; }
@@ -36,6 +38,8 @@ fn _touch_init_spec(): i64 {
     _touch_a_idx = flags_add_bool(s, 97,  "access-only",       0, "update access time only");
     _touch_m_idx = flags_add_bool(s, 109, "modification-only", 0, "update modification time only");
     _touch_c_idx = flags_add_bool(s, 99,  "no-create",         0, "do not create missing files");
+    _touch_r_idx = flags_add_str (s, 114, "reference",         0, "use this file's times instead of now");
+    _touch_t_idx = flags_add_str (s, 116, "",                  0, "use [[CC]YY]MMDDhhmm[.ss] instead of now");
     _touch_spec = s;
     return 0;
 }
@@ -104,6 +108,26 @@ fn _touch_create(path, no_create): i64 {
 # UTIME_OMIT = (1 << 30) - 2 = 1073741822
 # AT_FDCWD = (0 - 100) per CLAUDE.md (no negative literals).
 # SYS_UTIMENSAT = 280 on x86_64 (not in the stdlib SysNr enum yet).
+# `has_explicit` selects between an explicit epoch second and UTIME_NOW.
+# ⚠ A flag rather than a sentinel value: a pre-1970 stamp is a NEGATIVE epoch, so
+# `explicit_sec >= 0` would have quietly meant "no explicit time" for 1969. The unselected side always gets
+# UTIME_OMIT so `-a`/`-m` still mean "only this one".
+fn _touch_update_times_at(path, update_atime, update_mtime, has_explicit, explicit_sec): i64 {
+    if (has_explicit == 1) {
+        var te[32];
+        # UTIME_OMIT = 1073741822 on the side we are not setting.
+        store64(&te + 0,  explicit_sec);
+        store64(&te + 8,  0);
+        store64(&te + 16, explicit_sec);
+        store64(&te + 24, 0);
+        if (update_atime == 0) { store64(&te + 8,  1073741822); }
+        if (update_mtime == 0) { store64(&te + 24, 1073741822); }
+        if (K_HAVE_UTIMES == 0) { return 0; }
+        return fs_utimensat(0 - 100, path, &te, 0);
+    }
+    return _touch_update_times(path, update_atime, update_mtime);
+}
+
 fn _touch_update_times(path, update_atime, update_mtime): i64 {
     var times: i64 = 0;
     if (update_atime == 1) {
@@ -140,7 +164,7 @@ fn _touch_update_times(path, update_atime, update_mtime): i64 {
     return fs_utimensat(0 - 100, path, times, 0);
 }
 
-fn _touch_one(path, update_atime, update_mtime, no_create): i64 {
+fn _touch_one(path, update_atime, update_mtime, no_create, has_explicit, explicit_sec): i64 {
     if (strlen(path) == 0) {
         _touch_report(path, 2);
         return 0 - 2;
@@ -150,7 +174,7 @@ fn _touch_one(path, update_atime, update_mtime, no_create): i64 {
         _touch_report(path, 0 - cr);
         return cr;
     }
-    var ur = _touch_update_times(path, update_atime, update_mtime);
+    var ur = _touch_update_times_at(path, update_atime, update_mtime, has_explicit, explicit_sec);
     if (ur != 0) {
         var errno = 0 - ur;
         # With --no-create, ENOENT is the expected outcome when the
@@ -160,6 +184,108 @@ fn _touch_one(path, update_atime, update_mtime, no_create): i64 {
         return ur;
     }
     return 0;
+}
+
+# Parse a POSIX `-t` stamp: `[[CC]YY]MMDDhhmm[.ss]`, interpreted as UTC.
+# Returns 0 and writes the epoch second to `out`, or -1 on a malformed stamp.
+#
+# ⛔ THE STATUS IS THE RETURN AND THE VALUE IS AN OUT-PARAMETER, ON PURPOSE. The
+# first cut returned the epoch and used a negative value to mean "malformed" —
+# which silently rejected every pre-1970 stamp, because those ARE negative.
+# `touch -t 6901011200` (a valid 1969 date GNU accepts) exited 2. A sentinel that
+# overlaps the value domain is not a sentinel.
+#
+# ⚠ UTC, not local time — kriya is UTC-only until tzfile parsing lands (ADR 0007),
+# and `date` already behaves this way. Interpreting the stamp in local time while
+# rendering it back in UTC would be worse than being consistently UTC.
+#
+# The century rule is POSIX's: with a 2-digit year, 69-99 means 1969-1999 and
+# 00-68 means 2000-2068.
+fn _touch_parse_stamp(s, out): i64 {
+    if (s == 0) { return 0 - 1; }
+    var len = strlen(s);
+
+    # Optional ".ss" tail.
+    var sec: i64 = 0;
+    var dlen = len;
+    var di: i64 = 0;
+    var dot: i64 = 0 - 1;
+    while (di < len) {
+        if (load8(s + di) == 46) { dot = di; }
+        di = di + 1;
+    }
+    if (dot >= 0) {
+        if (len - dot != 3) { return 0 - 1; }
+        var s0 = load8(s + dot + 1);
+        var s1 = load8(s + dot + 2);
+        if (s0 < 48) { return 0 - 1; }
+        if (s0 > 57) { return 0 - 1; }
+        if (s1 < 48) { return 0 - 1; }
+        if (s1 > 57) { return 0 - 1; }
+        sec = (s0 - 48) * 10 + (s1 - 48);
+        if (sec > 60) { return 0 - 1; }        # 60 = leap second, accepted
+        dlen = dot;
+    }
+
+    # The remainder must be all digits, and 8, 10 or 12 of them.
+    var k: i64 = 0;
+    while (k < dlen) {
+        var c = load8(s + k);
+        if (c < 48) { return 0 - 1; }
+        if (c > 57) { return 0 - 1; }
+        k = k + 1;
+    }
+    var year: i64 = 0;
+    var base: i64 = 0;
+    if (dlen == 12)      { year = _touch_d4(s, 0);            base = 4; }
+    elif (dlen == 10)    {
+        var yy = _touch_d2(s, 0);
+        if (yy >= 69) { year = 1900 + yy; } else { year = 2000 + yy; }
+        base = 2;
+    }
+    elif (dlen == 8)     { year = 0 - 2; base = 0; }          # -2 = "current year"
+    else { return 0 - 1; }
+
+    var mon = _touch_d2(s, base + 0);
+    var day = _touch_d2(s, base + 2);
+    var hr  = _touch_d2(s, base + 4);
+    var mi  = _touch_d2(s, base + 6);
+    if (mon < 1)  { return 0 - 1; }
+    if (mon > 12) { return 0 - 1; }
+    if (day < 1)  { return 0 - 1; }
+    if (day > 31) { return 0 - 1; }
+    if (hr > 23)  { return 0 - 1; }
+    if (mi > 59)  { return 0 - 1; }
+
+    if (year == (0 - 2)) {
+        var nowparts = epoch_to_date(clock_epoch_secs());
+        year = load64(nowparts);
+    }
+    store64(out, _touch_ymd_to_epoch(year, mon, day, hr, mi, sec));
+    return 0;
+}
+
+fn _touch_d2(s, off): i64 {
+    return (load8(s + off) - 48) * 10 + (load8(s + off + 1) - 48);
+}
+
+fn _touch_d4(s, off): i64 {
+    return _touch_d2(s, off) * 100 + _touch_d2(s, off + 2);
+}
+
+# Days-from-civil, the standard branchless algorithm. UTC.
+fn _touch_ymd_to_epoch(y, m, d, hh, mm, ss): i64 {
+    var yy = y;
+    if (m <= 2) { yy = yy - 1; }
+    var era: i64 = yy / 400;
+    if (yy < 0) { era = (yy - 399) / 400; }
+    var yoe = yy - era * 400;
+    var mp = m + 9;
+    if (m > 2) { mp = m - 3; }
+    var doy = (153 * mp + 2) / 5 + d - 1;
+    var doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    var days = era * 146097 + doe - 719468;
+    return days * 86400 + hh * 3600 + mm * 60 + ss;
 }
 
 fn cmd_touch(start: i64): i64 {
@@ -182,6 +308,36 @@ fn cmd_touch(start: i64): i64 {
     var no_create: i64 = 0;
     if (flags_get_bool(_touch_spec, _touch_c_idx) == 1) { no_create = 1; }
 
+    # -r REF / -t STAMP. ⚠ Mutually exclusive: GNU takes the last one given, but
+    # silently picking a winner between two explicit time sources is exactly the
+    # "accepts and lies" shape v1.2.1 swept out. Refuse instead.
+    var ref_path = flags_get_str(_touch_spec, _touch_r_idx);
+    var stamp    = flags_get_str(_touch_spec, _touch_t_idx);
+    var explicit_sec: i64 = 0;
+    var has_explicit: i64 = 0;
+    if (ref_path != 0) {
+        if (stamp != 0) {
+            k_write( 2, "kriya touch: error: -r and -t are mutually exclusive\n", 53);
+            return EXIT_USAGE;
+        }
+        var rst[144];
+        var rr = k_stat(ref_path, &rst);
+        if (rr != 0) {
+            _touch_report(ref_path, 0 - rr);
+            return EXIT_FAILURE;
+        }
+        explicit_sec = load64(&rst + 88);            # st_mtime
+        has_explicit = 1;
+    } elif (stamp != 0) {
+        var sbox[8];
+        if (_touch_parse_stamp(stamp, &sbox) != 0) {
+            k_write( 2, "kriya touch: error: -t expects [[CC]YY]MMDDhhmm[.ss]\n", 54);
+            return EXIT_USAGE;
+        }
+        explicit_sec = load64(&sbox);
+        has_explicit = 1;
+    }
+
     # POSIX: neither -a nor -m → update both. -a alone → atime only.
     # -m alone → mtime only. Both together → update both (same as
     # neither).
@@ -200,7 +356,7 @@ fn cmd_touch(start: i64): i64 {
     var i: i64 = 0;
     while (i < npos) {
         var p = flags_positional(_touch_spec, i);
-        var r = _touch_one(p, update_atime, update_mtime, no_create);
+        var r = _touch_one(p, update_atime, update_mtime, no_create, has_explicit, explicit_sec);
         if (r != 0) { any_failed = 1; }
         i = i + 1;
     }
