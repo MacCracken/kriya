@@ -171,8 +171,10 @@ if [ -f "$STATE" ]; then
 
     # 3b. `## Toolchain` Cyrius pin — a MIRROR of cyrius.cyml `[package].cyrius`, which is
     # the single source of truth (CI derives the installer version from it). Nothing kept the
-    # two in sync, so the doc line sat at 6.4.20 while the manifest said 6.5.18 — two pin
-    # bumps behind. Read the manifest and rewrite the doc line; the manifest is never written.
+    # two in sync and nothing failed when they diverged, so the doc line sat at `6.4.20` through
+    # BOTH the 1.1.9 bump (6.4.20 → 6.5.18) and the 1.1.10 bump (6.5.18 → 6.5.35) — two pin
+    # bumps stale, caught only by eye at the 1.1.10 cut. Read the manifest and rewrite the doc
+    # line to match; the manifest itself is never written here.
     PIN=$(awk -F'"' '
         /^[[:space:]]*\[/ { in_pkg = ($0 ~ /^[[:space:]]*\[package\][[:space:]]*$/) }
         in_pkg && /^[[:space:]]*cyrius[[:space:]]*=/ { print $2; exit }
