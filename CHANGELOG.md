@@ -6,6 +6,91 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.1.10] - 2026-08-25 — toolchain pin 6.5.35; the allocator that finally reuses registers
+
+Toolchain pin moved **6.5.18 → 6.5.35** (`lib sync --full`, 108 stdlib files) — 17 upstream releases.
+No kriya source change was required. CI action pins refreshed in the same pass.
+
+### Changed — cyrius pin 6.5.18 → 6.5.35
+
+**Almost nothing kriya consumes actually moved.** Of the 22 declared `[deps].stdlib` modules, 19 are
+byte-identical between the two snapshots — including the whole `unicode/` subtree and every
+`syscalls*` file on kriya's targets (`syscalls`, `syscalls_x86_64_linux`, `syscalls_x86_64_agnos`,
+`syscalls_linux_common`). **Zero functions were removed, renamed, or re-signatured** anywhere in the
+closure. The three that differ:
+
+- **`fmt.cyr`** — a `fmt_float_buf` fractional-carry fix (6.5.30): the carry out of a rounded fraction
+  was computed *after* the integer part had already been written, so `3 - 1e-7` printed `2.1000000`.
+  Unreachable from kriya — there is not one `f64_*` or `fmt_float*` call site in the tree, because
+  `printf` ships every conversion **except** `%e`/`%f`/`%g`. It does clear a hazard under that
+  deferred work: implementing `%f` against the old pin would have inherited the bug.
+- **`niyama.cyr`** — 1.0.6 → 1.0.7. The bundled-distribution version comment, and nothing else; the
+  regex engine `grep` and `find` run on is byte-identical.
+- **`process.cyr`** — an inert `#host_only` marker (6.5.24) that fails a `CYRIUS_KERNEL=1` bare-metal
+  build early instead of faulting at runtime. `#` opens a comment in cyrius, so it is dead text on
+  every kriya target; confirmed by the `--agnos` build, which includes `process.cyr` for
+  `xargs`/`find -exec` and compiles clean.
+
+⭐ **The one thing in this window that can move emitted code is the register allocator.** 6.5.35 fixed
+two defects that had jointly prevented linear-scan from ever reusing a register — live intervals were
+force-extended to function end so expire never fired, and the `picked` cap was a hard limit of 5. Frame
+layout is therefore repacked tree-wide. **This is a larger instance of exactly the change class that
+exposed kriya's year-old `find` stack smash at the previous bump** (`var ctx[4]` holding 32 bytes;
+40/40 → 8/40). That is why the verification below is wider than a pin bump normally warrants — not
+because anything was expected to break.
+
+⚠ **If a utility ever misbehaves after an allocator-line bump, rebuild with
+`CYRIUS_REGALLOC_PICKER_CAP=5` to reproduce the pre-6.5.35 register assignment.** If the symptom
+disappears, the defect is a latent frame/buffer bug in kriya (the `find.cyr` class), not a compiler
+regression. Recorded here because the next allocator release poses the same question.
+
+**Re-measured, not assumed.** `src/cmd/find.cyr:912` records that the function-local `var X[N]`-is-N-
+*bytes* rule (the ×8 u64 unit applies only at module scope) was **measured** at 6.5.18 with a
+two-local probe, precisely because the rule is non-uniform enough not to trust across a codegen bump.
+Re-taken at 6.5.35: `|&b - &a|` = **8 / 32 / 144** for `var x[4]` / `var x[32]` / `var x[144]`. The
+rule holds unchanged. A repo-wide re-scan for the same shape — a function-local buffer written past
+its declared byte length — is clean; the three candidates it surfaces (`printf.cyr:197 alt_buf[4]`,
+`ls.cyr:274 buf[20]`, `ls.cyr:470 ws[8]`) are all byte- or 16-bit accesses that fit, `ws[8]` being an
+exact-size `struct winsize`.
+
+**Verified green at the new pin:** host + `--agnos` builds; **86** unit + **18** POSIX-blessed
+assertions; **1529** fuzz assertions (1127 grep + 201 find + 201 printf) — *also* green under 6.5.29's
+new `cyrius fuzz --poison` (freelist redzones, `0xA5` fill, quarantine-on-free), which is a strictly
+stronger signal than the plain run because out-of-bounds *reads* land in mapped memory and never
+fault; **31/31** smoke scripts, **1012** cases, cell-by-cell against GNU; `lint` 0 warnings; `vet`
+46 deps / 0 untrusted / 0 missing. The CI recipe was re-run end-to-end from a clean `git archive`
+checkout with no `lib/` present, since `./lib/` is gitignored and CI re-vendors via `cyrius deps`.
+
+Cold-start is flat. Measured as an **interleaved A/B** of the two snapshots' binaries on the same box
+rather than against a months-old figure: 6.5.35 median **1.185 ms** vs 6.5.18's 1.210 ms, and
+**1.218 ms** vs 1.236 ms with the arm order swapped (150 pairs each; ~25 µs of second-slot position
+bias, and 6.5.35 wins in both slots). Against v1.0.0's 1.196 ms that is flat. Host binary 931,000 →
+935,096 bytes (+4,096, one page).
+
+⚠ **`cyrius lib sync` cannot resolve kriya's `unicode/*` entries in declared-only mode** — it reports
+them as "not found in the snapshot" even though `<pin>/lib/unicode/*.cyr` exist. `lib sync --full` and
+`cyrius deps` both handle them correctly, and CI uses `cyrius deps`, so nothing is broken; use
+`--full` when re-vendoring by hand. The `unicode/*` entries are load-bearing — dropping them fails the
+build with 3 reachable undefined functions, pulled in transitively by niyama.
+
+### Changed — CI action pins to current majors
+
+`actions/checkout@v4` → **`@v7`** (both workflows) and `softprops/action-gh-release@v2` → **`@v3`**.
+Both majors are Node 20 → Node 24 runtime moves with no input-schema change; `ubuntu-latest` is far
+past checkout v7's v2.327.1 minimum runner. v7 additionally refuses to check out fork PRs for
+`pull_request_target` / `workflow_run` — kriya triggers on `push`, `pull_request`, `workflow_call` and
+tag push, so none of its jobs are in range. Matches vidya, the first-party repo already on these pins.
+
+⚠ These pins are the one part of this release that **cannot be verified locally**. Everything else was
+run on this machine.
+
+### Unchanged — both standing Cyrius proposals stay open
+
+Grepping the whole 6.5.19–6.5.35 span for `octal` / `0o` / `openat` / `unlinkat` / `fstatat` /
+`mkdirat` / `renameat` returns nothing, and every `syscalls*` file on kriya's targets is byte-identical
+across the two snapshots. So: no `0o755` sweep of the decimal POSIX-mode constants, and no `*at()`-family
+stdlib wrappers to migrate kriya's raw `syscall(N, …)` sites onto. Both remain follow-ups.
+
 ## [1.1.9] - 2026-08-11 — symlinks on agnos; the stack smash cyrius 6.5 uncovered
 
 Toolchain pin moved **6.4.20 → 6.5.18** (`lib sync --full`), which is what surfaced the `find` bug below.
