@@ -172,6 +172,13 @@ fn _seq_write_int_w(buf, offset, v, width): i64 {
 }
 
 fn cmd_seq(start: i64): i64 {
+    help_begin("seq", "Print a sequence of numbers.",
+               "seq [OPTIONS] [FIRST [INCREMENT]] LAST");
+    help_operands("Integers only. A leading -N is read as a negative FIRST, not an option.");
+    help_example("seq 5");
+    help_example("seq 1 2 9");
+    help_example("seq -w 8 11");
+    help_if_requested(0, start);
     var n_argv = kriya_argv_count();
     var sep    = "\n";
     var seplen: i64 = 1;

@@ -60,6 +60,13 @@ fn _mv_init_spec(): i64 {
     _mv_n_idx = flags_add_bool(s, 110, "no-clobber",  0, "refuse to overwrite existing dest");
     _mv_v_idx = flags_add_bool(s, 118, "verbose",     0, "print each rename");
     _mv_spec = s;
+    help_begin("mv", "Move or rename files and directories.",
+               "mv [OPTIONS] SOURCE... DEST");
+    help_operands("A same-filesystem move is a rename; across filesystems it is a copy followed by a removal. ⚠ If the copy succeeds and the source removal fails, the destination is KEPT and the failure reported (ADR 0009).");
+    help_exit(1, "a move failed");
+    help_example("mv old.txt new.txt");
+    help_example("mv -n a.txt b.txt /tmp/");
+    help_example("mv build/ /var/tmp/build/");
     return 0;
 }
 

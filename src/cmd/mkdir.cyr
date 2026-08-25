@@ -36,6 +36,12 @@ fn _mkdir_init_spec(): i64 {
     _mkdir_m_idx = flags_add_str(s,  109, "mode",    0, "set final-component mode (octal)");
     _mkdir_v_idx = flags_add_bool(s, 118, "verbose", 0, "print a line per created directory");
     _mkdir_spec = s;
+    help_begin("mkdir", "Create directories.",
+               "mkdir [OPTIONS] DIRECTORY...");
+    help_exit(1, "a directory could not be created");
+    help_example("mkdir build");
+    help_example("mkdir -p a/b/c");
+    help_example("mkdir -m 700 private");
     return 0;
 }
 

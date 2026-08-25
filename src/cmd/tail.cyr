@@ -57,6 +57,13 @@ fn _tail_init_spec(): i64 {
     _tail_v_idx = flags_add_bool(s, 118, "verbose", 0, "always emit filename headers");
     _tail_f_idx = flags_add_bool(s, 102, "follow",  0, "output new lines as the file grows");
     _tail_spec = s;
+    help_begin("tail", "Print the last part of files.",
+               "tail [OPTIONS] [FILE...]");
+    help_operands("Defaults to 10 lines. ⚠ -f follows a single file by polling its path; multi-file follow is not supported.");
+    help_exit(1, "a file could not be read");
+    help_example("tail -n 50 app.log");
+    help_example("tail -f app.log");
+    help_example("tail -c 200 blob.bin");
     return 0;
 }
 

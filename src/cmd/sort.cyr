@@ -77,6 +77,13 @@ fn _so_init_spec(): i64 {
     _so_z_idx = flags_add_bool(s, 122, "zero-terminated",      0, "NUL-separated lines");
     _so_s_idx = flags_add_bool(s, 115, "stable",               0, "stable sort (default)");
     _so_spec = s;
+    help_begin("sort", "Sort lines of text.",
+               "sort [OPTIONS] [FILE...]");
+    help_operands("⚠ Sorts in memory with a 256 MiB cap; an external-sort fallback is a named follow-up.");
+    help_exit(1, "-c found the input unsorted, or a file could not be read");
+    help_example("sort names.txt");
+    help_example("sort -n -r nums");
+    help_example("sort -t: -k1,1 /etc/passwd");
     return 0;
 }
 

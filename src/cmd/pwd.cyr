@@ -20,6 +20,10 @@ fn _pwd_init_spec(): i64 {
     _pwd_L_idx = flags_add_bool(s, 76, "logical",  0, "use $PWD if absolute (default)");
     _pwd_P_idx = flags_add_bool(s, 80, "physical", 0, "always resolve via getcwd");
     _pwd_spec = s;
+    help_begin("pwd", "Print the working directory.",
+               "pwd [OPTIONS]");
+    help_example("pwd");
+    help_example("pwd -P");
     return 0;
 }
 

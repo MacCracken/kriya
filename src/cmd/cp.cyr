@@ -92,6 +92,13 @@ fn _cp_init_spec(): i64 {
     _cp_BIG_H_idx = flags_add_bool(s, 72,  "",            0, "follow command-line symlinks only (-R)");
     _cp_BIG_L_idx = flags_add_bool(s, 76,  "dereference", 0, "follow all symlinks (-R)");
     _cp_spec = s;
+    help_begin("cp", "Copy files and directory trees.",
+               "cp [OPTIONS] SOURCE... DEST");
+    help_operands("With one SOURCE, DEST is the new name or an existing directory. With several, DEST must be a directory. Directories need -R/-r. Existing destinations are refused without -f (ADR 0003, ADR 0004).");
+    help_exit(1, "a copy failed, or a destination existed without -f");
+    help_example("cp notes.txt backup.txt");
+    help_example("cp -r src/ dest/");
+    help_example("cp -p -f a.conf /etc/a.conf");
     return 0;
 }
 

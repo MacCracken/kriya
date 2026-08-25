@@ -41,6 +41,11 @@ fn _tee_init_spec(): i64 {
     var s = flags_new();
     _tee_a_idx = flags_add_bool(s, 97, "append", 0, "append to output files (O_APPEND)");
     _tee_spec = s;
+    help_begin("tee", "Copy stdin to stdout and to each FILE.",
+               "tee [OPTIONS] [FILE...]");
+    help_exit(1, "a file could not be written");
+    help_example("make 2>&1 | tee build.log");
+    help_example("echo hi | tee -a log");
     return 0;
 }
 

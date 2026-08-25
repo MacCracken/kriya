@@ -6,6 +6,100 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.3.0] - 2026-08-25 — `--help`, on all 38 utilities
+
+Opens the **1.3.x discoverability arc**. First of the post-defect arcs, and the first release since
+1.1.9 that adds capability rather than repairing it.
+
+⚠ **This arc has an external consumer waiting.** agnoshi's tab-completion needs `kriya --list` and
+`<util> --help=json` to offer completions without hardcoding kriya's surface. 1.3.0 builds the
+renderer and the per-utility prose those forms will serialise; 1.3.1 adds the JSON, 1.3.2 the
+top-level list.
+
+### Added — `--help` on every utility
+
+⭐ **The OPTIONS table is read back out of the flags spec**, not written by hand. Every utility already
+declares its full option table to `flags_new()` for the parser; nothing read it back. Short letter,
+long name, kind and description all come from there, so **the option list cannot drift from what the
+parser accepts — it *is* the parser's data.**
+
+What a spec cannot supply is prose: a summary, a synopsis, what the operands are called, what the exit
+codes mean, and a couple of examples. Those are declared per utility with `help_begin` /
+`help_operands` / `help_exit` / `help_example`, sitting next to the flags they describe.
+`help_begin` seeds the [ADR 0008](docs/adr/0008-posix-exit-code-policy.md) three-tier codes, so a
+utility only declares what it does *differently* — `grep`'s no-match-is-1, `xargs`' 123–127 ladder,
+`env`'s 126/127.
+
+Sections follow [ADR 0002](docs/adr/0002-option-parsing-humans-and-agents.md) exactly: `NAME`,
+`SYNOPSIS`, `DESCRIPTION`, `OPTIONS`, `EXIT CODES`, `EXAMPLES`, wrapped at 80 columns.
+
+⚠ **ANSI only on a tty** — verified by a test that pipes `--help` through `od` and fails on an escape
+byte. Styling a redirected stream puts escapes into whatever consumes it, and the consumer here is a
+shell completer.
+
+### The parts that were not obvious
+
+⛔ **`-h` is not help, and must never become it.** ADR 0002 reassigns it per utility — `du -h`,
+`ls -h` and `sort -h` all mean human-readable. "Add `-h` as an alias" is the obvious-looking change
+that would silently break three utilities, so the test suite pins `du -h` producing sizes and
+`sort -h` being a *bad option*.
+
+⭐ **`--help` renders and exits inside the parser rather than returning a sentinel.** All 28
+spec-based utilities have the shape
+`if (kriya_args_parse(...) != 0) { report "bad option"; return EXIT_USAGE; }` — so any non-zero return
+would print "bad option" for a successful `--help`. Threading a third outcome through 28 call sites is
+28 chances to get it wrong, for a path that legitimately terminates the process. ⚠ The write-failure
+flag is still checked before exiting, so `kriya ls --help > /dev/full` does not exit 0.
+
+⛔ **`--help` has to reach the right program.** Two utilities take argv that is *someone else's
+command line*, and both got this wrong first time:
+
+- `xargs --help` printed **nothing**. `--help` is in no spec, so the operand-boundary scan called it
+  the first *operand* — making `--help` the command to run. It is now recognised in that scan, so
+  `xargs --help` is xargs' help while **`xargs echo --help` still hands `--help` to `echo`**.
+- `find . -exec echo --help {} \;` printed **find's** help. The hand-rolled utilities scanned all of
+  argv, finding a `--help` never addressed to them. They now check the **first argument only** — which
+  is the shape that means help; anything later belongs to whatever is being expressed or executed.
+
+⚠ **Ten utilities have no OPTIONS section, and that is correct.** `find`, `seq`, `env`, `du`, `df`,
+`date`, `echo`, `sleep`, `yes`, `true` and `false` walk argv themselves and have no spec to read back.
+Their pages carry every other section; OPTIONS is absent rather than empty.
+
+⚠ **`--help=json` is named, not rejected.** It answers *"not implemented yet; use --help"* and exits 2.
+Answering "bad option" would read as "no such flag" — the wrong thing to tell an agent probing for the
+interface ADR 0002 promises.
+
+### Fixed — a subset build broke, exactly as the watchlist predicted
+
+⛔ `tests/kriya.tcyr` stopped compiling: `args.cyr` now calls into `help.cyr`, and the tcyr includes a
+*subset* of `src/lib/`. This is **roadmap M15e**, written up three releases ago — cyrius only rejects
+*reachable* undefined functions, so a missing include stays green until something calls it. The entry
+predicted the failure and named the check; the check is now also in the test file's own comment.
+
+### Notes
+
+⚠ **Cold start is unmeasured this release, and that matters for this arc.** agnoshi may spawn kriya on
+every `<tab>`, against a 2 ms budget last measured at 1.185 ms. The box was at load average **31**
+during the attempt — another workload running 80 processes — and an interleaved A/B gave contradictory
+directions across a swap, which is noise, not signal. What *is* stable: the binary grew
+**965,144 → 986,416 bytes** (+21 KB, +2.2%) for the help text. Re-measure on a quiet box before 1.3.2.
+
+### Tests
+
+**1,595 smoke cases across 35 scripts** (up from 1,315 across 34), 119 unit + 18 POSIX, 1,529 fuzz
+assertions green under the poisoned allocator. Both targets build.
+
+- `scripts/smoke-help.sh` — new, 280 cases. Every one of the 38 utilities is checked for exit 0, a
+  `NAME` heading, its own name on the NAME line (catching a stale copy), and all four remaining
+  sections. Plus: the OPTIONS table matching the parser, a short-only option rendering no dangling
+  comma, a value-taking option marked, `-h` keeping its per-utility meaning, no ANSI down a pipe,
+  `--help` routing correctly for `xargs` and `find` in both directions, `--` still terminating option
+  recognition, and `--help=json` naming itself.
+
+⚠ Two of those blocks needed `rc=0; cmd || rc=$?` rather than `$(cmd; echo $?)` — under `set -e` the
+subshell aborts at the non-zero status before it can echo it. That is the fourth release in a row this
+has come up; it is now spelled out in the script.
+
 ## [1.2.6] - 2026-08-25 — closing the defect arc
 
 The last three confirmed defects from the v1.1.11 P-1 sweep. **M17 is retired**, and with it the

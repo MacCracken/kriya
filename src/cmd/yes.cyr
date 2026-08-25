@@ -7,6 +7,11 @@
 # stays in L1.
 
 fn cmd_yes(start: i64): i64 {
+    help_begin("yes", "Print a string repeatedly until killed.",
+               "yes [STRING...]");
+    help_example("yes");
+    help_example("yes | head -3");
+    help_if_requested(0, start);
     var n = kriya_argv_count();
     var buf = alloc(8192);
     var blen: i64 = 0;

@@ -61,6 +61,13 @@ fn _uq_init_spec(): i64 {
     _uq_w_idx = flags_add_str(s,  119, "check-chars",      0, "compare at most N chars");
     _uq_z_idx = flags_add_bool(s, 122, "zero-terminated",  0, "NUL-separated lines");
     _uq_spec = s;
+    help_begin("uniq", "Report or filter repeated adjacent lines.",
+               "uniq [OPTIONS] [INPUT [OUTPUT]]");
+    help_operands("⚠ Only ADJACENT duplicates are considered — sort the input first if that is not already true.");
+    help_exit(1, "input or output could not be handled");
+    help_example("sort f | uniq");
+    help_example("uniq -c log");
+    help_example("uniq -d names");
     return 0;
 }
 

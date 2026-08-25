@@ -31,6 +31,11 @@ fn _bn_init_spec(): i64 {
     _bn_s_idx = flags_add_str(s,  115, "suffix",   0, "suffix to strip (implies -a)");
     _bn_z_idx = flags_add_bool(s, 122, "zero",     0, "NUL-terminate each output");
     _bn_spec = s;
+    help_begin("basename", "Strip directory and optional suffix from a path.",
+               "basename NAME [SUFFIX]");
+    help_example("basename /usr/bin/cp");
+    help_example("basename src/main.cyr .cyr");
+    help_example("basename -a /a/b /c/d");
     return 0;
 }
 

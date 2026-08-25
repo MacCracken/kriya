@@ -470,6 +470,14 @@ fn _df_load_mounts(): i64 {
 }
 
 fn cmd_df(start: i64): i64 {
+    help_begin("df", "Report filesystem disk space usage.",
+               "df [OPTIONS] [FILE...]");
+    help_operands("With no operand, every mounted filesystem is listed. An operand resolves to the filesystem CONTAINING it, by longest mountpoint prefix.");
+    help_exit(1, "an operand could not be resolved");
+    help_example("df");
+    help_example("df -h /home");
+    help_example("df /var/log/syslog");
+    help_if_requested(0, start);
     # df is built entirely on statfs(2), which agnos does not provide
     # (K_HAVE_STATFS == 0). Refuse cleanly up front rather than walking a
     # mount table that does not exist. On Linux this branch is DCE'd.

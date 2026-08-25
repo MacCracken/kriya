@@ -41,6 +41,13 @@ fn _touch_init_spec(): i64 {
     _touch_r_idx = flags_add_str (s, 114, "reference",         0, "use this file's times instead of now");
     _touch_t_idx = flags_add_str (s, 116, "",                  0, "use [[CC]YY]MMDDhhmm[.ss] instead of now");
     _touch_spec = s;
+    help_begin("touch", "Create files, or update their timestamps.",
+               "touch [OPTIONS] FILE...");
+    help_operands("With no time option the current time is used. ⚠ -r and -t are mutually exclusive; -t stamps are interpreted as UTC (ADR 0007).");
+    help_exit(1, "a file could not be created or stamped");
+    help_example("touch newfile");
+    help_example("touch -t 202601011200 f");
+    help_example("touch -r ref.txt copy.txt");
     return 0;
 }
 

@@ -26,6 +26,10 @@ fn _dn_init_spec(): i64 {
     var s = flags_new();
     _dn_z_idx = flags_add_bool(s, 122, "zero", 0, "NUL-terminate each output");
     _dn_spec = s;
+    help_begin("dirname", "Strip the last component from a path.",
+               "dirname NAME...");
+    help_example("dirname /usr/bin/cp");
+    help_example("dirname -z a/b/c");
     return 0;
 }
 

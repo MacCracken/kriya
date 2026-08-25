@@ -10,6 +10,11 @@ include "src/lib/path.cyr"
 include "src/lib/fs.cyr"
 include "src/lib/protected.cyr"
 include "src/lib/args.cyr"
+# ⚠ `args.cyr` calls into `help.cyr` since v1.3.0 (`--help` is intercepted in
+# `kriya_args_parse_range`), so a subset build must include it too. This is the
+# roadmap M15e trap: cyrius only rejects REACHABLE undefined functions, so a
+# missing include stays green until something calls it.
+include "src/lib/help.cyr"
 include "src/cmd/true.cyr"
 include "src/cmd/false.cyr"
 

@@ -1,0 +1,316 @@
+# help.cyr — `--help` rendering, per ADR 0002.
+#
+# ⭐ THE OPTIONS TABLE IS NOT WRITTEN BY HAND — IT IS READ BACK OUT OF THE SPEC
+# every utility already builds for `flags_parse`. Short letter, long name, kind
+# and description are all there; nothing about the option list can drift out of
+# sync with the parser, because it IS the parser's data.
+#
+# What the spec cannot supply is the prose: a summary, a synopsis, what the
+# operands are called, what the exit codes mean, and a couple of examples. Those
+# are declared per utility with the `help_*` calls below, next to the flags they
+# describe.
+#
+# ⚠ `-h` IS NOT HELP. ADR 0002 reassigns it per utility — `du -h`, `ls -h` and
+# `sort -h` all mean human-readable — and gives `--help` sole help duty. A `-h`
+# that means help on 35 utilities and something else on 3 is worse than one that
+# never means help.
+#
+# Section order is fixed by ADR 0002: NAME, SYNOPSIS, DESCRIPTION, OPTIONS,
+# EXIT CODES, EXAMPLES. Wrapped at 80 columns. ANSI only on a tty.
+
+var HELP_WIDTH = 80;
+var HELP_MAX_EXITS = 12;
+var HELP_MAX_EXAMPLES = 8;
+
+# Current utility's help record. One slot: a process runs one utility.
+var _help_name      = 0;
+var _help_summary   = 0;
+var _help_synopsis  = 0;
+var _help_operands  = 0;    # display string for the operand names, or 0
+var _help_exit_code = 0;    # i64 array
+var _help_exit_text = 0;    # cstr array
+var _help_exit_n    = 0;
+var _help_examples  = 0;    # cstr array
+var _help_example_n = 0;
+
+# Begin a utility's help record. Seeds the ADR-0008 three-tier exit codes, which
+# most utilities use verbatim; `help_exit` overrides or extends.
+fn help_begin(name, summary, synopsis): i64 {
+    _help_name     = name;
+    _help_summary  = summary;
+    _help_synopsis = synopsis;
+    _help_operands = 0;
+    _help_exit_code = alloc(HELP_MAX_EXITS * 8);
+    _help_exit_text = alloc(HELP_MAX_EXITS * 8);
+    _help_exit_n    = 0;
+    _help_examples  = alloc(HELP_MAX_EXAMPLES * 8);
+    _help_example_n = 0;
+    help_exit(0, "success");
+    help_exit(1, "operation failed");
+    help_exit(2, "usage error");
+    return 0;
+}
+
+# Set or replace the meaning of one exit code.
+fn help_exit(code, meaning): i64 {
+    var i: i64 = 0;
+    while (i < _help_exit_n) {
+        if (load64(_help_exit_code + i * 8) == code) {
+            store64(_help_exit_text + i * 8, meaning);
+            return 0;
+        }
+        i = i + 1;
+    }
+    if (_help_exit_n >= HELP_MAX_EXITS) { return 0; }
+    store64(_help_exit_code + _help_exit_n * 8, code);
+    store64(_help_exit_text + _help_exit_n * 8, meaning);
+    _help_exit_n = _help_exit_n + 1;
+    return 0;
+}
+
+fn help_example(text): i64 {
+    if (_help_example_n >= HELP_MAX_EXAMPLES) { return 0; }
+    store64(_help_examples + _help_example_n * 8, text);
+    _help_example_n = _help_example_n + 1;
+    return 0;
+}
+
+fn help_operands(names): i64 {
+    _help_operands = names;
+    return 0;
+}
+
+# --- rendering -------------------------------------------------------
+
+fn _help_sp(n): i64 {
+    var i: i64 = 0;
+    while (i < n) {
+        k_write( 1, " ", 1);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Section heading. Bold on a tty, plain otherwise — ADR 0002 forbids styling a
+# redirected stream, because the escapes end up in whatever consumes it.
+fn _help_head(title): i64 {
+    if (k_isatty(1) == 1) { k_write( 1, "\x1b[1m", 4); }
+    k_write( 1, title, strlen(title));
+    if (k_isatty(1) == 1) { k_write( 1, "\x1b[0m", 4); }
+    k_write( 1, "\n", 1);
+    return 0;
+}
+
+# Emit `text` wrapped to HELP_WIDTH, every line indented by `indent`, breaking
+# only at spaces. A word longer than the column is emitted whole rather than
+# split — a chopped path is harder to read than an over-long line.
+fn _help_wrap(text, indent): i64 {
+    var len = strlen(text);
+    var avail = HELP_WIDTH - indent;
+    var start: i64 = 0;
+    while (start < len) {
+        # Skip leading spaces on a continuation line.
+        var skipping: i64 = 1;
+        while (skipping == 1) {
+            if (start >= len) { skipping = 0; }
+            elif (load8(text + start) == 32) { start = start + 1; }
+            else { skipping = 0; }
+        }
+        if (start >= len) { return 0; }
+        var end = start + avail;
+        if (end >= len) { end = len; }
+        else {
+            # Walk back to the last space in range.
+            var brk = end;
+            var found: i64 = 0;
+            while (brk > start) {
+                if (load8(text + brk) == 32) { found = brk; brk = start; }
+                else { brk = brk - 1; }
+            }
+            if (found > start) { end = found; }
+        }
+        _help_sp(indent);
+        k_write( 1, text + start, end - start);
+        k_write( 1, "\n", 1);
+        start = end;
+    }
+    return 0;
+}
+
+# Width of the widest "-x, --long" cell, so descriptions align in one column.
+fn _help_opt_width(spec): i64 {
+    if (spec == 0) { return 0; }
+    var entries = load64(spec);
+    var count   = load64(spec + 16);
+    var w: i64 = 0;
+    var i: i64 = 0;
+    while (i < count) {
+        var ep = entries + i * FLAGS_ENTRY_SIZE;
+        var cw: i64 = 0;
+        if (load64(ep) != 0) { cw = cw + 4; }              # "-x, " or "-x  "
+        else { cw = cw + 4; }                              # aligned blank
+        var ln = load64(ep + 8);
+        if (ln != 0) {
+            if (strlen(ln) > 0) { cw = cw + 2 + strlen(ln); }
+        }
+        if (load64(ep + 16) != 0) { cw = cw + 6; }          # " VALUE"
+        if (cw > w) { w = cw; }
+        i = i + 1;
+    }
+    return w;
+}
+
+fn _help_render_options(spec): i64 {
+    # ⚠ Ten utilities walk argv themselves and have no spec (`find`, `seq`,
+    # `env`, `du`, `df`, `date`, `echo`, `sleep`, `yes`, `true`, `false`). Their
+    # pages carry every other section; OPTIONS is simply absent rather than
+    # empty, because there is no table to read back.
+    if (spec == 0) { return 0; }
+    var entries = load64(spec);
+    var count   = load64(spec + 16);
+    if (count == 0) { return 0; }
+    _help_head("OPTIONS");
+    var colw = _help_opt_width(spec);
+    var i: i64 = 0;
+    while (i < count) {
+        var ep = entries + i * FLAGS_ENTRY_SIZE;
+        var sh = load64(ep);
+        var ln = load64(ep + 8);
+        var ty = load64(ep + 16);
+        var hp = load64(ep + 40);
+        var used: i64 = 0;
+        var has_long: i64 = 0;
+        if (ln != 0) {
+            if (strlen(ln) > 0) { has_long = 1; }
+        }
+        _help_sp(2);
+        if (sh != 0) {
+            var sb[4];
+            store8(&sb, 45);
+            store8(&sb + 1, sh);
+            k_write( 1, &sb, 2);
+            # ⚠ The comma joins two forms — an option with only a short form
+            # would otherwise render as a dangling `-l,`.
+            if (has_long == 1) { k_write( 1, ", ", 2); }
+            else { _help_sp(2); }
+            used = 4;
+        } else {
+            _help_sp(4);
+            used = 4;
+        }
+        if (has_long == 1) {
+            k_write( 1, "--", 2);
+            k_write( 1, ln, strlen(ln));
+            used = used + 2 + strlen(ln);
+        }
+        if (ty != 0) {
+            k_write( 1, " VALUE", 6);
+            used = used + 6;
+        }
+        # ⚠ An option whose cell overflows the column gets its description on the
+        # next line rather than a ragged single line.
+        if (used > colw) {
+            k_write( 1, "\n", 1);
+            _help_sp(2);
+            used = 0;
+        }
+        _help_sp(colw - used + 2);
+        if (hp != 0) { k_write( 1, hp, strlen(hp)); }
+        k_write( 1, "\n", 1);
+        i = i + 1;
+    }
+    k_write( 1, "\n", 1);
+    return 0;
+}
+
+fn _help_render_exits(): i64 {
+    if (_help_exit_n == 0) { return 0; }
+    _help_head("EXIT CODES");
+    var i: i64 = 0;
+    while (i < _help_exit_n) {
+        var code = load64(_help_exit_code + i * 8);
+        _help_sp(2);
+        var nb[8];
+        var nl = fmt_int_buf(code, &nb);
+        k_write( 1, &nb, nl);
+        _help_sp(4 - nl);
+        k_write( 1, load64(_help_exit_text + i * 8), strlen(load64(_help_exit_text + i * 8)));
+        k_write( 1, "\n", 1);
+        i = i + 1;
+    }
+    k_write( 1, "\n", 1);
+    return 0;
+}
+
+# Render the whole page for `spec`. Returns 0.
+fn help_render(spec): i64 {
+    if (_help_name == 0) { return 0; }
+
+    _help_head("NAME");
+    _help_sp(2);
+    k_write( 1, _help_name, strlen(_help_name));
+    if (_help_summary != 0) {
+        k_write( 1, " — ", 5);
+        k_write( 1, _help_summary, strlen(_help_summary));
+    }
+    k_write( 1, "\n\n", 2);
+
+    if (_help_synopsis != 0) {
+        _help_head("SYNOPSIS");
+        _help_sp(2);
+        k_write( 1, _help_synopsis, strlen(_help_synopsis));
+        k_write( 1, "\n\n", 2);
+    }
+
+    if (_help_summary != 0) {
+        _help_head("DESCRIPTION");
+        _help_wrap(_help_summary, 2);
+        if (_help_operands != 0) {
+            k_write( 1, "\n", 1);
+            _help_wrap(_help_operands, 2);
+        }
+        k_write( 1, "\n", 1);
+    }
+
+    _help_render_options(spec);
+    _help_render_exits();
+
+    if (_help_example_n > 0) {
+        _help_head("EXAMPLES");
+        var i: i64 = 0;
+        while (i < _help_example_n) {
+            _help_sp(2);
+            k_write( 1, load64(_help_examples + i * 8), strlen(load64(_help_examples + i * 8)));
+            k_write( 1, "\n", 1);
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# Render and exit if argv[start..] asks for help. For the utilities that walk
+# argv themselves and never reach `kriya_args_parse` — they call this first.
+# `spec` may be 0; OPTIONS is then omitted.
+fn help_if_requested(spec, start: i64): i64 {
+    # ⛔ FIRST ARGUMENT ONLY. These utilities take argv that is not an option
+    # list — `find`'s is an expression, `env`'s and `xargs`' end in someone
+    # else's command line — so a scan of the whole of argv finds a `--help` that
+    # was never addressed to us. Measured: `find . -exec echo --help {} \;`
+    # printed FIND's help instead of running the exec.
+    # `find --help` is the shape that means help; anything later belongs to
+    # whatever is being expressed or executed.
+    var n = kriya_argv_count();
+    if (start >= n) { return 0; }
+    var tok = load64(kriya_argv_flat() + start * 8);
+    var hw = _kriya_tok_is_help(tok, strlen(tok));
+    if (hw == 1) {
+        help_render(spec);
+        if (k_write_failed() == 1) { syscall(SYS_EXIT, 1); }
+        syscall(SYS_EXIT, 0);
+    }
+    if (hw == 2) {
+        k_write( 2, "kriya: --help=FORMAT is not implemented yet; use --help for the human form\n", 74);
+        syscall(SYS_EXIT, 2);
+    }
+    return 0;
+}

@@ -46,6 +46,13 @@ fn _wc_init_spec(): i64 {
     _wc_m_idx = flags_add_bool(s, 109, "chars",            0, "count UTF-8 codepoints");
     _wc_L_idx = flags_add_bool(s, 76,  "max-line-length", 0, "longest line length in chars");
     _wc_spec = s;
+    help_begin("wc", "Count lines, words, bytes and characters.",
+               "wc [OPTIONS] [FILE...]");
+    help_operands("With no operand, reads stdin. With several, a total line is printed. With no count option, lines, words and bytes are shown.");
+    help_exit(1, "a file could not be read");
+    help_example("wc -l access.log");
+    help_example("wc -c *.txt");
+    help_example("cat f | wc");
     return 0;
 }
 

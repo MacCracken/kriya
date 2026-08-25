@@ -46,6 +46,12 @@ fn _wh_init_spec(): i64 {
     _wh_s_idx = flags_add_bool(s, 115, "silent", 0, "no output; rely on exit code");
     _wh_z_idx = flags_add_bool(s, 122, "zero",   0, "NUL-terminate each output");
     _wh_spec = s;
+    help_begin("which", "Locate a command on PATH.",
+               "which [OPTIONS] NAME...");
+    help_operands("Searches $PATH in order. ⚠ A name containing a slash is used as given, with no search.");
+    help_exit(1, "a name was not found on PATH");
+    help_example("which cp");
+    help_example("which -a python3");
     return 0;
 }
 

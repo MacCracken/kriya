@@ -1,5 +1,9 @@
 # false — POSIX `false(1)`: do nothing, exit 1.
 # Args ignored per POSIX.
 fn cmd_false(start: i64): i64 {
+    help_begin("false", "Do nothing, unsuccessfully.",
+               "false [ignored...]");
+    help_example("false || echo failed");
+    help_if_requested(0, start);
     return EXIT_FAILURE;
 }

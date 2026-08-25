@@ -63,6 +63,14 @@ fn _rm_init_spec(): i64 {
     _rm_d_idx = flags_add_bool(s, 100, "dir",         0, "remove empty directories");
     _rm_v_idx = flags_add_bool(s, 118, "verbose",     0, "print each removal");
     _rm_spec = s;
+    help_begin("rm", "Remove files and directory trees.",
+               "rm [OPTIONS] FILE...");
+    help_operands("⚠ rm never follows symlinks and no flag opts in (ADR 0003). It refuses `/` with no escape hatch (ADR 0004), refuses a `.`/`..` final component, and refuses a symlink operand carrying a trailing slash (ADR 0010).");
+    help_exit(1, "a removal failed, or an operand was refused");
+    help_exit(2, "usage error, or a protected path was named");
+    help_example("rm stale.log");
+    help_example("rm -r -f build/");
+    help_example("rm -i important.conf");
     return 0;
 }
 

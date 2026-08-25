@@ -57,6 +57,17 @@ fn _xa_init_spec(): i64 {
     _xa_I_idx    = flags_add_str (s, 73,  "replace",            0, "replace REPLSTR in command args");
     _xa_s_idx    = flags_add_int (s, 115, "max-chars",          0, "max argv+envp byte size per exec");
     _xa_spec = s;
+    help_begin("xargs", "Build command lines from stdin and run them.",
+               "xargs [OPTIONS] [COMMAND [ARG...]]");
+    help_operands("⚠ Option recognition stops at the first operand — everything after reaches COMMAND verbatim, including its own flags and its `--`.");
+    help_exit(123, "a command exited non-zero");
+    help_exit(124, "a command exited 255; xargs aborted");
+    help_exit(125, "a command was killed by a signal");
+    help_exit(126, "the command was found but not executable");
+    help_exit(127, "the command was not found");
+    help_example("find . -name '*.o' | xargs rm --");
+    help_example("ls | xargs -I{} mv {} dest/");
+    help_example("printf 'a\\nb\\n' | xargs -n1 echo");
     return 0;
 }
 

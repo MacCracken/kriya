@@ -40,6 +40,12 @@ fn _rmdir_init_spec(): i64 {
     _rmdir_v_idx      = flags_add_bool(s, 118, "verbose", 0, "print a line per removed directory");
     _rmdir_ignore_idx = flags_add_bool(s,   0, "ignore-fail-on-non-empty", 0, "ENOTEMPTY is not an error (use with -p)");
     _rmdir_spec = s;
+    help_begin("rmdir", "Remove empty directories.",
+               "rmdir [OPTIONS] DIRECTORY...");
+    help_operands("Only empty directories are removed; use `rm -r` for a populated tree.");
+    help_exit(1, "a directory was not empty or could not be removed");
+    help_example("rmdir empty");
+    help_example("rmdir -p a/b/c");
     return 0;
 }
 
