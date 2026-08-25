@@ -1,0 +1,145 @@
+# spawn.cyr — kriya's own fork + execve + waitpid, for utilities that run
+# user-named commands (`find -exec`, `xargs`).
+#
+# ⛔ WHY THIS EXISTS RATHER THAN stdlib `exec_env`: THAT FUNCTION SILENCES THE
+# CHILD. Its Linux arm opens `/dev/null` and `dup2`s it onto **fd 2** before
+# exec (`lib/process.cyr`), so every diagnostic the child writes is discarded.
+# Measured: `chmod 555 rot; kriya find rot -name '*.tmp' -exec rm {} \;` printed
+# NOTHING and exited 0 while deleting nothing, where GNU prints a "Permission
+# denied" line per file. A cleanup job written that way reports complete success
+# having done nothing at all — the failure mode with no visible symptom.
+#
+# ⛔ IT ALSO COLLAPSES EVERY NON-EXIT OUTCOME TO -1. `exec_env` returns
+# `WEXITSTATUS` on a normal exit and -1 for anything else, so "killed by a
+# signal" and "fork failed" are indistinguishable, and a failed exec arrives as
+# the child's `sys_exit(127)` — identical to a child that genuinely exited 127.
+# POSIX `xargs` has to tell those apart: 127 not-found, 126 not-executable,
+# 125 signalled, 124 exit-255, 123 any other nonzero. kriya reported 127 for a
+# signalled child and 123 for a non-executable one.
+#
+# ⭐ THE CLOEXEC PIPE IS WHAT MAKES "EXEC FAILED" DISTINGUISHABLE. The child
+# holds the write end with FD_CLOEXEC set: a successful `execve` closes it and
+# the parent reads EOF; a failed one writes its errno through before exiting.
+# There is no other way to separate an exec failure from a child that chose to
+# exit with the same status.
+#
+# ⚠ agnos has no fork. It offers `execwait(path, len)` — a blocking load-and-run
+# of a static ELF with no argv, no envp and no fd control — so that arm delegates
+# to stdlib `exec_vec` and can only report an exit status. It also never had the
+# `/dev/null` redirect, so the stderr bug was Linux-only to begin with.
+
+# Encoded `k_spawn` result. Kept as small positive tags rather than a raw wait
+# status because agnos cannot produce one, and a shared decoder beats two.
+enum KSpawnR {
+    K_SPAWN_SIGNAL_BASE = 1000;   # + signal number
+    K_SPAWN_EXECFAIL    = 2000;   # + errno; the command never started
+    K_SPAWN_FORKFAIL    = 3000;
+}
+
+fn k_spawn_exited(r): i64 {
+    if (r < 0)    { return 0; }
+    if (r >= 256) { return 0; }
+    return 1;
+}
+fn k_spawn_exit_status(r): i64 { return r; }
+
+fn k_spawn_signalled(r): i64 {
+    if (r < K_SPAWN_SIGNAL_BASE) { return 0; }
+    if (r >= K_SPAWN_EXECFAIL)   { return 0; }
+    return 1;
+}
+fn k_spawn_signal(r): i64 { return r - K_SPAWN_SIGNAL_BASE; }
+
+fn k_spawn_execfailed(r): i64 {
+    if (r < K_SPAWN_EXECFAIL)  { return 0; }
+    if (r >= K_SPAWN_FORKFAIL) { return 0; }
+    return 1;
+}
+fn k_spawn_exec_errno(r): i64 { return r - K_SPAWN_EXECFAIL; }
+
+# Run `args` (vec of cstr; args[0] is the path to exec) with `env` (vec of cstr),
+# INHERITING fds 0, 1 and 2 untouched. Blocks until the child is reaped.
+fn k_spawn(args, env): i64 {
+    var argc = vec_len(args);
+    if (argc < 1) { return K_SPAWN_FORKFAIL; }
+
+    #ifdef CYRIUS_TARGET_AGNOS
+    # No fork, no argv, no fd control — `execwait` is the whole surface. The
+    # stdlib wrapper returns the child's exit code, or -1 when the spawn failed.
+    var ar = exec_vec(args);
+    if (ar < 0) { return K_SPAWN_FORKFAIL; }
+    if (ar > 255) { return 255; }
+    return ar;
+    #endif
+
+    #ifndef CYRIUS_TARGET_AGNOS
+    var cmd = vec_get(args, 0);
+    var argv = alloc((argc + 1) * 8);
+    var ai: i64 = 0;
+    while (ai < argc) {
+        store64(argv + ai * 8, vec_get(args, ai));
+        ai = ai + 1;
+    }
+    store64(argv + argc * 8, 0);
+
+    var envc = vec_len(env);
+    var envp = alloc((envc + 1) * 8);
+    var ei: i64 = 0;
+    while (ei < envc) {
+        store64(envp + ei * 8, vec_get(env, ei));
+        ei = ei + 1;
+    }
+    store64(envp + envc * 8, 0);
+
+    # Two i32 fds in an 8-byte local. ⚠ `var fds[8]` is 8 BYTES here — a
+    # function-local `var X[N]` is N bytes (roadmap M15a).
+    var fds[8];
+    var pr = syscall(22, &fds);                    # SYS_PIPE
+    var rfd: i64 = 0 - 1;
+    var wfd: i64 = 0 - 1;
+    if (pr == 0) {
+        rfd = load32(&fds) & 4294967295;
+        wfd = load32(&fds + 4) & 4294967295;
+        syscall(72, wfd, 2, 1);                    # SYS_FCNTL, F_SETFD, FD_CLOEXEC
+    }
+
+    var pid = sys_fork();
+    if (pid < 0) {
+        if (rfd >= 0) { k_close(rfd); k_close(wfd); }
+        return K_SPAWN_FORKFAIL;
+    }
+    if (pid == 0) {
+        # ⚠ fds 0/1/2 are deliberately NOT touched. That single omission is the
+        # entire stderr fix.
+        if (rfd >= 0) { k_close(rfd); }
+        var xr = sys_execve(cmd, argv, envp);
+        # Only reachable when execve failed. Report the errno through the pipe;
+        # its closure on success is what the parent reads as "it started".
+        if (wfd >= 0) {
+            var eb[8];
+            store64(&eb, 0 - xr);
+            k_write( wfd, &eb, 8);
+        }
+        sys_exit(127);
+    }
+
+    var exec_errno: i64 = 0;
+    if (rfd >= 0) {
+        k_close(wfd);
+        var rb[8];
+        store64(&rb, 0);
+        var n = k_read( rfd, &rb, 8);
+        if (n == 8) { exec_errno = load64(&rb); }
+        k_close(rfd);
+    }
+
+    var stbuf[4];
+    sys_waitpid(pid, &stbuf, 0);
+    var st = load32(&stbuf);
+
+    if (exec_errno > 0) { return K_SPAWN_EXECFAIL + exec_errno; }
+    if (WIFSIGNALED(st) == 1) { return K_SPAWN_SIGNAL_BASE + WTERMSIG(st); }
+    if (WIFEXITED(st) == 1)   { return WEXITSTATUS(st); }
+    return K_SPAWN_FORKFAIL;
+    #endif
+}

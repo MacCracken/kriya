@@ -184,6 +184,55 @@ expect_eq "non -I still blank-splits" \
     "$(printf 'a b\nc\n' | xargs      echo | tr '\n' ' ')" \
     "$(printf 'a b\nc\n' | "$BIN" xargs echo | tr '\n' ' ')"
 
+# --- the child is no longer gagged, and the exit ladder is POSIX (v1.2.2) ---
+# ⛔ stdlib `exec_env` dup2s /dev/null onto fd 2, so every diagnostic the child
+# wrote was DISCARDED. It also collapses every non-exit outcome to -1, which made
+# "killed by a signal" indistinguishable from "fork failed" — so a signalled
+# child reported 127 (should be 125) and a non-executable one reported 123
+# (should be 126). kriya now forks and execs itself (`src/lib/spawn.cyr`),
+# inheriting fds 0/1/2 and reporting exec failure through a CLOEXEC pipe.
+mkdir -p spawn && cd spawn
+printf '#!/bin/sh\necho OUT\necho ERRMSG >&2\nexit 3\n' > sc.sh   ; chmod +x sc.sh
+printf '#!/bin/sh\necho RAN "$1"\nkill -TERM $$\n'       > kill.sh ; chmod +x kill.sh
+printf '#!/bin/sh\necho RAN "$1"\nexit 255\n'            > e255.sh ; chmod +x e255.sh
+printf '#!/bin/sh\necho RAN "$1"\nexit 3\n'              > e3.sh   ; chmod +x e3.sh
+printf '#!/bin/sh\nexit 0\n'                              > ok.sh   ; chmod +x ok.sh
+printf 'not a program\n'                                   > noexec.sh; chmod 644 noexec.sh
+
+# The child's stderr reaches the terminal — this is the whole point.
+expect_eq "child stderr survives" "OUT|ERRMSG|" "$(echo foo | "$BIN" xargs ./sc.sh 2>&1 | tr '\n' '|')"
+
+# The POSIX ladder, each rung against GNU.
+led() {
+    k=0; ( echo foo | "$BIN" xargs "$1" ) >/dev/null 2>&1 || k=$?
+    g=0; ( echo foo | xargs      "$1" ) >/dev/null 2>&1 || g=$?
+    expect_eq "exit ladder $1" "$g" "$k"
+}
+led ./sc.sh          # 123 — child exited nonzero
+led ./kill.sh        # 125 — killed by a signal
+led ./e255.sh        # 124 — exited 255
+led ./noexec.sh      # 126 — found, not executable
+led ./ok.sh          # 0
+led ./nosuch.sh      # 127 — not found
+
+# ⛔ 124 and 125 ABORT the invocation; a plain nonzero does not. kriya used to
+# keep feeding items to a command that had already died — three ran where GNU
+# ran one.
+expect_eq "exit 255 aborts"     "$(printf 'a\nb\nc\n' | xargs -n1 ./e255.sh 2>/dev/null | tr '\n' '|')" "$(printf 'a\nb\nc\n' | "$BIN" xargs -n1 ./e255.sh 2>/dev/null | tr '\n' '|')"
+expect_eq "signal aborts"       "$(printf 'a\nb\nc\n' | xargs -n1 ./kill.sh 2>/dev/null | tr '\n' '|')" "$(printf 'a\nb\nc\n' | "$BIN" xargs -n1 ./kill.sh 2>/dev/null | tr '\n' '|')"
+expect_eq "plain nonzero continues" "$(printf 'a\nb\nc\n' | xargs -n1 ./e3.sh 2>/dev/null | tr '\n' '|')" "$(printf 'a\nb\nc\n' | "$BIN" xargs -n1 ./e3.sh 2>/dev/null | tr '\n' '|')"
+
+# The aborting outcomes explain themselves, as GNU's do.
+case "$(printf 'a\n' | "$BIN" xargs ./kill.sh 2>&1 >/dev/null)" in
+    *"terminated by signal 15"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL signal diagnostic missing\n" >&2 ;;
+esac
+case "$(printf 'a\n' | "$BIN" xargs ./e255.sh 2>&1 >/dev/null)" in
+    *"exited with status 255"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL 255 diagnostic missing\n" >&2 ;;
+esac
+cd ..
+
 # --- summary ---------------------------------------------------------
 
 TOTAL=$((PASS + FAIL))

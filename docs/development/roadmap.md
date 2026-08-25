@@ -193,13 +193,22 @@ Carried forward, each blocked on a different enabler:
 - `printf %e/%f/%g/%a` — needs a float-formatting story (**M12d**). ⚠ The stdlib's `fmt_float_buf`
   carry bug was only fixed at cyrius 6.5.30 (see `[1.1.10]`), so this would have inherited it.
 
-### 1.2.2 — The spawn helper
+### 1.2.2 — The spawn helper ✅ shipped 2026-08-25
 
-**M17a** — `find -exec` and `xargs` discard the child's stderr, because stdlib `exec_env` dup2s
-`/dev/null` onto fd 2. `find rot -name '*.tmp' -exec rm {} \;` on an unwritable directory prints
-nothing and exits 0 while deleting nothing. A kriya-local fork + execve + waitpid helper in
-`src/lib/`, with fds 0/1/2 inherited untouched and a raw wait status the callers can decode, fixes
-both utilities and is the prerequisite for `find -exec ... +` and `xargs -P` later.
+**M17a** closed, and it turned out to carry two more defects than catalogued. `src/lib/spawn.cyr`
+does kriya's own fork + execve + waitpid with fds 0/1/2 inherited, reporting exec failure through a
+CLOEXEC pipe so it is distinguishable from a child that exits with the same status.
+
+- The stderr swallow itself (stdlib `exec_env` dup2s `/dev/null` onto fd 2). **Linux-only** — agnos
+  has no fork and never had the redirect.
+- **Also fixed:** two wrong rungs of the POSIX exit ladder — a signalled child reported 127 instead
+  of 125, a non-executable one 123 instead of 126.
+- **Also fixed:** `xargs` did not abort on exit-255 or a signalled child, contrary to POSIX; it ran
+  every remaining item where GNU ran one.
+
+⭐ Unblocks `find -exec ... +` (ARG_MAX chunking), `xargs -P` (parallel) and `xargs -p`
+(interactive) — all need a spawn primitive that returns more than an exit code. They move from
+"blocked" to "schedulable" in **M12d**.
 
 ### 1.2.3 — Walk safety
 

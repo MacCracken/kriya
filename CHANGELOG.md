@@ -6,6 +6,77 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.2.2] - 2026-08-25 — the spawn helper: children can speak again
+
+Third batch of the **1.2.x arc**, and the one the roadmap named as a prerequisite: a kriya-local
+`fork` + `execve` + `waitpid` in [`src/lib/spawn.cyr`](src/lib/spawn.cyr), so the two utilities that
+run user-named commands stop losing what those commands say and what happens to them.
+
+### Fixed — `find -exec` and `xargs` discarded the child's stderr
+
+⛔ **`chmod 555 rot; kriya find rot -name '*.tmp' -exec rm {} \;` printed NOTHING and exited 0 while
+deleting nothing.** GNU prints a "Permission denied" line per file. A cleanup job written that way
+reported complete success having done nothing at all — a failure mode with no visible symptom.
+
+The cause is one line in the stdlib: `exec_env`'s Linux arm opens `/dev/null` and **`dup2`s it onto
+fd 2** in the child before exec (`lib/process.cyr:277`). Every diagnostic the child writes goes into
+the void. kriya now forks and execs itself and simply **does not touch fds 0, 1 or 2** — that
+omission is the entire fix. Verified byte-identical to GNU's output on the same tree.
+
+### Fixed — the POSIX exit ladder had two wrong rungs
+
+⛔ `exec_env` returns `WEXITSTATUS` on a normal exit and **−1 for everything else**, so "killed by a
+signal" and "fork failed" arrive identically, and a failed exec arrives as the child's own
+`sys_exit(127)` — indistinguishable from a child that genuinely exited 127. POSIX `xargs` has to tell
+five outcomes apart, and −1 cannot express them. Measured against GNU:
+
+| outcome | POSIX / GNU | kriya before | kriya now |
+|---|---|---|---|
+| child exited nonzero | 123 | 123 | 123 |
+| child exited 255 | 124 | 124 | 124 |
+| **killed by a signal** | **125** | **127** | **125** |
+| **found, not executable** | **126** | **123** | **126** |
+| not found | 127 | 127 | 127 |
+
+⭐ **A CLOEXEC pipe is what makes "exec failed" distinguishable at all.** The child holds the write end
+with `FD_CLOEXEC` set: a successful `execve` closes it and the parent reads EOF; a failed one writes
+its errno through before exiting. There is no other way to separate an exec failure from a child that
+chose to exit with the same status — the exit-code convention alone cannot do it.
+
+### Fixed — `xargs` kept going after a catastrophic child failure
+
+⛔ **POSIX: "if the utility exits with status 255, `xargs` shall write a diagnostic message and
+exit."** kriya wrote no message and ran every remaining item. Measured with three items and a child
+that dies on SIGTERM: kriya ran all three, GNU ran one. Both the `-I` loop and the batch loop now
+abort on 124 and 125, and both outcomes explain themselves —
+`kriya xargs: ./kill.sh: terminated by signal 15` and `…: exited with status 255; aborting`, matching
+GNU's wording under kriya's prefix. A plain nonzero exit still continues, as it should.
+
+### Notes on the helper
+
+⚠ **agnos has no fork.** It offers `execwait(path, len)` — a blocking load-and-run of a static ELF
+with no argv, no envp and no fd control — so that arm delegates to stdlib `exec_vec` and can only
+report an exit status. It also never had the `/dev/null` redirect, so **the stderr bug was
+Linux-only** to begin with; the exit-ladder half was not.
+
+The result is returned as a small tagged integer (`k_spawn_exited` / `_signalled` / `_execfailed`
+decoders) rather than a raw wait status, because agnos cannot produce one and a shared decoder beats
+two target-specific ones.
+
+⭐ This is the prerequisite the roadmap flagged: `find -exec ... +` (ARG_MAX chunking), `xargs -P`
+(parallel jobs) and `xargs -p` (interactive prompt) all need a spawn primitive that returns more than
+an exit code. They are now unblocked.
+
+### Tests
+
+**1,230 smoke cases across 33 scripts** (up from 1,215), 119 unit + 18 POSIX, 1,529 fuzz assertions
+green under the poisoned allocator. Both targets build.
+
+- `smoke-xargs.sh` 42 → 54: the child's stderr surviving, every rung of the exit ladder compared
+  against GNU, the 124/125 abort rule against the plain-nonzero continue, and both diagnostics.
+- `smoke-find.sh` 47 → 50: `-exec` child stderr byte-identical to GNU on an unwritable tree, and an
+  unexecutable command reported rather than silently treated as a false predicate.
+
 ## [1.2.1] - 2026-08-25 — accepts-and-lies
 
 Second batch of the **1.2.x arc**. Not a feature release: every change here is a place kriya returned

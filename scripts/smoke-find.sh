@@ -162,6 +162,25 @@ k=$(cd br2 && "$BIN" find . -name x -exec echo 'A{}B{}C{}D{}E{}F' \; 2>&1)
 g=$(cd br2 && find      . -name x -exec echo 'A{}B{}C{}D{}E{}F' \; 2>&1)
 expect_eq "-exec with a short path matches GNU" "$g" "$k"
 
+# --- -exec no longer swallows the child's stderr (v1.2.2) ---
+# ⛔ `find rot -name '*.tmp' -exec rm {} \;` on an unwritable directory printed
+# NOTHING and exited 0 while deleting nothing — a cleanup job reporting complete
+# success having done nothing at all. stdlib `exec_env` dup2s /dev/null onto
+# fd 2; kriya now forks and execs itself with fds 0/1/2 inherited.
+mkdir -p gag && touch gag/x.tmp gag/y.tmp && chmod 555 gag
+kerr=$("$BIN" find gag -name '*.tmp' -exec rm {} \; 2>&1 | sort | tr '\n' '|')
+chmod 755 gag && rm -f gag/*.tmp && touch gag/x.tmp gag/y.tmp && chmod 555 gag
+gerr=$(find      gag -name '*.tmp' -exec rm {} \; 2>&1 | sort | tr '\n' '|')
+chmod 755 gag
+expect_eq "-exec child stderr matches GNU" "$gerr" "$kerr"
+case "$kerr" in
+    *"Permission denied"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL -exec stderr was swallowed: [%s]\n" "$kerr" >&2 ;;
+esac
+
+# A command that cannot be executed is reported, not silently treated as false.
+expect_exit "-exec missing command -> 1" 1 "$BIN" find gag -name '*.tmp' -exec ./nosuchcmd {} \;
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"
