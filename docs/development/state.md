@@ -192,26 +192,46 @@ M5 was resumed on 2026-05-17 by user request, pre-boot-burn. All three utilities
 
 ### Post-1.0 — sequenced in roadmap.md
 
-Post-1.0 work is tracked two ways in [`roadmap.md`](roadmap.md), and both matter:
+[`roadmap.md`](roadmap.md) is **open work only** — shipped milestones were removed at v1.2.5, because
+the record of what landed belongs in `CHANGELOG.md` and here, not in a plan. It sequences the
+remaining work into **arcs batched by shared enabler**: shipping the enabler *is* the release, and one
+round of test work then serves the whole batch.
 
-- **The 1.2.x arc** — the running order. Batched by shared enabler, because half the open work is
-  gated on a handful of capabilities and shipping the enabler *is* the release. **The whole scheduled arc has shipped** — 1.2.0 (option handling),
-  1.2.1 (accepts-and-lies), 1.2.2 (the spawn helper), 1.2.3 (walk safety), 1.2.4 (destructive-verb
-  semantics) and 1.2.5 (the chrono batch, partial by design). What remains is the roadmap's **Not yet
-  scheduled** set plus the two genuinely upstream-gated chrono items. The roadmap carries an
-  **enabler map** naming what each unblocks.
-- **Milestone buckets M10–M17** — the catalogue. Every known item, grouped by kind. Summary:
+**The 1.2.x correctness arc has shipped** — 1.2.0 option handling, 1.2.1 accepts-and-lies, 1.2.2 the
+spawn helper, 1.2.3 walk safety, 1.2.4 destructive-verb semantics, 1.2.5 the chrono batch. **1.2.6**
+closes it by retiring the last three P-1 defects (`ls -l` fabricating metadata, grep's heap retention,
+realpath's 16 KiB ceiling).
 
-- **M10 — Consumer-burn** — the last v1.0 criterion. Trigger: AGNOS USB-keyboard-on-boot resolves → AGNOS coreutils integration → first green boot-burn → 1.0.1 with consumer-burn audit. Parallel signal on the kernel team's timeline, not a blocker.
-- **M11 — Cyrius proposal sweeps** — octal-literal cleanup, raw-syscall → stdlib-wrapper cleanup. Triggered by upstream Cyrius acceptance.
-- **M12 — POSIX-deviation fill-in** — GNU-parity features grouped by enabler dependency (chrono, flags, stdlib helpers, per-utility independent).
-- **M13 — Performance optimization** — `wc -c` short-circuit, niyama Boyer-Moore, `tail` seek-from-end, speculative items.
-- **M14 — stdlib `getenv` post-fork bug** — upstream Cyrius fix; kriya then strips PATH-cache workaround.
-- **M15 — Codegen / toolchain-interaction watchlist** *(standing, opened v1.1.11)* — the ways the Cyrius compiler and kriya interact badly, each entry with a mechanical detection and the incident that motivated it. Never closes; re-run the detections at every pin bump. Headline entry: a function-local `var X[N]` is N **bytes** while module scope is N×8 — the rule behind the v1.1.9 `find` smash and the v1.1.11 `k_access` one.
-- **M16 — AGNOS as a build target** *(renumbered from M11 at v1.1.11 — the number was already taken by the Cyrius proposal sweeps)* — make `src/lib/fs.cyr`'s syscall layer target-aware, then gate the per-command stragglers.
-- **M17 — Confirmed defects deferred from the v1.1.11 P-1 sweep** *(opened v1.1.11)* — ten defects, each reproduced against a shipped build and each needing a redesign rather than a patch: `find -exec`/`xargs` swallowing the child's stderr, `xargs` parsing the child's options as its own (and eating `--`), `xargs -I` splitting on blanks instead of lines, `grep -r` walking from AT_FDCWD instead of a parent dirfd, `mv` cross-FS rollback deleting the only surviving copy, `cp -R -i` never prompting, `ls -l` fabricating metadata on stat failure, grep's per-byte heap retention, the `rm -r symlink/` policy question, and realpath's new 16 KiB ceiling.
+Then, in order — resequencable, since no arc depends on another:
 
-Each can advance independently against a tagged 1.x.y minor.
+| Arc | Theme | Enabler |
+|---|---|---|
+| **1.3.x** | Discoverability — `--help`, `--help=json`, `kriya --list` | spec-renderer atop `flags.cyr` |
+| **1.4.x** | Pattern & text parity — grep context/glob, multi-byte text | UTF-8 decoder, shared glob |
+| **1.5.x** | Identity & listing — user/group names, `ls` sort keys, colour | passwd/group parser |
+| **1.6.x** | File-op completeness — hard links, xattrs, `ln` flags | inode-set helper, xattr API |
+| **1.7.x** | Traversal, exec & FS reporting — `find`/`xargs`/`du`/`df`/`env` | spawn helper ✅, ARG_MAX chunking |
+| **1.8.x** | Parsers & numerics — floats, sort keys, size suffixes, `date -d` | float formatting, byte-suffix parser |
+| **1.9.x** | Performance — the measured gaps in `docs/benchmarks.md` | niyama literal fast path (upstream) |
+
+⚠ **1.3.x is first because a consumer is waiting**, not because it is hardest: agnoshi's
+tab-completion needs `kriya --list` and `<util> --help=json`.
+
+⚠ **Re-check the enabler before scheduling around it.** The 1.2.5 chrono batch was filed as fully
+upstream-gated and was two-thirds actionable — chrono's `dt_format` covers fewer specifiers than
+kriya's own `date`, and the "missing" duration parser was never coming.
+
+**Gated, off the sequence:** M10 consumer-burn (AGNOS boot-burn — a parallel signal that may
+resequence everything above once it lands), M11 Cyrius proposal sweeps (octal literals, `*at()`
+wrappers — both re-verified still absent at pin 6.5.35), M14 stdlib `getenv` post-fork bug, upstream
+chrono tzfile (`date` local time), M16 AGNOS as a build target.
+
+**Standing:** M15, the codegen/toolchain-interaction watchlist — never closes; re-run its mechanical
+detections at every pin bump. Headline entry: a function-local `var X[N]` is N **bytes** while module
+scope is N×8, the rule behind both the v1.1.9 `find` smash and the v1.1.11 `k_access` one.
+
+⚠ The **M-numbers are historical identifiers, not a live index** — `CHANGELOG.md` references them, so
+the roadmap carries a table mapping each dissolved bucket to where its work went.
 
 ## Next
 

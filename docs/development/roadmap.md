@@ -1,379 +1,278 @@
 # kriya — Roadmap
 
-> Milestone plan through v1.0. State lives in [`state.md`](state.md);
-> this file is the sequencing — what ships, in what order, against
-> what dependency gates.
+> **Open work only.** Anything shipped has been removed from this file — the record of what
+> landed and why lives in [`CHANGELOG.md`](../../CHANGELOG.md) (per release) and
+> [`state.md`](state.md) (current snapshot). This file answers one question: *what next, in
+> what order, against what gate.*
 
-## v1.0 criteria
+## How this file is organised
 
-- [x] Core utility set across M1–M6 ships, each with happy + error-path tests + at least one fuzz harness for parser-style utilities (`grep`, `find`, `printf`) — 38 utilities + 644 smoke cases + 1529 fuzz assertions across `kriya-grep.fcyr` / `kriya-find.fcyr` / `kriya-printf.fcyr`. Shipped at v1.0.0.
-- [x] POSIX compliance documented per utility (deviations get ADRs) — M2-M4 utilities verify cell-by-cell against GNU
-- [x] Each destructive utility (`rm`, `mv`, `cp -f`) covered by a TOCTOU + symlink-safety test — M8 audit verified ADR-0003/0004 coverage across cp/mv/rm; three M8 mitigations (F1 cp, F4 find, F5 grep) closed remaining TOCTOU gaps with smoke-suite regression coverage.
-- [x] Dispatcher overhead measured (one-call cold start) and held under **2 ms** on Cyrius-current hardware — v0.9.0 median 1.201ms (60% of budget).
-- [ ] At least one downstream consumer green (agnoshi `$PATH` lookup → kriya symlinks) — pending AGNOS kernel boot burn-in.
-- [x] CHANGELOG complete from v0.1.0 onward.
-- [x] Security audit pass (`docs/audit/2026-05-18-security.md`) — path traversal, TOCTOU, signal handling, symlink-follow policy + external CVE/0-day research. M8 deliverable, shipped.
-- [x] Benchmarks captured in `docs/benchmarks.md` — cold-start history + per-utility throughput vs GNU. M8 deliverable, shipped.
+Three sections, each answering a different question:
 
-## Milestones
-
-### M0 — Scaffold (v0.1.0) — ✅ shipped 2026-05-15
-
-- `cyrius init kriya` scaffold landed
-- Doc-tree per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md)
-- ADR / architecture / guides / examples folders ready
-- Sovereign-replacement boundaries documented in CLAUDE.md (owl, cyim, sit, chakshu, agnoshi cover their respective domains; kriya fills the gaps)
-
-### M1 — Dispatcher + simplest utilities (v0.2.0) — ✅ shipped 2026-05-17
-
-Dispatcher pattern + six trivial utilities. Both ADRs 0001 (BusyBox dispatcher) and 0002 (option parsing) accepted. `true`, `false`, `echo`, `pwd`, `yes`, `sleep`. Cold-start median 1.185ms.
-
-### M2 — File operations (v0.3.0) — ✅ shipped 2026-05-17
-
-Seven destructive / file-creating utilities behind two policy ADRs:
-
-- **ADR 0003** — symlink-follow policy across cp/mv/rm/ln; default-preserve for `cp -R`; `rm` has no follow flag, ever.
-- **ADR 0004** — `rm` refuses to operate on `/`, no escape hatch. `protected_paths[]` mechanism in `src/lib/protected.cyr`.
-
-Utilities: `mkdir`, `rmdir`, `touch`, `ln`, `cp` (incl. full `-R` matrix), `mv`, `rm`. New shared lib `src/lib/fs.cyr` for `*at()`-family traversal. Two Cyrius proposals filed against the parent repo (octal literals + at-family stdlib wrappers).
-
-### M3 — Listing + path manipulation (v0.4.0) — ✅ shipped 2026-05-17
-
-Seven informational utilities, all read-only:
-
-- `basename`, `dirname` — pure-text path operations (paired commit).
-- `realpath`, `readlink` — share the new `fs_realpath` helper (3-mode canonicalization: REQUIRE_ALL / REQUIRE_PARENT / ALLOW_MISSING). ELOOP cycle detection at 40 hops.
-- `which` — `$PATH` walk + `sys_access(X_OK)`.
-- `stat` — printf-style format engine; 22 specifiers verified cell-by-cell against GNU.
-- `ls` — `-a` / `-A` / `-l` / `-h` / `-r` / `-1` / `-F` / `-i` / `-d` / `-R`; ISO mtime via `chrono.epoch_to_date`.
-
-### M4 — Text-stream utilities (v0.5.0) — ✅ shipped 2026-05-17
-
-Ten utilities — the biggest milestone by count:
-
-- `tee` — pass-through fan-out; resilient per-file failure.
-- `wc` — `-l` / `-w` / `-c` / `-m` UTF-8 codepoints / `-L`; GNU-compatible column-width matrix.
-- `head`, `tail` — `-n` / `-c` / `-q` / `-v`; head streams forward, tail buffers-and-back-walks up to 16 MiB.
-- `tail -f` — single-file follow via 200ms stat-poll; truncation detection on size shrink.
-- `nl` — single-section line numbering; GNU's `width + sep_len` unnumbered-padding quirk matched.
-- `uniq` — adjacent-line dedup; `-c` / `-d` / `-u` / `-i` / `-f` / `-s` / `-w` / `-z`.
-- `tr` — translate / delete / squeeze / complement; full POSIX set grammar incl. all 12 character classes.
-- `cut` — `-b` / `-c` / `-f` modes; full LIST grammar; `--complement` / `--output-delimiter`.
-- `sort` — in-memory stable merge sort O(n log n); 256 MiB cap; external-sort fallback deferred.
-- `printf` — every POSIX conversion except floating-point; full flag matrix; `%b` escape processing; arg reuse.
-
-**710 behavioural smoke cases pass across all 23 shipped utilities (M2+M3+M4)**; cold-start median 1.198ms (flat from v0.4.0).
-
-### Post-M6 — AGNOS kernel boot burn-in (parallel signal)
-
-**Boot-burn is a parallel signal on the AGNOS kernel's timeline, not a blocking gate on kriya.** The 38 shipped utilities cover the full POSIX-essential surface a shell needs to bootstrap; boot-burn produces the consumer feedback that retroactively shapes which deferred features get promoted. The kernel team's fix cycles and integration timeline drive when that signal arrives; kriya keeps moving on adjacent work in the meantime.
-
-What boot-burn will tell us (when it lands):
-
-- Which utilities are hit in early boot, and which surface gaps appear?
-- Are the ADR-0003 (symlink-follow) / ADR-0004 (`/` refusal) / ADR-0005 (regex engine) policies right in practice?
-- Does the 1.212ms cold-start matter in aggregate over a real init sequence?
-- Which deferred features (local-time `date`, hardlink `du`, multi-`-e` `grep`, find `-prune`/`-delete`, xargs `-P`, etc.) get promoted based on real script usage?
-
-**Signal shape**: agnos kernel completes a boot-burn run with kriya in the init userland (green boot using kriya symlinks via zugot recipe or direct install), plus a written incident log capturing what was hit. Tracked outside this repo as a project-memory item.
-
-Active work surface during kernel fix cycles:
-
-- **Bug fixes** in any of the 38 shipped utilities.
-- **Cyrius proposal sweeps** when accepted (octal literals → decimal-with-comment cleanup; `*at()`-family wrappers → raw `syscall(N, ...)` cleanup).
-- **stdlib `getenv` post-fork bug** — root-cause and fix the io.cyr `getenv` issue that find + xargs work around via PATH caching.
-- **Deferred features** in any utility if a real consumer asks (date local-time, du hardlink dedup, df statvfs-based operand walk, etc.).
-- **CI / release / build-script review** vs kindred Cyrius repos.
-- **M7 POSIX-compliance audit** — can start before or after boot-burn at user direction.
-
-### M5 — Filtering / search (v0.6.0) — ✅ shipped 2026-05-17
-
-Three utilities + one engine ADR + the process-fork integration.
-
-- [x] **ADR 0005**: regex engine choice — Cyrius stdlib `lib/niyama.cyr` (BRE + RE2). PCRE deferred behind a v2.0 flag gate.
-- [x] `src/cmd/grep.cyr` — `-i`/`-v`/`-w`/`-x`/`-c`/`-l`/`-L`/`-n`/`-q`/`-s`/`-h`/`-H`/`-o`/`-r`/`-R`/`-z`/`-E`/`-G`/`-F`/`-e`/`-f`; `-P` rejected with usage error pointing at `-E`. 66 smoke cases vs GNU.
-- [x] `src/cmd/find.cyr` — predicate AST + fnmatch-style glob (`-name`), `-type`/`-size`/`-mtime`/`-mmin`/`-empty`/`-newer`/`-maxdepth`/`-mindepth`, actions `-print`/`-print0`/`-exec ... \;`, full boolean grammar with parens, `-P` default + `-L` follow. 40 smoke cases vs GNU.
-- [x] `src/cmd/xargs.cyr` — `-0`/`-n`/`-I`/`-r`/`-t`/`-s` with whitespace + backslash + quote splitting, GNU-shaped exit-code rollup. 20 smoke cases vs GNU. `-P N` parallel deferred.
-
-**Cold-start** at M5 close: 1.192ms (RUNS=100; flat from v0.5.0). **126 smoke cases** total across the three utilities, every one cell-by-cell against GNU.
-
-**LOC review**: grep ~640, find ~770, xargs ~430. All under the 400-LOC split threshold's de facto upper bound (the policy targets single utilities; M5 utilities are larger but built on shared `fs`/`niyama`/`process` infrastructure — they pay for the engine surface, not unrelated sprawl). No extractions needed at v0.6.0.
-
-### M6 — System info + misc (v0.7.0) — ✅ shipped 2026-05-18
-
-Five utilities, shipped ahead of the AGNOS kernel boot-burn signal at user direction (same shape as the M5 mid-hold resume).
-
-- [x] `src/cmd/seq.cyr` — integer-only at v0.7.0 (float defers behind printf `%f`/`%g` follow-up); negative-FIRST `-DIGIT` handled via in-utility argv walk; 44 cell-by-cell smoke cases vs GNU.
-- [x] `src/cmd/env.cyr` — `-i`/`-`/`-u`/`-0` + NAME=VALUE assignments + in-order op application; PATH-resolved direct `sys_execve` (no fork); exit 127 ENOENT / 126 other; 28 smoke cases.
-- [x] `src/cmd/date.cyr` — 28 strftime specifiers including `%Y`/`%m`/`%d`/`%H`/`%M`/`%S`/`%a`/`%A`/`%b`/`%B`/`%j`/`%u`/`%w`/`%p`/`%P`/`%T`/`%R`/`%D`/`%F`/`%s`/`%Z`/`%z`/escapes; UTC-only at v0.7.0 (`-u` no-op); local-time tzfile parsing deferred; 44 smoke cases under `LC_ALL=C TZ=UTC`.
-- [x] `src/cmd/du.cyr` — `-s`/`-a`/`-c`/`-h`/`-k`/`-b`/`-L`/`-P`/`-d N`/`-S`; 1024-byte default blocks; `-b` skips directory st_size (apparent-size dir semantic); hardlink dedup deferred; 37 smoke cases.
-- [x] `src/cmd/df.cyr` — `-h`/`-T`/`-i`/`-a`/`-P`; `statfs(2)` per mount, parses `/proc/self/mounts` with octal-escape decoding; pseudo-FS filter (proc/sysfs/cgroup/etc.) by default; exact-mp operand match (path-walk via stat.st_dev deferred); 15 structural-parity cases vs GNU.
-
-### M7 — POSIX-compliance audit (v0.8.0) — ✅ shipped 2026-05-18
-
-- [x] Per-utility POSIX conformance review against the POSIX manual — `docs/audit/2026-05-18-posix-compliance.md` covers all 38 shipped utilities. 32 are POSIX-defined; 6 are intentional kriya-scope extensions. No quiet divergences.
-- [x] Capture all deviations in ADRs — three new ADRs landed: 0006 (utility scope + four-criteria gate), 0007 (`date` UTC-only at v0.7.0 with local-time follow-up named), 0008 (POSIX exit-code policy — three-tier baseline + per-utility specifics).
-- [x] Build a `tests/kriya-posix.tcyr` suite running POSIX-blessed test cases per utility — 18 starter cases across pillar utilities; fork+execve+pipe-capture harness. Population is incremental into M8/M9.
-
-### M8 — Security audit + benchmarks (v0.9.0) — ✅ shipped 2026-05-18
-
-- [x] Full security audit: path traversal, TOCTOU, signal handling, symlink follow, every destructive op — `docs/audit/2026-05-18-security.md`. External CVE/0-day research included (uutils-coreutils CVE-2026-35338..35381 cross-walked: 34 N/A or already-mitigated, 3 patched in M8, 2 documented as POSIX-conformant).
-- [x] Benchmarks finalized — `docs/benchmarks.md` with cold-start history + per-utility throughput vs GNU; `scripts/bench-throughput.sh` for deterministic re-runs.
-- [x] CHANGELOG complete (was already on v1.0 criteria before this milestone).
-
-### M9 — v1.0 freeze (v1.0.0) — ✅ shipped 2026-05-18
-
-- [x] All v1.0 criteria above check off (7 of 8; the 8th — downstream consumer green via AGNOS boot-burn — is deferred to a post-1.0 consumer-burn cycle per user direction; parallel signal, not blocker).
-- [x] Tag `1.0.0`.
-
-Three fuzz harnesses land at M9 to close the last code-side v1.0 criterion: `tests/kriya-grep.fcyr` (1127 assertions over niyama BRE/RE2/bracket-heavy patterns), `tests/kriya-find.fcyr` (201 over fork+exec find), `tests/kriya-printf.fcyr` (201 over fork+exec printf). `scripts/fuzz.sh` runs all three. Cold-start median 1.196 ms at v1.0.0.
-
-## Post-1.0 milestones
-
-v1.0 froze 2026-05-18 with 7 of 8 criteria checked. The 8th — downstream consumer green via AGNOS kernel boot-burn — is the trigger for **M10**.
-
-Post-1.0 work is described **twice, on purpose**, and the two views serve different questions:
-
-- **The 1.2.x arc** (immediately below) is the RUNNING ORDER — what ships next, batched by shared
-  enabler. Read this to know what to work on.
-- **The milestone buckets M10–M17** (after it) are the CATALOGUE — every known item, grouped by
-  kind, in numeric order. The number is an identifier, not a priority. Read this to find whether
-  something is already tracked, and to see what the arc has not yet scheduled.
-
-Items live in the catalogue and are pulled into the arc when their enabler is ready. Nothing should
-appear only in the arc.
-
-## The 1.2.x arc
-
-Post-1.0 work up to now has been a **bucket list** (M10–M17): correct groupings, no sequence. The
-1.2.x arc puts a running order on it. Each release below is a coherent batch — its items share an
-enabler, a file, or a user-facing story, so one round of test work serves the whole batch instead of
-being re-derived per item.
-
-Two rules hold across the arc:
-
-- **A batch is defined by its enabler, not by its utility.** Half the open work is blocked on a small
-  number of shared capabilities (§ Enabler map below). Shipping the enabler is the release; the
-  features that ride on it are the release notes.
-- **"Accepts and lies" outranks "rejects cleanly."** An option kriya refuses with exit 2 is a visible
-  gap a user works around. An option it *accepts and silently ignores* — or answers wrongly — is a
-  correctness defect wearing a feature's clothes, and those are pulled forward regardless of which
-  bucket they came from. Two were found in the v1.2.0 cycle alone (see 1.2.1 below).
-
-### 1.2.0 — Option handling ✅ shipped 2026-08-25
-
-Clustered short options (`-rf`, `-la`, `-in`, `-lw`, `-cd`), attached short values (`-n5`, `-c1-3`),
-and the obsolescent bare-digit form (`head -5`, `tail -5`), via a spec-driven pre-expansion in
-`src/lib/args.cyr` that serves all 28 utilities routing through `kriya_args_parse`. Plus the two
-M17 defects that live in the same code: **M17b** (`xargs` parsing the child's command line as its
-own, including deleting its `--` guard) and **M17c** (`xargs -I` splitting on blanks instead of
-lines). Closes **M12b**'s parser half.
-
-### 1.2.1 — Accepts-and-lies ✅ shipped 2026-08-25
-
-The class swept in one pass. Wider than catalogued: two items were listed, six shipped.
-
-- **Every bool long option silently swallowed `=VALUE`**, in all 28 utilities on the shared parser —
-  not just the three the catalogue named. Now refused with GNU's diagnostic. The three options GNU
-  *does* allow a value on (`cp --preserve`, `sort --check`, `tail --follow`) opt in by name via
-  `kriya_args_parse_optval`, since the parser cannot represent an optional-value long.
-- **`grep -e A -e B`** collects every occurrence via the new `kriya_argv_collect`.
-- **`printf %f`** and every invalid directive exit 1 with nothing on stdout, stopping at the error
-  like GNU. **`\xHH`** implemented while there.
-- **`stat` / `date`** refuse specifiers they cannot render instead of echoing the source bytes.
-  `stat`'s unknown-specifier output corrected to `?` (GNU's actual behaviour, which an existing smoke
-  case had pinned wrongly).
-
-Carried forward, each blocked on a different enabler:
-
-- `cp --preserve=links` / `ownership` — needs the inode-set helper (**M12c**). Refused by name today.
-- `stat %x/%y/%z`, `date %V/%c/%x/%X/%r` — need chrono's strftime formatter (**M12a**, batch 1.2.5).
-- `stat %U/%G` — needs a passwd/group parser (**M12c**).
-- `stat %N` — needs a quoting helper, shared with the `ls` quoting story (**M12d**).
-- `printf %e/%f/%g/%a` — needs a float-formatting story (**M12d**). ⚠ The stdlib's `fmt_float_buf`
-  carry bug was only fixed at cyrius 6.5.30 (see `[1.1.10]`), so this would have inherited it.
-
-### 1.2.2 — The spawn helper ✅ shipped 2026-08-25
-
-**M17a** closed, and it turned out to carry two more defects than catalogued. `src/lib/spawn.cyr`
-does kriya's own fork + execve + waitpid with fds 0/1/2 inherited, reporting exec failure through a
-CLOEXEC pipe so it is distinguishable from a child that exits with the same status.
-
-- The stderr swallow itself (stdlib `exec_env` dup2s `/dev/null` onto fd 2). **Linux-only** — agnos
-  has no fork and never had the redirect.
-- **Also fixed:** two wrong rungs of the POSIX exit ladder — a signalled child reported 127 instead
-  of 125, a non-executable one 123 instead of 126.
-- **Also fixed:** `xargs` did not abort on exit-255 or a signalled child, contrary to POSIX; it ran
-  every remaining item where GNU ran one.
-
-⭐ Unblocks `find -exec ... +` (ARG_MAX chunking), `xargs -P` (parallel) and `xargs -p`
-(interactive) — all need a spawn primitive that returns more than an exit code. They move from
-"blocked" to "schedulable" in **M12d**.
-
-### 1.2.3 — Walk safety ✅ shipped 2026-08-25
-
-**M17d** and **M17f** closed.
-
-- `grep -r` now descends from a parent fd like `rm`/`cp`/`find`. Proven with a PATH_MAX-deep tree
-  rather than a race — a path-based descent cannot open a 6 KB path, so the discriminator is
-  deterministic. Also a user-visible fix: deep trees now work.
-- ⚠ Required a new `fs_open_entry_dir`/`fs_open_entry_file` pair taking BOTH dirfd and full path,
-  because `fs_opendir_nofollow(real_dirfd, …)` is `-ENOSYS` on agnos — the obvious rewrite would have
-  broken `grep -r` at depth 1 there.
-- `cp -R` honours `-i` and the no-clobber default, matching what the non-recursive path always did.
-  A declined prompt is exit 1 (GNU parity). ⚠ The no-`-f` refusal is a deliberate GNU divergence per
-  CLAUDE.md's hard rule.
-
-### 1.2.4 — Destructive-verb semantics ✅ shipped 2026-08-25
-
-**M17e** and **M17i** closed, each with an ADR because both were behaviour decisions rather than bug
-fixes.
-
-- **[ADR 0009](../adr/0009-mv-never-rolls-back-a-completed-copy.md)** — `mv` never deletes the
-  destination once the copy has completed. The rollback belongs to a FAILED copy only; after a
-  successful one, a partially-succeeded source removal left the destination as the sole complete copy
-  and deleting it was total data loss.
-- **[ADR 0010](../adr/0010-rm-refuses-a-trailing-slash-symlink-operand.md)** — `rm -r link/` is
-  refused rather than half-completed. ⚠ Deliberate GNU divergence, no `-f` bypass. ADR 0003's status
-  updated to record the extension.
-
-### 1.2.5 — The chrono batch ✅ shipped 2026-08-25 (partial, by design)
-
-⭐ **The gate was partly imaginary.** chrono at pin 6.5.35 has `dt_format` (fewer specifiers than
-kriya's own `date`), `dt_strptime` (format-string based), duration constructors but **no duration
-string parser**, and no tzfile reader. Four of the six items were never blocked.
-
-Shipped: `sleep` fractions + suffixes (shared `kriya_parse_duration_ms`), `touch -r`, `touch -t`,
-`stat %x/%y/%z`.
-
-Still deferred, and now for an accurate reason:
-
-- **`date -d STR` / `touch -d STR`** — free-form human dates. A real parser to write; `dt_strptime`
-  needs a format string and does not substitute. Belongs to **M12a**.
-- **`date` local time / `ls -l` locale mtime** — the genuine tzfile dependency, and the trigger
-  [ADR 0007](../adr/0007-date-utc-only-at-v0-7-0.md) already names.
-
-⚠ Lesson for the remaining buckets: **re-check the enabler before scheduling around it.** This batch
-was filed as fully upstream-gated and was two-thirds actionable.
-
-### Not yet scheduled
-
-**M17g** (`ls -l` fabricating metadata on stat failure), **M17h** (grep's per-byte heap retention),
-**M17j** (realpath's 16 KiB ceiling), the rest of **M12c**/**M12d**, and all of **M13**. These land
-against 1.2.x point releases as they become ready; the batches above are the ones with a settled
-running order.
-
-### Enabler map
-
-What actually gates the arc. Ship the enabler, and everything under it becomes small.
-
-| Enabler | Home | Unblocks |
+| Section | Answers | Use it when |
 |---|---|---|
-| Option pre-expansion | `src/lib/args.cyr` | ✅ shipped 1.2.0 — clustering, attached values, `head -5` |
-| `flags_add_str_multi` | stdlib or kriya-side accumulator | `grep -e`×N, `grep --include/--exclude`, `sort -k`×N |
-| Spawn helper (fork/execve/waitpid, fds inherited) | `src/lib/` | M17a stderr, `find -exec +`, `xargs -P`, `xargs -p` |
-| chrono duration + date parser + tzfile | upstream `lib/chrono.cyr` | `sleep`, `touch -r/-t/-d`, `date -d`, `date` local, `ls -l` mtime, `stat %x/%y/%z` |
-| Inode-set helper | `src/lib/fs.cyr` | `cp --preserve=links`, `du` hardlink dedup |
-| UTF-8 decoder | stdlib `unicode/` (present) or kriya-side | `cut -c` multi-byte, `tr` locale fold, `uniq` multi-byte `-i` |
-| passwd/group parser | new `src/lib/` module | `ls -l` user/group names, `stat %U/%G`, `find -user/-group` |
-| Byte-suffix parser (`5K`, `1M`) | `src/lib/args.cyr` | `head -c 1K`, `tail -c 1K`, `sort -S` |
-| niyama literal fast path | upstream | `grep` literal speedup (M13), `grep` memory (M17h) |
-| Comparator-by-flag indirection | `src/cmd/ls.cyr` | `ls -t`, `-S`, and the `--color` table |
+| **Arcs** (1.2.6 → 1.9.x) | *What ships next?* | Picking up work |
+| **Gated** | *Why isn't this moving?* | Asking why an item never appears in an arc |
+| **Standing** | *What must I re-check every time?* | Bumping the toolchain pin |
 
-## Milestone buckets (M10–M17) — the catalogue
+### A note on the M-numbers
 
-### M10 — Consumer-burn (closes v1.0 criterion #8)
+Earlier revisions of this file tracked work as milestone buckets **M0–M17**, and `CHANGELOG.md`
+entries reference them. Those numbers are **historical identifiers, not a live index** — the arcs
+above are the running order now. Where a bucket is still open and still has a natural name, the
+number is kept (**M10** consumer-burn, **M11** proposal sweeps, **M14** getenv, **M15** watchlist,
+**M16** agnos target, **M17g/h/j** in 1.2.6). The rest have been dissolved into the arcs:
 
-The single remaining v1.0 criterion. Trigger sequence:
+| Old bucket | Where it went |
+|---|---|
+| M0–M9 | shipped; see `CHANGELOG.md` |
+| M12a (chrono) | 1.8.3 (`date -d`) + Gated (tzfile); the rest shipped in 1.2.5 |
+| M12b (flags upgrade) | 1.2.0 (clustering, shipped) + 1.3.x (`--help`/`--list`) |
+| M12c (stdlib helpers) | distributed across 1.4.x–1.6.x by enabler |
+| M12d (per-utility) | distributed across 1.4.x–1.8.x by theme |
+| M13 (performance) | 1.9.x |
+| M17a–f, M17i | shipped in 1.2.0–1.2.4 |
 
-1. **AGNOS USB-keyboard-on-boot resolves.** Out of kriya scope; tracked at agnos.
-2. **AGNOS coreutils integration** — wire kriya symlinks into the AGNOS init userland (via zugot recipe or direct install). agnoshi `$PATH` lookups resolve to `kriya` for `cp`, `mv`, `rm`, `mkdir`, `grep`, `find`, `xargs`, etc.
-3. **First green boot-burn** — AGNOS kernel boots with kriya in init, runs through whatever init script exercise the boot-burn defines, completes without kriya-side failure.
-4. **Incident log** — `docs/audit/<date>-consumer-burn.md` capturing what was exercised, what surfaced, what bug fixes (if any) landed back in kriya.
-5. **1.0.1 release** — checkbox the v1.0 criterion, ship release notes pointing at the consumer-burn audit.
+Two rules hold across the arcs, both learned the hard way:
 
-Open during the wait:
+- **An arc is defined by its enabler, not by its utility.** Most open work is blocked on a small
+  number of shared capabilities (§ Enabler map). Shipping the enabler *is* the release; the features
+  riding on it are the release notes. Batching by enabler means one round of test work serves the
+  whole batch instead of being re-derived per item.
+- **⚠ Re-check the enabler before scheduling around it.** The 1.2.5 chrono batch was filed as fully
+  upstream-gated and turned out two-thirds actionable — the assumed blockers either did not exist or
+  were weaker than the local code already was. Verify the gate before you plan around it.
 
-- Bug fixes if anything surfaces from agnos-side testing.
-- Adjacent post-1.0 buckets below can advance in parallel — they don't block on the boot-burn.
+## Arc sequence
+
+| Arc | Theme | Enabler | Gate |
+|---|---|---|---|
+| **1.2.6** | Close the defect arc | none — all local | ready |
+| **1.3.x** | Discoverability | spec-renderer atop `flags.cyr` | ready; **consumer waiting** (agnoshi) |
+| **1.4.x** | Pattern & text parity | repeatable-option collector, UTF-8 decoder | ready |
+| **1.5.x** | Identity & listing | passwd/group parser, comparator indirection | ready |
+| **1.6.x** | File-op completeness | inode-set helper, xattr API | ready |
+| **1.7.x** | Traversal, exec & FS reporting | spawn helper ✅, ARG_MAX chunking | ready |
+| **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | ready |
+| **1.9.x** | Performance | niyama literal fast path (upstream, partial) | partly gated |
+
+Nothing after 1.2.6 is ordered by dependency between arcs — they are independent and could be
+resequenced by consumer demand. The order below reflects **who is waiting**: 1.3.x first because
+agnoshi has a named, external need for it.
+
+---
+
+## 1.2.6 — Close the defect arc
+
+The last three confirmed defects from the v1.1.11 P-1 sweep. Closing these retires **M17** entirely
+and ends the 1.2.x correctness arc.
+
+- **M17g — `ls -l` fabricates metadata when a per-entry stat fails.** In a readable-but-not-searchable
+  directory it prints `---------- 0 0 0 0 1970-01-01 00:00` and exits 0, rendering a symlink as a
+  regular file. GNU prints `?` for the unknown fields, reports `cannot access` on stderr, exits 1.
+  ⚠ The fix is not the renderer — it is making `fs_stat_entry`'s failure a per-record state that the
+  column-width computation, the long-format renderer and the exit-status rollup all understand.
+- **M17h — `grep` retains ~320 bytes of heap per byte of input under BRE/ERE.** A 13.6 MB file
+  segfaults under `ulimit -v 1048576`; GNU handles it in constant memory. ⭐ The kriya-side half is
+  independent of upstream: route a pattern with no metacharacters to the already-present
+  `GR_ENG_FIXED` handle instead of compiling an NFA. The general case stays with the niyama work in
+  1.9.x.
+- **M17j — `realpath` refuses inputs over 16 KiB where GNU still resolves them.** v1.1.11 bounded
+  `fs_realpath`'s previously unchecked copies, turning a silently wrong answer into an honest
+  `ENAMETOOLONG`. Making `result`/`remaining` growable finishes the job.
+
+---
+
+## 1.3.x — Discoverability
+
+**Enabler:** a spec-renderer on top of `lib/flags.cyr`, per [ADR 0002](../adr/0002-option-parsing-humans-and-agents.md)'s "Implementation status".
+Every utility already declares its full option table to `flags_new()`; nothing reads it back out.
+
+⚠ **This arc has an external consumer waiting.** agnoshi's tab-completion needs `kriya --list` and
+`<util> --help=json` to offer completions and "did you mean…?" without hardcoding kriya's surface.
+The cold-start budget matters here specifically: every `<tab>` may spawn one of these, and kriya is
+at 1.185 ms against a 2 ms target.
+
+- **1.3.0 — `--help`, human form.** Auto-rendered from the spec. Fixed section order per ADR 0002:
+  `NAME`, `SYNOPSIS`, `DESCRIPTION`, `OPTIONS`, `EXIT CODES`, `EXAMPLES`; wrapped at 80 columns;
+  ANSI only on a tty. ⚠ `-h` is **not** help — it is reassigned per utility (`du -h`, `ls -h`,
+  `sort -h`), and `--help` carries help duty alone. That is already ADR 0002's ruling.
+- **1.3.1 — `--help=json`.** Schema per ADR 0002 Appendix A, behind `KRIYA_HELP_SCHEMA_VERSION` in
+  `src/lib/args.cyr`. ⚠ **This is a public interface** — schema changes go through deprecation, and a
+  major bump needs its own ADR. Include the `destructive` field agnoshi asked for, so a completer can
+  warn before running `rm`/`mv`/`cp -f` rather than after.
+- **1.3.2 — `kriya --list` + the CI lint.** Top-level utility enumeration as JSON (`name`, `summary`,
+  `exit_codes`). Plus the lint rule ADR 0002 promised: a utility whose schema does not conform fails
+  CI, so the interface cannot rot silently.
+
+---
+
+## 1.4.x — Pattern & text parity
+
+**Enablers:** the repeatable-option collector (`kriya_argv_collect`, shipped 1.2.1) and a UTF-8
+decoder. ⚠ Check `unicode/_decode` in the vendored stdlib before writing one — it is already in
+kriya's dependency closure for niyama.
+
+- **1.4.0 — `grep` context.** `-A N` / `-B N` / `-C N` and `-Z` (NUL-separated output). Context needs
+  a ring buffer over the input stream; `-Z` pairs with `find -print0` the way `-z` already does.
+- **1.4.1 — Shared glob: `grep --include`/`--exclude`, `find -regex`.** `find` already owns an
+  fnmatch-style matcher (`_f_glob_match`); lifting it into `src/lib/` serves both, and `-regex` is
+  niyama on the path string rather than the basename.
+- **1.4.2 — Multi-byte text.** `cut -c` distinct from `-b`, `tr` locale-aware fold and `[=c=]`
+  equivalence classes and `[c*N]` repetition, `uniq` multi-byte `-i`. One decoder, four surfaces.
+- **1.4.3 — Line-grouping and numbering.** `uniq --group` / `--all-repeated[=METHOD]`, `nl` section
+  delimiters (`-d`/`-h`/`-f`/`-l`/`-p`) and `-b p REGEX`. Plus `echo -e` / `-E` against an escape
+  table in `lib/str.cyr` — small, and it belongs with the other text work.
+- ⚠ Also here: the **BRE `-i` bracket-class quirk** in `grep`, catalogued in the M7 POSIX audit and
+  never chased down.
+
+---
+
+## 1.5.x — Identity & listing
+
+**Enablers:** a passwd/group parser (new `src/lib/` module) and a comparator-by-flag indirection in
+`ls`.
+
+- **1.5.0 — passwd/group parser.** Unblocks three consumers at once: `ls -l` user/group names,
+  `stat %U`/`%G` (which refuse by name today), and `find -user`/`-group`. ⚠ Parse `/etc/passwd` and
+  `/etc/group` directly — no NSS, no dynamic linking; that is the whole point of a static tool.
+- **1.5.1 — `ls` sort keys and colour.** `-t` (mtime) and `-S` (size) via the comparator indirection,
+  `-n` (force numeric uid/gid once names exist), `--color=auto|always|never` with a per-type table
+  and tty detection.
+- **1.5.2 — Quoting.** `stat %N` (quoted name + symlink target) against a shared quoting helper, and
+  the same helper for `ls`'s quoting story. Also `pwd`'s `$PWD` inode-match, which needs only a
+  stat-compare in `fs.cyr`.
+
+---
+
+## 1.6.x — File-op completeness
+
+**Enablers:** an inode-set helper in `src/lib/fs.cyr` and an fd-anchored xattr API. ⚠ The M8 security
+audit names the safe xattr pattern — follow it rather than reinventing.
+
+- **1.6.0 — Hard-link awareness.** The inode-set helper serves two callers: `cp --preserve=links`
+  (which v1.2.1 made refuse **by name** rather than silently ignore) and `du` hardlink dedup. Same
+  surface, one implementation.
+- **1.6.1 — Ownership and xattrs.** `cp`/`mv` xattr preservation, and `mv` cross-FS UID/GID
+  preservation (which rides with `cp --preserve=ownership`). ⚠ Both extend `--preserve=`'s accepted
+  attribute list, which v1.2.1 deliberately made a closed set — widen it there, not by loosening the
+  check.
+- **1.6.2 — `ln` and the stragglers.** `ln -r` (relative symlink), `-T`/`-t` (target-dir
+  disambiguation), `-b`/`--backup`; `touch -h` (symlink-aware utimensat); `cp -R` of char/block
+  device nodes, currently rejected per the M8 audit decision; `mv` multi-file `--follow`.
+
+---
+
+## 1.7.x — Traversal, exec & filesystem reporting
+
+**Enabler:** the spawn helper (`src/lib/spawn.cyr`, shipped 1.2.2) plus ARG_MAX argv chunking.
+⭐ The spawn helper was the prerequisite the P-1 sweep flagged; everything here was blocked on it.
+
+- **1.7.0 — Batched exec.** `find -exec ... +` (ARG_MAX chunking) and `xargs -L N` / `-x` /
+  `--show-limits`. All four are the same argv-accounting problem seen from two directions.
+- **1.7.1 — `find` predicates.** `-prune`, `-depth` (DFS post-order), `-perm`, `-H` (operand-only
+  follow — the one [ADR 0003](../adr/0003-symlink-follow-policy.md) mode still deferred).
+- **1.7.2 — Destructive and parallel.** ⛔ `find -delete` **must inherit the [ADR-0004](../adr/0004-rm-refuses-root.md) `/` refusal and
+  the [ADR-0010](../adr/0010-rm-refuses-a-trailing-slash-symlink-operand.md) trailing-slash-symlink refusal** — a second deletion path that does not is a hole in
+  both. `xargs -P N` (job-table management) and `-p` (interactive prompt, which must honour ADR 0002's
+  no-hang-on-non-tty rule).
+- **1.7.3 — Usage reporting.** `du -x` (one-filesystem), `--exclude`/`--exclude-from`, `--inodes`,
+  `-0`, POSIXLY_CORRECT 512-byte blocks; `df -t TYPE` (POSIX-required) and the stat-based
+  "filesystem containing FILE" operand walk; `env -S` split-string and `-C DIR`.
+
+---
+
+## 1.8.x — Parsers & numerics
+
+**Enablers:** a float-formatting story and a byte-suffix parser in `src/lib/args.cyr`.
+
+⚠ The stdlib's `fmt_float_buf` carry bug was only fixed at cyrius 6.5.30 (see CHANGELOG `[1.1.10]`) —
+implementing floats before that pin would have inherited it. The pin is past it now.
+
+- **1.8.0 — Floats.** `printf %e` / `%E` / `%f` / `%F` / `%g` / `%G` / `%a` / `%A` — which v1.2.1 made
+  **fail honestly** rather than print the conversion letter — plus positional `%N$s`. `seq -f FORMAT`
+  rides directly on it.
+- **1.8.1 — Sort keys.** `-h` (human-numeric), `-V` (version), `-g` (general-numeric), `-M` (month),
+  `-d` (dictionary), `-i` (ignore-nonprinting), `-R` (shuffle), `-m` (merge pre-sorted), and multi-key
+  `-k F1 -k F2`. ⚠ The repeatable-`-k` half needs the same collector `grep -e` uses.
+- **1.8.2 — Size limits.** The byte-suffix parser (`5K`, `1M`, `1G`) serving `head -c 1K`,
+  `tail -c 1K` and `sort -S`; `head -n -N` / `-c -N` (all-but-last); `tail` `+N` start-from-line,
+  `-F` retry, and multi-file `-f` (single-file is enforced today, not merely absent); `sort`'s
+  external-sort fallback above the 256 MiB cap, with `-T DIR`.
+- **1.8.3 — Date input.** `date -d STR` and `touch -d STR`, free-form. ⚠ Genuinely large — GNU's
+  parser is notorious, and chrono's `dt_strptime` needs a format string so it does not substitute.
+  Scope it to a documented subset (ISO 8601, `@epoch`, `now`, `HH:MM[:SS]`) rather than chasing GNU.
+
+---
+
+## 1.9.x — Performance
+
+The named gaps in [`docs/benchmarks.md`](../benchmarks.md), each with a measured cost.
+
+- **`wc -c` fast path** — detect a regular-file fd and return `st_size` without reading. ~20 LOC,
+  closes a 200× gap.
+- **`tail` seek-from-end** — `lseek(SEEK_END)` + backward scan in 8 KiB chunks for seekable input.
+  Removes the 16 MiB cap and closes most of a 12× gap.
+- **niyama literal Boyer-Moore** — ⚠ upstream Cyrius. Closes a 2300× literal-scan gap and the general
+  half of M17h. Measured locally at 1.2.3: kriya scans 32 MB in 6.7 s where GNU takes 6 ms.
+- **`cp` `copy_file_range(2)`** — accelerated copy with reflink where the filesystem supports it.
+  Speculative; check AGNOS kernel availability before committing.
+- **`find` predicate JIT** — compile the predicate AST to a flat eval loop. ⚠ Not committed; revisit
+  only if benchmark pressure rises after the consumer burn.
+
+---
+
+## Gated — not on the arc sequence
+
+These are open, but their trigger is outside kriya.
+
+### M10 — Consumer-burn (closes the last v1.0 criterion)
+
+The only unchecked v1.0 criterion: one downstream consumer green. **Trigger sequence:**
+
+1. AGNOS USB-keyboard-on-boot resolves (tracked at agnos, out of kriya scope).
+2. AGNOS coreutils integration — kriya symlinks in the init userland, agnoshi `$PATH` resolving to
+   them.
+3. First green boot-burn with kriya in init.
+4. Incident log at `docs/audit/<date>-consumer-burn.md`.
+5. Release checkboxing the criterion.
+
+⭐ **Boot-burn is a parallel signal, not a blocking gate.** What it will tell us: which utilities early
+boot actually hits, whether the [ADR-0003](../adr/0003-symlink-follow-policy.md)/0004/0005 policies hold up in practice, whether cold start
+matters in aggregate over a real init sequence, and **which deferred features to promote** based on
+real script usage rather than guesswork. That last one may resequence every arc above.
 
 ### M11 — Cyrius proposal sweeps
 
-Gated on upstream Cyrius acceptance, not kriya work. Two proposals filed 2026-05-17:
+Gated on upstream acceptance, not kriya work. Both filed 2026-05-17; both zero-behaviour-change.
 
-- **`2026-05-17-octal-literal-syntax`** — when accepted, sweep kriya's decimal POSIX-mode constants (`511 # 0o777`, `1073741823 # UTIME_NOW`) back to octal literals. Files affected: `src/cmd/mkdir.cyr`, `src/cmd/touch.cyr`, `src/lib/fs.cyr`, `src/lib/protected.cyr`. Zero behavior change; tag as 1.0.x.
-- **`2026-05-17-syscalls-at-family-stdlib`** — when accepted, sweep raw `syscall(N, ...)` sites to stdlib `sys_*at` wrappers (`sys_openat`, `sys_unlinkat`, `sys_renameat`, `sys_utimensat`, `sys_linkat`, etc.). Files: `src/cmd/touch.cyr`, `src/cmd/ln.cyr`, `src/lib/fs.cyr`, and any future utility that lands raw syscalls. Zero behavior change.
+- **`2026-05-17-octal-literal-syntax`** — sweep decimal POSIX-mode constants (`511 # 0o777`) back to
+  octal. Files: `mkdir.cyr`, `touch.cyr`, `fs.cyr`, `protected.cyr`.
+- **`2026-05-17-syscalls-at-family-stdlib`** — sweep raw `syscall(N, …)` sites to named `sys_*at`
+  wrappers. Files: `touch.cyr`, `ln.cyr`, `fs.cyr`. ⚠ Re-verified at pin 6.5.35: still absent, so the
+  gate is real.
 
-Sweeps happen as soon as accepted; no batching required.
+### M14 — stdlib `getenv` post-fork bug
 
-### M12 — POSIX-deviation fill-in (GNU-parity features)
+`find` and `xargs` cache PATH at startup to work around a stack-vs-syscall clobber in `getenv`'s 8 KB
+stack buffer. When upstream fixes it, the workaround comes out. Pure cleanup, zero behaviour change.
 
-The "missing" column of the M7 POSIX audit ([2026-05-18-posix-compliance.md](../audit/2026-05-18-posix-compliance.md)). Each is a named follow-up against a concrete enabler, not a TBD. Grouped by enabler dependency:
+### Upstream chrono — local time
 
-**M12a — chrono-dependent (`lib/chrono.cyr` upstream additions):**
+`date` local-time and `ls -l` locale-aware mtime need tzfile parsing (`chrono_tz.cyr`). ⚠ This is the
+**genuine** chrono gate — verified absent at pin 6.5.35 — and the trigger [ADR 0007](../adr/0007-date-utc-only-at-v0-7-0.md) already names.
 
-- `sleep` fractional + suffix (`1.5s`, `1m`, `1h`) — duration parser.
-- `touch` `-r REF` / `-t STAMP` / `-d STR` — date parser.
-- `date` `-d STR` parsing — same parser.
-- `date` local-time tzfile parsing — `chrono_tz.cyr` (per ADR 0007); the longest of the three.
-- `ls -l` locale-aware mtime form.
-- `stat` `%x` / `%y` / `%z` strftime renderers.
+### M16 — AGNOS as a build target (design-first)
 
-**M12b — `lib/flags.cyr` upgrade-dependent:**
+Make kriya the sovereign, **shell-independent** coreutils for AGNOS — the canonical home for the FS tools (any shell execs it, the Unix way; agnsh's 1.4.2 builtin verbs are a shell-bound convenience that this supersedes once 1.43.x `execwait` lands). **Prep done:** pin 5.11.61 → 6.0.56, lib re-vendored, VERSION → 1.1.0.
 
-- Option-parser short clustering `-rfv` and attached short values `-n10` (ADR 0002 honoured end-to-end after this).
-- `--help` / `--help=json` / `kriya --list` per ADR 0002 — needs the spec-renderer on top of `flags.cyr`.
+**Why it's a real refactor (not a gate-the-blockers port like bannermanor/commandress):** kriya hardcodes **Linux syscall numbers** (`syscall(82,…)`=rename, `217`=getdents64, `257`=openat — ~610 numeric-syscall sites) instead of the target-aware `SYS_*` constants, parses **Linux `getdents64`/`stat` struct formats** (the sovereign agnos formats differ — see `agnos-userland-abi.md` §4.1/§4.2), and uses modern **`*at` syscalls** (openat/renameat/linkat/newfstatat/utimensat) that agnos doesn't define (agnos has the basic forms with different numbers + the explicit-length ABI).
 
-**M12c — stdlib helper-dependent:**
+**Plan:** make the central `src/lib/fs.cyr` syscall layer target-aware (`#ifdef CYRIUS_TARGET_AGNOS`: agnos numbers + sovereign dirent/stat structs + `*at`→basic mapping; Linux path unchanged) — most commands flow through it, so it's the leverage point. Then gate the per-command stragglers: `ln` (linkat/newfstatat), `touch` (utimensat → degrade timestamps), `tail` (lseek → degrade), `pwd` + path resolution (getcwd → degrade; CWD is userland-owned on agnos), `rm`/`cp`/`mv` (TTY `ioctl` TCGETS → non-interactive). Validate with `cyrius build --agnos` per command + the Linux `.tcyr` regression. Analogous to the agnosys-core repair, scaled to the coreutils FS surface.
 
-- `lib/str.cyr` escape table → `echo -e` / `-E`.
-- `fs.cyr` stat-compare → `pwd` `$PWD` inode-match.
-- Symlink-aware utimensat wrapper → `touch -h`.
-- `fs.cyr` xattr fd-anchored API → `cp`/`mv` xattr preservation (M8 audit names the safe pattern).
-- Inode-set helper → `cp --preserve=links` AND `du` hardlink dedup. Same surface.
-- `niyama` literal/fixed-string Boyer-Moore fast path (upstream) → `grep` literal speedup (CHANGELOG 0.6.0 names this; also a perf item, see M13).
+---
 
-**M12d — per-utility independent (no shared blocker):**
-
-- `cp` `--preserve=links` (after M12c inode-set helper).
-- `mv` cross-FS UID/GID preservation (rides with `cp --preserve=ownership`).
-- `mv` multi-file `--follow`.
-- `cp -R` source for char/block device nodes (currently rejected; per M8 audit decision).
-- `ln -r` (relative symlink), `-T`/`-t` (target-dir disambiguation), `-b`/`--backup`.
-- `ls -C` (multi-column tty packing), `-t`/`-S` (sort keys), `--color=auto`, `%U`/`%G` name lookup.
-- `head` `-n -N` / `-c -N` all-but-last form (shared suffix-parser with `tail` when extracted).
-- `tail` multi-file `-f`, `-F` retry, `+N` start-from-line, k/M/G suffixes.
-- `nl` section delimiters (`-d` / `-h` / `-f` / `-l` / `-p`), `-b p REGEX` (needs niyama).
-- `uniq` `--all-repeated`, `--group`.
-- `tr` `[=c=]` equivalence classes, `[c*N]` repetition, locale fold.
-- `cut` multi-byte `-c` (needs UTF-8 decoder).
-- `sort` `-h` / `-V` / `-g` / `-M` / `-R` / `-m` / `-d` / `-i`, multi-key `-k F1 -k F2`, end-field key range `-k F1,F2`, external-sort fallback for inputs > 256 MiB.
-- `printf` `%e` / `%f` / `%g` / `%a` floats, `\xHH` hex escape, positional `%N$s`.
-- `seq` `-f FORMAT` (rides with printf floats).
-- `grep` multi-`-e` (needs `flags_add_str_multi`), `-A` / `-B` / `-C` context, `--include` / `--exclude` (shared glob with find), `--color` (shared with `ls --color`), `-Z` NUL-separated output, BRE `-i` bracket-class quirk.
-- `find` `-prune`, `-delete` (must inherit ADR-0004 `/` refusal), `-exec ... +` (ARG_MAX argv-chunking), `-regex` (niyama), `-perm`, `-user` / `-group` (passwd/group lookup), `-depth` (DFS post-order), `-H` (operand-only follow).
-- `xargs` `-P N` (parallel — job-table management), `-p` (interactive prompt), `-L N` (lines-per-cmd), `-x` (overflow-exit), `--show-limits`.
-- `du -x` (one-filesystem), `--exclude` / `--exclude-from`, `--inodes`, `-0` NUL output, POSIXLY_CORRECT 512-byte default.
-- `df` `-t TYPE` filter (POSIX-required), stat-based "filesystem containing FILE" operand walk.
-- `env -S` split-string mode, `env -C DIR`.
-
-Each item is one PR; the larger ones may warrant their own ADR if they change cross-cutting policy.
-
-### M13 — Performance optimization
-
-The named follow-ups in [docs/benchmarks.md](../benchmarks.md). Each has a concrete enabler.
-
-- **`wc -c` fast path** — detect regular-file fd, return `st_size` without reading. ~20 LOC. Closes the 200× gap.
-- **niyama Boyer-Moore for literal patterns** — upstream Cyrius. When pattern has no special chars, build a skip table. Affects `grep` and any future niyama consumer. Closes the 2300× literal-scan gap.
-- **`tail` seek-from-end** — for seekable input, `lseek(SEEK_END)` + back-scan in 8 KiB chunks. Removes the 16 MiB cap on regular files. Closes most of the 12× gap.
-- **`cp` `copy_file_range(2)`** — Linux-specific accelerated copy with reflink on supporting filesystems. Speculative; check AGNOS kernel availability.
-- **`find` predicate JIT** (speculative) — compile predicate AST to flat eval loop. Not committed; revisit if benchmark pressure rises post-burn.
-
-Each can land independently against a 1.x.y minor.
-
-### M14 — stdlib `getenv` post-fork bug (upstream Cyrius)
-
-Tracked as a "would be nice to fix" against `lib/io.cyr`. find and xargs work around via PATH caching at startup (CHANGELOG 0.6.0 deferred-list, kriya-side workaround). When upstream fixes the stack-vs-syscall-clobber interaction in `getenv`'s 8 KB stack buffer, kriya can strip the PATH-cache workaround. Zero behavior change kriya-side; pure cleanup.
+## Standing
 
 ### M15 — Codegen / toolchain-interaction watchlist (standing)
 
@@ -456,125 +355,54 @@ Standing, low-drama: no negative literals (write `(0 - N)`), no mixed `&&`/`||` 
 `var x = 42;` takes the static-init fast path while `var x = f();` consumes one of the 4,096
 initialized-globals slots.
 
-### M16 — AGNOS as a build target (opened 2026-06-06; design-first)
+---
 
-> ⚠ **Renumbered from M11 at v1.1.11.** This section was added at 1.1.0 and given a number that was
-> already taken: **M11 is the Cyrius proposal sweeps**, as referenced by `CHANGELOG.md` ("M10–M14"),
-> `docs/development/state.md`, and the 1.0.0 release notes. It also sat *above* M10, breaking the
-> reading order. The established numbering wins; this bucket moves to M16. One point-in-time document
-> — `docs/development/issue/archive/2026-06-14-bin-applets-crash-on-agnos-iron.md` — says "M11
-> (AGNOS-as-build-target)" and is deliberately **left frozen**: archived issue notes are a record of
-> what was known then, not a live index.
+## Enabler map
 
-Make kriya the sovereign, **shell-independent** coreutils for AGNOS — the canonical home for the FS tools (any shell execs it, the Unix way; agnsh's 1.4.2 builtin verbs are a shell-bound convenience that this supersedes once 1.43.x `execwait` lands). **Prep done:** pin 5.11.61 → 6.0.56, lib re-vendored, VERSION → 1.1.0.
+What actually gates the arcs. Ship the enabler and everything under it becomes small.
 
-**Why it's a real refactor (not a gate-the-blockers port like bannermanor/commandress):** kriya hardcodes **Linux syscall numbers** (`syscall(82,…)`=rename, `217`=getdents64, `257`=openat — ~610 numeric-syscall sites) instead of the target-aware `SYS_*` constants, parses **Linux `getdents64`/`stat` struct formats** (the sovereign agnos formats differ — see `agnos-userland-abi.md` §4.1/§4.2), and uses modern **`*at` syscalls** (openat/renameat/linkat/newfstatat/utimensat) that agnos doesn't define (agnos has the basic forms with different numbers + the explicit-length ABI).
+| Enabler | Home | Unblocks | Status |
+|---|---|---|---|
+| Option pre-expansion | `src/lib/args.cyr` | clustering, attached values, `head -5` | ✅ 1.2.0 |
+| Repeatable-option collector | `src/lib/args.cyr` | `grep -e`×N, `sort -k`×N, `grep --include/--exclude` | ✅ 1.2.1 (as `kriya_argv_collect`) |
+| Spawn helper | `src/lib/spawn.cyr` | child stderr, `find -exec +`, `xargs -P`/`-p` | ✅ 1.2.2 |
+| Duration parser | `src/lib/args.cyr` | `sleep` fractions + suffixes | ✅ 1.2.5 |
+| Spec-renderer on `flags.cyr` | `src/lib/args.cyr` | `--help`, `--help=json`, `kriya --list` | 1.3.x |
+| UTF-8 decoder | stdlib `unicode/_decode` (already vendored) | `cut -c`, `tr` fold, `uniq -i` multi-byte | 1.4.x |
+| Shared glob matcher | lift `_f_glob_match` into `src/lib/` | `grep --include/--exclude`, `find -name` reuse | 1.4.x |
+| passwd/group parser | new `src/lib/` module | `ls -l` names, `stat %U/%G`, `find -user/-group` | 1.5.x |
+| Quoting helper | `src/lib/` | `stat %N`, `ls` quoting | 1.5.x |
+| Comparator-by-flag indirection | `src/cmd/ls.cyr` | `ls -t`, `-S`, `--color` table | 1.5.x |
+| Inode-set helper | `src/lib/fs.cyr` | `cp --preserve=links`, `du` hardlink dedup | 1.6.x |
+| fd-anchored xattr API | `src/lib/fs.cyr` | `cp`/`mv` xattr preservation | 1.6.x |
+| ARG_MAX argv chunking | `src/lib/` | `find -exec +`, `xargs -L`/`-x` | 1.7.x |
+| Float formatting | `src/cmd/printf.cyr` | `printf %e/%f/%g/%a`, `seq -f` | 1.8.x |
+| Byte-suffix parser | `src/lib/args.cyr` | `head -c 1K`, `tail -c 1K`, `sort -S` | 1.8.x |
+| niyama literal fast path | **upstream** | `grep` literal speedup, M17h general case | 1.9.x, gated |
+| chrono tzfile reader | **upstream** | `date` local time, `ls -l` locale mtime | gated |
 
-**Plan:** make the central `src/lib/fs.cyr` syscall layer target-aware (`#ifdef CYRIUS_TARGET_AGNOS`: agnos numbers + sovereign dirent/stat structs + `*at`→basic mapping; Linux path unchanged) — most commands flow through it, so it's the leverage point. Then gate the per-command stragglers: `ln` (linkat/newfstatat), `touch` (utimensat → degrade timestamps), `tail` (lseek → degrade), `pwd` + path resolution (getcwd → degrade; CWD is userland-owned on agnos), `rm`/`cp`/`mv` (TTY `ioctl` TCGETS → non-interactive). Validate with `cyrius build --agnos` per command + the Linux `.tcyr` regression. Analogous to the agnosys-core repair, scaled to the coreutils FS surface.
+---
 
-### M17 — Confirmed defects deferred from the v1.1.11 P-1 sweep
+## Out of scope
 
-Every item below was **reproduced against a shipped build**, and every one was left unfixed at
-v1.1.11 because its repair is a redesign rather than a patch — a new primitive, an option-parser
-rewrite, or an ADR-level decision about behaviour. They are ordered by consequence. This milestone
-closes when the list is empty; each item is one PR.
+Fixed boundaries. A new utility that passes the [ADR-0006](../adr/0006-utility-scope-non-posix.md) four-criteria gate can land as a 1.x.y, but
+the table below does not move.
 
-The sweep's *fixed* findings are in `CHANGELOG.md` under `[1.1.11]`. The ones it **refuted** are
-recorded there too, so they do not get re-litigated.
-
-**M17a — `find -exec` and `xargs` discard the child's stderr.** *(silent failure — highest
-consequence here)*
-`exec_env` from the stdlib `process` module dup2s `/dev/null` onto fd 2 in the child. Reproduced:
-`chmod 555 rot; kriya find rot -name '*.tmp' -exec rm {} \;` prints **nothing** and exits **0** while
-deleting nothing; GNU prints a "Permission denied" line per file. A cleanup job written this way
-reports complete success having done nothing at all. *Deferred because* the fix is a new
-kriya-local spawn helper — fork + execve + waitpid with fds 0/1/2 inherited untouched, returning a
-raw wait status so callers can tell a normal exit from a signal death from an exec failure — and
-then moving both `find` and `xargs` onto it. That is a new primitive in `src/lib/`, with its own
-tests, not a line change.
-
-**M17b — `xargs` runs its own option parser over the child's command line.**
-`echo t.txt | kriya xargs sort -r` silently sorts *ascending*: `-r` is eaten as
-`--no-run-if-empty`. `xargs head -n 2` eats `-n 2` as `--max-args`. Worse, the `--` guard is
-consumed and deleted, so `ls -1 | xargs rm --` hands `rm` an argument list starting `-r` and
-**recursively deletes a directory** the `--` existed to protect. *Deferred because* the fix is a
-rewrite of the option scan: stop at the first token that is not a recognised xargs flag and copy the
-rest verbatim, mirroring the state machine `cmd_env` already uses. That changes how every `xargs`
-invocation is parsed and needs the whole 23-case smoke script re-derived against GNU.
-
-**M17c — `xargs -I` splits input on whitespace instead of on lines.**
-POSIX says a replacement string consumes one **line** per invocation. kriya splits on blanks, so
-`printf 'a b\n' | xargs -I{} rm -- {}` deletes files `a` and `b` and leaves `a b`. The common
-`ls | xargs -I{} mv {} dest/` idiom mangles every filename containing a space. *Deferred because* it
-shares the parser surface with M17b and should land in the same PR.
-
-**M17d — `grep -r` re-resolves each path from `AT_FDCWD` instead of descending from the parent
-dirfd.** *(TOCTOU)*
-`rm`, `cp` and `find` all thread a parent dirfd through their walks per ADR 0003; `grep -r` is the
-one that does not. Reproduced: swap an ancestor directory for a symlink to `/etc` mid-scan and grep
-follows it out of the tree and reports `/etc/passwd` contents under the original path, exit 0.
-*Deferred because* the repair is the same dirfd-threading refactor the other three already carry —
-`_gr_walk_dir(parent_dirfd, name, display_path, …)` plus `fs_opendir_nofollow` — touching the whole
-recursive path of a 1,022-line file.
-
-**M17e — `mv` cross-filesystem directory rollback deletes the destination.**
-When the copy succeeds but the source removal partially fails, `_mv_cross_fs` unwinds by deleting the
-destination tree — which by then is the **only** copy of any file already drained from the source.
-Reproduced with an unwritable source parent: source emptied, destination gone, data unrecoverable.
-*Deferred because* it is a behaviour decision, not a bug fix: GNU keeps the destination and reports
-the source-removal error, leaving two trees rather than zero. Adopting that is right, and it wants an
-ADR because it changes documented `mv` failure semantics.
-
-**M17f — `cp -R -i` never prompts, and the recursive path ignores the no-clobber default.**
-Under a real pty, `kriya cp -i -R src dst` overwrites `dst/src/f` with no prompt and exits 0.
-`interactive` is simply not threaded through `_cp_dir_top` → `_cp_dir_descend_at` → `_cp_file_at`.
-*Deferred because* the fix has to add a destination-exists check at every recursive file write and
-decide what `-i` means when the prompt is answered "no" partway through a tree — a partial copy with
-what exit status? That is an ADR-0002 question.
-
-**M17g — `ls -l` fabricates metadata when a per-entry stat fails.**
-In a readable-but-not-searchable directory, `kriya ls -l` prints
-`---------- 0 0 0 0 1970-01-01 00:00 afile` and exits 0, rendering a symlink as a regular file. GNU
-prints `?` for the unknown fields, reports `cannot access` on stderr, and exits 1. *Deferred because*
-`fs_stat_entry`'s failure needs to become a per-record state that the column-width computation, the
-long-format renderer and the exit-status rollup all understand.
-
-**M17h — `grep` retains roughly 320 bytes of heap per byte of input under BRE/ERE.**
-A 13.6 MB file segfaults under `ulimit -v 1048576`; GNU handles it in constant memory. *Deferred
-because* the real fix is upstream (niyama), but there is a kriya-side half worth taking first: route
-patterns with no metacharacters to the already-present `GR_ENG_FIXED` handle instead of compiling an
-NFA. That overlaps the M13 Boyer-Moore item and should be scoped with it.
-
-**M17i — `rm -r symlink-to-dir/` follows the link and empties the target.** *(policy, not a
-regression)*
-Verified that **GNU does exactly the same**, so this is not a divergence from the reference
-implementation — the sweep's original claim that GNU refuses was wrong. It is, however, a divergence
-from kriya's own stated rule that destructive operations do not follow symlinks unless `-L` opts in
-(CLAUDE.md; ADR 0003 hard rule #1). *Deferred because* choosing to be stricter than GNU on a
-destructive verb is exactly what ADR 0003 exists to decide, and the successor ADR should settle the
-trailing-slash case explicitly.
-
-**M17j — `realpath` refuses inputs over 16 KiB where GNU still resolves them.** *(accepted
-limitation)*
-v1.1.11 bounded `fs_realpath`'s previously unchecked seed and symlink-rebuild copies, which turned a
-silently wrong answer into an honest `ENAMETOOLONG`. GNU grows its buffer instead. *Deferred because*
-making `result`/`remaining` growable is a contained but real change, and refusing is the safe
-behaviour to ship in the meantime.
-
-### Out of scope for any 1.x.y
-
-The "Out of scope (for v1.0)" list below stays out of scope for 1.x as well. New utility additions that pass the ADR-0006 four-criteria gate could land as 1.x.y, but the hard scope-boundary table (archive, networking, GPU, editor) is fixed.
-
-## Out of scope (for v1.0)
-
-- **Anything covered elsewhere** — `cat` (owl), `vim` (cyim), `git` (sit), `htop` (chakshu), shell builtins (agnoshi)
-- **Archive utilities** (`tar`, `gzip`, `unzip`) — when sankoch extracts a sovereign archive CLI, that's where they go
-- **Network utilities** (`ping`, `curl`, `ssh`, `nc`, `wget`) — separate domain repos
-- **GPU / display / window management** — wrong layer
-- **Compiler tooling** (`make`, `awk`, `sed`) — `awk` and `sed` are big enough to deserve their own repos; `make` is a build system, separate concern entirely
-- **Per-utility binaries (no dispatcher)** — explicit choice via ADR 0001; revisit only if dispatcher overhead exceeds budget
-- **Windows / non-Linux platforms** — AGNOS-targeted
+- **Anything with a sovereign home** — `cat` (owl), `vim` (cyim), `git` (sit), `htop` (chakshu),
+  shell builtins (agnoshi).
+- **Archive** (`tar`, `gzip`, `unzip`) — goes wherever sankoch extracts a sovereign archive CLI.
+- **Networking** (`ping`, `curl`, `ssh`, `nc`, `wget`) — separate domain repos.
+- **GPU / display / window management** — wrong layer.
+- **Compiler tooling** — `awk` and `sed` are big enough to deserve their own repos; `make` is a build
+  system.
+- **Per-utility binaries** — explicit choice via ADR 0001; revisit only if dispatcher overhead
+  exceeds budget.
+- **Windows / non-Linux** — AGNOS-targeted.
 
 ## Splitting policy
 
-If any single utility crosses **~400 LOC** or develops a non-trivial dep surface, propose extraction into its own repo (e.g. `kriya-find`, or a domain-named repo). The MVP scope stays small; growth signals a new sovereign tool, not bloat to absorb.
+If a single utility crosses **~400 LOC** or grows a non-trivial dependency surface, propose extracting
+it into its own repo. ⚠ Five already exceed it — `find` (1087), `grep` (1022), `ls` (906),
+`sort` (726), `cp` (693) — and none has been split. The threshold is a **prompt to decide**, not an
+automatic trigger: the multi-tool is the right home while they share `src/lib/`, and the question is
+whether a given utility has stopped sharing. Revisit at each arc boundary.
