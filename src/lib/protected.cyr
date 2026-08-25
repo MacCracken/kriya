@@ -37,36 +37,21 @@ fn protected_path_at(i): i64 {
     return 0;
 }
 
-# Canonicalize `operand` into an absolute, textually-normalized path
-# and return a heap-allocated cstring. No filesystem access — `..`
-# resolves textually, symlinks are not dereferenced.
+# Canonicalize `operand` into an absolute, textually-normalized path and return
+# a heap-allocated cstring: relative operands are joined against `getcwd()`, `..`
+# resolves TEXTUALLY, and symlinks are never dereferenced. This is the form the
+# refusal-check compares against the protected list.
 #
-# This is the form the refusal-check compares against the protected
-# list. It MUST match the semantics of `path_normalize` on an
-# absolute input; relative operands are joined against `getcwd()`
-# first.
+# The body moved to `fs_path_absolute` (`src/lib/fs.cyr`) at v1.1.11, unchanged,
+# when `cp`'s copy-a-directory-into-itself guard turned out to need the same
+# absolute-and-textually-normalized frame. This stays as the ADR-0004-facing name
+# so the guard still reads in its own vocabulary; the contract above — including
+# the `getcwd`-failure fallback — is documented and implemented there.
+#
+# ⚠ Any change to `fs_path_absolute` changes what `rm` refuses. `tests/kriya.tcyr`
+# pins the 21 spellings of `/` that must stay refused; run it after touching it.
 fn protected_canonicalize(operand): i64 {
-    if (operand == 0) {
-        var z = alloc(2);
-        store8(z, 47);     # '/'
-        store8(z + 1, 0);
-        return path_normalize(z);
-    }
-    if (path_is_absolute(operand) == 1) {
-        return path_normalize(operand);
-    }
-    # Relative — prepend cwd.
-    var cwd_buf[4096];
-    var n = k_getcwd(&cwd_buf, 4096);
-    if (n < 0) {
-        # Can't get cwd. Best-effort: refuse the operand defensively
-        # would be too aggressive; return the operand normalized so
-        # a literal "/" still matches. Other relative operands fail
-        # the membership check (e.g. "../" doesn't match "/").
-        return path_normalize(operand);
-    }
-    var joined = path_join(&cwd_buf, operand);
-    return path_normalize(joined);
+    return fs_path_absolute(operand);
 }
 
 # 1 if `operand`'s canonical form matches any protected path, 0
@@ -74,7 +59,24 @@ fn protected_canonicalize(operand): i64 {
 # whole invocation with exit 2.
 fn is_protected_path(operand): i64 {
     var canon = protected_canonicalize(operand);
-    var clen = strlen(canon);
+
+    # ⛔ FAIL CLOSED WHEN THE PATH CANNOT BE CANONICALIZED. `fs_path_absolute`
+    # returns an absolute path in every success case, so a RELATIVE result can
+    # only mean its `getcwd` fallback fired — and without a cwd there is no way
+    # to know what a relative operand names. The old behaviour was to hand back
+    # the relative form, which then failed to string-match "/" and let `rm`
+    # proceed: the refusal failed OPEN exactly when it could not do its job.
+    # Reachable in practice — a cwd over 4095 bytes (30 nested 200-char
+    # directories) makes `getcwd` fail, and `kriya pwd -P` reports it plainly.
+    #
+    # ⚠ Today the `/`-only table makes this mostly theoretical: an operand can
+    # only resolve to "/" if it ENDS in "." or "..", and `_rm_is_dot_operand`
+    # now refuses those outright. It stops being theoretical the moment the
+    # table grows — and ADR 0004 explicitly invites maintainers to add `/etc`,
+    # `/usr`, `/boot` without a successor ADR. `../../etc` from a deep cwd has
+    # no dot final component and would sail straight through.
+    if (path_is_absolute(canon) == 0) { return 1; }
+
     var n = protected_path_count();
     var i: i64 = 0;
     while (i < n) {

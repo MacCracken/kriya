@@ -131,6 +131,27 @@ out=$("$BIN" ln -s -v src.txt vlink 2>&1)
 expected="kriya ln: 'vlink' -> 'src.txt'"
 expect_eq "verbose -s output" "$expected" "$out"
 
+# --- -f must not destroy the destination on failure (v1.1.11) -----------
+# ⛔ `-f` used to unlink the destination and THEN attempt the link, so any
+# failure afterwards left nothing behind. Measured: `ln -f /nonexistent-src
+# keep.txt` reported "no such file or directory" and DELETED keep.txt. Now the
+# link is made under a temp name in the same directory and renamed over the
+# target, so the destination is only replaced once a replacement exists.
+#
+# ⚠ The obvious shortcut — unlink only on EEXIST, since that "proves" the source
+# is linkable — is NOT enough: the kernel reports EEXIST before EXDEV, so a
+# cross-device link onto an existing path still answered 17 and still deleted.
+mkdir -p ffail
+echo IMPORTANT > ffail/keep.txt
+echo SRC       > ffail/src.txt
+
+expect_exit "ln -f missing src fails"    1 "$BIN" ln -f /nonexistent-src ffail/keep.txt
+expect_eq   "destination survives"       "IMPORTANT" "$(cat ffail/keep.txt)"
+expect_exit "ln -f valid src replaces"   0 "$BIN" ln -f ffail/src.txt ffail/keep.txt
+expect_eq   "destination replaced"       "SRC" "$(cat ffail/keep.txt)"
+# No temp file is left behind on either path.
+expect_eq   "no stray temp files"        "0" "$(ls -A ffail | grep -c 'kriya-ln-tmp')"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

@@ -130,15 +130,7 @@ Three fuzz harnesses land at M9 to close the last code-side v1.0 criterion: `tes
 
 ## Post-1.0 milestones
 
-v1.0 froze 2026-05-18 with 7 of 8 criteria checked. The 8th — downstream consumer green via AGNOS kernel boot-burn — is the trigger for **M10**. The remaining post-1.0 work falls into four buckets that can advance independently against tagged minor releases (1.x.y).
-
-### M11 — AGNOS as a build target (1.1.0, opened 2026-06-06; design-first)
-
-Make kriya the sovereign, **shell-independent** coreutils for AGNOS — the canonical home for the FS tools (any shell execs it, the Unix way; agnsh's 1.4.2 builtin verbs are a shell-bound convenience that this supersedes once 1.43.x `execwait` lands). **Prep done:** pin 5.11.61 → 6.0.56, lib re-vendored, VERSION → 1.1.0.
-
-**Why it's a real refactor (not a gate-the-blockers port like bannermanor/commandress):** kriya hardcodes **Linux syscall numbers** (`syscall(82,…)`=rename, `217`=getdents64, `257`=openat — ~610 numeric-syscall sites) instead of the target-aware `SYS_*` constants, parses **Linux `getdents64`/`stat` struct formats** (the sovereign agnos formats differ — see `agnos-userland-abi.md` §4.1/§4.2), and uses modern **`*at` syscalls** (openat/renameat/linkat/newfstatat/utimensat) that agnos doesn't define (agnos has the basic forms with different numbers + the explicit-length ABI).
-
-**Plan:** make the central `src/lib/fs.cyr` syscall layer target-aware (`#ifdef CYRIUS_TARGET_AGNOS`: agnos numbers + sovereign dirent/stat structs + `*at`→basic mapping; Linux path unchanged) — most commands flow through it, so it's the leverage point. Then gate the per-command stragglers: `ln` (linkat/newfstatat), `touch` (utimensat → degrade timestamps), `tail` (lseek → degrade), `pwd` + path resolution (getcwd → degrade; CWD is userland-owned on agnos), `rm`/`cp`/`mv` (TTY `ioctl` TCGETS → non-interactive). Validate with `cyrius build --agnos` per command + the Linux `.tcyr` regression. Analogous to the agnosys-core repair, scaled to the coreutils FS surface.
+v1.0 froze 2026-05-18 with 7 of 8 criteria checked. The 8th — downstream consumer green via AGNOS kernel boot-burn — is the trigger for **M10**. The remaining post-1.0 work falls into the buckets below (**M10–M16**), which can advance independently against tagged minor releases (1.x.y). They are listed in numeric order; the number is an identifier, not a priority.
 
 ### M10 — Consumer-burn (closes v1.0 criterion #8)
 
@@ -232,6 +224,192 @@ Each can land independently against a 1.x.y minor.
 ### M14 — stdlib `getenv` post-fork bug (upstream Cyrius)
 
 Tracked as a "would be nice to fix" against `lib/io.cyr`. find and xargs work around via PATH caching at startup (CHANGELOG 0.6.0 deferred-list, kriya-side workaround). When upstream fixes the stack-vs-syscall-clobber interaction in `getenv`'s 8 KB stack buffer, kriya can strip the PATH-cache workaround. Zero behavior change kriya-side; pure cleanup.
+
+### M15 — Codegen / toolchain-interaction watchlist (standing)
+
+Not a milestone that closes: a **standing list of the ways the Cyrius compiler and kriya interact
+badly**, kept because every entry here has already cost real time at least once, and because the
+failure mode is always the same — the code reads correctly, compiles clean, passes lint, and is wrong
+anyway. Opened at v1.1.11 out of the P-1 sweep.
+
+Each entry names the rule, how to detect it **mechanically**, and what happened the last time it bit.
+Re-run the detections at every toolchain pin bump; the 6.5.x line is the codegen-quality line and a
+pin move is exactly when a latent instance stops being latent.
+
+**M15a — A function-local `var X[N]` is N BYTES. At module scope it is N×8.**
+The single most expensive rule in this list. Re-measured at pin 6.5.35 with a two-local probe:
+`|&b - &a|` = **8 / 32 / 144** for `var x[4]` / `var x[32]` / `var x[144]`.
+- *Detection*: for every `var X[N]` in `src/`, take the maximum byte offset actually accessed
+  (`store8`/`store16`/`store64`/`load*`/`memcpy`/a syscall buffer arg) and require it `< N`. Sizes are
+  a strong smell on their own: a buffer holding k 64-bit fields must be `[k*8]`, and every `struct stat`
+  buffer must be `[144]`.
+- *Note*: kriya currently has **zero** module-scope arrays — all 136 are function-local — so the
+  N-bytes reading always applies here. A future module-scope array would silently flip the rule.
+- *Bit us at v1.1.9*: `find`'s `var ctx[4]` held four i64 fields. Silent for a year because the old
+  register allocator left dead space where the overflow landed; the 6.5.18 bump repacked the frame
+  onto live state and `find` went 40/40 → 8/40.
+- *Bit us again at v1.1.11*: `k_access`'s agnos arm declared `var st[48]` for `k_stat`'s **output**,
+  confusing agnos's 48-byte wire struct with the canonical 144-byte layout `_k_agnos_stat` actually
+  writes. A 96-byte frame smash on every PATH probe, reachable from `which`, `env`, `xargs` and
+  `find -exec`. Reproduced on the host with the same shape: SIGSEGV.
+
+**M15b — The register allocator can turn a latent frame bug into a live one.**
+6.5.35 fixed two defects that had prevented linear-scan from ever reusing a register, so frame layout
+repacks tree-wide. A buffer overrun that previously landed in dead space starts landing on live state.
+- *Detection*: there is none in advance — that is the point. Run M15a's scan and the full smoke suite
+  after every pin bump.
+- *Bisection lever*: rebuild with `CYRIUS_REGALLOC_PICKER_CAP=5` to reproduce pre-6.5.35 register
+  assignment. **If the symptom disappears, the defect is kriya's, not the compiler's.**
+
+**M15c — Two `var` of the same name in one function are ONE slot.**
+Cyrius hoists a branch-local `var` to the nearest enclosing loop or function, so declarations in
+different arms of an `if`/`elif`/`else` collide rather than shadow.
+- *Detection*: group `var` declarations by name within each function. Scalars reused sequentially are
+  fine; the dangerous shape is a duplicate **array** (a scratch buffer), where stale bytes from one arm
+  can be read by another.
+- *Status at v1.1.11*: scanned clean. Three duplicate-array sites exist — `cut.cyr` `tb[2]`,
+  `touch.cyr` `ts[32]`, `uniq.cyr` `klen_box[8]` — and all three are mutually exclusive arms that fill
+  before they read.
+- *Bit us at v1.1.6*: `grep`'s one-byte line-terminator scratch was redeclared at all five emit sites;
+  two in the same `if`/`elif`/`else` chain collided and broke `cyrius build --agnos` outright.
+
+**M15d — `break` inside a `while` that declares a `var` is unreliable.**
+Use a flag plus `continue`, per CLAUDE.md.
+- *Detection*: for each `while` body containing a `var` declaration, flag any `break;`.
+- *Status at v1.1.11*: **zero instances**. The four `break;` in `src/cmd/find.cyr` are in loops with no
+  `var` declaration.
+
+**M15e — Include order in `src/main.cyr` is load-bearing, and so is the dependency direction.**
+A global must be declared before its use, so the 46-line include list is a dependency order, not a
+style choice. The subtler half is directional: adding a function to a `src/lib/` file that calls into a
+**later**-included module breaks every consumer that includes only a subset — and it breaks quietly,
+because cyrius only rejects *reachable* undefined functions, so an unused one is dead-code-eliminated
+and the build stays green until someone calls it.
+- *Detection*: after adding a cross-module call in `src/lib/`, build `tests/*.tcyr` and `tests/*.fcyr`
+  too — they include subsets of `src/lib/`, not `src/main.cyr`.
+- *Bit us at v1.1.11*: `fs_path_absolute` was first written into `path.cyr`, where it both violated that
+  file's documented "nothing here touches the filesystem" commitment and introduced a `path.cyr` →
+  `sys.cyr` dependency that `tests/kriya.tcyr` did not satisfy. It built green only because nothing
+  called it yet. Moved to `fs.cyr`, which is filesystem-aware and already ordered after `sys.cyr`.
+
+**M15f — A syscall returns a NEGATIVE ERRNO, and nothing forces you to look.**
+- *Detection*: enumerate `syscall(` and `sys_*` call sites and check each result is tested, with the
+  right predicate — `r < 0`, not `r == (0 - 1)`, since the kernel answers `-ENOENT` (−2), not −1.
+- *Status at v1.1.11*: all write traffic goes through `k_write`, which now records a sticky failure the
+  dispatcher consults at exit — the ~540 call sites still ignore the return, and that is now safe by
+  construction rather than by luck. All read traffic goes through `k_read`. No raw `syscall(1, …)` or
+  `syscall(0, …)` remains outside `src/lib/sys.cyr`.
+
+**M15g — Language shapes that compile to something other than what they read as.**
+Standing, low-drama: no negative literals (write `(0 - N)`), no mixed `&&`/`||` in one expression
+(nest the `if`s), enum members are const-folded and consume no `gvar_toks` slot, and a top-level
+`var x = 42;` takes the static-init fast path while `var x = f();` consumes one of the 4,096
+initialized-globals slots.
+
+### M16 — AGNOS as a build target (opened 2026-06-06; design-first)
+
+> ⚠ **Renumbered from M11 at v1.1.11.** This section was added at 1.1.0 and given a number that was
+> already taken: **M11 is the Cyrius proposal sweeps**, as referenced by `CHANGELOG.md` ("M10–M14"),
+> `docs/development/state.md`, and the 1.0.0 release notes. It also sat *above* M10, breaking the
+> reading order. The established numbering wins; this bucket moves to M16. One point-in-time document
+> — `docs/development/issue/archive/2026-06-14-bin-applets-crash-on-agnos-iron.md` — says "M11
+> (AGNOS-as-build-target)" and is deliberately **left frozen**: archived issue notes are a record of
+> what was known then, not a live index.
+
+Make kriya the sovereign, **shell-independent** coreutils for AGNOS — the canonical home for the FS tools (any shell execs it, the Unix way; agnsh's 1.4.2 builtin verbs are a shell-bound convenience that this supersedes once 1.43.x `execwait` lands). **Prep done:** pin 5.11.61 → 6.0.56, lib re-vendored, VERSION → 1.1.0.
+
+**Why it's a real refactor (not a gate-the-blockers port like bannermanor/commandress):** kriya hardcodes **Linux syscall numbers** (`syscall(82,…)`=rename, `217`=getdents64, `257`=openat — ~610 numeric-syscall sites) instead of the target-aware `SYS_*` constants, parses **Linux `getdents64`/`stat` struct formats** (the sovereign agnos formats differ — see `agnos-userland-abi.md` §4.1/§4.2), and uses modern **`*at` syscalls** (openat/renameat/linkat/newfstatat/utimensat) that agnos doesn't define (agnos has the basic forms with different numbers + the explicit-length ABI).
+
+**Plan:** make the central `src/lib/fs.cyr` syscall layer target-aware (`#ifdef CYRIUS_TARGET_AGNOS`: agnos numbers + sovereign dirent/stat structs + `*at`→basic mapping; Linux path unchanged) — most commands flow through it, so it's the leverage point. Then gate the per-command stragglers: `ln` (linkat/newfstatat), `touch` (utimensat → degrade timestamps), `tail` (lseek → degrade), `pwd` + path resolution (getcwd → degrade; CWD is userland-owned on agnos), `rm`/`cp`/`mv` (TTY `ioctl` TCGETS → non-interactive). Validate with `cyrius build --agnos` per command + the Linux `.tcyr` regression. Analogous to the agnosys-core repair, scaled to the coreutils FS surface.
+
+### M17 — Confirmed defects deferred from the v1.1.11 P-1 sweep
+
+Every item below was **reproduced against a shipped build**, and every one was left unfixed at
+v1.1.11 because its repair is a redesign rather than a patch — a new primitive, an option-parser
+rewrite, or an ADR-level decision about behaviour. They are ordered by consequence. This milestone
+closes when the list is empty; each item is one PR.
+
+The sweep's *fixed* findings are in `CHANGELOG.md` under `[1.1.11]`. The ones it **refuted** are
+recorded there too, so they do not get re-litigated.
+
+**M17a — `find -exec` and `xargs` discard the child's stderr.** *(silent failure — highest
+consequence here)*
+`exec_env` from the stdlib `process` module dup2s `/dev/null` onto fd 2 in the child. Reproduced:
+`chmod 555 rot; kriya find rot -name '*.tmp' -exec rm {} \;` prints **nothing** and exits **0** while
+deleting nothing; GNU prints a "Permission denied" line per file. A cleanup job written this way
+reports complete success having done nothing at all. *Deferred because* the fix is a new
+kriya-local spawn helper — fork + execve + waitpid with fds 0/1/2 inherited untouched, returning a
+raw wait status so callers can tell a normal exit from a signal death from an exec failure — and
+then moving both `find` and `xargs` onto it. That is a new primitive in `src/lib/`, with its own
+tests, not a line change.
+
+**M17b — `xargs` runs its own option parser over the child's command line.**
+`echo t.txt | kriya xargs sort -r` silently sorts *ascending*: `-r` is eaten as
+`--no-run-if-empty`. `xargs head -n 2` eats `-n 2` as `--max-args`. Worse, the `--` guard is
+consumed and deleted, so `ls -1 | xargs rm --` hands `rm` an argument list starting `-r` and
+**recursively deletes a directory** the `--` existed to protect. *Deferred because* the fix is a
+rewrite of the option scan: stop at the first token that is not a recognised xargs flag and copy the
+rest verbatim, mirroring the state machine `cmd_env` already uses. That changes how every `xargs`
+invocation is parsed and needs the whole 23-case smoke script re-derived against GNU.
+
+**M17c — `xargs -I` splits input on whitespace instead of on lines.**
+POSIX says a replacement string consumes one **line** per invocation. kriya splits on blanks, so
+`printf 'a b\n' | xargs -I{} rm -- {}` deletes files `a` and `b` and leaves `a b`. The common
+`ls | xargs -I{} mv {} dest/` idiom mangles every filename containing a space. *Deferred because* it
+shares the parser surface with M17b and should land in the same PR.
+
+**M17d — `grep -r` re-resolves each path from `AT_FDCWD` instead of descending from the parent
+dirfd.** *(TOCTOU)*
+`rm`, `cp` and `find` all thread a parent dirfd through their walks per ADR 0003; `grep -r` is the
+one that does not. Reproduced: swap an ancestor directory for a symlink to `/etc` mid-scan and grep
+follows it out of the tree and reports `/etc/passwd` contents under the original path, exit 0.
+*Deferred because* the repair is the same dirfd-threading refactor the other three already carry —
+`_gr_walk_dir(parent_dirfd, name, display_path, …)` plus `fs_opendir_nofollow` — touching the whole
+recursive path of a 1,022-line file.
+
+**M17e — `mv` cross-filesystem directory rollback deletes the destination.**
+When the copy succeeds but the source removal partially fails, `_mv_cross_fs` unwinds by deleting the
+destination tree — which by then is the **only** copy of any file already drained from the source.
+Reproduced with an unwritable source parent: source emptied, destination gone, data unrecoverable.
+*Deferred because* it is a behaviour decision, not a bug fix: GNU keeps the destination and reports
+the source-removal error, leaving two trees rather than zero. Adopting that is right, and it wants an
+ADR because it changes documented `mv` failure semantics.
+
+**M17f — `cp -R -i` never prompts, and the recursive path ignores the no-clobber default.**
+Under a real pty, `kriya cp -i -R src dst` overwrites `dst/src/f` with no prompt and exits 0.
+`interactive` is simply not threaded through `_cp_dir_top` → `_cp_dir_descend_at` → `_cp_file_at`.
+*Deferred because* the fix has to add a destination-exists check at every recursive file write and
+decide what `-i` means when the prompt is answered "no" partway through a tree — a partial copy with
+what exit status? That is an ADR-0002 question.
+
+**M17g — `ls -l` fabricates metadata when a per-entry stat fails.**
+In a readable-but-not-searchable directory, `kriya ls -l` prints
+`---------- 0 0 0 0 1970-01-01 00:00 afile` and exits 0, rendering a symlink as a regular file. GNU
+prints `?` for the unknown fields, reports `cannot access` on stderr, and exits 1. *Deferred because*
+`fs_stat_entry`'s failure needs to become a per-record state that the column-width computation, the
+long-format renderer and the exit-status rollup all understand.
+
+**M17h — `grep` retains roughly 320 bytes of heap per byte of input under BRE/ERE.**
+A 13.6 MB file segfaults under `ulimit -v 1048576`; GNU handles it in constant memory. *Deferred
+because* the real fix is upstream (niyama), but there is a kriya-side half worth taking first: route
+patterns with no metacharacters to the already-present `GR_ENG_FIXED` handle instead of compiling an
+NFA. That overlaps the M13 Boyer-Moore item and should be scoped with it.
+
+**M17i — `rm -r symlink-to-dir/` follows the link and empties the target.** *(policy, not a
+regression)*
+Verified that **GNU does exactly the same**, so this is not a divergence from the reference
+implementation — the sweep's original claim that GNU refuses was wrong. It is, however, a divergence
+from kriya's own stated rule that destructive operations do not follow symlinks unless `-L` opts in
+(CLAUDE.md; ADR 0003 hard rule #1). *Deferred because* choosing to be stricter than GNU on a
+destructive verb is exactly what ADR 0003 exists to decide, and the successor ADR should settle the
+trailing-slash case explicitly.
+
+**M17j — `realpath` refuses inputs over 16 KiB where GNU still resolves them.** *(accepted
+limitation)*
+v1.1.11 bounded `fs_realpath`'s previously unchecked seed and symlink-rebuild copies, which turned a
+silently wrong answer into an honest `ENAMETOOLONG`. GNU grows its buffer instead. *Deferred because*
+making `result`/`remaining` growable is a contained but real change, and refusing is the safe
+behaviour to ship in the meantime.
 
 ### Out of scope for any 1.x.y
 

@@ -138,6 +138,30 @@ expect_exit 'missing -exec ;'          2 sh -c "$BIN find tree -exec echo"
 expect_exit 'missing start path'       1 "$BIN" find /no/such/path
 expect_exit '-H deferred'              2 "$BIN" find -H tree
 
+# --- -exec {} expansion is sized exactly (v1.1.11) ----------------------
+# ⛔ The rebuild buffer was `tlen + plen * 4`, silently assuming at most four
+# `{}` in one token. A fifth ran the loop past the allocation: kriya emitted four
+# copies of the path, a truncated fifth, then bytes from the ADJACENT HEAP OBJECT
+# (its own cached PATH) — a heap disclosure straight into the child's argv.
+# Compared against GNU, which is the oracle for the expected text.
+mkdir -p brace/a_reasonably_long_directory_name
+touch brace/a_reasonably_long_directory_name/target_file.txt
+
+for n in 1 2 4 5 8 20; do
+    tok=$(awk -v n="$n" 'BEGIN{s="{}"; for(i=1;i<n;i++) s=s "-{}"; print s}')
+    k=$("$BIN" find brace -name 'target*' -exec echo "$tok" \; 2>&1)
+    g=$(find      brace -name 'target*' -exec echo "$tok" \; 2>&1)
+    expect_eq "-exec with $n {} matches GNU" "$g" "$k"
+done
+
+# plen < 2 makes the per-occurrence delta NEGATIVE (the result is shorter than
+# the token) — the arithmetic has to stay correct there too.
+mkdir -p br2
+touch br2/x
+k=$(cd br2 && "$BIN" find . -name x -exec echo 'A{}B{}C{}D{}E{}F' \; 2>&1)
+g=$(cd br2 && find      . -name x -exec echo 'A{}B{}C{}D{}E{}F' \; 2>&1)
+expect_eq "-exec with a short path matches GNU" "$g" "$k"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

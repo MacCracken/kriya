@@ -198,6 +198,35 @@ echo "$out" | grep -q "^removed 'vtree/sub/b'" && PASS=$((PASS + 1)) || { FAIL=$
 echo "$out" | grep -q "^removed directory 'vtree/sub'" && PASS=$((PASS + 1)) || { FAIL=$((FAIL + 1)); echo "FAIL verbose missing vtree/sub dir" >&2; }
 echo "$out" | grep -q "^removed directory 'vtree'" && PASS=$((PASS + 1)) || { FAIL=$((FAIL + 1)); echo "FAIL verbose missing vtree dir" >&2; }
 
+# --- POSIX "." / ".." operand refusal (v1.1.11) -------------------------
+# ⛔ `rm -r dir/sub/..` resolved to the PARENT and emptied it: measured on a
+# parent/{keep.txt,sub/} tree, BOTH were deleted and rm then reported "no such
+# file or directory" — an error for an operation that had already destroyed the
+# wrong directory. POSIX requires the refusal; GNU refuses even under -f.
+# The refusal is PER-OPERAND (exit 1, other operands still run), unlike the
+# ADR-0004 protected-path check which is invocation-wide.
+mkdir -p dot/d/sub dot/sub
+echo KEEP > dot/keep.txt
+echo DF   > dot/d/f
+mkdir -p dot/... dot/a.. dot/..x
+
+expect_exit "rm -r -f .        refused" 1 sh -c "cd dot && '$BIN' rm -r -f ."
+expect_exit "rm -r -f ..       refused" 1 sh -c "cd dot && '$BIN' rm -r -f .."
+expect_exit "rm -r -f sub/..   refused" 1 sh -c "cd dot && '$BIN' rm -r -f sub/.."
+expect_exit "rm -r -f d/.      refused" 1 sh -c "cd dot && '$BIN' rm -r -f d/."
+expect_exit "rm -r -f d/./     refused" 1 sh -c "cd dot && '$BIN' rm -r -f d/./"
+# Nothing was touched by any of the above.
+expect_present "keep.txt survives the refusals" dot/keep.txt
+expect_present "d/f survives the refusals"      dot/d/f
+expect_present "sub/ survives the refusals"     dot/sub
+# ...and names that merely CONTAIN dots are still ordinary, removable names.
+expect_exit "rm -r ... removes"  0 "$BIN" rm -r dot/...
+expect_exit "rm -r a.. removes"  0 "$BIN" rm -r dot/a..
+expect_exit "rm -r ..x removes"  0 "$BIN" rm -r dot/..x
+expect_absent "... gone" dot/...
+expect_absent "a.. gone" dot/a..
+expect_absent "..x gone" dot/..x
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

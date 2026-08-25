@@ -5,7 +5,10 @@
 
 include "src/lib/exit.cyr"
 include "src/lib/errmsg.cyr"
+include "src/lib/sys.cyr"
 include "src/lib/path.cyr"
+include "src/lib/fs.cyr"
+include "src/lib/protected.cyr"
 include "src/lib/args.cyr"
 include "src/cmd/true.cyr"
 include "src/cmd/false.cyr"
@@ -127,6 +130,72 @@ fn main() {
     assert_eq(kriya_parse_octal_mode("755a"),  0 - 1,  "trailing non-digit -> -1");
     assert_eq(kriya_parse_octal_mode("-1"),    0 - 1,  "leading sign -> -1");
     assert_eq(kriya_parse_octal_mode(0),       0 - 1,  "null pointer -> -1");
+
+
+    # =================================================================
+    # ADR 0004 root guard — the highest-consequence predicate in kriya.
+    #
+    # ⛔ THESE ARE NOT STYLE TESTS. `is_protected_path` is the only thing
+    # standing between a mistyped `rm -rf` operand and the filesystem, and it
+    # decides purely on TEXT: `fs_path_absolute` then a string compare against
+    # the table. That makes it exactly as strong as `path_normalize`'s handling
+    # of `..`, `.` and duplicate slashes — so every spelling of "/" that a shell
+    # can produce is pinned here rather than trusted.
+    #
+    # ⚠ There is no safe way to test this end-to-end: exercising it through
+    # `rm` means running `rm` against `/` and finding out. The predicate is the
+    # test surface, and it has to carry the whole weight.
+    # =================================================================
+    test_group("is_protected_path — every route to /");
+    assert_eq(is_protected_path("/"),                 1, "/ is protected");
+    assert_eq(is_protected_path("//"),                1, "// -> /");
+    assert_eq(is_protected_path("///"),               1, "/// -> /");
+    assert_eq(is_protected_path("/."),                1, "/. -> /");
+    assert_eq(is_protected_path("/./"),               1, "/./ -> /");
+    assert_eq(is_protected_path("/.."),               1, "/.. -> / (no walk above root)");
+    assert_eq(is_protected_path("/../"),              1, "/../ -> /");
+    assert_eq(is_protected_path("/../.."),            1, "/../.. -> /");
+    assert_eq(is_protected_path("/./././"),           1, "/./././ -> /");
+    assert_eq(is_protected_path("//..//"),            1, "//..// -> / (dup slashes + ..)");
+    assert_eq(is_protected_path("/home/.."),          1, "/home/.. -> /");
+    assert_eq(is_protected_path("/home/../"),         1, "/home/../ -> /");
+    assert_eq(is_protected_path("/usr/bin/../../"),   1, "/usr/bin/../../ -> /");
+    assert_eq(is_protected_path("/nonexistent/.."),   1, ".. through a missing dir still -> / (text-only)");
+
+    test_group("is_protected_path — must NOT over-refuse");
+    assert_eq(is_protected_path("/home"),             0, "/home is not protected");
+    assert_eq(is_protected_path("/tmp"),              0, "/tmp is not protected");
+    assert_eq(is_protected_path("/home/.."),          1, "(control: /home/.. IS /)");
+    assert_eq(is_protected_path("/home/..x"),         0, "/home/..x is a name, not a walk");
+    assert_eq(is_protected_path("/..."),              0, "/... is a name, not a walk");
+
+    # =================================================================
+    # fs_path_absolute — the frame both the root guard and cp's
+    # copy-into-itself check compare in. Absolute inputs must be a pure
+    # normalize; that is the half the guard depends on.
+    # =================================================================
+    test_group("fs_path_absolute");
+    assert_eq(streq(fs_path_absolute("/a/b"),        "/a/b"), 1, "already absolute -> normalized");
+    assert_eq(streq(fs_path_absolute("/a//b"),       "/a/b"), 1, "duplicate slash collapses");
+    assert_eq(streq(fs_path_absolute("/a/./b"),      "/a/b"), 1, "single dot drops");
+    assert_eq(streq(fs_path_absolute("/a/c/../b"),   "/a/b"), 1, ".. resolves textually");
+    assert_eq(streq(fs_path_absolute("/a/b/"),       "/a/b"), 1, "trailing slash trims");
+    assert_eq(streq(fs_path_absolute("/"),           "/"),    1, "/ stays /");
+    assert_eq(streq(fs_path_absolute(0),             "/"),    1, "null operand -> /");
+
+    # =================================================================
+    # path_is_under — the component-boundary rule. cp's copy-into-itself
+    # guard rides on this, so a prefix-without-boundary match would make
+    # cp refuse legitimate copies (/var vs /variable).
+    # =================================================================
+    test_group("path_is_under — component boundaries");
+    assert_eq(path_is_under("/a", "/a"),        1, "a path is under itself");
+    assert_eq(path_is_under("/a", "/a/b"),      1, "child is under parent");
+    assert_eq(path_is_under("/a", "/a/b/c"),    1, "grandchild is under parent");
+    assert_eq(path_is_under("/var", "/variable"), 0, "/variable is NOT under /var");
+    assert_eq(path_is_under("/a/b", "/a"),      0, "parent is not under child");
+    assert_eq(path_is_under("/a", "/b"),        0, "siblings are unrelated");
+    assert_eq(path_is_under("/a", "/a/../b"),   0, ".. in the candidate normalizes out first");
 
     return assert_summary();
 }

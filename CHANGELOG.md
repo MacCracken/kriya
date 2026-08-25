@@ -6,6 +6,192 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.1.11] - 2026-08-25 — the P-1 sweep: nine repairs, six of them data loss, corruption or disclosure
+
+A priority-one audit across security, hardening, correctness, refactor and performance, and the
+repairs that came out of it. **No new utilities and no new flags** — every change here makes an
+existing verb stop doing something wrong.
+
+Everything below was **reproduced against a shipped build** before it was touched and **re-verified
+against GNU coreutils** after. Ten further defects were confirmed and deliberately **not** fixed here
+because each needs a redesign rather than a patch; they are itemised with their reproductions in
+[roadmap.md](docs/development/roadmap.md) under **M17**. Three reported findings were **refuted** and
+are recorded at the end so nobody re-litigates them.
+
+### Fixed — a failed write exited 0 (every applet, silently truncated output)
+
+⛔ **`seq 1 5 > /dev/full` printed nothing and exited 0.** So did `echo`, `printf`, `wc`, `ls`,
+`head`, `nl`, `cut`, `grep` and the rest — all 38 verbs share one writer, and v1.1.8 routed every
+site through `k_write` without making any of the **~540 call sites check its return**. A full disk, a
+failing device or a quota stop produced truncated output *and* success, which is the worst possible
+shape: the caller's `&&` chain proceeds on a lie.
+
+Threading a status back through every applet's emit path is a rewrite, so `k_write` now records the
+first failure in sticky state and the **dispatcher consults it once, at exit** (`src/main.cyr`).
+Output matches GNU: `kriya seq: write error: no space left on device`, exit 1.
+
+⚠ It is a net, not a replacement. The dispatcher only speaks up when the applet itself returned
+success — `sort` and `tr` already detected the failure and keep their own more specific messages.
+⚠ EPIPE never reaches it: kriya leaves SIGPIPE at its default disposition, so `kriya yes | head` is
+still killed by the signal (141, matching GNU). That is now pinned by a test, because the obvious
+version of this fix would have broken it.
+
+**The Linux arm of `k_write` also stopped dropping short writes.** It was a bare `syscall(1, …)`
+while the agnos arm looped, so the two targets disagreed about the one thing the function exists to
+guarantee. Linux `write(2)` returns short whenever a signal lands mid-transfer, and on a pipe past
+`PIPE_BUF`.
+
+### Fixed — `k_access` on agnos smashed 96 bytes of its own stack frame
+
+⛔ **`var st[48]` for a buffer the callee fills with 144 bytes.** The agnos arm confused agnos's
+48-byte *wire* struct with the canonical Linux layout `_k_agnos_stat` actually writes — it takes the
+wire form in its own `var a[48]` and **translates**, always emitting 144 bytes. Reachable from all
+four PATH-probing verbs: `which`, `env`, `xargs` and `find -exec`.
+
+⭐ This is the [M15a](docs/development/roadmap.md) rule biting for the second time in three releases:
+**a function-local `var X[N]` is N BYTES**; the ×8 u64 unit applies only at module scope. v1.1.9 lost
+`find` to it. Reproduced on the host with the same shape — the next local sits exactly 48 bytes away
+and the write walks through it into the return address: **SIGSEGV**. Every other stat buffer in kriya
+was already `[144]`; this was the lone outlier, and its `# agnos 48-byte stat` comment is what made
+it look deliberate.
+
+### Fixed — `cp -r` into its own subdirectory recursed until it dumped core
+
+⛔ **12,188 directories created, then a core dump, with the half-built tree left on disk.**
+`cp -r dir dir/sub` descended into the copy it had just made and made another. One mistyped operand
+fills a filesystem and crashes. GNU refuses immediately; now so does kriya, with the same message and
+exit code — and it refuses **before creating anything**, where GNU leaves two levels behind.
+
+`cmd_cp` already resolves `cp -r a b/` to `b/a` before the recursive call, so the check compares the
+directory that would actually be created. Both operands go through the new
+`fs_path_absolute` first, so `cp -r /tmp/x/a a/sub` from `/tmp/x` is caught too. Verified against GNU
+across nine shapes, including the four that **must not** be refused.
+
+### Fixed — `rm` deleted the parent when handed a `.` or `..` operand
+
+⛔ **`rm -r parent/sub/..` emptied `parent`** — `keep.txt` and `sub/` both gone — and *then* reported
+"no such file or directory": an error message for an operation that had already destroyed the wrong
+directory. `rm -r d/.` did the same to `d`'s contents. POSIX requires refusing this shape and GNU
+refuses it even under `-f`.
+
+The refusal is **per-operand** (other operands still run, exit 1), unlike the ADR-0004 protected-path
+check above it, which is invocation-wide and atomic. Names that merely contain dots — `...`, `a..`,
+`..x` — stay ordinary removable names. Verified against GNU across all eight shapes.
+
+### Fixed — `ln -f` destroyed the destination when it could not create the link
+
+⛔ **`ln -f /nonexistent-src keep.txt` reported the error and deleted `keep.txt`.** `-f` unlinked
+first and attempted the link second, so every failure after that point left nothing behind. GNU
+reports the same error and leaves the file alone.
+
+kriya now links under a temp name in the destination's directory and `rename`s over the target, which
+is what GNU does — the destination is never absent.
+
+⛔ **"Unlink only on EEXIST" is not good enough, and the reason is not obvious.** The tempting
+shortcut treats EEXIST as proof the source is linkable — but **the kernel checks EEXIST before
+EXDEV**. Verified against `linkat(2)` directly: a cross-device link onto an existing path answers
+errno 17, not 18. That shortcut still deleted the destination and then failed with "invalid
+cross-device link" — the same bug, narrowed rather than fixed. The temp name needs no `getpid`
+(which has no agnos peer): `link`/`symlink` are atomic create-if-absent, so a taken name simply
+answers EEXIST and the next one is tried.
+
+### Fixed — an unset `PATH` made `xargs` and `find -exec` run a binary from the current directory
+
+⛔ **`env -u PATH xargs ls` executed an attacker-supplied `./ls`.** `execve` does no path search: a
+slash-free name is resolved by the **kernel** against the current directory. Both "PATH is unset" and
+"searched PATH and found nothing" ended in `execve("ls")`.
+
+An unset PATH now falls back to `/bin:/usr/bin` — the value glibc's `execvp` takes from
+`confstr(_CS_PATH)` — and a failed search returns *not found* rather than a bare name, reported as
+POSIX exit 127. An empty PATH is left alone: POSIX defines a zero-length prefix as the current
+directory, so `PATH=` legitimately means `.` — but it is now resolved explicitly, through the same
+access/stat check as any other entry.
+
+⭐ **`xargs` and `find` were carrying byte-identical 45-line copies of the resolver**, so this hole
+had to be found and fixed twice. Both now call one `fs_resolve_in_path` in `src/lib/fs.cyr`.
+
+### Fixed — `find -exec` leaked adjacent heap into the child's argv
+
+⛔ **The `{}` rebuild buffer was `tlen + plen * 4`** — a silent assumption of at most four
+occurrences in one token. A fifth ran the loop past the allocation:
+`find t -name f -exec echo '{}-{}-{}-{}-{}' \;` emitted four copies of the path, a truncated fifth,
+and then bytes from the **adjacent heap object** (kriya's own cached PATH string), which went into
+the argument handed to `execve`. A heap disclosure straight into a child process, plus corruption of
+kriya's own state.
+
+Occurrences are now counted and the size is **exact** — `tlen + count * (plen - 2)`, which stays
+correct when `plen < 2` and the result is shorter than the token. Byte-identical to GNU from 1 to 20
+occurrences.
+
+### Fixed — `realpath` silently answered the wrong path past 16 KiB
+
+⛔ **A 16,427-byte operand made `kriya realpath -m` print `…/rp/d/.d` where GNU printed `…/rp/d/f`,
+and exit 0.** Not a crash — a wrong canonical path reported as success, which is worse, because
+`realpath` / `readlink -f` output is normally fed straight into the next command. `fs_realpath`'s
+append path had always been bounds-checked, which made the whole function look guarded, while the
+seed copied `input` straight from argv into a fixed 16 KiB buffer with no check at all. The
+symlink-rebuild path had the same gap, where `tl + rest_len` can approach twice the buffer.
+
+All three copies are now checked and answer `ENAMETOOLONG`. ⚠ kriya therefore **refuses** inputs GNU
+still resolves; making the buffers growable is roadmap **M17j**. An honest refusal beats a wrong
+answer.
+
+### Fixed — the ADR-0004 root guard failed open when it could not canonicalize
+
+⛔ **A cwd over 4,095 bytes makes `getcwd` fail**, and `protected_canonicalize` then handed back the
+*relative* operand, which failed to string-match `/` and let `rm` proceed — the refusal failed open
+exactly when it could not do its job. It now fails **closed**: `fs_path_absolute` returns an absolute
+path in every success case, so a relative result can only mean the fallback fired, and the operand is
+refused (exit 2).
+
+⚠ With the `/`-only table this was near-theoretical — an operand can only resolve to `/` if it ends
+in `.` or `..`, which the new `rm` check already refuses. It stops being theoretical the moment the
+table grows, and **ADR 0004 explicitly invites maintainers to add `/etc`, `/usr`, `/boot` without a
+successor ADR**. `../../etc` from a deep cwd has no dot final component.
+
+### Changed — one shared `fs_path_absolute`, and `path.cyr` keeps its purity
+
+`protected_canonicalize`'s body moved to `fs_path_absolute` in `src/lib/fs.cyr` when `cp`'s new guard
+turned out to need the same absolute-and-textually-normalized frame. ⚠ It lives in `fs.cyr` rather
+than next to `path_normalize` because it calls `getcwd`, and `path.cyr`'s header commits to "pure
+string operations: nothing here touches the filesystem" — a boundary worth more than the convenience.
+Writing it into `path.cyr` first also introduced a `path.cyr` → `sys.cyr` dependency that
+`tests/kriya.tcyr` does not satisfy, and it **built green anyway** because cyrius only rejects
+*reachable* undefined functions. That trap is now [M15e](docs/development/roadmap.md).
+
+### Added — tests, and the roadmap organisation the sweep earned
+
+**137 in-process assertions** (119 unit + 18 POSIX, up from 104) and **1,081 smoke cases across 32
+scripts** (up from 1,012 across 31). New coverage:
+
+- **The ADR-0004 root guard is now pinned by 21 unit assertions** — every spelling of `/` a shell can
+  produce (`//`, `/.`, `/..`, `/home/../`, `//..//`, `.` through a missing directory) plus the
+  names that must **not** be refused. ⚠ There is no safe way to test this end-to-end: exercising it
+  through `rm` means running `rm` against `/` and finding out. The predicate is the test surface and
+  it carries the whole weight.
+- `fs_path_absolute` and `path_is_under` boundary assertions — the latter because `cp`'s guard rides
+  on it and a prefix-without-boundary match would make `cp` refuse legitimate copies (`/var` vs
+  `/variable`).
+- `scripts/smoke-write-errors.sh` — 29 new cases over `/dev/full`, skipping honestly where it is
+  unavailable, plus the SIGPIPE regression guard.
+- Refusal and non-refusal cases for `rm` dot-operands, `ln -f`, `cp -r` into itself, `find -exec`
+  multi-`{}`, and the `xargs` CWD-execution hole.
+
+Roadmap reorganised: **M15** is a new standing codegen/toolchain-interaction watchlist (each entry
+with a mechanical detection and the incident that motivated it), **M17** holds the sweep's deferred
+defects, and **M16** is the AGNOS-build-target bucket **renumbered from M11**, which collided with
+the Cyrius proposal sweeps and sat above M10 in the reading order.
+
+### Not a problem — three findings refuted, recorded so they are not re-litigated
+
+- **`rm -r symlink-to-dir/` follows the link.** It does, and it empties the target — but **GNU does
+  exactly the same**. The claim that GNU refuses was wrong. It remains a divergence from kriya's own
+  ADR-0003 stance and is tracked as **M17i**, as a policy question rather than a regression.
+- **`cp -f` deletes a pre-existing destination when the copy fails.** Not reproducible: under
+  `ulimit -f`, kriya and GNU both leave the same 512-byte partial destination.
+- **`cp -R A/. A` zeroes every file.** Real before this release; the copy-into-itself guard above
+  closes it, with `A/.` refused exactly as GNU refuses it.
+
 ## [1.1.10] - 2026-08-25 — toolchain pin 6.5.35; the allocator that finally reuses registers
 
 Toolchain pin moved **6.5.18 → 6.5.35** (`lib sync --full`, 108 stdlib files) — 17 upstream releases.

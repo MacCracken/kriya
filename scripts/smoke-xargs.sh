@@ -110,6 +110,24 @@ mine=$(printf 'a\n' | $BIN xargs basename)
 gnu=$( printf 'a\n' | xargs    basename)
 expect_eq 'PATH resolves'      "$gnu" "$mine"
 
+# --- a command that cannot be found must not fall back to the CWD (v1.1.11) ---
+# ⛔ `execve` does NO path search: a slash-free name is resolved by the KERNEL
+# against the CURRENT DIRECTORY. xargs used to hand the bare name over whenever
+# PATH was unset or the search came up empty, so a stray `./ls` in the working
+# directory got executed instead of the real one. Demonstrated: `env -u PATH
+# xargs ls` ran an attacker-supplied ./ls. Now an unset PATH falls back to
+# /bin:/usr/bin (what glibc's execvp does) and a failed search exits 127.
+mkdir -p cwdexec
+printf '#!/bin/sh\necho PWNED-FROM-CWD\n' > cwdexec/ls
+chmod +x cwdexec/ls
+
+expect_eq "unset PATH does not run ./ls" "" \
+    "$(cd cwdexec && printf 'ITEM\n' | env -u PATH "$BIN" xargs ls 2>/dev/null | grep PWNED)"
+expect_exit "missing command exits 127" 127 \
+    sh -c "printf 'ITEM\n' | '$BIN' xargs definitely-not-a-real-command"
+# A real command still resolves and runs.
+expect_eq "PATH lookup still works" "a b" "$(printf 'a\nb\n' | "$BIN" xargs echo)"
+
 # --- summary ---------------------------------------------------------
 
 TOTAL=$((PASS + FAIL))

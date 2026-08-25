@@ -132,13 +132,43 @@ fn _ln_resolve_dest(target, dest_arg, no_deref): i64 {
 # Make one link. Returns 0 on success, negative errno on failure.
 # `symbolic`: -s flag.  `physical`: -P (no-follow for hard link).
 # `force`: -f (unlink existing dest first if needed).
-fn _ln_make(target, link, symbolic, physical, force, verbose): i64 {
-    if (force == 1) {
-        # Best-effort unlink. We don't care about ENOENT; any other
-        # errno will be surfaced by the link call below.
-        k_unlink(link);
+# One link attempt. Returns 0 or a negative errno and reports nothing — the
+# caller retries this under -f, so a diagnostic here would fire twice.
+#
+# Hard link: on Linux, linkat gives an explicit follow policy (SYS_LINKAT = 265,
+# AT_FDCWD = -100, AT_SYMLINK_FOLLOW = 1024). Default (no -P) follows the source
+# symlink, which is POSIX `ln` behaviour; -P does not. agnos has no *at() family
+# and no symlinks, so the plain hard link routes through k_link (ext2 supports
+# hard links).
+fn _ln_link_once(target, link, symbolic, physical): i64 {
+    if (symbolic == 1) {
+        return k_symlink(target, link);
     }
-    var r: i64 = 0;
+    if (K_HAVE_ATFAMILY == 1) {
+        var flags: i64 = 1024;
+        if (physical == 1) { flags = 0; }
+        return fs_linkat(0 - 100, target, 0 - 100, link, flags);
+    }
+    return k_link(target, link);
+}
+
+# "<dirname(link)>/.kriya-ln-tmp-N". Same directory as the final link, so the
+# rename that follows is same-filesystem and therefore atomic.
+fn _ln_tmp_name(link, n): i64 {
+    var dir = path_dirname(link);
+    var b = alloc(20);
+    var s = ".kriya-ln-tmp-";
+    var i: i64 = 0;
+    while (i < 14) {
+        store8(b + i, load8(s + i));
+        i = i + 1;
+    }
+    store8(b + 14, 48 + n);
+    store8(b + 15, 0);
+    return path_join(dir, b);
+}
+
+fn _ln_make(target, link, symbolic, physical, force, verbose): i64 {
     if (symbolic == 1) {
         # agnos has no symlinks (K_HAVE_SYMLINK == 0); refuse cleanly
         # rather than silently misbehaving. On Linux this branch is DCE'd.
@@ -146,19 +176,66 @@ fn _ln_make(target, link, symbolic, physical, force, verbose): i64 {
             k_write( 2, "kriya ln: symbolic links not supported on AGNOS\n", 48);
             return EXIT_FAILURE;
         }
-        r = k_symlink(target, link);
-    } else {
-        # Hard link. On Linux, use linkat for explicit follow policy:
-        # SYS_LINKAT = 265. AT_FDCWD = -100. AT_SYMLINK_FOLLOW = 1024.
-        # Default (no -P): follow source symlink — POSIX ln behavior.
-        # -P: do not follow. agnos has no *at()/symlinks, so route the
-        # plain hard link through k_link (ext2 supports hard links).
-        if (K_HAVE_ATFAMILY == 1) {
-            var flags: i64 = 1024;
-            if (physical == 1) { flags = 0; }
-            r = fs_linkat(0 - 100, target, 0 - 100, link, flags);
-        } else {
-            r = k_link(target, link);
+    }
+
+    # ⛔ -f MUST NOT UNLINK BEFORE IT KNOWS A REPLACEMENT CAN BE MADE. It used to
+    # unlink unconditionally and then attempt the link, so any failure after that
+    # point destroyed the destination and put nothing in its place. Measured:
+    # `ln -f /nonexistent-src keep.txt` reported "no such file or directory" and
+    # DELETED keep.txt, whose contents were the only copy. GNU reports the same
+    # error and leaves the file alone. `ln -f` across filesystems (EXDEV) had the
+    # same shape.
+    #
+    # ⭐ So the link is attempted FIRST, and an existing destination is replaced
+    # by LINK-TO-TEMP-THEN-RENAME, which is what GNU does. The destination is
+    # never absent: `renameat` swaps a finished link over it atomically, and if
+    # anything fails first the temp is cleaned up and the original still stands.
+    #
+    # ⛔ "UNLINK THEN RETRY" IS NOT GOOD ENOUGH, AND THE REASON IS NON-OBVIOUS.
+    # The tempting shortcut is to treat EEXIST as proof the source is linkable
+    # and only then unlink — but the KERNEL CHECKS EEXIST BEFORE EXDEV. Verified
+    # against linkat(2) directly: a cross-device link onto an existing path
+    # answers errno 17, not 18. So that shortcut still deleted the destination
+    # and then failed with "invalid cross-device link", which is exactly the bug,
+    # narrowed rather than fixed.
+    #
+    # The temp name needs no `getpid` — `link`/`symlink` are atomic
+    # create-if-absent, so a colliding name simply answers EEXIST and we take the
+    # next one. Ten candidates is far past any real contention; beyond that we
+    # report EEXIST rather than guessing.
+    var r = _ln_link_once(target, link, symbolic, physical);
+    if (r == (0 - 17)) {                                   # EEXIST
+        if (force == 1) {
+            var n: i64 = 0;
+            var placed: i64 = 0;
+            var last = r;
+            while (n < 10) {
+                if (placed == 0) {
+                    var tmp = _ln_tmp_name(link, n);
+                    var tr = _ln_link_once(target, tmp, symbolic, physical);
+                    if (tr == 0) {
+                        var mr = fs_rename(tmp, link);
+                        if (mr == 0) {
+                            placed = 1;
+                            last = 0;
+                        } else {
+                            k_unlink(tmp);
+                            last = mr;
+                            n = 10;                        # give up: report mr
+                        }
+                    } else {
+                        # EEXIST means this temp name is taken — try the next.
+                        # Anything else is the real reason the link cannot be
+                        # made, and the destination must survive it.
+                        if (tr != (0 - 17)) {
+                            last = tr;
+                            n = 10;
+                        }
+                    }
+                }
+                n = n + 1;
+            }
+            r = last;
         }
     }
     if (r != 0) {

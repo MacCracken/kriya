@@ -170,6 +170,39 @@ expect_exit "preserve /etc link"      0 "$BIN" cp -R nofollow_test nofollow_copy
 expect_type "etc_link preserved"      symlink nofollow_copy/etc_link
 expect_link_target "etc_link target"  nofollow_copy/etc_link /etc
 
+# --- copy-a-directory-into-itself refusal (v1.1.11) ---------------------
+# ⛔ This used to recurse forever. `cp -r dir dir/sub` descended into the copy
+# it had just made and made another: 12,188 directories created before the
+# process DUMPED CORE, with the half-built tree left behind. One mistyped
+# operand, a full filesystem and a crash. GNU refuses immediately; so do we.
+#
+# The refusal must be exact in BOTH directions — an over-broad rule would
+# reject the legitimate copies below, which are the common case.
+mkdir -p self/sub
+echo payload > self/f
+echo nested  > self/sub/g
+
+# Refused: destination lands inside the source.
+expect_exit "cp -r X X (onto itself)"        1 "$BIN" cp -r self self
+expect_exit "cp -r X X/sub (into own subdir)" 1 "$BIN" cp -r self self/sub
+expect_exit "cp -r X X/sub/ (trailing slash)" 1 "$BIN" cp -r self self/sub/
+# Refused before ANY directory is created — kriya leaves no partial tree
+# (GNU creates two levels before it notices).
+SELF_DIRS=$(find self -type d | wc -l | tr -d ' ')
+expect_eq  "no partial tree left behind"     "2" "$SELF_DIRS"
+# ...and refused when the two operands are spelled differently.
+expect_exit "cp -r ABS X/sub (abs vs rel)"   1 "$BIN" cp -r "$WORK/self" self/sub
+
+# Allowed: destination is outside the source. These are the copies the guard
+# must not touch.
+expect_exit "cp -r X sibling"                0 "$BIN" cp -r self sibling
+expect_type "sibling copied"                 dir sibling
+expect_exit "cp -r X/sub X/sub2 (same parent)" 0 "$BIN" cp -r self/sub self/sub2
+expect_type "sub2 created"                   dir self/sub2
+mkdir -p intodir
+expect_exit "cp -r X existing-dir/"          0 "$BIN" cp -r self intodir/
+expect_type "nested under existing dir"      dir intodir/self
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

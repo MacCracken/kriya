@@ -598,6 +598,31 @@ fn _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose): i
         return 0;
     }
     if (fs_is_dir(&st) == 1) {
+        # ⛔ REFUSE TO COPY A DIRECTORY INTO ITSELF — THIS RECURSES FOREVER, AND IT IS A TYPO, NOT AN
+        # EXOTIC INPUT. `cp -r dir dir/backup` used to descend into the copy it had just made, make
+        # another, and descend again: measured at 12,188 directories created before the process
+        # DUMPED CORE, with the half-built tree left on disk. On a real filesystem that is a disk-fill
+        # plus a crash from one mistyped operand. GNU refuses immediately, and so do we now.
+        #
+        # ⭐ `dst` IS ALREADY THE EFFECTIVE DESTINATION, which is what makes this check a two-liner:
+        # `cmd_cp` resolved `cp -r a b/` to `b/a` via `path_join` before calling here, so the
+        # comparison is against the directory that would actually be created, exactly as GNU reports
+        # it ("cannot copy a directory, 'a', into itself, 'a/sub/a'").
+        #
+        # Both sides go through `fs_path_absolute` first: the operands only share a textual prefix once
+        # they are in the same frame, so `cp -r /tmp/x/a a/sub` from /tmp/x is caught too.
+        # ⚠ Equal paths land here as well (`cp -r a/sub a` resolves `dst` back to `a/sub`), where GNU
+        # prefers its "are the same file" wording. Same refusal, same exit code, different sentence.
+        var abs_src = fs_path_absolute(src);
+        var abs_dst = fs_path_absolute(dst);
+        if (path_is_under(abs_src, abs_dst) == 1) {
+            k_write( 2, "kriya cp: cannot copy a directory, '", 36);
+            k_write( 2, src, strlen(src));
+            k_write( 2, "', into itself, '", 17);
+            k_write( 2, dst, strlen(dst));
+            k_write( 2, "'\n", 2);
+            return 0 - 22;                      # EINVAL
+        }
         # follow already reflects whether we stat'd (1) or lstat'd (0).
         return _cp_dir_top(src, dst, policy, follow, force, preserve, verbose, &st);
     }

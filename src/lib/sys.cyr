@@ -91,6 +91,38 @@ fn k_read(fd, buf, n): i64 {
     #endif
 }
 
+# ⛔ STICKY WRITE-FAILURE STATE — THE SAFETY NET FOR ~540 IGNORED RETURN VALUES.
+# v1.1.8 routed every write site through `k_write` so short writes stopped silently dropping data,
+# but it did not make the ~540 call sites CHECK the result, and threading a status back through
+# every applet's emit path is a rewrite, not a fix. So the failure is recorded here instead and the
+# dispatcher consults it once, at exit (`src/main.cyr`).
+#
+# ⛔ WITHOUT THIS, A FAILED WRITE PRODUCED TRUNCATED OUTPUT **AND EXIT 0** — the worst shape there
+# is, because the caller's `&&` chain proceeds on a lie. Measured against GNU: `seq 1 3 >/dev/full`
+# is `seq: write error: No space left on device` / exit 1 on GNU, and was silent / exit 0 here.
+# Same for `echo`, `printf`, `yes` and `wc` — every applet, because they all share this one writer.
+#
+# ⚠ It is a NET, NOT A REPLACEMENT for per-utility error handling: the dispatcher only speaks up
+# when the applet itself returned success. An applet that already detected the failure and returned
+# nonzero (`cp`, `mv`, `tee` on their destination fds) keeps its own exit code and message.
+#
+# ⚠ EPIPE does not reach here. kriya leaves SIGPIPE at its default disposition, so `kriya yes | head`
+# is killed by the signal (exit 141, matching GNU) before `write` ever returns -EPIPE.
+var _K_WRITE_BAD:   i64 = 0;    # 1 once any write has failed
+var _K_WRITE_ERRNO: i64 = 0;    # errno of the FIRST failure; 0 = short write with no errno
+
+fn _k_write_note(errno): i64 {
+    # First failure wins — later ones are usually consequences of the first.
+    if (_K_WRITE_BAD == 0) {
+        _K_WRITE_BAD = 1;
+        _K_WRITE_ERRNO = errno;
+    }
+    return 0;
+}
+
+fn k_write_failed(): i64 { return _K_WRITE_BAD; }
+fn k_write_errno(): i64 { return _K_WRITE_ERRNO; }
+
 fn k_write(fd, buf, n): i64 {
     # write is #1 on BOTH targets, but route it for one consistent layer.
     #ifdef CYRIUS_TARGET_AGNOS
@@ -113,9 +145,15 @@ fn k_write(fd, buf, n): i64 {
         var r = syscall(1, fd, buf + done, n - done);
         if (r > 0) { done = done + r; stall = 0; }
         else {
-            if (r < 0) { return r; }               # a real error — surface it, do not spin on it
+            if (r < 0) {                           # a real error — surface it, do not spin on it
+                _k_write_note(0 - r);
+                return r;
+            }
             stall = stall + 1;
-            if (stall > 20000) { return done; }    # abandoned pipe: report the short count honestly
+            if (stall > 20000) {                   # abandoned pipe: report the short count honestly
+                _k_write_note(0);
+                return done;
+            }
             syscall(44);
             var sp = 0;
             while (sp < 2000) { sp = sp + 1; }
@@ -124,7 +162,33 @@ fn k_write(fd, buf, n): i64 {
     return done;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(1, fd, buf, n);
+    # ⛔ THE LINUX ARM LOOPS TOO. It used to be a bare `syscall(1, fd, buf, n)`, which made the two
+    # targets disagree about the one thing this function exists to guarantee: agnos retried a short
+    # write, Linux dropped the remainder on the floor. Linux `write(2)` returns a short count
+    # whenever a signal lands after some bytes are already transferred, and on a pipe past PIPE_BUF —
+    # so this is a real path, not a theoretical one, and it loses data silently when it fires.
+    var done = 0;
+    while (done < n) {
+        var r = syscall(1, fd, buf + done, n - done);
+        if (r > 0) { done = done + r; }
+        else {
+            if (r < 0) {
+                # EINTR (-4) means nothing was written and the call is restartable; anything else
+                # is real. No stall counter is needed on this arm — a blocking Linux fd either makes
+                # progress, errors, or blocks in the kernel.
+                if (r != (0 - 4)) {
+                    _k_write_note(0 - r);
+                    return r;
+                }
+            } else {
+                # write() answered 0 with bytes still outstanding: no progress is possible, so
+                # report the short count rather than spinning on it.
+                _k_write_note(0);
+                return done;
+            }
+        }
+    }
+    return done;
     #endif
 }
 
@@ -391,7 +455,18 @@ fn k_readlink(path, buf, bufsize): i64 {
 # (X_OK/R_OK/W_OK all collapse to "does it exist?"). mode bits: R=4 W=2 X=1.
 fn k_access(path, mode): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    var st[48];                                            # agnos 48-byte stat
+    # ⛔ 144, NOT 48 — this buffer is `k_stat`'s OUTPUT, not agnos's wire format. The 48-byte
+    # packed struct agnos #33 returns never reaches a caller: `_k_agnos_stat` takes it in its own
+    # `var a[48]` and TRANSLATES it, zeroing and filling the canonical Linux 144-byte layout at
+    # `buf` on both targets (see the comment above `_k_agnos_stat`). A function-local `var X[N]`
+    # is N BYTES, so `var st[48]` gave the translator a 48-byte destination for a 144-byte write
+    # and smashed 96 bytes of this frame — measured on the host with the same shape: the very next
+    # local sits exactly 48 bytes away and the write walks straight through it into the return
+    # address (SIGSEGV). Every other stat buffer in kriya is already `[144]`; this was the one
+    # outlier, and the `# agnos 48-byte stat` comment is what made it look deliberate.
+    # ⚠ agnos-arm only, and reachable from all four PATH-probing utilities — `which`, `env`,
+    # `xargs` and `find -exec` all resolve a command through `k_access(candidate, 1)`.
+    var st[144];                                           # canonical Linux stat layout (both targets)
     if (k_stat(path, &st) == 0) { return 0; }
     return 0 - 2;                                          # ENOENT
     #endif

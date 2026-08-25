@@ -433,11 +433,22 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
     var ri: i64 = 0;
 
     # Seed result + remaining.
+    #
+    # ⛔ THE SEED COPIES ARE BOUNDS-CHECKED, AND THEY DID NOT USED TO BE. The
+    # append path at the bottom of the segment loop has always answered
+    # ENAMETOOLONG when `result` would overflow, which made the whole function
+    # look guarded — but `input` came straight from argv and went into a fixed
+    # 16 KiB `remaining` with no check at all. Measured: a 16,427-byte operand
+    # made `kriya realpath -m` print `…/rp/d/.d` where GNU printed `…/rp/d/f`,
+    # AND EXIT 0. Not a crash — a wrong canonical path reported as success, which
+    # is worse, because `realpath`/`readlink -f` output is normally fed straight
+    # into the next command.
     if (path_is_absolute(input) == 1) {
         store8(result, 47);
         store8(result + 1, 0);
         ri = 1;
         var ilen = strlen(input);
+        if (ilen + 1 > BUFSZ) { return 0 - 36; }   # ENAMETOOLONG
         memcpy(remaining, input + 1, ilen);  # also copies the null
     } else {
         var n = k_getcwd(result, BUFSZ);
@@ -445,6 +456,7 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
         ri = n - 1;  # SYS_GETCWD returns length INCLUDING null
         if (ri < 1) { ri = 1; }
         var ilen = strlen(input);
+        if (ilen + 2 > BUFSZ) { return 0 - 36; }   # ENAMETOOLONG
         memcpy(remaining, input, ilen + 1);
     }
 
@@ -561,6 +573,11 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
                                 var rest_off = seg_end;
                                 while (load8(remaining + rest_off) == 47) { rest_off = rest_off + 1; }
                                 var rest_len = strlen(remaining + rest_off);
+                                # ⚠ Same class as the seed above: `tl` is bounded by the
+                                # readlink limit and `rest_len` by BUFSZ, so their SUM can be
+                                # nearly twice BUFSZ. Each round of symlink expansion grows
+                                # `remaining`, so a chain of links is the natural way to reach it.
+                                if (tl + rest_len + 2 > BUFSZ) { return 0 - 36; }   # ENAMETOOLONG
                                 if (rest_len > 0) {
                                     store8(new_remaining + tl, 47);
                                     memcpy(new_remaining + tl + 1, remaining + rest_off, rest_len + 1);
@@ -586,4 +603,128 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
     memcpy(out_buf, result, ri);
     store8(out_buf + ri, 0);
     return ri;
+}
+
+# Absolute, textually-normalized form of `operand`, as a heap cstring.
+#
+# ⚠ Lives here, not in `path.cyr`, precisely because it touches the filesystem:
+# a relative operand is joined against `getcwd()`. `path.cyr`'s header commits to
+# "pure string operations: nothing here touches the filesystem", and that
+# boundary is worth more than the convenience of filing this next to
+# `path_normalize`.
+#
+# Beyond the cwd lookup it is text-only: `..` resolves TEXTUALLY and symlinks are
+# NOT dereferenced. Both callers depend on that for different reasons:
+#
+#   - `protected_canonicalize` (ADR 0004) — `rm` never follows symlinks
+#     (ADR 0003 hard rule #1), so the root guard must judge the operand by the
+#     name the user typed, not by wherever a link happens to point.
+#   - `_cp_recursive_one` — the copy-a-directory-into-itself check needs both
+#     operands expressed in one comparable frame before `path_is_under` can rule
+#     on them; `cp -r /tmp/x/a a/sub` from /tmp/x is the same mistake as
+#     `cp -r a a/sub` and only shares a prefix once both sides are absolute.
+#
+# On a `getcwd` failure it falls back to normalizing the operand as given: still
+# exactly right for an already-absolute path, and merely non-matching for a
+# relative one — the safe direction for the root guard, whose fallback comment
+# has said so since v0.3.0.
+fn fs_path_absolute(operand): i64 {
+    if (operand == 0) {
+        var z = alloc(2);
+        store8(z, 47);                     # "/"
+        store8(z + 1, 0);
+        return path_normalize(z);
+    }
+    if (path_is_absolute(operand) == 1) {
+        return path_normalize(operand);
+    }
+    var cwd_buf[4096];
+    var n = k_getcwd(&cwd_buf, 4096);
+    if (n < 0) {
+        return path_normalize(operand);
+    }
+    var joined = path_join(&cwd_buf, operand);
+    return path_normalize(joined);
+}
+
+# Resolve `cmd` to a path to hand `execve`, searching `path_env` (a PATH-shaped
+# `a:b:c` cstring, or 0 when the variable is unset).
+#
+# Returns the resolved cstring, or **0 when nothing was found** — callers must
+# treat 0 as "command not found" and report it (POSIX exit 127) rather than
+# passing anything to exec.
+#
+# ⛔ RETURNING THE BARE NAME ON FAILURE IS A SANDBOX ESCAPE, NOT A CONVENIENCE.
+# `execve("ls", …)` with no slash is resolved by the KERNEL relative to the
+# current directory — there is no PATH search at the syscall layer. So both
+# "PATH is unset" and "searched PATH and found nothing" used to end in
+# `execve("ls")`, which runs `./ls` if one happens to be sitting there.
+# Demonstrated: a directory containing an attacker-supplied `./ls`, then
+# `printf 'ITEM\n' | env -u PATH xargs ls` printed `PWNED-FROM-CWD ITEM`, while
+# GNU xargs ran /usr/bin/ls. Reachable the same way through `find -exec`.
+#
+# ⭐ An UNSET PATH falls back to `/bin:/usr/bin` — the value glibc's `execvp`
+# uses from `confstr(_CS_PATH)`, so kriya lands where GNU lands.
+#
+# ⚠ An EMPTY PATH is different from an unset one and is left alone: POSIX
+# defines a zero-length prefix as the current working directory, so `PATH=`
+# legitimately means "." and is resolved as such — but explicitly, through the
+# same access/stat check as any other entry, instead of by falling out of the
+# bottom of the function.
+#
+# A `cmd` that already contains a slash is returned unchanged: POSIX says such a
+# name is used as given, with no PATH search.
+fn fs_resolve_in_path(cmd, path_env): i64 {
+    if (cmd == 0) { return 0; }
+    var i: i64 = 0;
+    var has_slash: i64 = 0;
+    while (load8(cmd + i) != 0) {
+        if (load8(cmd + i) == 47) { has_slash = 1; }
+        i = i + 1;
+    }
+    if (has_slash == 1) { return cmd; }
+
+    var pe = path_env;
+    if (pe == 0) { pe = "/bin:/usr/bin"; }
+
+    var pp: i64 = 0;
+    var done: i64 = 0;
+    var found: i64 = 0;
+    while (done == 0) {
+        var seg_end = pp;
+        var scanning: i64 = 1;
+        while (scanning == 1) {
+            var c = load8(pe + seg_end);
+            if (c == 0) { scanning = 0; }
+            elif (c == 58) { scanning = 0; }              # ':'
+            else { seg_end = seg_end + 1; }
+        }
+        var slen = seg_end - pp;
+        var entry: i64 = 0;
+        if (slen == 0) {
+            entry = alloc(2);
+            store8(entry, 46);                            # '.' — POSIX zero-length prefix
+            store8(entry + 1, 0);
+        } else {
+            entry = alloc(slen + 1);
+            memcpy(entry, pe + pp, slen);
+            store8(entry + slen, 0);
+        }
+        var candidate = path_join(entry, cmd);
+        # k_access: X_OK on Linux, existence check on agnos (no permission model).
+        if (k_access(candidate, 1) == 0) {
+            var st[144];
+            if (k_stat(candidate, &st) == 0) {
+                if (fs_is_reg(&st) == 1) {
+                    found = candidate;
+                    done = 1;
+                }
+            }
+        }
+        if (done == 0) {
+            if (load8(pe + seg_end) == 0) { done = 1; }
+            else { pp = seg_end + 1; }
+        }
+    }
+    return found;
 }

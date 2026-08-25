@@ -330,6 +330,62 @@ fn _rm_one(operand, force, interactive, recursive, dir_only, verbose): i64 {
     return 0;
 }
 
+# 1 if `op`'s FINAL path component is "." or ".." — the operand shape POSIX
+# requires `rm` to refuse.
+#
+# ⛔ THIS IS A DATA-LOSS GUARD, NOT A TIDINESS CHECK. Without it `rm -r dir/sub/..`
+# resolved to the PARENT and emptied it: measured on a `parent/{keep.txt,sub/}`
+# tree, kriya deleted BOTH `keep.txt` and `sub/` and then reported "no such file
+# or directory" — an error message for an operation that had already destroyed
+# the wrong directory. `rm -r d/.` did the same to `d`'s contents. GNU refuses
+# both, and refuses them even under `-f`.
+#
+# ⚠ The refusal is PER-OPERAND and does not stop the invocation, which is what
+# GNU does: other operands still run, and the exit status is 1. That is different
+# from the ADR-0004 protected-path check above it, which IS invocation-wide and
+# atomic — a distinction worth keeping straight, because they read alike.
+#
+# Trailing slashes are stripped first: `a/./` names the same directory as `a/.`.
+# Only an exact "." or ".." final component counts — `...`, `a..` and `..x` are
+# ordinary names and must still be removable.
+fn _rm_is_dot_operand(op): i64 {
+    if (op == 0) { return 0; }
+    var len = strlen(op);
+    if (len == 0) { return 0; }
+
+    # Strip trailing '/' down to (but not past) a single leading character, so
+    # "/" survives as "/" and is left to the protected-path check.
+    var stripping: i64 = 1;
+    while (stripping == 1) {
+        if (len > 1) {
+            if (load8(op + len - 1) == 47) { len = len - 1; }
+            else { stripping = 0; }
+        } else {
+            stripping = 0;
+        }
+    }
+
+    # Start of the final component.
+    var start: i64 = 0;
+    var i: i64 = 0;
+    while (i < len) {
+        if (load8(op + i) == 47) { start = i + 1; }
+        i = i + 1;
+    }
+
+    var clen = len - start;
+    if (clen == 1) {
+        if (load8(op + start) == 46) { return 1; }              # "."
+        return 0;
+    }
+    if (clen == 2) {
+        if (load8(op + start) == 46) {
+            if (load8(op + start + 1) == 46) { return 1; }      # ".."
+        }
+    }
+    return 0;
+}
+
 fn cmd_rm(start: i64): i64 {
     _rm_init_spec();
     if (kriya_args_parse(_rm_spec, start) != 0) {
@@ -390,8 +446,18 @@ fn cmd_rm(start: i64): i64 {
     i = 0;
     while (i < npos) {
         var op = flags_positional(_rm_spec, i);
-        var r = _rm_one(op, force, interactive, recursive, dir_only, verbose);
-        if (r != 0) { any_failed = 1; }
+        # POSIX: refuse a "." or ".." final component. Per-operand skip, not an
+        # invocation-wide refusal — see `_rm_is_dot_operand`. `-f` does NOT
+        # override this, matching GNU.
+        if (_rm_is_dot_operand(op) == 1) {
+            k_write( 2, "kriya rm: refusing to remove '.' or '..' directory: skipping '", 62);
+            k_write( 2, op, strlen(op));
+            k_write( 2, "'\n", 2);
+            any_failed = 1;
+        } else {
+            var r = _rm_one(op, force, interactive, recursive, dir_only, verbose);
+            if (r != 0) { any_failed = 1; }
+        }
         i = i + 1;
     }
 

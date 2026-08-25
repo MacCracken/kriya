@@ -100,51 +100,14 @@ fn _xa_env_get(): i64 {
     return v;
 }
 
+# Thin wrapper over the shared resolver — see `fs_resolve_in_path` in
+# `src/lib/fs.cyr`, which is also what `find -exec` uses. This file used to
+# carry a byte-identical 45-line copy of it, so the CWD-execution hole below had
+# to be found and fixed twice.
+# ⚠ Returns 0 when the command is not found. The caller MUST NOT pass that to
+# exec — it reports 127 instead.
 fn _xa_resolve_exec(cmd): i64 {
-    var i: i64 = 0;
-    var has_slash: i64 = 0;
-    while (load8(cmd + i) != 0) {
-        if (load8(cmd + i) == 47) { has_slash = 1; }
-        i = i + 1;
-    }
-    if (has_slash == 1) { return cmd; }
-    var path_env = _xa_path_env;
-    if (path_env == 0)        { return cmd; }
-    if (load8(path_env) == 0) { return cmd; }
-    var pp: i64 = 0;
-    var done: i64 = 0;
-    while (done == 0) {
-        var seg_end = pp;
-        var scanning: i64 = 1;
-        while (scanning == 1) {
-            var c = load8(path_env + seg_end);
-            if (c == 0) { scanning = 0; }
-            elif (c == 58) { scanning = 0; }
-            else { seg_end = seg_end + 1; }
-        }
-        var slen = seg_end - pp;
-        var entry: i64 = 0;
-        if (slen == 0) {
-            entry = alloc(2);
-            store8(entry, 46);
-            store8(entry + 1, 0);
-        } else {
-            entry = alloc(slen + 1);
-            memcpy(entry, path_env + pp, slen);
-            store8(entry + slen, 0);
-        }
-        var candidate = path_join(entry, cmd);
-        # k_access: X_OK on Linux, existence check on agnos (no perm model).
-        if (k_access(candidate, 1) == 0) {
-            var st[144];
-            if (k_stat(candidate, &st) == 0) {
-                if (fs_is_reg(&st) == 1) { return candidate; }
-            }
-        }
-        if (load8(path_env + seg_end) == 0) { done = 1; }
-        else { pp = seg_end + 1; }
-    }
-    return cmd;
+    return fs_resolve_in_path(cmd, _xa_path_env);
 }
 
 # --- input parsing ----------------------------------------------------
@@ -363,7 +326,17 @@ fn _xa_exec_one(args, trace_mode): i64 {
     if (vec_len(args) == 0) { return 0; }
     if (trace_mode == 1) { _xa_emit_trace(args); }
     var first = vec_get(args, 0);
-    vec_set(args, 0, _xa_resolve_exec(first));
+    var resolved = _xa_resolve_exec(first);
+    if (resolved == 0) {
+        # POSIX xargs: 127 when the utility cannot be found. Reported here rather
+        # than handed to execve as a bare name, which the kernel would resolve
+        # against the current directory.
+        k_write( 2, "kriya xargs: ", 13);
+        k_write( 2, first, strlen(first));
+        k_write( 2, ": command not found\n", 20);
+        return 127;
+    }
+    vec_set(args, 0, resolved);
     var env = _xa_env_get();
     var rc = exec_env(args, env);
     if (rc == 0)        { return 0; }
