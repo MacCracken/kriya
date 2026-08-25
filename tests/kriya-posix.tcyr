@@ -72,6 +72,18 @@ fn _posix_run(args, out_buf, bufsz): i64 {
         sys_close(wfd);
         var devnull = sys_open("/dev/null", 1, 0);
         if (devnull >= 0) { sys_dup2(devnull, 2); sys_close(devnull); }
+        # ⛔ STDIN MUST BE REDIRECTED TOO, AND IT WAS NOT. fds 1 and 2 were
+        # handled and fd 0 was left inherited, so any case running a utility that
+        # READS stdin blocked on whatever the test process happened to have.
+        # `posix_assert_exit("xargs -r empty -> 0", …)` is exactly that case:
+        # xargs slurps stdin to EOF, so under a shell whose stdin is an open pipe
+        # that never closes, the whole suite HUNG at the last assertion until
+        # `cyrius test`'s 300s timeout killed it. Reproduced deterministically;
+        # `cyrius test tests/kriya-posix.tcyr < /dev/null` passed in 257ms.
+        # ⚠ CI happens to run with stdin at /dev/null, which is why this never
+        # fired there — a latent landmine, not a passing test.
+        var devin = sys_open("/dev/null", 0, 0);        # O_RDONLY
+        if (devin >= 0) { sys_dup2(devin, 0); sys_close(devin); }
         sys_execve(cmd, argv, envp);
         sys_exit(127);
     }

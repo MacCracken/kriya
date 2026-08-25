@@ -177,17 +177,31 @@ fn _mv_cross_fs(src, dst, src_st, verbose): i64 {
     if (fs_is_dir(src_st) == 1) {
         # Cross-FS directory move: cp -R (POLICY_P preserves symlinks
         # per ADR 0003; preserve=1 carries mode + timestamps) followed
-        # by rm -r of the source. Either step's failure triggers a
-        # best-effort rollback of whatever was copied so the user
-        # doesn't end up with two authoritative trees.
+        # by rm -r of the source.
+        #
+        # ⛔ THE ROLLBACK BELONGS TO EXACTLY ONE OF THESE TWO FAILURES (ADR 0009).
+        # If the COPY failed, the source is untouched and the destination is a
+        # useless fragment — deleting it loses nothing. If the copy SUCCEEDED and
+        # the source removal failed, the destination is the ONLY complete copy of
+        # everything `_rm_dir_at` already drained, because a recursive removal
+        # partially succeeds. Rolling back there destroyed the data outright.
+        #
+        # Measured before ADR 0009: with the source's PARENT unwritable, so the
+        # final rmdir fails after the contents are gone, `mv ro/tree /other/moved`
+        # left `ro/tree` empty AND deleted the destination — both files gone from
+        # the filesystem. GNU keeps the destination and reports the removal error.
         var cr = _cp_recursive_one(src, dst, 0, 1, 0, 1, 0);
         if (cr != 0) {
-            _rm_dir_at(0 - 100, dst, dst, 1, 0, 0);
+            _rm_dir_at(0 - 100, dst, dst, 1, 0, 0);   # copy failed: source intact
             return cr;
         }
         var rr = _rm_dir_at(0 - 100, src, src, 1, 0, 0);
         if (rr != 0) {
-            _rm_dir_at(0 - 100, dst, dst, 1, 0, 0);
+            # Copy is durable — KEEP it. Two visible trees beat zero.
+            # ⚠ No `_mv_report` here: `_rm_dir_at` has already printed the failure.
+            # It carries a `kriya rm:` prefix inside an `mv` invocation, which is
+            # accurate but leaks the implementation; GNU says `mv: cannot remove`.
+            # One slightly-mislabelled line beats two identical ones.
             return rr;
         }
         if (verbose == 1) { _mv_verbose(src, dst); }
@@ -211,10 +225,11 @@ fn _mv_cross_fs(src, dst, src_st, verbose): i64 {
 
     var ur = k_unlink(src);
     if (ur != 0) {
-        # cp succeeded but src couldn't be unlinked. Roll back the
-        # destination so the user doesn't end up with two copies that
-        # both look authoritative.
-        k_unlink(dst);
+        # cp succeeded but src could not be unlinked. Same rule as the directory
+        # branch (ADR 0009): once the copy is durable the destination stays.
+        # ⚠ Benign here — a single unlink either works or leaves the source whole,
+        # so the old rollback lost nothing. It is unified anyway so the rule is
+        # one sentence rather than a per-branch judgement, and so `mv` matches GNU.
         _mv_report(src, 0 - ur);
         return ur;
     }

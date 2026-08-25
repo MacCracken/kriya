@@ -227,6 +227,35 @@ expect_absent "... gone" dot/...
 expect_absent "a.. gone" dot/a..
 expect_absent "..x gone" dot/..x
 
+# --- ADR 0010: a symlink operand with a trailing slash is refused -------
+# ⛔ `rm -r link/` USED TO EMPTY THE TARGET AND THEN REPORT FAILURE. A trailing
+# slash is POSIX-defined to resolve to the linked-to directory, so the walk
+# descends and deletes everything, then fails to unlink `link` itself because
+# `link/` is not a directory to unlinkat(AT_REMOVEDIR). GNU does the same. The
+# user sees an error, sees the link still there, and reasonably concludes nothing
+# happened — while the data is gone. ADR 0010 refuses instead.
+mkdir -p adr10/real/sub
+echo IMPORTANT > adr10/real/data.txt
+echo MORE      > adr10/real/sub/x.txt
+ln -s real adr10/link
+
+expect_exit   "ADR 0010: link/ refused"        1 sh -c "cd adr10 && '$BIN' rm -r link/"
+expect_present "ADR 0010: target file intact"   adr10/real/data.txt
+expect_present "ADR 0010: nested file intact"   adr10/real/sub/x.txt
+expect_present "ADR 0010: link itself intact"   adr10/link
+# ⚠ -f must NOT bypass it. Same stance as ADR 0004's root refusal: an escape
+# hatch on a destructive verb propagates by copy-paste.
+expect_exit   "ADR 0010: -f does not bypass"   1 sh -c "cd adr10 && '$BIN' rm -r -f link/"
+expect_present "ADR 0010: still intact under -f" adr10/real/data.txt
+
+# Forms that must be UNAFFECTED.
+expect_exit   "no slash: unlinks the link"     0 sh -c "cd adr10 && '$BIN' rm -r link"
+expect_absent  "…link gone"                     adr10/link
+expect_present "…target survives"               adr10/real/data.txt
+# A REAL directory with a trailing slash is still removable.
+expect_exit   "real dir with trailing slash"   0 "$BIN" rm -r adr10/real/
+expect_absent  "…real dir removed"              adr10/real
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

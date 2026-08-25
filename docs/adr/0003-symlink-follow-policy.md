@@ -1,6 +1,11 @@
 # 0003 — Symlink-follow policy for destructive utilities
 
-**Status**: Accepted
+**Status**: Accepted — extended by [0010](0010-rm-refuses-a-trailing-slash-symlink-operand.md)
+
+> ⚠ **[ADR 0010](0010-rm-refuses-a-trailing-slash-symlink-operand.md) closes a POSIX-shaped hole in
+> hard rule #1.** A trailing slash on a symlink operand (`rm -r link/`) resolves to the linked-to
+> directory under POSIX, so it was a sanctioned way to make `rm` follow a link — which it did,
+> emptying the target and then reporting failure. `rm` now refuses that shape.
 **Date**: 2026-05-17
 
 ## Context

@@ -206,6 +206,44 @@ else
     echo "(skipping cross-FS tests — /tmp and /dev/shm on same fs or /dev/shm missing)"
 fi
 
+# --- ADR 0009: a completed copy is never rolled back --------------------
+# ⛔ THIS WAS TOTAL DATA LOSS. Cross-FS `mv` is copy-then-remove, and the removal
+# is a RECURSIVE walk that can PARTIALLY succeed — drain most of a tree and then
+# fail on one entry. The old code rolled the destination back on that failure,
+# deleting the only complete copy of everything already removed. Measured with an
+# unwritable source PARENT (so the final rmdir fails after the contents are
+# gone): source emptied, destination deleted, both files gone from the filesystem
+# entirely. GNU keeps the destination; ADR 0009 adopts that.
+if [ -d /dev/shm ] && [ "$TMP_DEV" != "$SHM_DEV" ]; then
+    RB=/dev/shm/kriya-mv-adr9.$$
+    rm -rf "$RB"; mkdir -p "$RB/ro/tree/sub"
+    echo ONLY-COPY-A > "$RB/ro/tree/a.txt"
+    echo ONLY-COPY-B > "$RB/ro/tree/sub/b.txt"
+    chmod 555 "$RB/ro"                       # parent unwritable -> final rmdir fails
+    RBDST="$WORK/adr9_landed"
+    rc=0
+    "$BIN" mv "$RB/ro/tree" "$RBDST" >/dev/null 2>&1 || rc=$?
+    expect_eq "ADR 0009: reports failure"       "1"   "$rc"
+    expect_eq "ADR 0009: destination kept"      "yes" "$([ -f "$RBDST/a.txt" ] && echo yes || echo no)"
+    expect_eq "ADR 0009: nested file kept too"  "yes" "$([ -f "$RBDST/sub/b.txt" ] && echo yes || echo no)"
+    expect_eq "ADR 0009: content intact"        "ONLY-COPY-A" "$(cat "$RBDST/a.txt" 2>/dev/null)"
+    chmod 755 "$RB/ro" 2>/dev/null || true
+    rm -rf "$RB"
+
+    # Same rule for a regular file: once the copy is durable, it stays.
+    RF=/dev/shm/kriya-mv-adr9f.$$
+    rm -rf "$RF"; mkdir -p "$RF/ro"; echo PAYLOAD > "$RF/ro/f"; chmod 555 "$RF/ro"
+    rc=0
+    "$BIN" mv "$RF/ro/f" "$WORK/adr9_file" >/dev/null 2>&1 || rc=$?
+    expect_eq "ADR 0009 (file): reports failure" "1"   "$rc"
+    expect_eq "ADR 0009 (file): source intact"   "yes" "$([ -f "$RF/ro/f" ] && echo yes || echo no)"
+    expect_eq "ADR 0009 (file): dest kept"       "yes" "$([ -f "$WORK/adr9_file" ] && echo yes || echo no)"
+    chmod 755 "$RF/ro" 2>/dev/null || true
+    rm -rf "$RF"
+else
+    echo "skip: /tmp and /dev/shm share a filesystem — ADR 0009 cases not exercised"
+fi
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

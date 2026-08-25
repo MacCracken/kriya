@@ -6,6 +6,110 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.2.4] - 2026-08-25 — destructive-verb semantics
+
+Fifth batch of the **1.2.x arc**, and the ADR-gated one: two cases where a destructive verb destroyed
+data and *then* reported failure. Both were behaviour decisions rather than bug fixes, so each gets an
+ADR — **[0009](docs/adr/0009-mv-never-rolls-back-a-completed-copy.md)** and
+**[0010](docs/adr/0010-rm-refuses-a-trailing-slash-symlink-operand.md)** — and the code follows them.
+
+### Fixed — `mv` deleted the only surviving copy (ADR 0009)
+
+⛔ **Total data loss, and the exit status said nothing.** Cross-filesystem `mv` is copy-then-remove.
+`_mv_cross_fs` rolled back — deleted the destination — when **either** step failed, under a comment
+explaining that the user shouldn't "end up with two authoritative trees." That reasoning is right for
+one of the two failures and catastrophic for the other:
+
+- **Copy failed** → source untouched, destination a useless fragment. Deleting it loses nothing. ✅
+- **Copy succeeded, source removal failed** → the removal is a **recursive walk that partially
+  succeeds**. Most of the tree is already gone, so the destination is the only complete copy — and
+  the rollback deleted it.
+
+Measured with the source's *parent* unwritable, so the final `rmdir` fails after the contents are
+gone:
+
+```
+mkdir -p ro/tree/sub; echo A > ro/tree/a.txt; echo B > ro/tree/sub/b.txt
+chmod 555 ro
+kriya mv ro/tree /other-fs/moved
+```
+
+`ro/tree` empty, `/other-fs/moved` deleted, **both files gone from the filesystem entirely**. GNU
+reports the removal error, exits 1, and keeps both files.
+
+**ADR 0009: once the copy has completed, the destination is never deleted.** The rollback stays for
+the failed-copy case it was written for. Applied to the regular-file branch too — benign there (a
+single failed `unlink` leaves the source whole) but unified so the rule is one sentence rather than a
+per-branch judgement, and so `mv` matches GNU on both shapes.
+
+⚠ The "two authoritative trees" concern is real and now unmitigated. It is the lesser harm: two trees
+are **visible**, and `mv` tells you.
+
+### Fixed — `rm -r link/` emptied the target, then reported failure (ADR 0010)
+
+⛔ **Worse than either following or refusing.** A trailing slash on a symlink is POSIX-defined to
+resolve to the linked-to directory, so the walk descends and deletes everything — and *then* fails to
+unlink `link` itself, because `link/` is not a directory to `unlinkat(AT_REMOVEDIR)`:
+
+```
+rm -r link/          # rm: cannot remove 'link/': Not a directory
+```
+
+`real/` loses every file, the symlink survives, the exit status is non-zero. **Verified identical in
+GNU.** The user sees an error, sees the link still there, and reasonably concludes nothing happened.
+
+⚠ It also sat against kriya's own floor: ADR 0003 hard rule #1 is that `rm` never follows a symlink
+and *no flag opts in*. The trailing slash was a POSIX-blessed way to follow one — on the utility
+CLAUDE.md singles out as the most dangerous.
+
+**ADR 0010: the shape is refused.** Per-operand, other operands still run, exit 1. `rm link` without
+the slash is unchanged. ⚠ **`-f` does not bypass it** — the same stance as ADR 0004's root refusal,
+and for the same reason: an escape hatch on a destructive verb propagates by copy-paste. The message
+names both intents, because the whole problem is that one character silently chose between them.
+
+⚠ **This is a deliberate divergence from GNU**, which performs the half-completed removal. A script
+relying on `rm -r link/` to clear a linked-to directory now fails — it was relying on data
+destruction reported as an error. ADR 0003's status is updated to record that 0010 extends it.
+
+### Notes
+
+Both ADRs carry their full alternatives-considered sections — including the readings that *lost*
+(making the source removal all-or-nothing; following the link and removing it too), because the next
+person to look at these will arrive with exactly those ideas.
+
+One cosmetic gap left standing: when the source removal fails, the message carries a `kriya rm:`
+prefix inside an `mv` invocation — accurate, but it leaks the implementation where GNU says
+`mv: cannot remove`. One slightly-mislabelled line beat two identical ones; noted in the code.
+
+### Fixed — the POSIX harness could hang forever, and had been blamed on load
+
+⛔ **`tests/kriya-posix.tcyr` redirected the child's fd 1 and fd 2 and left fd 0 inherited.** Any case
+running a utility that *reads* stdin therefore blocked on whatever the test process happened to have.
+`posix_assert_exit("xargs -r empty -> 0", …)` is exactly that case — `xargs` slurps stdin to EOF — so
+under a shell whose stdin is an open pipe that never closes, the entire suite hung at the last
+assertion until `cyrius test`'s 300 s timeout killed it.
+
+⚠ **This was misdiagnosed twice before being caught.** It first showed up as an apparent timeout right
+after a full smoke run, and the box genuinely was loaded (15-minute average 7.85, then 10.75), so it
+was attributed to contention — an explanation that fit the evidence available and was wrong. It
+recurred at load 0.24, which falsified it. Reproduced deterministically afterwards: hangs with
+inherited stdin, passes in **257 ms** with `< /dev/null`.
+
+⚠ CI runs with stdin already at `/dev/null`, which is why this never fired there. It was a latent
+landmine, not a passing test.
+
+### Tests
+
+**1,261 smoke cases across 33 scripts** (up from 1,243), 119 unit + 18 POSIX, 1,529 fuzz assertions
+green under the poisoned allocator. Both targets build.
+
+- `smoke-mv.sh` 51 → 58: the unwritable-parent shape for both a directory and a regular file, each
+  asserting the failure is *reported* **and** the destination survives with its content intact.
+  Skips honestly where `/tmp` and `/dev/shm` share a filesystem.
+- `smoke-rm.sh` 67 → 78: `link/` refused with the target, the nested file and the link all verified
+  intact; `-f` verified not to bypass; and the three forms that must stay unaffected — `rm -r link`
+  without the slash, a *real* directory with a trailing slash, and a plain file.
+
 ## [1.2.3] - 2026-08-25 — walk safety
 
 Fourth batch of the **1.2.x arc**. Two recursive walks that were not doing what the rest of kriya

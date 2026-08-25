@@ -224,12 +224,18 @@ CLOEXEC pipe so it is distinguishable from a child that exits with the same stat
   A declined prompt is exit 1 (GNU parity). ⚠ The no-`-f` refusal is a deliberate GNU divergence per
   CLAUDE.md's hard rule.
 
-### 1.2.4 — Destructive-verb semantics (ADR-gated)
+### 1.2.4 — Destructive-verb semantics ✅ shipped 2026-08-25
 
-**M17e** (`mv` cross-filesystem rollback deleting the only surviving copy) and **M17i** (`rm -r
-symlink/` following the link — matching GNU but contradicting kriya's own ADR-0003 stance). Both are
-behaviour decisions rather than bug fixes and want a successor ADR before code. Grouped because one
-ADR cycle can settle both.
+**M17e** and **M17i** closed, each with an ADR because both were behaviour decisions rather than bug
+fixes.
+
+- **[ADR 0009](../adr/0009-mv-never-rolls-back-a-completed-copy.md)** — `mv` never deletes the
+  destination once the copy has completed. The rollback belongs to a FAILED copy only; after a
+  successful one, a partially-succeeded source removal left the destination as the sole complete copy
+  and deleting it was total data loss.
+- **[ADR 0010](../adr/0010-rm-refuses-a-trailing-slash-symlink-operand.md)** — `rm -r link/` is
+  refused rather than half-completed. ⚠ Deliberate GNU divergence, no `-f` bypass. ADR 0003's status
+  updated to record the extension.
 
 ### 1.2.5 — The chrono batch
 
