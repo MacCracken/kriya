@@ -644,37 +644,12 @@ fn cmd_printf(start: i64): i64 {
 
     var fmt = flags_positional(_pf_spec, 0);
 
-    # Set up: positional indexing starts at 1 (0 is FORMAT). We pass
-    # npos and an args_idx that walks from arg index 1 upward by
-    # adjusting _pf_process's view. Easiest: use a separate `arg_count`
-    # = npos - 1 and treat positional(1) as the first arg.
-    #
-    # _pf_process indexes 0..npos directly into the original positional
-    # list, but we want the FORMAT excluded. Simplest fix: have
-    # _pf_process accept a base-offset. The function above uses
-    # `flags_positional(_pf_spec, args_idx)`; we'll re-implement the
-    # offset inside this caller by wrapping... actually easier: just
-    # pre-bump args_idx by 1 inside the function. Or do it here.
-    #
-    # The cleanest approach: have _pf_process treat the args as
-    # positions [1..npos). I'll do that by passing the FORMAT in
-    # separately and shifting npos.
-
-    # Wrapper: _pf_process_args treats the arg pool as starting at
-    # index 1 (skipping FORMAT). Reimplemented inline above uses
-    # args_idx starting from 0. To avoid touching _pf_process, we
-    # save and restore by NOT including FORMAT in the count and
-    # making _pf_process see a shifted view via a tiny shim.
-    #
-    # Simpler path: inline a one-arg shift inside _pf_process by
-    # adding `+ 1` to every `flags_positional(_pf_spec, args_idx)`.
-    # I'll do that here by storing the shift in a global. But it's
-    # cleaner to just pre-collect the args pointers into a side vec.
-
+    # ⚠ FORMAT is positional 0 and is NOT an argument. `_pf_process` takes the
+    # argument COUNT, not the positional count, and reaches the pool through
+    # `flags_positional(_pf_spec, args_idx + 1)` — the `+ 1` at each of its call
+    # sites is what skips FORMAT, so args_idx stays a plain 0-based argument
+    # index and the exhaustion test `args_idx >= arg_count` needs no offset.
     var arg_count = npos - 1;
-    # Process with a small wrapper: _pf_process is already written to
-    # use the global spec; to shift past FORMAT, we set a global
-    # `_pf_arg_base` (added below) that the helper uses.
     _pf_process(fmt, arg_count);
     if (_pf_bad == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
