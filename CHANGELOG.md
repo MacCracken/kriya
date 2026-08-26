@@ -73,23 +73,27 @@ the BRE path (which lower-cases the subject, so the set is emitted lower-cased) 
 matched upper case only, a *different* wrong answer from the BRE path's. The rewrite supplies both
 the class substitution and the range validation `(?i)` never did.
 
-⛔ **GNU `grep` and GNU `find` ARE NOT ONE ORACLE, and sharing the rewriter without saying so
-REGRESSED `find`.** `grep` matches with its own bundled matcher; `find -iregex` calls glibc
-`regcomp` with `RE_ICASE`; the two implement **different range rules**:
+⛔ **GNU `grep` and GNU `find` ARE NOT ONE ORACLE, and sharing the rewriter without saying so made
+`find` wrong.** `grep` matches with its own bundled matcher; `find -iregex` calls glibc `regcomp`
+with `RE_ICASE`; the two implement **different range rules**:
 
     grep -i '[b-B]'            matches NOTHING
     find  -iregex '.*[b-B].*'  matches `b` AND `B`
-    grep -i '[Z-a]'            is an ERROR, exit 2
-    find  -iregex '.*[Z-a].*'  is silently empty, exit 0 — find has no error path at all
 
-⚠ **This was a regression introduced by this release and caught before it shipped, not a bug it
-found.** Unifying both callers onto grep's rule broke four mixed-case range cases in `find` that had
-agreed with GNU since the predicate shipped — while fixing the one class case that was wrong. ⛔ The
-existing `-iregex` tests could not have caught it: none of them used a range, so they stayed green
-through a real behavioural regression. glibc's rule is now a separate mode bit, verified exact over
-all **7,744** printable-endpoint ranges: a byte `c` is in `[x-y]` iff
-`toupper(x) <= toupper(c) <= toupper(y)` — a translation applied to the **candidate** as well as
-both endpoints, which is why `[B-{]` excludes `a` while containing `[`, `\`, `]` and `_`.
+⚠ **They differ in what a range MEANS, not in which ranges are LEGAL** — both refuse exactly when
+`toupper(x) > toupper(y)`, so the validity gate is shared and only the membership computation forks.
+glibc's rule, verified exact over all **7,744** printable-endpoint ranges in both the posix-basic and
+posix-extended dialects: a byte `c` is in `[x-y]` iff `toupper(x) <= toupper(c) <= toupper(y)` — a
+translation applied to the **candidate** as well as both endpoints, which is why `[B-{]` excludes `a`
+while containing `[`, `\`, `]` and `_`.
+
+⛔ **Getting this right took two wrong answers first, and the second was caused by comparing
+DIALECTS rather than implementations.** `find`'s default is `findutils-default` (emacs-flavoured);
+kriya's is POSIX BRE (ADR 0005). Measured against GNU's *default*, the shared validity gate looks
+like a regression, because the emacs dialect does not refuse a reversed range — it matches nothing.
+Measured against `-regextype posix-basic`, which is the like-for-like comparison, GNU refuses it
+exactly as kriya does. ⚠ Every `find` regex assertion now pins `-regextype posix-basic`, which costs
+no coverage: kriya's default IS posix-basic, so the pinned form exercises the identical path.
 
 ⭐ **What makes a pattern rewrite sufficient at all**: every set GNU denotes under `-i` is **closed
 under case**, and a case-closed set loses nothing when lower-cased. So matching `lower(S)` against a
@@ -122,6 +126,24 @@ subject fold — and the `-F` engine, which was never wrong — alone.
   already agrees with GNU on everything else and a second opinion would be a second source of truth.
 - ⭐ **Diagnostics now name the rule that was broken** — "invalid range end", "unterminated `[`",
   "no `[=c=]` / `[.c.]`" — where a flat "bad pattern" sent readers looking for a typo.
+
+### Fixed — ⛔ CI caught what local GNU could not: findutils 4.9.0 has no character classes
+
+⚠ **The first cut of the `find` assertions passed here and failed on CI**, and the cause was not case
+folding at all: **findutils 4.9.0** (ubuntu-24.04, what CI runs) does not implement POSIX character
+classes in its default dialect, while **4.11.0** (this box) does.
+
+    findutils 4.9.0:  find . -regex '.*[[:alpha:]].*'                        -> nothing
+                      find . -regextype posix-basic -regex '.*[[:alpha:]].*' -> every path
+    findutils 4.11.0: both forms match every path
+
+⛔ **The `-regex` form proves it is a DIALECT gap and not a `-i` bug** — the class fails there with no
+`-i` anywhere in sight. ⚠ **Fourth time this project has been bitten by an oracle whose behaviour is
+a property of its VERSION** (`find -exec` argv[0], `cut -c`, `nl -d ''`, now this), and the first
+where the fix makes the test *more* honest rather than merely narrower: pinning the dialect compares
+kriya's actual default against the same thing on both sides. ⭐ The whole suite is now verified inside
+the `ubuntu:24.04` container as a non-root user — 38 scripts, 0 failures — which is the check that
+would have caught this before it reached CI, and was not run.
 
 ### Fixed — ⛔ the no-`-i` path validated nothing at all
 
@@ -157,15 +179,21 @@ simultaneously a 4.1 violation and a defensible parity choice — recorded rathe
 
 ### Release totals
 
-**4,278 smoke cases across 38 scripts** (up from 4,217) — `smoke-grep.sh` 165 → **213**,
-`smoke-find.sh` 64 → **77**. **274 unit** (up from 220); 18 POSIX; fuzz green under poison; four
+**4,279 smoke cases across 38 scripts** (up from 4,217) — `smoke-grep.sh` 165 → **213**,
+`smoke-find.sh` 64 → **78**. **277 unit** (up from 220); 18 POSIX; fuzz green under poison; four
 lints clean; both targets build. `vet` reports **51 deps** (new `src/lib/icase.cyr`).
 Binary 1,038,256 → 1,046,808 bytes (+8,552).
 
 ⭐ **Verified under all six matrix conditions**, two of them added by this release because a bracket
-range walks collation order: baseline 38/38 4,278; hostile block-size + `POSIXLY_CORRECT` env
-38/38 4,278; **`en_US.UTF-8` 38/38 4,278**; **`C.UTF-8` 38/38 4,278**; deep `$TMPDIR` 38/38 4,278;
-simulated root 38/38 4,262 (root-only paths skipping).
+range walks collation order: baseline 38/38 4,279; hostile block-size + `POSIXLY_CORRECT` env
+38/38 4,279; **`en_US.UTF-8` 38/38 4,279**; **`C.UTF-8` 38/38 4,279**; deep `$TMPDIR` 38/38 4,279;
+simulated root 38/38 4,263 (root-only paths skipping).
+
+⭐ **And, new at 1.4.5, verified inside the `ubuntu:24.04` container as a NON-ROOT user** — 38
+scripts, 0 failures, 4,257 cases (the shortfall against 4,279 is version-conditional coverage that
+correctly stands down there). ⚠ Running it as root instead fails two pre-existing `-exec` assertions
+that depend on a "Permission denied", which root does not get — so the user matters as much as the
+image.
 
 ⚠ **Two pre-existing `grep` divergences surfaced by the fuzz and deliberately NOT fixed here** — both
 are in paths this release did not touch, and both are now on the roadmap rather than absorbed

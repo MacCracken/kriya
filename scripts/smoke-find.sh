@@ -219,15 +219,33 @@ rx_same "negated"                 . -type f ! -regex '.*aab.*'
 # path. ⚠ `grep -i` had the identical bug; the fix is shared in
 # `src/lib/icase.cyr` precisely so the two cannot drift apart again.
 : > rx/MiXeD.c
-rx_same "-iregex [[:upper:]]"     . -iregex '.*[[:upper:]].*'
-rx_same "-iregex [[:lower:]]"     . -iregex '.*[[:lower:]].*'
-rx_same "-iregex range lower"     . -iregex '.*[a-c].*'
-rx_same "-iregex range upper"     . -iregex '.*[A-C].*'
-rx_same "-iregex negated class"   . -iregex '.*[^[:upper:]].*'
+
+# ⛔ `-regextype posix-basic` IS PINNED ON EVERY CASE BELOW, and it is not
+# decoration. GNU's DEFAULT dialect is `findutils-default` (emacs-flavoured) and
+# its support for POSIX character classes changed between the two findutils
+# releases kriya must satisfy:
+#
+#   findutils 4.9.0 (ubuntu-24.04, what CI runs):
+#       find . -regex '.*[[:alpha:]].*'                       -> nothing
+#       find . -regextype posix-basic -regex '.*[[:alpha:]].*' -> every path
+#   findutils 4.11.0 (this box): both forms match every path.
+#
+# ⚠ So the class is not implemented at all in 4.9's default dialect — with or
+# without `-i`, which is what proves this is a DIALECT gap and not a
+# case-folding difference. An earlier version of this block compared kriya's
+# default (POSIX BRE, per ADR 0005) against GNU's default (emacs) and passed
+# here while failing on CI. ⭐ Pinning costs no kriya coverage: kriya's default
+# IS posix-basic, so `-regextype posix-basic` exercises the identical path.
+RXB="-regextype posix-basic"
+rx_same "-iregex [[:upper:]]"     . $RXB -iregex '.*[[:upper:]].*'
+rx_same "-iregex [[:lower:]]"     . $RXB -iregex '.*[[:lower:]].*'
+rx_same "-iregex range lower"     . $RXB -iregex '.*[a-c].*'
+rx_same "-iregex range upper"     . $RXB -iregex '.*[A-C].*'
+rx_same "-iregex negated class"   . $RXB -iregex '.*[^[:upper:]].*'
 rx_same "-iregex ERE class"       . -regextype posix-extended -iregex '.*[[:upper:]].*'
 # ⚠ The control: plain `-regex` must be unaffected, or a bug there would hide
 # behind the `-iregex` assertions above.
-rx_same "-regex [[:upper:]] control" . -regex '.*[[:upper:]].*'
+rx_same "-regex [[:upper:]] control" . $RXB -regex '.*[[:upper:]].*'
 
 # ⛔ REGRESSION GUARD — GNU `find` IS NOT GNU `grep`, and 1.4.5 briefly assumed
 # it was. `find -iregex` goes through glibc `regcomp` with `RE_ICASE`; `grep`
@@ -246,14 +264,34 @@ rx_same "-regex [[:upper:]] control" . -regex '.*[[:upper:]].*'
 # these cases involves a character class, so the class assertions above cannot
 # catch a regression here — they need their own block.
 : > rx/bB.c
-rx_same "-iregex [b-B] mixed range"  . -iregex '.*[b-B].*'
-rx_same "-iregex [a-B] mixed range"  . -iregex '.*[a-B].*'
-rx_same "-iregex [A-c] mixed range"  . -iregex '.*[A-c].*'
-# ⚠ These two are ERRORS for `grep -i` and silently empty for `find`. Asserting
-# them is what pins the two rules apart.
-rx_same "-iregex [Z-a] is silent"    . -iregex '.*[Z-a].*'
-rx_same "-iregex [W-b] is silent"    . -iregex '.*[W-b].*'
-rx_same "-iregex [B-{] translation"  . -iregex '.*[B-{].*'
+rx_same "-iregex [b-B] mixed range"  . $RXB -iregex '.*[b-B].*'
+rx_same "-iregex [a-B] mixed range"  . $RXB -iregex '.*[a-B].*'
+rx_same "-iregex [A-c] mixed range"  . $RXB -iregex '.*[A-c].*'
+rx_same "-iregex [B-{] translation"  . $RXB -iregex '.*[B-{].*'
+
+# ⚠ Compared by EXIT CLASS, not by output: both refuse these, but the wording
+# differs ("find: failed to compile ..." vs "kriya find: -iregex has an invalid
+# range end") and the message is not the thing under test.
+# ⛔ These two are the cases that separate the DIALECTS: under `posix-basic`
+# GNU refuses them, and under its emacs default GNU accepts them and matches
+# nothing. kriya's default dialect is POSIX BRE, so posix-basic is the honest
+# comparison — measuring against the emacs default is what made an earlier
+# reading of this call it a regression.
+# ⚠ Compared as REFUSED-or-NOT, never as a raw exit code. GNU `find` uses 1 for
+# a fatal error and kriya uses 2 for a usage error (ADR 0008), a deliberate
+# pre-existing divergence — and `find` returns 0 when it simply matches nothing,
+# so any non-zero status here IS the refusal.
+rx_rc() {
+    label=$1; shift
+    grc=0; (cd rx && find "$@") >/dev/null 2>&1 || grc=$?
+    krc=0; (cd rx && "$BIN" find "$@") >/dev/null 2>&1 || krc=$?
+    [ "$grc" -ne 0 ] && grc=refused || grc=ok
+    [ "$krc" -ne 0 ] && krc=refused || krc=ok
+    expect_eq "regex: $label" "$grc" "$krc"
+}
+rx_rc "-iregex [Z-a] refused" . $RXB -iregex '.*[Z-a].*'
+rx_rc "-iregex [W-b] refused" . $RXB -iregex '.*[W-b].*'
+rx_rc "-iregex [b-B] accepted" . $RXB -iregex '.*[b-B].*'
 rx_same "no match at all"         . -regex '.*zzz.*'
 
 # ⛔ `-regextype emacs` is REFUSED BY NAME. GNU's default and its emacs type

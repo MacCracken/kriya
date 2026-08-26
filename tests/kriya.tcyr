@@ -533,18 +533,27 @@ fn main() {
 
     # ⛔ GNU `find` is NOT GNU `grep` — glibc's `RE_ICASE` translates the
     # CANDIDATE as well as the endpoints, so `[b-B]` denotes {b,B} there and
-    # nothing in grep. Unifying both onto grep's rule regressed `find -iregex`.
-    test_group("icase — find's translate range rule differs from grep's");
-    store64(ie, ICASE_OK);
+    # NOTHING in grep. ⚠ The two differ in what a range MEANS, not in which
+    # ranges are LEGAL: both refuse exactly when `toupper(x) > toupper(y)`.
+    test_group("icase — find's translate rule differs from grep's in MEANING");
     var trm = ICASE_MODE_FOLD | ICASE_RANGE_TRANSLATE;
-    _t_rw("[b-B]", trm, ie);
-    assert_eq(load64(ie), ICASE_OK, "[b-B] is not an error under translate");
     store64(ie, ICASE_OK);
-    _t_rw("[Z-a]", trm, ie);
-    assert_eq(load64(ie), ICASE_OK, "[Z-a] is not an error either");
-    # ...where grep's rule refuses that very range.
+    var tr_bB = _t_rw("[b-B]", trm, ie);
+    assert_eq(load64(ie), ICASE_OK, "[b-B] is legal under translate");
+    # ⭐ The load-bearing difference: under translate `[b-B]` denotes {b,B}, so
+    # against a lower-cased subject it is the single byte `b`. Under grep's rule
+    # the same range is EMPTY, and an empty set has no bracket spelling — it is
+    # written as the negation of every byte, which starts `[^`.
+    assert_eq(streq(tr_bB, "[b]"), 1, "translate: [b-B] is the byte b");
     store64(ie, ICASE_OK);
-    assert_eq(_t_rw("[Z-a]", ICASE_MODE_FOLD, ie), 0, "grep's rule still refuses it");
+    var gr_bB = _t_rw("[b-B]", ICASE_MODE_FOLD, ie);
+    assert_eq(streq(gr_bB, "[b]"), 0, "grep's rule: [b-B] is NOT b");
+    # ...and the VALIDITY gate is shared, so both refuse this one.
+    store64(ie, ICASE_OK);
+    assert_eq(_t_rw("[Z-a]", trm, ie), 0, "translate refuses [Z-a]");
+    assert_eq(load64(ie), ICASE_E_RANGE, "...as an invalid range");
+    store64(ie, ICASE_OK);
+    assert_eq(_t_rw("[Z-a]", ICASE_MODE_FOLD, ie), 0, "grep's rule refuses it too");
 
     # ⚠ The no-`-i` gate is the RAW comparison, giving OPPOSITE answers to the
     # `-i` gate on the same two inputs.

@@ -77,14 +77,17 @@ enum IcaseMode {
     #
     #   grep -i '[b-B]'            matches NOTHING
     #   find  -iregex '.*[b-B].*'  matches `b` AND `B`
-    #   grep -i '[Z-a]'            is an ERROR, exit 2
-    #   find  -iregex '.*[Z-a].*'  is silently empty, exit 0 — find has no
-    #                              error path for a bracket at all
     #
-    # Without this bit, unifying both callers onto grep's rule REGRESSED
-    # `find -iregex`: four mixed-case range cases that agreed with GNU at 1.4.4
-    # stopped agreeing. The bit exists so the shared parser can serve two
-    # callers that really are different, rather than making one of them wrong.
+    # ⚠ They differ in what a range MEANS, not in which ranges are LEGAL: both
+    # refuse exactly when `toupper(x) > toupper(y)`, so the validity gate below
+    # is shared and only the membership computation forks.
+    #
+    # ⛔ Compare LIKE FOR LIKE or this measures nothing. GNU find's DEFAULT
+    # dialect is `findutils-default` (emacs-flavoured) and kriya's is POSIX BRE
+    # (ADR 0005). The emacs dialect sets different syntax bits — it does NOT
+    # refuse a reversed range, it matches nothing — so measuring kriya's BRE
+    # against GNU's default makes the shared gate look like a bug. Every
+    # comparison pins `-regextype posix-basic`.
     #
     # glibc's rule, verified exact over all 7,744 printable-endpoint ranges with
     # zero mismatches: a byte `c` is in `[x-y]` iff
@@ -474,10 +477,22 @@ fn _icase_bracket(pat, plen, i, set, cls, out, n0, next_p, err_p, mode): i64 {
                 continue;
             }
             if ((mode & ICASE_RANGE_TRANSLATE) != 0) {
-                # glibc `RE_ICASE`. ⚠ Never an error — a reversed translated
-                # range is simply empty, which is exactly what GNU find does.
+                # glibc `RE_ICASE` under a POSIX syntax. ⚠ The VALIDITY gate is
+                # the same one grep uses — the two callers differ only in what
+                # the range MEANS, not in which ranges are legal.
+                #
+                # ⛔ GNU find's DEFAULT dialect (`findutils-default`, emacs) sets
+                # different syntax bits and does NOT error here; it matches
+                # nothing instead. kriya's default dialect is POSIX BRE
+                # (ADR 0005), so the posix-basic answer is the apples-to-apples
+                # one. Comparing kriya's BRE against GNU's emacs default is what
+                # made an earlier reading of this call it a regression.
                 var ulo = icase_to_upper(lo);
                 var uhi = icase_to_upper(hi);
+                if (ulo > uhi) {
+                    store64(err_p, ICASE_E_RANGE);
+                    return 0 - 1;
+                }
                 var tq: i64 = 0;
                 while (tq < ICASE_SET_SIZE) {
                     var utq = icase_to_upper(tq);
