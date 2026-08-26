@@ -6,6 +6,101 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.3.6] - 2026-08-26 — the parity audit's low findings; the audit closes
+
+Third and last batch from the 1.3.3 audit. **All 39 findings are now resolved: 11 high at 1.3.4,
+19 medium at 1.3.5, 9 low here.**
+
+⚠ As in 1.3.5, nothing in kriya changed. Every fix is to a test that could have passed or failed for a
+reason other than kriya's behaviour.
+
+### ⛔ One finding exists to stop a wrong "fix"
+
+`smoke-printf.sh` asserts that `%f`, `%e`, `%g` and `%a` exit 1 and print nothing, under a comment
+calling them *"invalid directives"* and claiming *"GNU exits 1 and prints nothing"*. **That comment is
+false.** Verified: `/usr/bin/printf '%f' 1.5` prints `1.500000` and exits 0 — they are perfectly valid
+floating-point conversions in GNU. kriya refuses them because it has no float formatter yet (roadmap
+1.8.0), and refusing loudly beats printing a wrong number.
+
+So the block is a **deliberate divergence, not a parity check**, and the absolutes are the point. The
+audit flagged it specifically to prevent someone converting it to a runtime comparison against GNU —
+which would have broken a correct test on the strength of a wrong comment. The comment now says what
+the block is for. ⚠ `%Z` in the same block genuinely *is* invalid in GNU, and that distinction is now
+written down.
+
+### Assertions that measured the host's `od`, not kriya
+
+`basename -z` and `env -0` both piped kriya's output through `od -An -c` and compared against a string
+encoding **GNU od's** three-column layout, its padding, and its spelling of NUL as `\0`. busybox od and
+BSD od render all three differently, and `od` is absent entirely from a scratch image — so the
+assertions were about which `od` was installed. Both now translate NUL with `tr` and compare bytes.
+
+### Fixtures that could kill the whole script
+
+⛔ **`smoke-cp.sh` and `smoke-du.sh` built their payloads from `/dev/urandom` via a bare command under
+`set -e`** — three host dependencies, each fatal to the *entire script* rather than to one assertion:
+`/dev/urandom` existing (it does not in a minimal chroot or an unpopulated initramfs — **exactly the
+environments an AGNOS-targeted toolset runs in**), `dd` existing, and `dd` accepting `status=none`, a
+GNU extension busybox rejects. A shared `gen_payload` helper now probes and falls back to a payload
+the shell alone can produce. ⚠ Random bytes remain the better fixture where available, so the probe
+prefers them rather than replacing them.
+
+⚠ **`du` compares `st_blocks`, which is not stable until writeback.** Under delayed allocation — ext4
+`delalloc`, and far more visibly btrfs and XFS where a fresh file can report 0 blocks — kriya and GNU
+can sample the same file on opposite sides of the flush and disagree about a file neither touched.
+A `sync` after the fixtures is cheap insurance; they are built once.
+
+### Absolutes where the answer was available at runtime
+
+- **`smoke-date.sh`'s epoch window was one second wide in one direction** (`diff >= 0 && diff <= 1`).
+  A backwards clock step between the two invocations — chronyd and systemd-timesyncd *do* step on a
+  runner that has just booted — turns it red with no kriya defect. Now an absolute difference.
+- **`smoke-mv.sh` asserted the preserved subdirectory mode as the literal `750`**, duplicating the
+  fixture three lines above it. Change the `chmod` and the test silently starts asserting the old
+  value against the new one. Now captured from the source before the move.
+- **`smoke-df.sh` asserted GNU's dedup behaviour as an absolute**, three lines after the same property
+  was already compared against GNU at runtime — and GNU's duplicate-device filtering is a tie-break,
+  not a fixed rule. ⚠ **This was my own code from 1.3.2.** Demoted to an observation; the runtime
+  comparisons are the assertions.
+
+### Binaries POSIX does not guarantee
+
+`smoke-env.sh` hardcoded `/bin/sh` sixteen times plus `/bin/echo`, `/bin/true` and `/bin/false`. POSIX
+guarantees only that `sh` exists *somewhere*; the other three are guaranteed nowhere, and distroless
+and scratch images ship none of them. All resolved once at the top, with a loud skip where the platform
+cannot support the test.
+
+⚠ **`command -v echo` answers with the shell BUILTIN**, not a path — so the obvious resolution silently
+disabled the very assertions it was meant to protect. `env -i` clears the environment and must exec an
+absolute path, so the helper probes the filesystem instead. Caught because the case count dropped from
+29 to 26 rather than staying flat.
+
+### Tests
+
+**3,612 smoke cases across 37 scripts**, 119 unit + 18 POSIX, fuzz green under poison, four lints clean,
+both targets build.
+
+⚠ The count is slightly *down* from 1.3.5's 3,614: two `df` assertions became observations, which is
+the intended effect. **A test count is not a score.**
+
+Verified under the same four conditions as 1.3.5 — baseline, block-size environment variables, a deep
+`$TMPDIR`, and simulated root — **37/37 in every one** (3,612 / 3,612 / 3,612 / 3,596, the last
+reflecting root-only paths skipping themselves).
+
+### The audit, closed
+
+39 findings over three releases. Worth recording what the pass was actually worth:
+
+- **Two real kriya bugs**, both silent-wrong-output: `sort -k F` reading as `-k F,F`, and `sort -k
+  F1,F2` truncating to `F1`.
+- **Two assertions that could never fail**, one of them green since the day it was written.
+- **One test that could hang CI** rather than fail it.
+- **⛔ Three findings that were wrong**, plus **one I wrongly dismissed** — I tested the `sort -k`
+  claim with data that could not discriminate it and reported the auditor mistaken. It was not.
+
+⭐ **The lesson worth keeping is the last one.** An audit is a lead list, not a work list, and a
+disconfirming test only disconfirms if it could have come out the other way.
+
 ## [1.3.5] - 2026-08-25 — the parity audit's medium findings
 
 Second of three batches from the 1.3.3 audit. **All 11 high-risk findings closed at 1.3.4; all 19

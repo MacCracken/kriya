@@ -200,9 +200,16 @@ else
     g_all=$(echo "$bind_out" | grep -c G_ALL_KEEPS)
     expect_eq "bind mount: dropped by default, same as GNU" "$g_def" "$k_def"
     expect_eq "bind mount: kept under -a, same as GNU"      "$g_all" "$k_all"
-    # And pin the absolute, since this GNU is the one that defines the rule.
-    expect_eq "bind mount: GNU drops the duplicate by default" "1" "$g_def"
-    expect_eq "bind mount: kriya drops the duplicate by default" "1" "$k_def"
+    # ⚠ These were assertions on GNU's ABSOLUTE behaviour, three lines after the
+    # same property was already compared against GNU at runtime. GNU's
+    # duplicate-device filtering is a tie-break, not a fixed rule — which of two
+    # entries survives depends on devname shape and mount order, so a GNU change
+    # here would fail a test about KRIYA. Demoted to an observation: the
+    # runtime comparisons above are the assertions.
+    if [ "$g_def" != "1" ]; then
+        echo "note: this GNU df does NOT drop the bind-mount duplicate by default — the"
+        echo "      parity assertions above still hold, but the dedup path is unexercised"
+    fi
 fi
 
 # --- -a shows more mounts than default (includes pseudo-FS) ---

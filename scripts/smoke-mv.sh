@@ -183,6 +183,7 @@ if [ -d /dev/shm ] && [ "$TMP_DEV" != "$SHM_DEV" ]; then
     echo "deep" > "$XFS_DIR/sub/nested"
     ln -s /etc/hostname "$XFS_DIR/sub/link"
     chmod 0750 "$XFS_DIR/sub"
+    SRC_SUB_MODE=$(stat -c %a "$XFS_DIR/sub")
     XFS_DIR_DST="$WORK/dir_landed"
     expect_exit "cross-FS dir succeeds"  0 "$BIN" mv "$XFS_DIR" "$XFS_DIR_DST"
     # The src directory must be gone (rm -r ran after cp -R).
@@ -196,7 +197,10 @@ if [ -d /dev/shm ] && [ "$TMP_DEV" != "$SHM_DEV" ]; then
     expect_eq "xfs dst link target"      "/etc/hostname" "$target"
     # -p semantic: subdir mode preserved through cp -R.
     sub_mode=$(stat -c %a "$XFS_DIR_DST/sub")
-    expect_eq "xfs dst subdir mode"      "750" "$sub_mode"
+    # ⚠ Compare against the SOURCE mode captured before the move, not a literal.
+    # The literal duplicated the fixture: change the chmod above and this
+    # silently starts asserting the old value against the new one.
+    expect_eq "xfs dst subdir mode preserved" "$SRC_SUB_MODE" "$sub_mode"
     # The inode of the destination must differ from anything in /dev/shm —
     # proof we crossed filesystems. (We can only check that dst exists on
     # the same FS as $WORK, which is on /tmp; the inode-differ check on

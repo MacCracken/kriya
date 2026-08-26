@@ -19,13 +19,39 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"
 
+# ⚠ `set -e` is on and this was a bare command, so THREE host dependencies were
+# each fatal to the whole script rather than to one assertion: /dev/urandom
+# existing (absent in a minimal chroot or an unpopulated initramfs — precisely
+# the environments an AGNOS-targeted toolset runs in), `dd` existing, and `dd`
+# accepting `status=none` (a GNU extension busybox's dd rejects). Random bytes
+# are the better fixture where they are available, so probe rather than assume,
+# and fall back to a deterministic payload the shell alone can produce.
+gen_payload() {   # gen_payload <path> <kib>
+    if [ -r /dev/urandom ] && head -c 1024 /dev/urandom >/dev/null 2>&1; then
+        head -c $(( $2 * 1024 )) /dev/urandom > "$1"
+    else
+        : > "$1"
+        _i=0
+        while [ "$_i" -lt "$2" ]; do
+            printf '%01024d' "$_i" >> "$1"
+            _i=$((_i + 1))
+        done
+    fi
+}
+
 # Build a deterministic tree.
 mkdir -p a/b/c d
 echo "small" > a/file1
 head -c 4096 /dev/urandom > a/big
 echo "deep" > a/b/c/deeper
 echo "side" > d/file
-head -c 5242880 /dev/urandom > big5m
+gen_payload big5m 5120
+# ⛔ `du` compares st_blocks, which is NOT stable until writeback. Under delayed
+# allocation — ext4 delalloc, and far more visibly btrfs and XFS, where a fresh
+# file can report 0 blocks — kriya and GNU can sample the same file on opposite
+# sides of the flush and disagree about a file neither of them touched.
+# Cheap insurance; the fixtures are built once.
+sync 2>/dev/null || true
 
 PASS=0
 FAIL=0

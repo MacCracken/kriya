@@ -69,8 +69,12 @@ bar"
 expect_eq "basename -s" "$expected" "$out"
 
 # --- basename -z (NUL terminator) ---
-out=$("$BIN" basename -z /usr/bin/cp | od -An -c | head -1 | tr -s ' ')
-expect_eq "basename -z" " c p \\0" "$out"
+# ⚠ Compare BYTES, not `od`'s rendering. This asserted a string that encodes
+# GNU od's three-column layout, its leading blank, and its spelling of NUL as
+# `\0` — none of which are kriya's output. busybox od and BSD od pad and
+# escape differently, so the test measured which od was installed.
+out=$("$BIN" basename -z /usr/bin/cp | tr '\0' '@')
+expect_eq "basename -z NUL-terminated" "cp@" "$out"
 
 # --- basename errors ---
 expect_exit "basename no args"       2 "$BIN" basename

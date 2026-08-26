@@ -131,7 +131,14 @@ check_parity "%! unknown"       "%!"
 k_s=$("$BIN" date +%s)
 g_s=$(date +%s)
 diff=$((g_s - k_s))
-if [ "$diff" -ge 0 ] && [ "$diff" -le 1 ]; then
+# ⚠ ABSOLUTE difference. This was `diff >= 0 && diff <= 1`, i.e. one second wide
+# in ONE direction only, which goes red without any kriya defect if the clock
+# steps backwards between the two invocations (chronyd/systemd-timesyncd do step
+# on a CI runner that has just booted) or if kriya is descheduled across a
+# second boundary. Neither says anything about `date`.
+d=$((g_s - k_s))
+if [ "$d" -lt 0 ]; then d=$((0 - d)); fi
+if [ "$d" -le 2 ]; then
     PASS=$((PASS + 1))
 else
     FAIL=$((FAIL + 1))

@@ -124,10 +124,22 @@ compare "0 octal arg"         "%d\n" "0177"
 # --- errors ---
 expect_exit "no FORMAT"  2 "$BIN" printf
 
-# --- invalid directives fail instead of lying (v1.2.1) ---
+# --- unhandled directives fail instead of lying (v1.2.1) ---
 # ⛔ printf used to WARN on stderr, write the bare conversion LETTER to stdout
 # (dropping the `%`) and exit 0 — so `printf '%f' 1.5` produced the text "f" and
-# reported success. GNU exits 1 and prints nothing for an invalid conversion.
+# reported success.
+#
+# ⛔ THIS BLOCK IS A DELIBERATE DIVERGENCE, NOT A PARITY CHECK — do not "fix" it
+# by comparing against GNU at runtime. The comment here used to call
+# %f/%e/%g/%a "invalid directives" and claim GNU exits 1 for them. **That is
+# false**: they are VALID floating-point conversions in GNU, which prints
+# `1.500000` and exits 0. kriya refuses them because it has no float formatter
+# yet (roadmap 1.8.0), and refusing loudly beats printing a wrong number. The
+# absolutes below are the point.
+#
+# ⚠ `%Z` on the other hand IS invalid in GNU, so that pair is a real parity
+# assertion and could be compared at runtime — it is kept as an absolute only
+# for symmetry with the block above it.
 for d in %f %e %g %a; do
     rc=0; out=$("$BIN" printf "$d" 1.5 2>/dev/null) || rc=$?
     expect_eq "$d exits 1"       "1" "$rc"

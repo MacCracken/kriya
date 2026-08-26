@@ -22,6 +22,25 @@ cd "$WORK"
 
 PASS=0
 FAIL=0
+# ⚠ `set -e` is on and this was a bare command, so THREE host dependencies were
+# each fatal to the whole script rather than to one assertion: /dev/urandom
+# existing (absent in a minimal chroot or an unpopulated initramfs — precisely
+# the environments an AGNOS-targeted toolset runs in), `dd` existing, and `dd`
+# accepting `status=none` (a GNU extension busybox's dd rejects). Random bytes
+# are the better fixture where they are available, so probe rather than assume,
+# and fall back to a deterministic payload the shell alone can produce.
+gen_payload() {   # gen_payload <path> <kib>
+    if [ -r /dev/urandom ] && head -c 1024 /dev/urandom >/dev/null 2>&1; then
+        head -c $(( $2 * 1024 )) /dev/urandom > "$1"
+    else
+        : > "$1"
+        _i=0
+        while [ "$_i" -lt "$2" ]; do
+            printf '%01024d' "$_i" >> "$1"
+            _i=$((_i + 1))
+        done
+    fi
+}
 
 expect_eq() {
     if [ "$2" = "$3" ]; then
@@ -62,7 +81,7 @@ expect_exit "cp basic"               0 "$BIN" cp src.txt dst.txt
 expect_file_match "byte-identical"   src.txt dst.txt
 
 # Larger file to exercise the multi-block loop (>64KiB).
-dd if=/dev/urandom of=big.bin bs=1024 count=200 status=none
+gen_payload big.bin 200
 expect_exit "cp 200KB"               0 "$BIN" cp big.bin big.copy
 expect_file_match "200KB match"      big.bin big.copy
 
