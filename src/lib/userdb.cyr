@@ -1,0 +1,345 @@
+# src/lib/userdb.cyr — /etc/passwd and /etc/group, parsed directly.
+#
+# ⭐ WHY A PARSER AND NOT A LIBRARY CALL. `getpwuid(3)` would pull in NSS, and
+# NSS is dynamic linking by construction — it dlopen()s `libnss_*.so` at
+# runtime. kriya is static and zero-dep, so a direct parse is the design rather
+# than a shortcut. ⚠ The cost is honest and worth stating: users who exist only
+# in LDAP / SSSD / systemd-homed have no line in these files and will NOT
+# resolve. They degrade to numeric ids, which is the safe direction.
+#
+# ⭐ ONE MODULE, FOUR CONSUMERS. `ls -l`, `stat %U`/`%G`, `find -user`/`-group`
+# and `id`-shaped output all want the same two mappings. Two implementations of
+# "what is this uid called" in one binary would be two sets of edge cases that
+# drift apart silently — the argument that lifted `glob.cyr` out of `find` at
+# 1.4.1, `str.cyr`'s escape table at 1.4.3, and `icase.cyr` at 1.4.5.
+#
+# ── The grammar, measured against glibc rather than read off a man page ──
+#
+# Every rule below was checked by building a fixture /etc/passwd in a container
+# and asking `stat -c %U` / `getent` what it made of it, on BOTH coreutils 9.4 /
+# glibc 2.39 (ubuntu-24.04, what CI runs) and 9.11 / glibc 2.44 (this box).
+# ⭐ Identical on both, so none of it is version drift.
+#
+#   - Fields are `:`-separated. ⚠ A passwd line needs at least FOUR fields and
+#     a group line at least THREE; `f3:x:7001` is REJECTED while `f4:x:7002:7002`
+#     resolves. Extra trailing fields are accepted.
+#   - ⛔ A line beginning `#` IS SKIPPED. This is widely called a myth — the
+#     passwd(5) page does not document comments — and it is not one:
+#     `#hash:x:7201:7201::/tmp:/sh` has seven good fields and a valid uid, and
+#     `stat -c %U` on a file owned by 7201 still prints `UNKNOWN`.
+#   - The id field is DECIMAL. ⚠ A leading `0` does NOT make it octal —
+#     `0006004` is 6004 — and a leading `+` is accepted.
+#   - ⚠ Whitespace is NOT stripped: `  spaced ` is a name with the spaces in it.
+#   - A missing final newline is fine. A CRLF file is fine: the `\r` lands on
+#     the LAST field, which is neither the name nor the id.
+#   - ⛔ On a DUPLICATE id, the FIRST entry wins the reverse lookup. Two lines
+#     with uid 5555 named `first` and `second` give `first`.
+#   - ⛔ NIS/compat lines are refused BY PREFIX, not by field count. The short
+#     forms (`+@netgroup`, `+user::::::`) happen to fail the field and id rules,
+#     which made "no special case needed" look true — but `+plus:x:8102:8102`
+#     has four good fields and a valid id, and glibc's lookup path still refuses
+#     it. `#`, `+` and `-` are all checked explicitly, after blank-stripping.
+#   - ⛔ LEADING blanks are stripped before anything else; TRAILING blanks are
+#     not. `   leadws:x:...` is the user `leadws`; `trail :x:...` really is the
+#     five-character name `trail `.
+#
+# ── Fallback, which is where a static tool earns its keep ──
+#
+# ⛔ A missing or unreadable file is NOT an error. GNU degrades silently to
+# numeric ids and exits 0 — verified by moving /etc/passwd aside and running
+# `ls -l` (prints `0 0`, rc 0) and `stat -c %U` (prints `UNKNOWN`, rc 0).
+# ⚠ The two files degrade INDEPENDENTLY: with /etc/passwd chmod 000 and
+# /etc/group readable, GNU prints the numeric uid beside the NAMED group. So
+# they are loaded separately and neither failure poisons the other.
+# ⭐ This is also exactly what the agnos target needs, where there may be no
+# /etc/passwd at all — the fallback is the normal path there, not an error path.
+
+enum UserDbEnt {
+    UDB_E_ID     = 0;
+    UDB_E_NAME   = 8;
+    UDB_ENT_SIZE = 16;
+}
+
+enum UserDbLimits {
+    # ⚠ A cap, not an expectation. /etc/passwd is normally a few KiB; the cap
+    # bounds a hostile or corrupt one. Entries past it simply do not resolve,
+    # which degrades to numeric — the safe direction.
+    UDB_MAX_FILE   = 4194304;
+    UDB_PW_FIELDS  = 4;
+    UDB_GR_FIELDS  = 3;
+    # uid_t/gid_t are 32-bit unsigned; anything wider is not an id.
+    UDB_ID_MAX     = 4294967295;
+}
+
+var _udb_pw_state = 0;   # 0 = not tried, 1 = tried
+var _udb_pw_ents  = 0;
+var _udb_pw_n     = 0;
+var _udb_gr_state = 0;
+var _udb_gr_ents  = 0;
+var _udb_gr_n     = 0;
+
+# Read `path` whole into a fresh buffer; returns 0 if it cannot be read.
+# ⚠ Sized from `k_stat` rather than allocating the cap, because this runs on
+# every `ls -l` and the bump allocator never gives memory back.
+fn _udb_read_file(path, len_p): i64 {
+    store64(len_p, 0);
+    # ⛔ `FS_STAT_BUFSZ`, not `FS_STAT_SIZE`. The latter is the OFFSET of
+    # st_size (48) and the former is the struct's length (144) — and a
+    # function-local `var X[N]` is N BYTES (roadmap M15a), so the plausible-
+    # looking `var st[FS_STAT_SIZE]` hands `k_stat` a 48-byte buffer for a
+    # 144-byte write. It segfaults, which is the good outcome; a smaller
+    # mismatch would have corrupted the frame silently.
+    var st[FS_STAT_BUFSZ];
+    var cap: i64 = 65536;
+    if (k_stat(path, &st) == 0) {
+        var sz = load64(&st + FS_STAT_SIZE);
+        if (sz > 0) { cap = sz; }
+    }
+    if (cap > UDB_MAX_FILE) { cap = UDB_MAX_FILE; }
+    var fd = k_open(path, 0, 0);
+    if (fd < 0) { return 0; }
+    var buf = alloc(cap + 1);
+    var total: i64 = 0;
+    var loop: i64 = 1;
+    while (loop == 1) {
+        if (total >= cap) { loop = 0; continue; }
+        var n = k_read( fd, buf + total, cap - total);
+        if (n < 0) {
+            # EINTR retries; anything else stops with what we have.
+            if ((0 - n) != 4) { loop = 0; }
+        } elif (n == 0) {
+            loop = 0;
+        } else {
+            total = total + n;
+        }
+    }
+    k_close( fd);
+    store64(len_p, total);
+    return buf;
+}
+
+# Decimal id in buf[s, e). Returns the value, or (0 - 1) if it is not one.
+fn _udb_parse_id(buf, s, e): i64 {
+    if (s >= e) { return 0 - 1; }
+    var i = s;
+    # ⛔ LEADING blanks in the ID field are stripped; TRAILING ones are not.
+    # Measured, and the asymmetry is the whole point: `n:x: 8600:8600` resolves
+    # in GNU while `n:x:8601 :8601` does not. A differential fuzz over 600
+    # generated lines found this as 21 divergences of exactly one shape — every
+    # one an id field with a leading space or tab.
+    var blanks: i64 = 1;
+    while (blanks == 1) {
+        if (i >= e) { blanks = 0; continue; }
+        var b = load8(buf + i);
+        if (b == 32) { i = i + 1; continue; }
+        if (b == 9)  { i = i + 1; continue; }
+        if (b == 11) { i = i + 1; continue; }
+        if (b == 12) { i = i + 1; continue; }
+        if (b == 13) { i = i + 1; continue; }
+        blanks = 0;
+    }
+    if (i >= e) { return 0 - 1; }
+    if (load8(buf + i) == 43) { i = i + 1; }    # ...then an optional `+`
+    if (i >= e) { return 0 - 1; }
+    var v: i64 = 0;
+    while (i < e) {
+        var c = load8(buf + i);
+        if (c < 48) { return 0 - 1; }
+        if (c > 57) { return 0 - 1; }
+        v = v * 10 + (c - 48);
+        if (v > UDB_ID_MAX) { return 0 - 1; }
+        i = i + 1;
+    }
+    return v;
+}
+
+# Parse one line into `ent`. Returns 1 if it yielded an entry.
+# ⚠ NUL-terminates the name IN PLACE by overwriting its trailing `:`, so the
+# name is a plain C string pointing into the file buffer — no second copy.
+fn _udb_line(buf, s, e, min_fields, ent): i64 {
+    # ⛔ LEADING BLANKS ARE STRIPPED, and this must happen BEFORE both the
+    # prefix test and the name is taken. Measured: `   leadws:x:8100:8100::/h:/s`
+    # resolves as `leadws` in GNU, and `  #indent:x:8101:...` is a COMMENT.
+    # ⚠ Getting the order wrong diverges in both directions at once — kriya
+    # first shipped `   leadws` as a name AND treated `  #indent` as a user.
+    # ⚠ Space/tab/VT/FF/CR only. TRAILING blanks are NOT stripped: `trail :x:...`
+    # really is the five-character name `trail `, in GNU and here.
+    var scanning: i64 = 1;
+    while (scanning == 1) {
+        if (s >= e) { scanning = 0; continue; }
+        var b = load8(buf + s);
+        if (b == 32) { s = s + 1; continue; }
+        if (b == 9)  { s = s + 1; continue; }
+        if (b == 11) { s = s + 1; continue; }
+        if (b == 12) { s = s + 1; continue; }
+        if (b == 13) { s = s + 1; continue; }
+        scanning = 0;
+    }
+    if (s >= e) { return 0; }
+    # ⛔ `#`, `+` and `-` all mean "not a lookup entry" to glibc's getpw*/getgr*
+    # path. ⚠ The `+`/`-` NIS-compat forms were first left out on the reasoning
+    # that the field and id rules already rejected them — TRUE for `+@netgroup`
+    # and `+user::::::`, and FALSE for the full-field form: `+plus:x:8102:8102`
+    # has four good fields and a valid id, and GNU still refuses it while kriya
+    # resolved it as a user named `+plus`.
+    # ⛔ On a `passwd: compat` host a `-name` line means EXCLUDE this user, so
+    # turning it into a positive mapping is the worst available shape of it.
+    # ⚠ glibc's own `fgetpwent(3)` disagrees and returns `+plus`; the LOOKUP
+    # path is the one ls/stat/find take, so it is the oracle.
+    var f = load8(buf + s);
+    if (f == 35) { return 0; }
+    if (f == 43) { return 0; }
+    if (f == 45) { return 0; }
+    var c1: i64 = 0 - 1;
+    var c2: i64 = 0 - 1;
+    var c3: i64 = 0 - 1;
+    var c4: i64 = 0 - 1;
+    var nf: i64 = 1;
+    var i = s;
+    while (i < e) {
+        if (load8(buf + i) == 58) {
+            if (nf == 1) { c1 = i; }
+            elif (nf == 2) { c2 = i; }
+            elif (nf == 3) { c3 = i; }
+            elif (nf == 4) { c4 = i; }
+            nf = nf + 1;
+        }
+        i = i + 1;
+    }
+    if (nf < min_fields) { return 0; }
+    if (c1 < 0) { return 0; }
+    if (c2 < 0) { return 0; }
+    var ide = e;
+    if (c3 >= 0) { ide = c3; }
+    var id = _udb_parse_id(buf, c2 + 1, ide);
+    if (id < 0) { return 0; }
+    # ⛔ A passwd line's GID FIELD IS VALIDATED TOO, even though nothing here
+    # reads it. glibc rejects the WHOLE line when field 3 is not an id, so a
+    # parser that checks only the uid resolves users GNU does not: measured,
+    # `badgid:x:8300:notanumber::/h:/s`, `emptygid:x:8301:::/h:/s` and
+    # `negid:x:8302:-5::/h:/s` are all UNKNOWN in GNU and all resolved here.
+    # ⚠ Group lines have no second id field, hence the min_fields test.
+    if (min_fields == UDB_PW_FIELDS) {
+        if (c3 < 0) { return 0; }
+        var gde = e;
+        if (c4 >= 0) { gde = c4; }
+        if (_udb_parse_id(buf, c3 + 1, gde) < 0) { return 0; }
+    }
+    store64(ent + UDB_E_ID, id);
+    store64(ent + UDB_E_NAME, buf + s);
+    store8(buf + c1, 0);
+    return 1;
+}
+
+# Load one database. Returns the entry array (0 if unavailable) and stores the
+# count via `n_p`.
+fn _udb_load(path, min_fields, n_p): i64 {
+    store64(n_p, 0);
+    var lenp = alloc(8);
+    var buf = _udb_read_file(path, lenp);
+    if (buf == 0) { return 0; }
+    var len = load64(lenp);
+    if (len == 0) { return 0; }
+    # One entry per line at most, so count newlines to size the table exactly.
+    var lines: i64 = 1;
+    var i: i64 = 0;
+    while (i < len) {
+        if (load8(buf + i) == 10) { lines = lines + 1; }
+        i = i + 1;
+    }
+    var ents = alloc(lines * UDB_ENT_SIZE + UDB_ENT_SIZE);
+    var n: i64 = 0;
+    var s: i64 = 0;
+    i = 0;
+    while (i <= len) {
+        var term: i64 = 0;
+        if (i == len) { term = 1; }
+        elif (load8(buf + i) == 10) { term = 1; }
+        if (term == 1) {
+            var e = i;
+            # Tolerate CRLF: the `\r` belongs to the last field, never the name.
+            if (e > s) {
+                if (load8(buf + e - 1) == 13) { e = e - 1; }
+            }
+            if (_udb_line(buf, s, e, min_fields, ents + n * UDB_ENT_SIZE) == 1) {
+                n = n + 1;
+            }
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    store64(n_p, n);
+    return ents;
+}
+
+# ⭐ Loaded at most ONCE per process, and that is a requirement rather than an
+# optimisation: `ls -l` in a large directory looks up an owner per entry, and
+# re-reading /etc/passwd each time would be one open per file. GNU caches too —
+# `strace -e openat ls -l` over 40 same-owner files shows TWO passwd opens, not
+# forty.
+fn _udb_pw(): i64 {
+    if (_udb_pw_state == 0) {
+        _udb_pw_state = 1;
+        var np = alloc(8);
+        _udb_pw_ents = _udb_load("/etc/passwd", UDB_PW_FIELDS, np);
+        _udb_pw_n = load64(np);
+    }
+    return _udb_pw_ents;
+}
+
+fn _udb_gr(): i64 {
+    if (_udb_gr_state == 0) {
+        _udb_gr_state = 1;
+        var np = alloc(8);
+        _udb_gr_ents = _udb_load("/etc/group", UDB_GR_FIELDS, np);
+        _udb_gr_n = load64(np);
+    }
+    return _udb_gr_ents;
+}
+
+# ⚠ First match wins, matching glibc: two lines sharing an id resolve to the
+# name on the FIRST of them.
+fn _udb_name_for(ents, n, id): i64 {
+    if (ents == 0) { return 0; }
+    var i: i64 = 0;
+    while (i < n) {
+        var e = ents + i * UDB_ENT_SIZE;
+        if (load64(e + UDB_E_ID) == id) { return load64(e + UDB_E_NAME); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _udb_id_for(ents, n, name): i64 {
+    if (ents == 0) { return 0 - 1; }
+    var i: i64 = 0;
+    while (i < n) {
+        var e = ents + i * UDB_ENT_SIZE;
+        if (streq(load64(e + UDB_E_NAME), name) == 1) { return load64(e + UDB_E_ID); }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Name for `uid`, or 0 when there is none. ⚠ 0 means "no name", which callers
+# must render as the NUMBER — never as an empty column.
+fn userdb_user_name(uid): i64 {
+    var ents = _udb_pw();
+    return _udb_name_for(ents, _udb_pw_n, uid);
+}
+
+fn userdb_group_name(gid): i64 {
+    var ents = _udb_gr();
+    return _udb_name_for(ents, _udb_gr_n, gid);
+}
+
+# Id for `name`, or (0 - 1) when there is none.
+fn userdb_user_id(name): i64 {
+    var ents = _udb_pw();
+    return _udb_id_for(ents, _udb_pw_n, name);
+}
+
+fn userdb_group_id(name): i64 {
+    var ents = _udb_gr();
+    return _udb_id_for(ents, _udb_gr_n, name);
+}

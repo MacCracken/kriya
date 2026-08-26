@@ -134,12 +134,15 @@ kriya's dependency closure for niyama.
 **Enablers:** a passwd/group parser (new `src/lib/` module) and a comparator-by-flag indirection in
 `ls`.
 
-- **1.5.0 — passwd/group parser.** Unblocks three consumers at once: `ls -l` user/group names,
-  `stat %U`/`%G` (which refuse by name today), and `find -user`/`-group`. ⚠ Parse `/etc/passwd` and
-  `/etc/group` directly — no NSS, no dynamic linking; that is the whole point of a static tool.
-- **1.5.1 — `ls` sort keys and colour.** `-t` (mtime) and `-S` (size) via the comparator indirection,
-  `-n` (force numeric uid/gid once names exist), `--color=auto|always|never` with a per-type table
-  and tty detection.
+- ✅ **1.5.0 — passwd/group parser** (shipped). `src/lib/userdb.cyr`; `ls -l` names + `-n`,
+  `stat %U`/`%G`, and `find -user`/`-group`/`-uid`/`-gid`/`-nouser`/`-nogroup`. ⚠ **What it does NOT
+  do, and will not**: users who exist only in LDAP / SSSD / systemd-homed have no line in
+  `/etc/passwd` and resolve to numeric ids. Closing that means NSS, which means dynamic linking —
+  a **No-Go** for a static tool, not a deferral. Do not re-open it as unfinished work.
+- **1.5.1 — `ls` sort keys and colour.** `-t` (mtime) and `-S` (size) via the comparator
+  indirection, and `--color=auto|always|never` with a per-type table and tty detection. ⚠ `-n`
+  is NOT part of this any more — it shipped with the names at 1.5.0, since "force numeric" is
+  meaningless until there is something to force it away from.
 - **1.5.2 — Quoting.** `stat %N` (quoted name + symlink target) against a shared quoting helper, and
   the same helper for `ls`'s quoting story. Also `pwd`'s `$PWD` inode-match, which needs only a
   stat-compare in `fs.cyr`.

@@ -6,6 +6,145 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.5.0] - 2026-08-26 — the passwd/group parser; `ls -l`, `stat %U`/`%G`, `find -user` get names
+
+### Added — `src/lib/userdb.cyr`, and the three consumers it unblocks
+
+⭐ **`ls -l` shows names, `stat %U`/`%G` render, and `find` grows `-user`/`-group`/`-uid`/`-gid`/
+`-nouser`/`-nogroup`.** Before this, `ls -l` printed `1000 1000` where GNU prints `macro macro`,
+`stat -c %U` refused by name on stderr, and the find predicates were an unknown-predicate error.
+
+⛔ **A parser and not a library call, deliberately.** `getpwuid(3)` pulls in NSS, and NSS is dynamic
+linking by construction — it `dlopen()`s `libnss_*.so` at runtime. kriya is static and zero-dep, so
+parsing the files directly IS the design. ⚠ The cost is real and worth stating rather than hiding:
+users who exist only in LDAP / SSSD / systemd-homed have no line in these files and will not
+resolve. They degrade to numeric ids, which is the safe direction.
+
+⭐ **One module, three consumers**, the argument that lifted `glob.cyr` out of `find` at 1.4.1, the
+escape table into `str.cyr` at 1.4.3 and `icase.cyr` at 1.4.5: two implementations of "what is this
+uid called" in one binary would be two sets of edge cases that drift apart silently.
+
+### The grammar, measured against glibc rather than read off a man page
+
+Every rule was checked by building a fixture `/etc/passwd` in a container and asking `stat -c %U` and
+`getent` what they made of it, on **both** coreutils 9.4 / glibc 2.39 (ubuntu-24.04, what CI runs)
+**and** 9.11 / glibc 2.44 (this box). ⭐ Identical on both, so none of it is version drift.
+
+- ⚠ **A passwd line needs at least FOUR fields and a group line THREE.** `f3:x:7001` does not
+  resolve; `f4:x:7002:7002` does. Extra trailing fields are accepted.
+- ⛔ **A line beginning `#` IS skipped**, which is widely called a myth and is not one:
+  `#hash:x:7201:7201::/tmp:/sh` has seven good fields and a valid uid, and `stat -c %U` on a file
+  owned by 7201 still prints `UNKNOWN`. The passwd(5) page documents no comment syntax.
+- ⚠ **The id field is decimal and a leading `0` does NOT make it octal** — `0006004` is 6004, not
+  3076. A leading `+` is accepted.
+- ⛔ **LEADING blanks are stripped and TRAILING blanks are not** — in the NAME *and* in the ID
+  field, and the asymmetry is real in both: `   leadws:x:8100:8100` is the user `leadws`, while
+  `trail :x:...` really is the five-character name `trail `; `n:x: 8600:8600` resolves and
+  `n:x:8601 :8601` does not. ⚠ The strip happens BEFORE the prefix test, so `  #indent:x:...` is a
+  comment.
+- ⛔ **`#`, `+` and `-` lines are refused BY PREFIX, not by field count.** The short NIS forms
+  (`+@netgroup`, `+user::::::`) happen to fail the field and id rules, which makes "no special case
+  needed" look true — and it is false for the full-field form: `+plus:x:8102:8102::/h:/s` has four
+  good fields and a valid id, and glibc's lookup path still refuses it. ⚠ On a `passwd: compat`
+  host a `-name` line means EXCLUDE that user, so resolving it as a positive mapping is the worst
+  available shape of the bug. ⚠ glibc's own `fgetpwent(3)` disagrees and returns `+plus`; the
+  LOOKUP path is what `ls`/`stat`/`find` take, so it is the oracle.
+- ⛔ **A passwd line's GID field is validated too, though nothing reads it.** glibc rejects the whole
+  line when field 3 is not an id, so checking only the uid resolves users GNU does not:
+  `badgid:x:8300:notanumber`, `emptygid:x:8301:`, `negid:x:8302:-5` are all `UNKNOWN` in GNU.
+  Group lines have no second id field and are exempt.
+- ⛔ **On a duplicate id the FIRST entry wins** the reverse lookup.
+- ⚠ CRLF files and a missing final newline both parse — the `\r` lands on the last field, which is
+  neither the name nor the id.
+
+### ⛔ The GNU behaviours that a careful guess would have got wrong
+
+- **`ls -l` left-aligns a NAME and right-aligns an unmapped NUMBER — in the same column.** Every
+  other column in `-l` is right-justified, so one rule for the column would be wrong half the time:
+
+      -rw-r--r-- 1 root                  root                   0 ...
+      -rw-r--r-- 1                  4242                   4343 0 ...
+
+  Both padded to the widest entry in the listing. Verified byte-identical against GNU on a fixture
+  mixing a long name, a short name and an unmapped id.
+- **`stat %U` on an id with no entry prints the literal string `UNKNOWN`** — not the number, not an
+  empty field. `%u` is the specifier that gives the number.
+- ⛔ **Coreutils is inconsistent with ITSELF on an EMPTY name, and kriya has to be too.** For a
+  `:x:8104:8104::/h:/s` entry, `ls -l` falls back to the NUMBER (`8104`) while `stat -c %U` prints
+  the empty string. gnulib's `idcache.c` ends `return match->name[0] ? match->name : NULL;` so `ls`
+  treats a zero-length name as no name; `stat.c` calls getpwuid directly and guards only NULL.
+  ⚠ The guard therefore lives at ls's call site — pushing it into `userdb` would make kriya's
+  `stat` print `UNKNOWN` and regress a case that already matched.
+- **`-n` does not merely suppress lookup; in GNU it IMPLIES `-l`.**
+- ⛔ **`find -user` takes a name OR a number, and the NAME wins when both readings are possible.**
+  With a user literally named `4242` whose uid is 7777, `find -user 4242` matches the uid-7777
+  files. So the order is name-first with number as fallback, not "digits mean a number". `-uid` and
+  `-gid` are numeric-only and are the unambiguous form. ⚠ `chown` resolves the same way, which is
+  what confounded the first attempt to build a fixture for this.
+- ⚠ **`-nouser` means "no entry in the database"**, not "id is zero" and not "lookup failed": with
+  `/etc/passwd` removed entirely, GNU's `-nouser` matches every file.
+
+### Fallback, which is where a static tool earns its keep
+
+⛔ **A missing or unreadable file is NOT an error.** GNU degrades silently to numeric ids and exits
+0 — verified by moving `/etc/passwd` aside and running `ls -l` (prints `0 0`, rc 0) and `stat -c %U`
+(prints `UNKNOWN`, rc 0). ⚠ **The two files degrade INDEPENDENTLY**: with `/etc/passwd` unreadable
+and `/etc/group` readable, GNU prints the numeric uid beside the NAMED group, so they are loaded
+separately and neither failure poisons the other. ⭐ That is also exactly what the **agnos** target
+needs, where there may be no `/etc/passwd` at all — the fallback is the normal path there, not an
+error path.
+
+⭐ **Loaded at most once per process, which is a requirement and not an optimisation**: `ls -l` in a
+large directory looks up an owner per entry, and re-reading `/etc/passwd` each time would be one
+open per file. GNU caches too — `strace -e openat ls -l` over 40 same-owner files shows **two**
+passwd opens, not forty.
+
+### Fixed — a segfault caught by the first run, and the constant that caused it
+
+⛔ **`var st[FS_STAT_SIZE]` is a 48-byte buffer for a 144-byte write.** `FS_STAT_SIZE` is the OFFSET
+of `st_size`; `FS_STAT_BUFSZ` is the struct's length — and a function-local `var X[N]` is N BYTES
+(roadmap M15a). The plausible-looking name is the wrong one, and `stat -c %U` exited **139**
+(SIGSEGV) on its first run. ⚠ That was the good outcome: a smaller mismatch would have corrupted the
+frame silently.
+
+### ⚠ Six divergences found AFTER this release was first reported complete
+
+⛔ **The parser shipped wrong in six ways and a background investigation caught all of them**, three
+of which I had explicitly measured and read backwards. The leading-blank rule is the instructive
+one: my own fixture output was `  stat %U : [spaced ]`, and I read the two leading spaces of my
+`printf`'s OWN label as data, concluding "whitespace is part of the name". It is not — glibc strips
+leading blanks and keeps trailing ones, so the evidence was on screen and misread.
+
+The six: leading blanks not stripped (name); leading blanks not stripped (id field); `+`/`-` lines
+resolved as users; `#` not recognised when indented; a passwd line's gid field unvalidated; and
+`ls -l` printing a blank column where GNU falls back to the number.
+
+⭐ **A differential fuzz then closed the loop**: 1,200 generated passwd and group lines — random
+leading/trailing blanks, `#`/`+`/`-` prefixes, malformed and out-of-range ids, field counts from 2
+to 8 — compared against glibc through `stat -c %U`/`%G`. **Zero divergences.** ⚠ The first run of
+that fuzz was what found the id-field blank rule, as 21 failures of exactly one shape.
+
+### Release totals
+
+**4,303 smoke cases across 38 scripts** (up from 4,279) — `smoke-find.sh` 78 → **90**,
+`smoke-stat.sh` 48 → **53**, `smoke-ls.sh` 43 → **49**. **322 unit** (up from 277); 18 POSIX; fuzz
+green under poison; four lints clean; both targets build. `vet` reports **52 deps** (new
+`src/lib/userdb.cyr`). Binary 1,046,808 → 1,059,568 bytes (+12,760).
+
+⛔ **Every smoke assertion here is a RUNTIME COMPARISON against GNU, never a literal**, because the
+right answer is a property of the machine's `/etc/passwd`: uid 1000 is `macro` on this box and
+somebody else on the CI runner. `expect_eq "%U" "macro"` would assert the laptop it was written on.
+⚠ The mixed-width alignment quirk and the unmapped-id cases need `chown` privileges to construct, so
+they are covered by the unit tests and the container run, and the smoke scripts say so at the point
+where the gap is — deliberate rather than forgotten.
+
+⭐ **Verified under all five matrix conditions**: baseline 38/38 4,303; hostile block-size +
+`POSIXLY_CORRECT` env 38/38 4,303; `en_US.UTF-8` 38/38 4,303; deep `$TMPDIR` 38/38 4,303; simulated
+root 38/38 4,287 (root-only paths skipping).
+
+⭐ **And inside the `ubuntu:24.04` container as a non-root user** — 38 scripts, 0 failures, 4,281
+cases — the check that caught 1.4.5's CI failure only after CI did.
+
 ## [1.4.5] - 2026-08-26 — the `-i` bracket-class quirk; 1.4.x closes
 
 ### Fixed — ⛔ `grep -i` and `find -iregex` mis-matched every bracket expression

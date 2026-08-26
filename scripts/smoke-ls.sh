@@ -255,6 +255,45 @@ fi
 
 expect_exit "M17g: healthy listing still exits 0" 0 "$BIN" ls -l .
 
+# --- owner / group NAMES in -l, and -n (1.5.0) --------------------------
+#
+# ⛔ EVERY assertion here is a RUNTIME COMPARISON against GNU, never a literal.
+# The right answer is a property of the MACHINE's /etc/passwd — uid 1000 is
+# `macro` on the box this was written on and somebody else on the CI runner — so
+# `expect_eq "owner" "macro"` would assert the laptop rather than the code.
+#
+# ⚠ Only the columns THROUGH the owner and group are compared, because kriya's
+# date column is deliberately different: it renders ISO and in UTC (ADR 0007)
+# while GNU renders `Mon DD` in local time. Comparing whole lines would fail for
+# a reason that has nothing to do with this release.
+mkdir -p ownerdir && : > ownerdir/f1 && : > ownerdir/f2
+own_cols() { awk '{print $1, $2, $3, $4}'; }
+
+expect_eq "-l shows the owner NAME" \
+    "$(ls -l ownerdir/f1 | own_cols)" "$("$BIN" ls -l ownerdir/f1 | own_cols)"
+expect_eq "-l owner columns on a directory listing" \
+    "$(ls -l ownerdir | tail -n +2 | own_cols)" "$("$BIN" ls -l ownerdir | own_cols)"
+# A root-owned path exercises a different passwd entry than the test user's.
+expect_eq "-l of a root-owned path" \
+    "$(ls -ld / | own_cols)" "$("$BIN" ls -ld / | own_cols)"
+
+# ⚠ `-n` is not merely "don't look up names" — in GNU it also IMPLIES `-l`.
+expect_eq "-n forces numeric ids" \
+    "$(ls -n ownerdir/f1 | own_cols)" "$("$BIN" ls -n ownerdir/f1 | own_cols)"
+expect_eq "-n implies -l" \
+    "$(ls -n ownerdir | tail -n +2 | own_cols)" "$("$BIN" ls -n ownerdir | own_cols)"
+# ...and the two must actually DIFFER, or the pair above proves nothing. On a
+# host where the test user has no passwd entry they legitimately match, so this
+# is a comparison against GNU rather than an assertion of difference.
+expect_eq "-l vs -n differ exactly as GNU's do" \
+    "$(if [ "$(ls -l ownerdir/f1|own_cols)" = "$(ls -n ownerdir/f1|own_cols)" ]; then echo same; else echo differ; fi)" \
+    "$(if [ "$("$BIN" ls -l ownerdir/f1|own_cols)" = "$("$BIN" ls -n ownerdir/f1|own_cols)" ]; then echo same; else echo differ; fi)"
+
+# ⛔ The mixed-width alignment quirk — names LEFT-justified, unmapped numeric ids
+# RIGHT-justified in the SAME column — needs a file owned by an id with no
+# passwd entry, which cannot be created without chown privileges. It is covered
+# in the container run instead; noted here so the gap is deliberate.
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

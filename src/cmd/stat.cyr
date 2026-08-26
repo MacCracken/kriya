@@ -312,6 +312,22 @@ fn _st_emit_spec(c, st, name): i64 {
         k_write( 1, name, strlen(name));
         return 0;
     }
+    # %U / %G — the owner and group NAMES (roadmap 1.5.0). ⚠ GNU prints the
+    # literal string `UNKNOWN` when the id has no entry, NOT the number and not
+    # an empty field; `%u` is the specifier that gives the number. Measured
+    # against coreutils 9.4 and 9.11 on a file owned by an unmapped uid.
+    if (c == 85) {   # U
+        var un = userdb_user_name(load64(st + 28) & 4294967295);
+        if (un == 0) { k_write( 1, "UNKNOWN", 7); }
+        else { k_write( 1, un, strlen(un)); }
+        return 0;
+    }
+    if (c == 71) {   # G
+        var gn = userdb_group_name(load64(st + 32) & 4294967295);
+        if (gn == 0) { k_write( 1, "UNKNOWN", 7); }
+        else { k_write( 1, gn, strlen(gn)); }
+        return 0;
+    }
     if (c == 115) {  # s
         n = _st_render_dec(load64(st + 48), &buf);
     } else { if (c == 97) {  # a (octal perms)
@@ -392,14 +408,11 @@ fn _st_emit_spec(c, st, name): i64 {
 }
 
 # Specifiers GNU defines and kriya does not yet render, as opposed to ones that  #skip-lint
-# are simply not specifiers. ⚠ %x/%y/%z are NOT among them any more — they
-# render since v1.2.5. %U/%G wait on a passwd/group parser (roadmap 1.5.0), %N
-# on a quoting helper (roadmap 1.5.2), %w on statx(2).
+# are simply not specifiers. ⚠ The list keeps shrinking and the comment has to
+# shrink with it: %x/%y/%z left at v1.2.5 and %U/%G at 1.5.0, when
+# `src/lib/userdb.cyr` landed. %N still waits on a quoting helper
+# (roadmap 1.5.2) and %w on statx(2).
 fn _st_is_deferred_spec(c): i64 {  #skip-lint
-    # ⚠ %x/%y/%z left this list at v1.2.5 — they render now. %U/%G still need a
-    # passwd/group parser, %N a quoting helper, %w statx(2).
-    if (c == 85)  { return 1; }   # U
-    if (c == 71)  { return 1; }   # G
     if (c == 78)  { return 1; }   # N
     if (c == 119) { return 1; }   # w
     return 0;

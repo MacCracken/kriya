@@ -308,6 +308,46 @@ esac
 rc=0; "$BIN" find rx -regex >/dev/null 2>&1 || rc=$?
 expect_eq "regex: missing argument is a usage error" "2" "$rc"
 
+# --- -user / -group / -uid / -gid / -nouser / -nogroup (1.5.0) ----------
+#
+# ⛔ Runtime comparisons against GNU, never literals: the test user's name and
+# uid differ between this box and CI. ⚠ `rx_same` already compares kriya's and
+# GNU's output for the same argv, which is exactly the shape needed.
+mkdir -p ownerdir && : > ownerdir/f1 && : > ownerdir/f2
+ME_U=$(id -un); ME_G=$(id -gn); ME_UI=$(id -u); ME_GI=$(id -g)
+own_same() {
+    label=$1; shift
+    g=$(cd ownerdir && find "$@" 2>&1 | sort)
+    k=$(cd ownerdir && "$BIN" find "$@" 2>&1 | sort)
+    expect_eq "owner: $label" "$g" "$k"
+}
+own_same "-user NAME"        . -user "$ME_U"
+own_same "-group NAME"       . -group "$ME_G"
+own_same "-uid N"            . -uid "$ME_UI"
+own_same "-gid N"            . -gid "$ME_GI"
+# ⚠ `-user` accepts a NUMBER too, and resolves it as a NAME first when both
+# readings are possible — with a user literally named `4242` at uid 7777,
+# `find -user 4242` matches the uid-7777 files. That fixture needs privileges,
+# so the container run covers it; this only pins the numeric fallback.
+own_same "-user accepts a UID"  . -user "$ME_UI"
+own_same "-group accepts a GID" . -group "$ME_GI"
+own_same "-nouser"           . -nouser
+own_same "-nogroup"          . -nogroup
+own_same "-user with -type"  . -user "$ME_U" -type f
+own_same "negated -user"     . ! -user "$ME_U"
+
+# ⚠ Refusal compared as refused-or-not: GNU exits 1 and kriya exits 2 for a
+# usage error (ADR 0008), a deliberate pre-existing divergence.
+for badarg in nosuchuser___x; do
+    grc=0; (cd ownerdir && find . -user "$badarg") >/dev/null 2>&1 || grc=$?
+    krc=0; (cd ownerdir && "$BIN" find . -user "$badarg") >/dev/null 2>&1 || krc=$?
+    [ "$grc" -ne 0 ] && grc=refused || grc=ok
+    [ "$krc" -ne 0 ] && krc=refused || krc=ok
+    expect_eq "owner: -user $badarg refused" "$grc" "$krc"
+done
+rc=0; (cd ownerdir && "$BIN" find . -user) >/dev/null 2>&1 || rc=$?
+expect_eq "owner: -user with no argument is a usage error" "2" "$rc"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

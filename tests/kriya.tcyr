@@ -26,6 +26,9 @@ include "src/lib/str.cyr"
 # so a missing include would stay green until one of them arrived.
 include "src/lib/icase.cyr"
 include "src/lib/fs.cyr"
+# ⚠ M15e. `src/lib/userdb.cyr` is exercised below and reads `FsStat` offsets,
+# so it must come AFTER fs.cyr — the same ordering `src/main.cyr` uses.
+include "src/lib/userdb.cyr"
 include "src/lib/protected.cyr"
 include "src/lib/args.cyr"
 # ⚠ `args.cyr` calls into `help.cyr` since v1.3.0 (`--help` is intercepted in
@@ -66,6 +69,16 @@ fn _t_esc(lit, mode, out): i64 {
 fn _t_rw(pat, mode, err_p): i64 {
     var len: i64 = 0;
     return icase_rewrite(pat, strlen(pat), mode, &len, err_p);
+}
+
+# Copy `lit` into a fresh writable buffer and parse it as one database line.
+# ⚠ A COPY is required: `_udb_line` NUL-terminates the name in place, and a
+# string literal is not writable.
+fn _t_udb_line(lit, min_fields, ent): i64 {
+    var n = strlen(lit);
+    var buf = alloc(n + 1);
+    memcpy(buf, lit, n + 1);
+    return _udb_line(buf, 0, n, min_fields, ent);
 }
 
 fn main() {
@@ -583,6 +596,92 @@ fn main() {
     assert_eq(icase_scan_unsupported("a.b", 3),        ICASE_OK, "no bracket at all");
     # An escaped `[` does not open a bracket expression.
     assert_eq(icase_scan_unsupported("a\\[=b=]", 7),   ICASE_OK, "an escaped [ opens nothing");
+
+    # ⛔ Every rule here was measured against glibc in a container on BOTH
+    # coreutils 9.4 / glibc 2.39 (what CI runs) and 9.11 / glibc 2.44, by
+    # building a fixture /etc/passwd and asking `stat -c %U` what it made of it.
+    test_group("userdb — the id field");
+    assert_eq(_udb_parse_id("1000", 0, 4), 1000, "plain decimal");
+    assert_eq(_udb_parse_id("0", 0, 1), 0, "zero");
+    # ⚠ A leading zero does NOT make it octal: `0006004` is 6004, not 3076.
+    assert_eq(_udb_parse_id("0006004", 0, 7), 6004, "leading zeros stay decimal");
+    assert_eq(_udb_parse_id("+6005", 0, 5), 6005, "a leading + is accepted");
+    assert_eq(_udb_parse_id("", 0, 0), 0 - 1, "empty is not an id");
+    assert_eq(_udb_parse_id("+", 0, 1), 0 - 1, "a bare + is not an id");
+    assert_eq(_udb_parse_id("12x", 0, 3), 0 - 1, "trailing junk is not an id");
+    assert_eq(_udb_parse_id("x12", 0, 3), 0 - 1, "leading junk is not an id");
+    assert_eq(_udb_parse_id("-5", 0, 2), 0 - 1, "negative is not an id");
+    # ⛔ LEADING blanks in the ID field strip; TRAILING ones do not. Found by a
+    # differential fuzz as 21 divergences of exactly one shape — `n:x: 8600:...`
+    # resolves in GNU and `n:x:8601 :...` does not.
+    assert_eq(_udb_parse_id(" 8600", 0, 5), 8600, "a leading space strips");
+    assert_eq(_udb_parse_id("\t8603", 0, 5), 8603, "a leading tab strips");
+    assert_eq(_udb_parse_id(" +8606", 0, 6), 8606, "blanks then + is accepted");
+    assert_eq(_udb_parse_id("8601 ", 0, 5), 0 - 1, "a TRAILING space refuses");
+    assert_eq(_udb_parse_id(" 8602 ", 0, 6), 0 - 1, "...even with a leading one");
+    assert_eq(_udb_parse_id("  ", 0, 2), 0 - 1, "blanks alone are not an id");
+    # uid_t is 32-bit unsigned; wider is not an id.
+    assert_eq(_udb_parse_id("4294967295", 0, 10), 4294967295, "the 32-bit ceiling");
+    assert_eq(_udb_parse_id("4294967296", 0, 10), 0 - 1, "one past it is refused");
+
+    test_group("userdb — which lines yield an entry");
+    var ue = alloc(UDB_ENT_SIZE);
+    # ⚠ A passwd line needs FOUR fields and a group line THREE. Measured:
+    # `f3:x:7001` does NOT resolve while `f4:x:7002:7002` does.
+    assert_eq(_t_udb_line("f3:x:7001", UDB_PW_FIELDS, ue), 0, "3 fields is too few for passwd");
+    assert_eq(_t_udb_line("f4:x:7002:7002", UDB_PW_FIELDS, ue), 1, "4 fields is enough");
+    assert_eq(load64(ue + UDB_E_ID), 7002, "...and the uid is field 2");
+    assert_eq(streq(load64(ue + UDB_E_NAME), "f4"), 1, "...and the name is field 0");
+    assert_eq(_t_udb_line("g3:x:7101", UDB_GR_FIELDS, ue), 1, "3 fields is enough for group");
+    assert_eq(load64(ue + UDB_E_ID), 7101, "...and the gid is field 2");
+    # Extra trailing fields are fine.
+    assert_eq(_t_udb_line("f8:x:7006:7006::/tmp:/sh:extra", UDB_PW_FIELDS, ue), 1,
+              "extra fields are accepted");
+    # ⛔ A `#` line IS skipped, which is widely called a myth and is not one:
+    # this line has seven good fields and a valid uid, and glibc still ignores it.
+    assert_eq(_t_udb_line("#hash:x:7201:7201::/tmp:/sh", UDB_PW_FIELDS, ue), 0,
+              "a # comment is skipped");
+    assert_eq(_t_udb_line("", UDB_PW_FIELDS, ue), 0, "an empty line yields nothing");
+    # ⛔ NIS/compat forms are refused BY PREFIX, not by field count. The short
+    # forms happen to fail the field and id rules, which made "no special case
+    # needed" look true — and it is FALSE for the full-field form below.
+    assert_eq(_t_udb_line("+@netgroup", UDB_PW_FIELDS, ue), 0, "+@netgroup has too few fields");
+    assert_eq(_t_udb_line("+user::::::", UDB_PW_FIELDS, ue), 0, "+user:::::: has an empty id");
+    assert_eq(_t_udb_line("+plus:x:8102:8102::/h:/s", UDB_PW_FIELDS, ue), 0,
+              "+plus is refused despite four good fields");
+    assert_eq(_t_udb_line("-minus:x:8103:8103::/h:/s", UDB_PW_FIELDS, ue), 0,
+              "-minus likewise (it means EXCLUDE under compat)");
+    assert_eq(_t_udb_line("badid:x:notanumber:5::/tmp:/sh", UDB_PW_FIELDS, ue), 0,
+              "a non-numeric uid is skipped");
+    # ⛔ The GID field is validated too, though nothing reads it: glibc rejects
+    # the whole line, so checking only the uid resolves users GNU does not.
+    assert_eq(_t_udb_line("badgid:x:8300:notanumber::/h:/s", UDB_PW_FIELDS, ue), 0,
+              "a non-numeric gid rejects the line");
+    assert_eq(_t_udb_line("emptygid:x:8301:::/h:/s", UDB_PW_FIELDS, ue), 0,
+              "an empty gid rejects the line");
+    assert_eq(_t_udb_line("negid:x:8302:-5::/h:/s", UDB_PW_FIELDS, ue), 0,
+              "a negative gid rejects the line");
+    # ⚠ A group line has no second id field, so the same shape is fine there.
+    assert_eq(_t_udb_line("g:x:8400:notanumber", UDB_GR_FIELDS, ue), 1,
+              "a group's 4th field is a member list, not an id");
+
+    # ⛔ LEADING blanks are STRIPPED and TRAILING blanks are not — and the strip
+    # happens BEFORE the prefix test, so `  #x` is a comment. Getting the order
+    # wrong diverges in both directions at once, which is how it first shipped.
+    assert_eq(_t_udb_line("   leadws:x:8100:8100", UDB_PW_FIELDS, ue), 1, "leading blanks strip");
+    assert_eq(streq(load64(ue + UDB_E_NAME), "leadws"), 1, "...leaving a bare name");
+    assert_eq(_t_udb_line("\t\ttabbed:x:8110:8110", UDB_PW_FIELDS, ue), 1, "tabs strip too");
+    assert_eq(streq(load64(ue + UDB_E_NAME), "tabbed"), 1, "...leaving a bare name");
+    assert_eq(_t_udb_line("  #indent:x:8101:8101", UDB_PW_FIELDS, ue), 0,
+              "an INDENTED # is still a comment");
+    assert_eq(_t_udb_line("   ", UDB_PW_FIELDS, ue), 0, "a whitespace-only line yields nothing");
+    assert_eq(_t_udb_line("trail :x:8105:8105", UDB_PW_FIELDS, ue), 1, "trailing blanks do NOT strip");
+    assert_eq(streq(load64(ue + UDB_E_NAME), "trail "), 1, "...they are part of the name");
+    # An empty name is still an entry — glibc does not require one, and `stat`
+    # prints it as the empty string. ⚠ `ls` treats it as NO name and falls back
+    # to the number; that split lives at ls's call site, not here.
+    assert_eq(_t_udb_line(":x:7400:7400", UDB_PW_FIELDS, ue), 1, "an empty name still parses");
+    assert_eq(streq(load64(ue + UDB_E_NAME), ""), 1, "...as the empty string");
 
     return assert_summary();
 }

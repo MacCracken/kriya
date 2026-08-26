@@ -57,6 +57,10 @@ enum FindNode {
     F_N_MAXDEPTH  = 17,
     F_N_MINDEPTH  = 18,
     F_N_REGEX     = 19,
+    F_N_UID       = 20,
+    F_N_GID       = 21,
+    F_N_NOUSER    = 22,
+    F_N_NOGROUP   = 23,
     F_N_PRINT     = 30,
     F_N_PRINT0    = 31,
     F_N_EXEC      = 32,
@@ -433,6 +437,58 @@ fn _f_parse_primary(): i64 {
         var r = fs_lstat_at(0 - 100, rp, &st);
         if (r < 0) { _f_set_err("-newer reference path not found"); return 0; }
         return _f_node_new(F_N_NEWER, load64(&st + 88), 0, 0);
+    }
+    # ⛔ `-user` takes a NAME **or** a numeric id, and the NAME wins when both
+    # readings are possible. Measured: with a user literally named `4242` whose
+    # uid is 7777, `find -user 4242` matches the uid-7777 files. So the lookup
+    # order is name-first, number-only-as-fallback — not "digits mean a number".
+    # ⚠ GNU exits 1 here where kriya exits 2 (ADR 0008 usage-error policy); the
+    # diagnostic wording differs too, so tests compare refusal, not text.
+    if (streq(t, "-user") == 1) {
+        _f_consume();
+        var ua = _f_consume();
+        if (ua == 0) { _f_set_err("-user needs an argument"); return 0; }
+        var uid = userdb_user_id(ua);
+        if (uid < 0) { uid = kriya_parse_nonneg_int(ua); }
+        if (uid < 0) { _f_set_err("-user: not the name of a known user"); return 0; }
+        return _f_node_new(F_N_UID, uid, 0, 0);
+    }
+    if (streq(t, "-group") == 1) {
+        _f_consume();
+        var ga = _f_consume();
+        if (ga == 0) { _f_set_err("-group needs an argument"); return 0; }
+        var gid = userdb_group_id(ga);
+        if (gid < 0) { gid = kriya_parse_nonneg_int(ga); }
+        if (gid < 0) { _f_set_err("-group: not the name of a known group"); return 0; }
+        return _f_node_new(F_N_GID, gid, 0, 0);
+    }
+    # ⚠ `-uid` / `-gid` are NUMERIC ONLY — a name is not accepted, which is what
+    # makes them the unambiguous form when a user is named after a number.
+    if (streq(t, "-uid") == 1) {
+        _f_consume();
+        var un = _f_consume();
+        if (un == 0) { _f_set_err("-uid needs an argument"); return 0; }
+        var uv = kriya_parse_nonneg_int(un);
+        if (uv < 0) { _f_set_err("bad -uid value"); return 0; }
+        return _f_node_new(F_N_UID, uv, 0, 0);
+    }
+    if (streq(t, "-gid") == 1) {
+        _f_consume();
+        var gn = _f_consume();
+        if (gn == 0) { _f_set_err("-gid needs an argument"); return 0; }
+        var gv = kriya_parse_nonneg_int(gn);
+        if (gv < 0) { _f_set_err("bad -gid value"); return 0; }
+        return _f_node_new(F_N_GID, gv, 0, 0);
+    }
+    # ⚠ "no entry in the database", NOT "id is zero" and NOT "lookup failed" —
+    # with /etc/passwd absent entirely, GNU's `-nouser` matches EVERY file.
+    if (streq(t, "-nouser") == 1) {
+        _f_consume();
+        return _f_node_new(F_N_NOUSER, 0, 0, 0);
+    }
+    if (streq(t, "-nogroup") == 1) {
+        _f_consume();
+        return _f_node_new(F_N_NOGROUP, 0, 0, 0);
     }
     if (streq(t, "-maxdepth") == 1) {
         _f_consume();
@@ -912,6 +968,22 @@ fn _f_eval(n, ctx): i64 {
     if (k == F_N_NEWER)  {
         var ref_mtime = load64(n + 8);
         if (load64(st + 88) > ref_mtime) { return 1; }
+        return 0;
+    }
+    if (k == F_N_UID) {
+        if ((load64(st + 28) & 4294967295) == load64(n + 8)) { return 1; }
+        return 0;
+    }
+    if (k == F_N_GID) {
+        if ((load64(st + 32) & 4294967295) == load64(n + 8)) { return 1; }
+        return 0;
+    }
+    if (k == F_N_NOUSER) {
+        if (userdb_user_name(load64(st + 28) & 4294967295) == 0) { return 1; }
+        return 0;
+    }
+    if (k == F_N_NOGROUP) {
+        if (userdb_group_name(load64(st + 32) & 4294967295) == 0) { return 1; }
         return 0;
     }
     if (k == F_N_MAXDEPTH) { return 1; }   # filter applied at walk level

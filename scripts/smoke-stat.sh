@@ -161,14 +161,36 @@ expect_eq "unknown %q matches GNU" "$(stat --format="%q" regfile 2>/dev/null)" "
 # its own source text. `stat -c %y` printed the two bytes "%y" where a timestamp
 # belonged and exited 0 — a script substituting that into a filename or a
 # comparison got literal garbage with every sign of success.
-# ⚠ %x/%y/%z LEFT THIS LIST AT v1.2.5 — they render now. The rest still need a
-# passwd/group parser (%U/%G), a quoting helper (%N) or statx(2) (%w).
-for spec in %U %G %N %w; do
+# ⚠ The list keeps shrinking and these assertions have to shrink with it:
+# %x/%y/%z left at v1.2.5 and %U/%G at 1.5.0, when `src/lib/userdb.cyr` landed.
+# ⭐ This block going red is the SUCCESS signal for a release that implements
+# one of them — it did exactly that at 1.5.0. Only %N (a quoting helper,
+# roadmap 1.5.2) and %w (statx(2)) are still deferred.
+for spec in %N %w; do
     rc=0
     out=$("$BIN" stat -c "$spec" regfile 2>/dev/null) || rc=$?
     expect_eq "deferred $spec exits 1"     "1"  "$rc"
     expect_eq "deferred $spec prints none" ""   "$out"
 done
+
+# --- %U / %G: owner and group NAMES (1.5.0) ---
+#
+# ⛔ COMPARED AT RUNTIME, NEVER ASSERTED AS A LITERAL. The right answer here is
+# a property of the MACHINE's /etc/passwd — this box's uid 1000 is `macro` and
+# CI's runner is somebody else — so `expect_eq "%U" "macro"` would be asserting
+# the laptop it was written on. Every case below asks GNU.
+expect_eq "%U matches GNU" "$(stat -c '%U' regfile)" "$("$BIN" stat -c '%U' regfile)"
+expect_eq "%G matches GNU" "$(stat -c '%G' regfile)" "$("$BIN" stat -c '%G' regfile)"
+expect_eq "%U %G %u %g together" \
+    "$(stat -c '%U|%G|%u|%g' regfile)" "$("$BIN" stat -c '%U|%G|%u|%g' regfile)"
+# A root-owned path exercises a DIFFERENT entry than the test user's own.
+expect_eq "%U of a root-owned path" "$(stat -c '%U|%G' /)" "$("$BIN" stat -c '%U|%G' /)"
+# ⚠ An id with no passwd entry renders as the literal string `UNKNOWN`, not as
+# the number and not as an empty field. It cannot be produced without chown
+# privileges, so it is asserted in the unit tests and in the container run
+# instead of here — noted so the gap is deliberate rather than forgotten.
+rc=0; "$BIN" stat -c '%U' regfile >/dev/null 2>&1 || rc=$?
+expect_eq "%U now exits 0" "0" "$rc"
 # --- %x / %y / %z render (v1.2.5) ---
 # ⚠ Compared under TZ=UTC on the GNU side: kriya is UTC-only until tzfile
 # parsing lands (ADR 0007) and prints a literal +0000 offset. Under TZ=UTC the

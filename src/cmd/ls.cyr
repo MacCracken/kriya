@@ -33,13 +33,15 @@
 # Deferred (each a named follow-up): (roadmap 1.5.0 / 1.5.1)
 #   `-t` / `-S`           alternate sort keys (mtime / size). Trivial
 #                         once a comparator-by-flag indirection lands.
-#   `-n` / `--numeric-uid-gid`  alias for the current default of
-#                         numeric uid/gid in -l. When name lookup ships,
-#                         flag becomes "force numeric regardless".
 #   `--color=auto/always/never`  ANSI colouring; needs tty detection +
 #                         a per-type colour table.
-#   User / group names in -l — needs a passwd/group parser. Default
-#     stays numeric until that ships.
+#
+# ⭐ Owner/group NAMES shipped at 1.5.0 on `src/lib/userdb.cyr`, and `-n` with
+# them — it forces numeric regardless, and in GNU it also IMPLIES `-l`.
+# ⛔ The alignment is the part worth knowing: a resolved NAME is LEFT-justified
+# and an unmapped NUMERIC id is RIGHT-justified, in the SAME column, both padded
+# to the widest entry in the listing. Every other `-l` column is right-justified,
+# so assuming one rule for this one is wrong half the time.
 #
 # Symlink policy: ls is purely informational. ADR 0003 doesn't apply.
 # `-l` of a symlink renders `link -> target`; the target is not opened.
@@ -57,6 +59,7 @@ var _ls_r_idx  = 0;
 var _ls_1_idx  = 0;
 var _ls_F_idx  = 0;
 var _ls_i_idx  = 0;
+var _ls_n_idx  = 0;
 var _ls_d_idx  = 0;
 var _ls_R_idx  = 0;
 var _ls_w_idx  = 0;
@@ -72,6 +75,7 @@ fn _ls_init_spec(): i64 {
     _ls_1_idx = flags_add_bool(s, 49,  "",                0, "force one entry per line");
     _ls_F_idx = flags_add_bool(s, 70,  "",                0, "append type indicator");
     _ls_i_idx = flags_add_bool(s, 105, "inode",           0, "print inode number");
+    _ls_n_idx = flags_add_bool(s, 110, "numeric-uid-gid", 0, "list numeric uid/gid, never names");
     _ls_d_idx = flags_add_bool(s, 100, "directory",       0, "list dir operands as entries, not contents");
     _ls_R_idx = flags_add_bool(s, 82,  "recursive",       0, "descend into subdirectories");
     _ls_w_idx = flags_add_int(s, 119, "width",            0, "assume terminal width COLS (0 = auto)");
@@ -140,6 +144,13 @@ fn _ls_report(operand, errno): i64 {
 # pass (a `?` is one column wide, not the width of a fabricated zero), the
 # long-format emitter, AND the exit-status rollup.
 var _ls_stat_failed = 0;
+
+# ⚠ Module scope rather than a sixth threaded parameter. `-n` is a pure display
+# mode read once from the flags, and `_ls_print_dir` is three call sites deep
+# from where the flags are parsed — threading it would touch every layer in
+# between for a value none of them inspect. `_ls_stat_failed` above sets the
+# precedent for display state living here.
+var _ls_numeric = 0;
 
 fn _ls_rec_new(name_cstr): i64 {
     var rec = alloc(168);
@@ -221,6 +232,64 @@ fn _ls_emit_dec_padded(v, width): i64 {
     }
     k_write( 1, &buf, n);
     return 0;
+}
+
+# Emit `s` LEFT-justified in a `width` column.
+#
+# ⛔ Left, where every other column in `-l` is right-justified, because that is
+# what GNU does — and it does BOTH, in the SAME column: a resolved NAME is
+# left-aligned and an unresolvable NUMERIC id is right-aligned. Measured on
+# coreutils 9.4 and 9.11, a listing mixing the two renders
+#     -rw-r--r-- 1 root                  root                   0 ...
+#     -rw-r--r-- 1                  4242                   4343 0 ...
+# ⚠ Guessing one rule for the column would be wrong half the time.
+fn _ls_emit_str_padded(s, width): i64 {
+    var n = strlen(s);
+    k_write( 1, s, n);
+    var pad = width - n;
+    var sp[2];
+    store8(&sp, 32);
+    while (pad > 0) {
+        k_write( 1, &sp, 1);
+        pad = pad - 1;
+    }
+    return 0;
+}
+
+# Column width contributed by one owner/group cell.
+# ⛔ An EMPTY name falls back to the NUMBER here, and ONLY here. gnulib's
+# `idcache.c getuser()` ends `return match->name[0] ? match->name : NULL;` so
+# `ls` treats a zero-length name as no name — while `stat.c` calls getpwuid
+# directly and guards only NULL, so `stat -c %U` prints the empty string.
+# Measured on a `:x:8104:8104::/h:/s` entry: GNU `ls -l` shows `8104` and GNU
+# `stat -c %U` shows nothing. ⚠ Coreutils is inconsistent with ITSELF here, so
+# pushing the guard down into userdb would make kriya's `stat` print `UNKNOWN`
+# and REGRESS a case that already matched.
+fn _ls_owner_name(id, is_user): i64 {
+    var nm: i64 = 0;
+    if (is_user == 1) { nm = userdb_user_name(id); }
+    else { nm = userdb_group_name(id); }
+    if (nm == 0) { return 0; }
+    if (load8(nm) == 0) { return 0; }
+    return nm;
+}
+
+fn _ls_owner_width(id, numeric, is_user): i64 {
+    if (numeric == 0) {
+        var nm = _ls_owner_name(id, is_user);
+        if (nm != 0) { return strlen(nm); }
+    }
+    return _ls_dec_width(id);
+}
+
+# Emit one owner/group cell, name-or-number, with the alignment that shape
+# implies. ⚠ `-n` forces the numeric branch even when a name exists.
+fn _ls_emit_owner(id, width, numeric, is_user): i64 {
+    if (numeric == 0) {
+        var nm = _ls_owner_name(id, is_user);
+        if (nm != 0) { return _ls_emit_str_padded(nm, width); }
+    }
+    return _ls_emit_dec_padded(id, width);
 }
 
 # Symbolic permissions (10-byte sequence: type + ugo rwx triples).
@@ -716,7 +785,7 @@ fn _ls_print_simple(entries, F_mode, inode_mode): i64 {
     return 0;
 }
 
-fn _ls_print_long(entries, human, F_mode, inode_mode): i64 {
+fn _ls_print_long(entries, human, F_mode, inode_mode, numeric): i64 {
     var n = vec_len(entries);
     # Pass 1: compute widths.
     var w_nlink: i64 = 1;
@@ -736,9 +805,9 @@ fn _ls_print_long(entries, human, F_mode, inode_mode): i64 {
         }
         var wn = _ls_dec_width(load64(st + 16));
         if (wn > w_nlink) { w_nlink = wn; }
-        var wu = _ls_dec_width(load64(st + 28) & 4294967295);
+        var wu = _ls_owner_width(load64(st + 28) & 4294967295, numeric, 1);
         if (wu > w_uid)   { w_uid = wu; }
-        var wg = _ls_dec_width(load64(st + 32) & 4294967295);
+        var wg = _ls_owner_width(load64(st + 32) & 4294967295, numeric, 0);
         if (wg > w_gid)   { w_gid = wg; }
         var sz: i64 = 0;
         if (human == 1) {
@@ -784,9 +853,9 @@ fn _ls_print_long(entries, human, F_mode, inode_mode): i64 {
         } else {
             _ls_emit_dec_padded(load64(st + 16), w_nlink);
             k_write( 1, " ", 1);
-            _ls_emit_dec_padded(load64(st + 28) & 4294967295, w_uid);
+            _ls_emit_owner(load64(st + 28) & 4294967295, w_uid, numeric, 1);
             k_write( 1, " ", 1);
-            _ls_emit_dec_padded(load64(st + 32) & 4294967295, w_gid);
+            _ls_emit_owner(load64(st + 32) & 4294967295, w_gid, numeric, 0);
             k_write( 1, " ", 1);
             if (human == 1) {
                 _ls_emit_human_padded(load64(st + 48), w_size);
@@ -814,7 +883,7 @@ fn _ls_print_long(entries, human, F_mode, inode_mode): i64 {
 
 fn _ls_print_dir(entries, long_mode, human, F_mode, inode_mode): i64 {
     if (long_mode == 1) {
-        return _ls_print_long(entries, human, F_mode, inode_mode);
+        return _ls_print_long(entries, human, F_mode, inode_mode, _ls_numeric);
     }
     return _ls_print_simple(entries, F_mode, inode_mode);
 }
@@ -907,6 +976,11 @@ fn cmd_ls(start: i64): i64 {
     if (flags_get_bool(_ls_spec, _ls_F_idx) == 1) { F_mode = 1; }
     var inode_mode: i64 = 0;
     if (flags_get_bool(_ls_spec, _ls_i_idx) == 1) { inode_mode = 1; }
+    # ⚠ `-n` also implies `-l` in GNU; it is not merely a modifier of it.
+    if (flags_get_bool(_ls_spec, _ls_n_idx) == 1) {
+        _ls_numeric = 1;
+        long_mode = 1;
+    }
     var d_mode: i64 = 0;
     if (flags_get_bool(_ls_spec, _ls_d_idx) == 1) { d_mode = 1; }
     var R_mode: i64 = 0;
