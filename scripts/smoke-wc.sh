@@ -48,6 +48,13 @@ printf "no newline"                      > nonl           # 1 partial line
 printf "héllo wörld\n"                  > utf8           # 12 codepoints, 14 bytes
 
 # --- default (-l -w -c) matches GNU ---
+# ⚠ AUDITED AND DELIBERATELY LEFT AS A FULL-LINE COMPARISON. The 1.3.3 parity
+# audit flagged these as encoding GNU's column PADDING, which POSIX does not
+# specify. Checked: kriya reproduces GNU's padding exactly, including the
+# multi-file case where the width is set by the `total` row. Comparing the whole
+# line is the strongest parity assertion available here, and if a future GNU
+# changes its padding that is something worth being told about rather than
+# something to be insulated from.
 expect_eq "default simple" "$(wc simple)"       "$($BIN wc simple)"
 expect_eq "default short"  "$(wc short)"        "$($BIN wc short)"
 expect_eq "default empty"  "$(wc empty)"        "$($BIN wc empty)"

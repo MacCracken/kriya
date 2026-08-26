@@ -49,8 +49,16 @@ expect_exit() {
 check_parity() {
     name=$1
     fmt=$2
-    k1=$("$BIN" date "+$fmt")
+    # ⛔ THE ORDER IS LOAD-BEARING AND USED TO BE WRONG. This ran kriya first,
+    # then GNU twice, and accepted `k == g1 || k == g2`. Time only moves
+    # forward: if k differs from g1 then g1 is already at or past kriya's
+    # second, and g2 >= g1 — so `k == g2` was unreachable and the "handles the
+    # second-boundary race" fallback never once fired. Bracketing kriya BETWEEN
+    # two GNU readings is the mitigation that actually works: if the second
+    # ticks during the run, kriya's value matches whichever side of the
+    # boundary it landed on.
     g1=$(date "+$fmt")
+    k1=$("$BIN" date "+$fmt")
     g2=$(date "+$fmt")
     if [ "$k1" = "$g1" ]; then
         PASS=$((PASS + 1))

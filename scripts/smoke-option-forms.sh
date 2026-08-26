@@ -55,6 +55,11 @@ same() {
 }
 
 printf 'delta\nbravo\nalpha\nbravo\n' > f
+# ⛔ `uniq` collapses only ADJACENT duplicates, and `f`'s two `bravo`s are
+# not adjacent — so `uniq -cd f` prints NOTHING, from either implementation,
+# and the assertion below compared '' to '' and could never fail. A separate
+# fixture with a real adjacent run gives the flag something to do.
+printf 'delta\nbravo\nbravo\nalpha\n' > fdup
 printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n' > nums
 mkdir -p tree/sub
 echo x > tree/a
@@ -67,7 +72,7 @@ same "wc -lw"            wc -lw f
 same "wc -l -w"          wc -l -w f
 same "sort -rn"          sort -rn nums
 same "sort -r -n"        sort -r -n nums
-same "uniq -cd"          uniq -cd f
+same "uniq -cd"          uniq -cd fdup
 same "sort -u -f"        sort -uf f
 expect_exit "ls -la accepted"      0 "$BIN" ls -la tree
 expect_exit "ls -lart accepted?"   2 "$BIN" ls -lart tree   # -t is still deferred (M12d)

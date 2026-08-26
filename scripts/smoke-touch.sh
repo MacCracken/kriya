@@ -137,14 +137,28 @@ expect_present "good1 created"      good1
 # ⚠ Compared under TZ=UTC: kriya interprets the stamp as UTC (ADR 0007), so an
 # untagged GNU comparison would differ by the local offset, by design.
 for st in 202601011200 202601011200.30 2601011200 01011200 197001010000; do
-    "$BIN" touch -t "$st" tstamp_k 2>/dev/null
-    TZ=UTC touch  -t "$st" tstamp_g 2>/dev/null
+    # ⚠ `|| true` on both: these are bare simple commands under `set -e` with
+    # stderr discarded, so a host where either refuses a stamp would abort the
+    # whole script silently at this line rather than failing one assertion.
+    "$BIN" touch -t "$st" tstamp_k 2>/dev/null || true
+    TZ=UTC touch  -t "$st" tstamp_g 2>/dev/null || true
     expect_eq "-t $st matches GNU" \
         "$(TZ=UTC stat -c %y tstamp_g | cut -c1-19)" "$(TZ=UTC stat -c %y tstamp_k | cut -c1-19)"
 done
 # The century rule: 69-99 -> 19xx, 00-68 -> 20xx (POSIX).
+# ⚠ 69 -> 1969 is a PRE-EPOCH (negative time_t) stamp, so this asserts the
+# filesystem under $TMPDIR can store and return one. Most can; some cannot
+# (several network filesystems clamp at the epoch, and so do a few FUSE
+# layers). Probe with GNU first — if GNU cannot store it here either, the
+# limitation is the filesystem's and the century rule is untestable, not broken.
 "$BIN" touch -t 6901011200 cent_k 2>/dev/null
-expect_eq "-t century rule (69 -> 1969)" "1969-01-01" "$(TZ=UTC stat -c %y cent_k | cut -c1-10)"
+TZ=UTC touch -t 6901011200 cent_g 2>/dev/null || true
+cent_g_year=$(TZ=UTC stat -c %y cent_g 2>/dev/null | cut -c1-10)
+if [ "$cent_g_year" = "1969-01-01" ]; then
+    expect_eq "-t century rule (69 -> 1969)" "1969-01-01" "$(TZ=UTC stat -c %y cent_k | cut -c1-10)"
+else
+    echo "skip: this filesystem cannot store a pre-epoch stamp (GNU got '$cent_g_year')"
+fi
 
 # Malformed stamps are refused, not silently coerced.
 for bad in "" abc 20260101120 202613011200 202601321200 202601012500 202601011260 202601011200.6a; do

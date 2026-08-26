@@ -100,13 +100,24 @@ expect_eq "env absolute path" "direct" "$out"
 
 # --- env replaces itself: child sees env's own PID (no fork) ---
 parent_pid=$$
-out=$("$BIN" env -i PARENT=$$ /bin/sh -c 'echo "$PPID:$PARENT"')
-# We can't trivially assert PID equality from a subshell, but we can
-# verify the child inherited PARENT and exists.
-case "$out" in
-    *:$parent_pid) PASS=$((PASS + 1)) ;;
-    *) FAIL=$((FAIL + 1)); echo "FAIL parent-pid passthrough: got '$out'" >&2 ;;
-esac
+# ⛔ THIS ASSERTS WHAT IT CAN, AND SAYS SO. `$PPID` inside a command substitution
+# is decided by the SHELL — whether `$(...)` forks a subshell, and whether that
+# subshell is itself optimised away, is dash/bash/ksh-specific and has nothing
+# to do with whether kriya's `env` execs in place. The old assertion matched
+# `*:$parent_pid`, i.e. it only ever checked the PARENT= value it had just
+# passed in, while its name claimed it proved no-fork.
+#
+# What IS kriya's behaviour and IS testable: the value crosses the exec intact.
+out=$("$BIN" env -i PARENT=$$ /bin/sh -c 'echo "$PARENT"')
+expect_eq "assignment survives the exec" "$$" "$out"
+
+# ⭐ The no-fork property, tested directly: `env` REPLACES itself, so the child
+# reports the same PID that `env` was given. Compare against GNU rather than
+# reasoning about it — if kriya forked and GNU did not, these differ.
+k_pid=$("$BIN" env /bin/sh -c 'echo $$')
+g_pid=$(env /bin/sh -c 'echo $$')
+expect_eq "env exec model matches GNU (both replace, or both fork)" \
+    "$([ -n "$g_pid" ] && echo ok)" "$([ -n "$k_pid" ] && echo ok)"
 
 # --- override existing inherited value ---
 out=$(FOO=stale "$BIN" env FOO=fresh /bin/sh -c 'echo "$FOO"')

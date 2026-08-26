@@ -145,7 +145,11 @@ expected="renamed 'v_src' -> 'v_dst'"
 expect_eq "verbose output" "$expected" "$out"
 
 # --- cross-FS (EXDEV) — only if /tmp and /dev/shm are different filesystems ---
-TMP_DEV=$(stat -c %d /tmp 2>/dev/null || echo 0)
+# ⚠ Compare the device of $WORK, not of /tmp. The cross-filesystem move under
+# test is /dev/shm -> $WORK, and $WORK comes from `mktemp -d`, which honours
+# $TMPDIR — so on a host whose TMPDIR is not on /tmp's filesystem this guard
+# was answering a question about a pair the test never touches.
+TMP_DEV=$(stat -c %d "$WORK" 2>/dev/null || echo 0)
 SHM_DEV=$(stat -c %d /dev/shm 2>/dev/null || echo 1)
 if [ -d /dev/shm ] && [ "$TMP_DEV" != "$SHM_DEV" ]; then
     # File: copy + unlink should succeed and the bytes should match.

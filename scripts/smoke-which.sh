@@ -70,6 +70,16 @@ mkdir -p bin1/i_am_a_dir
 
 TEST_PATH="$WORK_REAL/bin1:$WORK_REAL/bin2"
 
+# ⛔ kriya's `which` decides a candidate matches with access(X_OK), so if
+# $TMPDIR is mounted `noexec` these fixture binaries are NOT executable and
+# every assertion below fails while kriya is behaving correctly. `noexec` on
+# /tmp is a common hardening default. Check the premise instead of assuming it.
+if [ ! -x "$WORK_REAL/bin1/prog_a" ] || ! "$WORK_REAL/bin1/prog_a" >/dev/null 2>&1; then
+    echo "skip: fixture binaries are not executable here (noexec \$TMPDIR?) — which(1) cannot be tested"
+    printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$((PASS + FAIL))"
+    exit 0
+fi
+
 # --- basic single match (first one wins) ---
 out=$(PATH="$TEST_PATH" "$BIN" which prog_a)
 expect_eq "first match wins"      "$WORK_REAL/bin1/prog_a" "$out"

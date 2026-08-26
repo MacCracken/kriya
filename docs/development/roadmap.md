@@ -101,17 +101,11 @@ release to release with both binaries measured by the same tool, and name any re
   ⚠ Also still unimplemented from GNU's filter: the `type == "none"` dummy rule, and kriya's
   unconditional `hugetlbfs` skip is stricter than GNU's (which hides it only via zero-blocks) — so a
   host with hugepages reserved would see kriya OMIT a filesystem GNU shows.
-- **1.3.x — the parity audit's remaining medium/low findings.** ⭐ The audit ran at 1.3.3 (39 findings:
-  11 high, 19 medium, 9 low). **All eleven high-risk findings are closed as of 1.3.4** — the
-  `-i on pipe` inherited-stdin hang, oracle identity (`scripts/check-oracles.sh`), the `sort -k` key
-  windows, root-bypasses-DAC in `mv`/`tee`/`ls`, stderr folded into `realpath`'s comparison,
-  `rm`'s hardcoded temp-dir depth, and `tee`'s non-POSIX `\x00`.
-  ⚠ **28 medium/low findings remain** and have not been individually re-verified. Two of the
-  original findings were wrong on inspection and one that I dismissed turned out to be right, so
-  **triage each against the built binary before acting** — the audit is a lead list, not a work list.
-  The full set is in the 1.3.3 workflow output; the recurring shapes are unpinned oracle output
-  ordering, assertions that compare `--help` text, and cases where the test and the utility share an
-  assumption so the test cannot fail.
+- **1.3.6 — the parity audit's 9 LOW findings.** ⭐ All 11 HIGH closed at 1.3.4 and all 19 MEDIUM at
+  1.3.5. ⛔ **Triage each against the built binary before acting** — of the original 39, two were wrong
+  on inspection, one I dismissed turned out to be right, and one (`wc` padding) was audited in 1.3.5
+  and deliberately left because the flagged comparison is the strongest one available. Expect some of
+  these nine to end the same way; "no change, reason recorded in the code" is a valid outcome.
 - **1.3.x — lint `src/cmd/` in CI.** ⛔ `cyrlint` takes ONE FILE and does not follow includes, so the
   CI lint step covers `src/main.cyr` + `src/lib/` only. **The 38 utility files have never been
   linted**: 45 over-long lines (cosmetic) and **59 untracked deferrals** (not cosmetic — 26 `follow-up`,

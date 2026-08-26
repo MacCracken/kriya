@@ -48,6 +48,16 @@ elapsed_ms() {
     echo $(( (e - s) / 1000000 ))
 }
 
+# Measure the harness's own cost with a command that certainly does not sleep,
+# so the "returns at once" ceilings scale with the machine instead of asserting
+# a constant that only held on the box where it was written.
+elapsed_ms_noop() {
+    _t0=$(date +%s%N)
+    "$BIN" true >/dev/null 2>&1 || true
+    _t1=$(date +%s%N)
+    echo $(( (_t1 - _t0) / 1000000 ))
+}
+
 # in_range NAME LOW HIGH ACTUAL
 in_range() {
     if [ "$4" -ge "$2" ] && [ "$4" -le "$3" ]; then
@@ -59,7 +69,15 @@ in_range() {
 }
 
 # --- accepted forms ---------------------------------------------------
-in_range "sleep 0 returns at once"  0    200  "$(elapsed_ms 0)"
+# ⚠ These two ceilings have NO sleep underneath them, so the whole budget is
+# process overhead: two `date +%s%N` forks, a `timeout` fork, and kriya's own
+# exec. On this box that is ~5 ms; on a loaded CI runner it is not bounded by
+# anything the test controls. ⭐ Calibrate against a measured no-op instead of
+# guessing a constant — `elapsed_ms` of a command that provably does not sleep
+# gives the floor, and anything within a wide multiple of it is "at once".
+NOOP_MS=$(elapsed_ms_noop)
+ZERO_CEIL=$((NOOP_MS * 4 + 200))
+in_range "sleep 0 returns at once"  0    "$ZERO_CEIL"  "$(elapsed_ms 0)"
 in_range "sleep 0.25 fractional"    200  900  "$(elapsed_ms 0.25)"
 in_range "sleep 0.5s frac+suffix"   450  1200 "$(elapsed_ms 0.5s)"
 in_range "sleep 1 bare integer"     950  1800 "$(elapsed_ms 1)"
@@ -67,7 +85,7 @@ in_range "sleep 1s suffix"          950  1800 "$(elapsed_ms 1s)"
 in_range "sleep 0.02m minutes"      1150 2000 "$(elapsed_ms 0.02m)"
 
 # Sub-millisecond fractions truncate rather than surprising: 0.0001s is a no-op.
-in_range "sleep 0.0001 truncates"   0    200  "$(elapsed_ms 0.0001)"
+in_range "sleep 0.0001 truncates"   0    "$ZERO_CEIL" "$(elapsed_ms 0.0001)"
 
 # --- rejected forms ---------------------------------------------------
 # ⚠ Each of these must be a USAGE error, not a silent zero-length sleep — a

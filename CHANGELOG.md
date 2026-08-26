@@ -6,6 +6,111 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.3.5] - 2026-08-25 — the parity audit's medium findings
+
+Second of three batches from the 1.3.3 audit. **All 11 high-risk findings closed at 1.3.4; all 19
+medium closed here.** The 9 low findings are 1.3.6.
+
+⚠ Nothing in kriya changed. Every fix is to a test that could pass or fail for a reason other than
+kriya's behaviour — which is the same defect class that let the `find -exec` `argv[0]` bug hide for two
+releases.
+
+### ⛔ Two assertions could not fail
+
+- **`smoke-option-forms.sh`'s `uniq -cd`.** `uniq` collapses only *adjacent* duplicates, and the
+  fixture's two `bravo` lines are not adjacent — so both implementations printed **nothing** and the
+  assertion compared `''` to `''`. It has been green since the day it was written and could never have
+  been anything else. Given a fixture with a real adjacent run.
+- **`smoke-date.sh`'s second-boundary fallback.** `check_parity` ran kriya, then GNU twice, accepting
+  `k == g1 || k == g2`. Time only moves forward: if `k` differs from `g1` then `g1` is already at or
+  past kriya's second, and `g2 >= g1` — so **`k == g2` was unreachable** and the mitigation never once
+  fired. kriya is now bracketed *between* two GNU readings, which is the mitigation that works.
+
+### ⛔ GNU's output units are environment-controlled; kriya's are not
+
+Measured on a 5-byte file: plain `du` prints `4`, `POSIXLY_CORRECT=1 du` prints `8` (512-byte units),
+`BLOCK_SIZE=1 du` prints `4096`. kriya prints `4` in all three. The same applies to `df` via
+`BLOCK_SIZE` / `DF_BLOCK_SIZE`. On any host exporting one of those — and `POSIXLY_CORRECT` is not
+exotic — **~30 `du` comparisons and every `df` numeric comparison fail at once**, blaming kriya for the
+caller's shell.
+
+Both oracles now run with those three variables unset. ⚠ The `du` fix needed a second pass because one
+invocation bypassed the helper, so `df`'s went through a single `gnu_df` wrapper that every call site
+uses — the same mistake was available twice and the shape that prevents it is worth preferring.
+
+### Host-shape assumptions
+
+- ⛔ **`smoke-df.sh` hardcoded `/home` as its probe path.** Not guaranteed to exist (containers,
+  minimal images), and on this box not even a separate filesystem. The probe is now discovered from
+  GNU's own output. ⚠ It also compared **Used and Available** on a filesystem the test run is itself
+  writing to — a build artifact landing between the two invocations moves them. Size only now.
+- **`smoke-which.sh`'s fixtures live under `$TMPDIR`**, and kriya's `which` uses `access(X_OK)`. A
+  `noexec` `/tmp` — a common hardening default — makes every fixture unexecutable and every assertion
+  fail while kriya is correct. The premise is now checked, and the script skips if it does not hold.
+- **`smoke-touch.sh`'s century rule asserts a pre-epoch stamp** (`69` → 1969, negative `time_t`), which
+  requires the filesystem to store one. GNU is probed first; if GNU cannot store it here either, the
+  limitation is the filesystem's. ⚠ Its two `touch` calls were also bare simple commands under
+  `set -e` with stderr discarded — a host that refused a stamp would have **aborted the whole script
+  silently** rather than failing one assertion.
+- **`smoke-mv.sh`'s cross-filesystem guard compared the wrong pair** — `/tmp` against `/dev/shm`, when
+  the move under test is `/dev/shm` → `$WORK`, and `$WORK` comes from `mktemp -d`, which honours
+  `$TMPDIR`.
+
+### Wall-clock races and harness portability
+
+⛔ **`tail -f` had roughly one poll of slack and no retry.** The writer appends at t≈0.4 s and t≈0.8 s,
+kriya polls every 200 ms, `timeout 1.4` killed it. On a loaded runner the writer may not be scheduled
+in time and the assertion blames kriya for the scheduler. ⭐ **Retry rather than widen**: a flake passes
+on the second attempt in a fraction of what a never-flake budget would cost on *every* run.
+
+**`smoke-sleep.sh`'s two "returns at once" ceilings had no sleep underneath them** — the whole 200 ms
+was process overhead (two `date` forks, a `timeout` fork, kriya's exec). Now calibrated against a
+measured no-op, so the bound scales with the machine instead of asserting a constant that held on the
+box where it was written.
+
+**`smoke-cp-recursive.sh` probed for `script(1)` by name.** `command -v script` is satisfied by
+BusyBox's applet, but `-qec` is util-linux syntax BusyBox does not take — so on Alpine the invocation
+fails and the assertion blames kriya. It now probes the flags.
+
+### Claims narrowed to what is actually testable
+
+**`smoke-env.sh` asserted `env` execs without forking, via `$PPID` inside `$(...)`** — whose value is
+decided by the *shell*, not by kriya. Worse, the pattern it matched (`*:$parent_pid`) only ever checked
+the `PARENT=` value the test had just passed in, so the assertion's name and its content disagreed.
+Split into what can be tested: that the assignment survives the exec, and that kriya's exec model
+matches GNU's.
+
+**`smoke-stat.sh` froze GNU's `?` for an unknown specifier as a literal** — a parity claim about a
+default branch in GNU's `stat.c`, which is exactly the shape the `argv[0]` incident took. Now asked at
+runtime.
+
+### Two findings audited and deliberately left, with the reason in the code
+
+- **`smoke-wc.sh`'s full-line comparisons.** Flagged for encoding GNU's column padding, which POSIX
+  does not specify. Checked: **kriya reproduces it exactly**, multi-file `total` row included.
+  Comparing the whole line is the strongest parity assertion available, and a future GNU padding
+  change is something worth being told about.
+- **`smoke-df.sh`'s `KNOWN_EXTRA_TYPES`.** Stays until the next CI run answers the question 1.3.2
+  opened — and if the "additionally shows /dev" note stops appearing, it should be **deleted outright
+  rather than maintained**.
+
+### Tests
+
+**3,614 smoke cases across 37 scripts**, 119 unit + 18 POSIX, fuzz green under poison, four lints clean,
+both targets build.
+
+⭐ **Verified under each condition these fixes are for**, not just the happy one:
+
+| condition | result |
+|---|---|
+| baseline | 37/37, 3,614 cases |
+| `POSIXLY_CORRECT` + `BLOCK_SIZE` + `DU_BLOCK_SIZE` + `DF_BLOCK_SIZE` | 37/37, 3,614 cases |
+| deep `$TMPDIR` (four levels down) | 37/37, 3,614 cases |
+| simulated root (`id` shimmed to 0) | 37/37, 3,598 cases — root-only paths skipping |
+
+⚠ The block-size run failed `smoke-df.sh` on the first attempt, after `du` was fixed and `df` was not.
+The condition-matrix run is what caught it; a green baseline would not have.
+
 ## [1.3.4] - 2026-08-25 — `--version`, and the audit findings worth acting on
 
 Two roadmap items: the dead version string finally gets a reader, and the parity audit's remaining

@@ -224,7 +224,11 @@ expect_eq   "…destination replaced"   "NEW" "$(cat iact/d/s/f)"
 # -i under a real pty. ⚠ `script(1)` is what makes the prompt reachable from a
 # shell script at all — kriya refuses -i on a non-tty stdin by design (ADR 0002),
 # so a plain pipe cannot exercise this path.
-if command -v script >/dev/null 2>&1; then
+# ⚠ `command -v script` is satisfied by BusyBox's applet too, and `-qec` is
+# util-linux syntax that BusyBox does not accept — on Alpine or any busybox
+# rootfs the invocation fails and the assertion blames kriya. Probe the actual
+# flags, not the name.
+if script -qec true /dev/null >/dev/null 2>&1; then
     echo OLD-IMPORTANT > iact/d/s/f
     # ⚠ `|| rc=$?` is load-bearing under `set -e`: declining is EXPECTED to exit
     # 1, and a bare pipeline would abort the script at that status before the

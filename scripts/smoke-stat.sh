@@ -151,7 +151,11 @@ out=$("$BIN" stat -c "%q" regfile)
 # with `stat -c '%q'`. This case asserted "%q" until v1.2.1 and was wrong; the
 # source comment it was written from claimed the literal echo was "GNU
 # behaviour". A test that pins the wrong oracle is worse than no test.
-expect_eq "unknown %q -> '?' (as GNU)" "?" "$out"
+# ⚠ Ask GNU rather than freezing its answer. The literal '?' is a parity claim
+# about a default branch in GNU's stat.c — exactly the shape that let the
+# `find -exec` argv[0] bug hide for two releases, where the local GNU's version
+# decided whether the test passed. Comparing at runtime cannot go stale.
+expect_eq "unknown %q matches GNU" "$(stat --format="%q" regfile 2>/dev/null)" "$out"
 
 # ⛔ A specifier GNU DEFINES that kriya cannot render must not be echoed back as
 # its own source text. `stat -c %y` printed the two bytes "%y" where a timestamp

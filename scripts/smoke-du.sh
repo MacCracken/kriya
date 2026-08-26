@@ -54,7 +54,15 @@ sorted_check() {
     name=$1
     shift
     k=$("$BIN" du "$@" | sort -k2)
-    g=$(du "$@" | sort -k2)
+    # ⛔ GNU du's DEFAULT BLOCK SIZE IS ENVIRONMENT-CONTROLLED and kriya's is not.
+    # Measured on a 5-byte file: plain `du` prints 4, `POSIXLY_CORRECT=1 du`
+    # prints 8 (512-byte units), `BLOCK_SIZE=1 du` prints 4096. kriya prints 4
+    # in all three. So on any host exporting one of these — and POSIXLY_CORRECT
+    # is not exotic — every one of the ~30 cell-by-cell comparisons below fails
+    # at once, blaming kriya for the shell's environment.
+    # ⚠ Pin the oracle's environment rather than kriya's: the comparison is
+    # about du's ARITHMETIC, not about which units the caller asked for.
+    g=$(env -u POSIXLY_CORRECT -u DU_BLOCK_SIZE -u BLOCK_SIZE du "$@" | sort -k2)
     expect_eq "$name" "$g" "$k"
 }
 
@@ -123,7 +131,8 @@ expect_exit "du --max-depth=bad"    2 "$BIN" du --max-depth=abc .
 
 # --- Default-to-`.` when no operand ---
 k=$("$BIN" du | sort -k2)
-g=$(du | sort -k2)
+# ⚠ Same environment pin as `sorted_check` — this one bypassed the helper.
+g=$(env -u POSIXLY_CORRECT -u DU_BLOCK_SIZE -u BLOCK_SIZE du | sort -k2)
 expect_eq "du with no operand" "$g" "$k"
 
 # --- summary ---

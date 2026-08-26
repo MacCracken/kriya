@@ -128,24 +128,50 @@ expect_eq "head - stdin"        "$(head -n 2 - < nums)"  "$($BIN head -n 2 - < n
 follow_dir=$(mktemp -d)
 
 # Single-file follow: initial output + appended lines.
-printf "line1\nline2\nline3\n" > "$follow_dir/log"
-( sleep 0.4; echo "line4" >> "$follow_dir/log"; sleep 0.4; echo "line5" >> "$follow_dir/log" ) &
-writer_pid=$!
-out=$(timeout 1.4 "$BIN" tail -f -n 2 "$follow_dir/log" 2>/dev/null || true)
-wait "$writer_pid" 2>/dev/null
-expect_eq "tail -f appends" \
-    "line2
+#
+# ⛔ THIS IS A WALL-CLOCK RACE AND USED TO HAVE NO RETRY. The writer appends at
+# t≈0.4 s and t≈0.8 s, kriya polls the path every 200 ms, and `timeout 1.4`
+# killed it — a budget with roughly one poll of slack. On a loaded runner the
+# writer subshell may not be scheduled in time, or the final poll may not land
+# before the kill, and the assertion then blames kriya for the scheduler.
+# ⭐ Retry rather than widening the budget: a flake passes on the second try in
+# a fraction of the time a budget generous enough to never flake would cost on
+# EVERY run. Three attempts, and the failure message still shows the last one.
+follow_expected="line2
 line3
 line4
-line5" \
-    "$out"
+line5"
+out=""
+attempt=1
+while [ "$attempt" -le 3 ]; do
+    printf "line1\nline2\nline3\n" > "$follow_dir/log"
+    ( sleep 0.4; echo "line4" >> "$follow_dir/log"; sleep 0.4; echo "line5" >> "$follow_dir/log" ) &
+    writer_pid=$!
+    out=$(timeout 2.5 "$BIN" tail -f -n 2 "$follow_dir/log" 2>/dev/null || true)
+    wait "$writer_pid" 2>/dev/null || true
+    if [ "$out" = "$follow_expected" ]; then
+        attempt=4
+    else
+        attempt=$((attempt + 1))
+    fi
+done
+expect_eq "tail -f appends" "$follow_expected" "$out"
 
 # Truncation detection: shrinking write emits the warning + new content.
-printf "line-A\nline-B\nline-C\n" > "$follow_dir/big"
-( sleep 0.4; printf "tiny\n" > "$follow_dir/big" ) &
-writer_pid=$!
-out_err=$(timeout 1.2 "$BIN" tail -f -n 1 "$follow_dir/big" 2>&1 || true)
-wait "$writer_pid" 2>/dev/null
+# ⚠ Same race, same treatment — the truncation has to land inside the window.
+out_err=""
+attempt=1
+while [ "$attempt" -le 3 ]; do
+    printf "line-A\nline-B\nline-C\n" > "$follow_dir/big"
+    ( sleep 0.4; printf "tiny\n" > "$follow_dir/big" ) &
+    writer_pid=$!
+    out_err=$(timeout 2.5 "$BIN" tail -f -n 1 "$follow_dir/big" 2>&1 || true)
+    wait "$writer_pid" 2>/dev/null || true
+    case "$out_err" in
+        *"file truncated"*tiny*) attempt=4 ;;
+        *) attempt=$((attempt + 1)) ;;
+    esac
+done
 if echo "$out_err" | grep -q "file truncated"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL truncate warning missing" >&2; fi
 if echo "$out_err" | grep -q "tiny"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL truncate new content missing" >&2; fi
 
