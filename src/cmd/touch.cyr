@@ -5,10 +5,9 @@
 #   -m              update modification time only.
 #   -c / --no-create  do not create the file if it does not exist.
 #
-# POSIX `-r REF` (copy times from REF), `-t [[CC]YY]MMDDhhmm[.SS]`
-# (explicit stamp), and GNU `-d STR` (human date string) are deferred
-# until the chrono helpers needed to parse and pack the stamps land
-# in stdlib `lib/chrono.cyr`. The intersection that ships at M2:
+# ⚠ `-r REF` and `-t [[CC]YY]MMDDhhmm[.SS]` SHIPPED in 1.2.5 (see CHANGELOG);
+# only GNU `-d STR` (free-form human date) is still out, and it is roadmap
+# 1.8.3 rather than a vague wait on chrono. The intersection that shipped at M2:
 # "create-if-missing + bump times to now", with `-a` / `-m` /
 # `-c` modifiers — covers the common script use (`touch buildmarker`,
 # `touch -c configmark`) and most of the agent surface.
@@ -16,7 +15,7 @@
 # Symlink policy (informative): touch follows symlinks by default,
 # updating the target's times. This matches POSIX and is outside the
 # ADR 0003 cp/mv/rm/ln matrix. GNU `-h` (no-dereference) lands when
-# we need it; documented in `--help` as deferred.
+# we need it; documented in `--help` as deferred. (roadmap 1.6.2)
 #
 # Root protection (ADR 0004): touch is non-destructive; no protected_paths
 # check. Touching `/` is a "directory exists, time update succeeds" no-op

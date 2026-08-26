@@ -130,6 +130,42 @@ mine=$("$BIN" sort -n big_unsorted)
 gnu=$(LC_ALL=C sort -n big_unsorted)
 expect_eq "1000 numeric"    "$gnu" "$mine"
 
+# --- ⭐ -k key windows, against GNU -----------------------------------
+#
+# ⛔ These diverge ONLY when the start field ties, which is why five releases of
+# `sort` shipped with both bugs and a comment claiming the range was "verified
+# byte-identical to GNU" — the verification used `-k1,1` and `-k2,2`, where
+# start == end and truncation cannot show.
+#   * a bare `-k F` means field F to END OF LINE in POSIX and GNU; kriya read it
+#     as `-k F,F`.
+#   * `-k F1,F2` was accepted and silently truncated to F1.
+# Both produced exit 0 and plausible-but-wrongly-ordered output.
+printf 'a:1:z\nb:1:a\n' > keytie.txt
+printf 'p q z\nr q a\n'  > keytie_ws.txt
+printf 'a:9:z\nb:1:y\nc:5:x\n' > key3.txt
+
+key_case() {   # key_case <label> <file> <sort args...>
+    label=$1; file=$2; shift 2
+    g=$(sort "$@" "$file" 2>/dev/null | tr '\n' ' ')
+    k=$("$BIN" sort "$@" "$file" 2>/dev/null | tr '\n' ' ')
+    expect_eq "$label" "$g" "$k"
+}
+key_case "-k2 runs to end of line"        keytie.txt    -t: -k2
+key_case "-k2,2 stops at field 2"         keytie.txt    -t: -k2,2
+key_case "-k2,3 spans fields 2-3"         keytie.txt    -t: -k2,3
+key_case "-k2 to EOL, whitespace fields"  keytie_ws.txt -k2
+key_case "-k2,2 whitespace"               keytie_ws.txt -k2,2
+key_case "-k2,3 whitespace"               keytie_ws.txt -k2,3
+key_case "-k2 with distinct keys"         key3.txt      -t: -k2
+key_case "-k1,2 range"                    key3.txt      -t: -k1,2
+key_case "-k3 last field"                 key3.txt      -t: -k3
+key_case "-k2 -n numeric"                 key3.txt      -t: -k2 -n
+key_case "-k2 -r reverse"                 keytie.txt    -t: -k2 -r
+
+# An inverted range is a usage error, not a silent reinterpretation.
+rc=0; "$BIN" sort -t: -k3,1 keytie.txt >/dev/null 2>&1 || rc=$?
+expect_eq "-k F1,F2 with F2 < F1 is a usage error" "2" "$rc"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

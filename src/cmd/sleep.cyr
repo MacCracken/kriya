@@ -4,14 +4,14 @@
 # `1`, `1.5`, `0.25`, `1s`, `2m`, `1h`, `1d`. A bare number is seconds, as POSIX
 # requires; the fractional and suffix forms are the GNU extension.
 #
-# ⚠ The suffix/fraction support was deferred here "until the wider duration
+# ⚠ The suffix/fraction support was deferred here "until the wider duration  #skip-lint
 # parser lands in lib/chrono.cyr". Checked at pin 6.5.35: chrono has duration
 # CONSTRUCTORS but no duration STRING parser, so there was nothing to wait for —
 # it is `kriya_parse_duration_ms` in `src/lib/args.cyr` now.
 #
 # ⚠ Still one operand only. GNU sums multiple (`sleep 1m 30s`); POSIX specifies
 # exactly one, and summing would make `sleep 1 2` silently mean 3 rather than an
-# error. Named as a follow-up rather than assumed.
+# error. Named as a follow-up rather than assumed. (roadmap 1.6.3)
 
 fn cmd_sleep(start: i64): i64 {
     sleep_help_declare();

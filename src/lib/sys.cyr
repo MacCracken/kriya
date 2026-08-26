@@ -276,9 +276,21 @@ fn k_getdents(fd, buf, bufsize): i64 {
     return wo;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(217, fd, buf, bufsize);                 # linux getdents64 #217
+    # ⚠ Named constant, not the bare 217 — cyrlint flags a raw getdents because
+    # the number and arity differ per target, and it is right to.
+    return syscall(SYS_GETDENTS64, fd, buf, bufsize);
     #endif
 }
+
+# ⛔ DO NOT REPLACE `k_getdents` WITH stdlib `io.cyr`'s `xgetdents`, which is what
+# cyrlint suggests for agnos-bound directory code. `xgetdents` calls agnos'
+# `sys_getdents` and hands back the RAW AGNOS RECORD — reclen@0, type@2,
+# namelen@3, a u32 ino@4, a name at +8 that is not guaranteed NUL-terminated.
+# Every caller here reads `linux_dirent64` through `fs_dent_reclen` /
+# `fs_dent_type` / the name accessor, so the swap would silently mis-parse every
+# directory entry on agnos: wrong sizes, wrong types, unterminated names.
+# The translation above is the reason this wrapper exists, and it is the part
+# `xgetdents` does not do.
 
 # =====================================================================
 # Path metadata / mutation. NUL-terminated path in; agnos counts length.

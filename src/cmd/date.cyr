@@ -9,7 +9,7 @@
 #                              kriya date ALWAYS prints UTC because
 #                              tzfile parsing (/etc/localtime, TZ env
 #                              with POSIX-style offset rules) is a
-#                              multi-hundred-LOC follow-up not in M6
+#                              multi-hundred-LOC follow-up not in M6 (roadmap: Gated — Upstream chrono)
 #                              scope. The flag is accepted so scripts
 #                              that pass it work; it's just the default.
 #
@@ -21,7 +21,7 @@
 # Local-time defer: GNU `date` defaults to local time. kriya `date`
 # defaults to UTC at v0.7.0. The deviation is documented in --help
 # (when --help ships) and here. Tzfile-aware operation lands behind
-# a known follow-up; until then UTC is the floor that requires no
+# a known follow-up; until then UTC is the floor that requires no (roadmap: Gated — Upstream chrono)
 # external state.
 #
 # strftime specifiers shipped (cell-by-cell against GNU under TZ=UTC):
@@ -207,7 +207,7 @@ var _date_bad: i64 = 0;
 # strftime specifiers GNU defines that kriya does not render yet. All of them
 # want either locale data or ISO-week arithmetic, which is the chrono work in
 # roadmap M12a.
-fn _date_is_deferred_spec(c): i64 {
+fn _date_is_deferred_spec(c): i64 {  #skip-lint
     if (c == 86) { return 1; }   # V  ISO week number
     if (c == 71) { return 1; }   # G  ISO week-based year
     if (c == 103) { return 1; }  # g  ISO week-based year, 2-digit
@@ -319,7 +319,7 @@ fn _date_render_spec(buf, pos, c, parts, wkday, epoch): i64 {
     # "%V" where a week number belonged, exit 0. A specifier that is not a
     # specifier at all is passed through verbatim, which IS what GNU does
     # (verified: `date +%@` prints `%@` on both).
-    if (_date_is_deferred_spec(c) == 1) {
+    if (_date_is_deferred_spec(c) == 1) {  #skip-lint
         k_write( 2, "kriya date: %", 13);
         var eb[8];
         store8(&eb, c);
@@ -444,7 +444,7 @@ fn cmd_date(start: i64): i64 {
                     }
                 }
                 if (ok == 0) {
-                    k_write( 2, "kriya date: error: unknown short option (only -u accepted at v0.7.0; -d/-r/-R/-I deferred)\n", 91);
+                    k_write( 2, "kriya date: error: unknown short option (only -u accepted at v0.7.0; -d/-r/-R/-I deferred)\n", 91);  # roadmap 1.8.3 (-d) and 1.8.4 (-r/-R/-I)
                     return EXIT_USAGE;
                 }
                 i = i + 1;

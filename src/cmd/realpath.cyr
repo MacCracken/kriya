@@ -18,7 +18,7 @@
 # EXIT_FAILURE if any PATH fails; the canonical paths for the others
 # are still emitted to stdout.
 #
-# Deferred to follow-up commits:
+# Deferred to follow-up commits: (roadmap 1.6.3)
 #   -s / --strip / --no-symlinks  skip symlink resolution (text-only).
 #   --relative-to=DIR             print path relative to DIR.
 #   --relative-base=DIR           print relative when under DIR, else absolute.

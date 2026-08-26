@@ -43,9 +43,9 @@
 #
 # Hard-link preservation across same-inode source entries: GNU cp
 # preserves them with `--preserve=links`. M2 cp does not preserve
-# them by default and does not yet take that flag. Multiple paths
+# them by default and does not yet take that flag. Multiple paths (roadmap 1.6.0)
 # to the same inode become independent copies in the destination tree.
-# Deferred follow-up.
+# Deferred follow-up. (roadmap 1.6.0)
 #
 # Each top-level (SRC, DST) pair is attempted independently. Exit
 # EXIT_FAILURE if any failed.

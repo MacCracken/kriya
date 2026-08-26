@@ -71,6 +71,17 @@ jobs:
           done
           cyrius vet src/main.cyr
 
+      - name: Lint deferral tracking (whole tree)
+        # ⛔ `cyrius lint` takes ONE FILE and does not follow includes, so the
+        # step above can only cover src/main.cyr + src/lib/. This runs it over
+        # EVERY file including src/cmd/ — the 38 utilities, which had never been
+        # linted and carried 56 untracked deferrals — and fails on any deferral
+        # that does not name a roadmap or CHANGELOG entry, plus any roadmap
+        # reference that points at an entry which does not exist.
+        # ⚠ Deferrals only, on purpose: the line-length rule is reported and not
+        # enforced. See the script header for why.
+        run: sh scripts/lint-deferrals.sh
+
       - name: Lint the introspection interface
         # ⛔ The lint ADR 0002 promised. Checks that src/cmd/*.cyr, the
         # dispatcher table and `kriya --list` name the SAME utilities; that
@@ -79,6 +90,14 @@ jobs:
         # the check exists but nothing fails on it -- which is how an interface
         # rots silently.
         run: sh scripts/lint-help-schema.sh
+
+      - name: Check oracle identity
+        # ⛔ Every parity script resolves its GNU oracle by bare name through
+        # $PATH and none of them check what they got. A BusyBox or toybox image
+        # substitutes a different implementation for every oracle at once, and
+        # the suite would not fail — it would pass against the wrong answer.
+        # ⚠ Identity only; version differences are legitimate and unavoidable.
+        run: sh scripts/check-oracles.sh
 
       - name: Smoke suite
         # ~3.5k behavioural cases across 37 scripts, ~11s. These are the tests

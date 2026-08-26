@@ -16,11 +16,12 @@
 # it lives on (resolved via stat → match against mount table dev).
 #
 # Pseudo-FS filter (default skip, override with -a):
-#   fs_type ∈ {proc, sysfs, devpts, securityfs, cgroup, cgroup2,
-#              pstore, autofs, mqueue, hugetlbfs, debugfs, tracefs,
-#              fusectl, configfs, ramfs, bpf, rpc_pipefs, sunrpc,
-#              binfmt_misc, fuse.gvfsd-fuse}
-#   OR f_blocks == 0
+#   fs_type ∈ GNU's ME_DUMMY_0 list, verbatim: {proc, none, subfs,
+#              devfs, sysfs, autofs, devpts, mqueue, kernfs, debugfs,
+#              fusectl, rpc_pipefs, fuse.portal}
+#   OR f_blocks == 0        ← this is what hides cgroup2/tracefs/bpf/
+#                             hugetlbfs/etc; they are NOT named above
+#   OR the mount duplicates a device already listed (GNU's dedup)
 #
 # /proc/self/mounts fields are space-separated; values with literal
 # spaces are octal-escaped as \040 — we decode those when parsing the
@@ -211,50 +212,54 @@ fn _df_mark_duplicates(mbuf, mused, suppress): i64 {
 }
 
 fn _df_is_pseudo_fs(fs_type): i64 {
+    # ⛔ THIS LIST IS GNU'S, VERBATIM — gnulib `lib/mountlist.c`'s `ME_DUMMY_0`,
+    # plus its `type == "none"` clause. It is deliberately SHORT, and everything
+    # else GNU hides (cgroup, cgroup2, tracefs, pstore, bpf, configfs,
+    # securityfs, binfmt_misc, ramfs, hugetlbfs, sunrpc) it hides via the
+    # ZERO-BLOCKS rule instead, not by name.
+    #
+    # ⚠ kriya used to name those eleven types here as well, which looked
+    # equivalent and was not: a type-name skip is unconditional, while
+    # zero-blocks is a property of the mount. **`hugetlbfs` reports f_blocks =
+    # the number of reserved hugepages**, so on a host with `vm.nr_hugepages > 0`
+    # GNU shows /dev/hugepages and kriya HID it — kriya omitting a filesystem
+    # GNU lists, which is the direction a user actually notices. Every one of the
+    # eleven reports f_blocks == 0 on an ordinary host, which is why matching by
+    # coincidence held for five releases.
+    #
+    # Matching GNU by construction rather than by coincidence is the whole point:
+    # the zero-blocks rule below already reproduces the intended effect, and does
+    # it for the right reason.
     var t = fs_type;
     var l = strlen(t);
     if (l == 4) {
         if (_seq_bytes_eq(t, "proc", 4) == 1) { return 1; }
-        if (_seq_bytes_eq(t, "ramfs", 4) == 1) { return 0; }   # length 5 below
-        if (_seq_bytes_eq(t, "sunr", 4) == 1) { return 0; }
-        if (_seq_bytes_eq(t, "rpc_", 4) == 1) { return 0; }
-        if (_seq_bytes_eq(t, "bpf", 3) == 1)  { return 0; }
-    }
-    if (l == 3) {
-        if (_seq_bytes_eq(t, "bpf", 3) == 1) { return 1; }
+        # ⚠ GNU treats a literal type of "none" as a dummy. Its C macro exempts
+        # bind mounts, but that flag is false on the Linux path that parses
+        # /proc/self/mounts — which is the same file kriya reads — so the rule
+        # is unconditional here too.
+        if (_seq_bytes_eq(t, "none", 4) == 1) { return 1; }
     }
     if (l == 5) {
+        if (_seq_bytes_eq(t, "subfs", 5) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "devfs", 5) == 1) { return 1; }
         if (_seq_bytes_eq(t, "sysfs", 5) == 1) { return 1; }
-        if (_seq_bytes_eq(t, "ramfs", 5) == 1) { return 1; }
     }
     if (l == 6) {
-        if (_seq_bytes_eq(t, "devpts", 6) == 1) { return 1; }
-        if (_seq_bytes_eq(t, "cgroup", 6) == 1) { return 1; }
-        if (_seq_bytes_eq(t, "mqueue", 6) == 1) { return 1; }
         if (_seq_bytes_eq(t, "autofs", 6) == 1) { return 1; }
-        if (_seq_bytes_eq(t, "pstore", 6) == 1) { return 1; }
-        if (_seq_bytes_eq(t, "sunrpc", 6) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "devpts", 6) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "mqueue", 6) == 1) { return 1; }
+        if (_seq_bytes_eq(t, "kernfs", 6) == 1) { return 1; }
     }
     if (l == 7) {
-        if (_seq_bytes_eq(t, "cgroup2", 7) == 1) { return 1; }
-        if (_seq_bytes_eq(t, "tracefs", 7) == 1) { return 1; }
         if (_seq_bytes_eq(t, "debugfs", 7) == 1) { return 1; }
         if (_seq_bytes_eq(t, "fusectl", 7) == 1) { return 1; }
     }
-    if (l == 8) {
-        if (_seq_bytes_eq(t, "configfs", 8) == 1) { return 1; }
-        if (_seq_bytes_eq(t, "hugetlbfs", 9) == 1) { return 0; }
-    }
-    if (l == 9) {
-        if (_seq_bytes_eq(t, "hugetlbfs", 9) == 1) { return 1; }
-    }
     if (l == 10) {
-        if (_seq_bytes_eq(t, "securityfs", 10) == 1) { return 1; }
-        if (_seq_bytes_eq(t, "binfmt_mis", 10) == 1) { return 0; }
+        if (_seq_bytes_eq(t, "rpc_pipefs", 10) == 1) { return 1; }
     }
     if (l == 11) {
-        if (_seq_bytes_eq(t, "binfmt_misc", 11) == 1) { return 1; }
-        if (_seq_bytes_eq(t, "rpc_pipefs", 10) == 1)  { return 0; }
+        if (_seq_bytes_eq(t, "fuse.portal", 11) == 1) { return 1; }
     }
     return 0;
 }
@@ -425,7 +430,7 @@ fn _df_emit_row(dev, mp, fs_type, st): i64 {
 # point". The original code compared the operand to each mountpoint for exact string
 # equality, so `df /` worked and `df /home` printed a header and no rows whenever /home
 # was not itself a mount. The file header claimed the correct behaviour and the loop
-# carried a `# TODO: proper "filesystem containing operand path" match` — doc and code
+# carried a `# TODO: proper "filesystem containing operand path" match` — doc and code  #skip-lint
 # disagreed, and the doc was the honest one. Implemented 2026-08-11.
 #
 # Match is LONGEST MOUNTPOINT PREFIX, which is what the kernel's own lookup resolves to:

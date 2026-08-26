@@ -112,6 +112,27 @@ mount_set_check() {
 # --- Default mount-point set matches GNU ---
 mount_set_check "default mount set"
 
+# --- hugetlbfs: the case the old name-based skip got wrong ---------------
+#
+# ⛔ kriya used to name `hugetlbfs` in its pseudo-FS skip list. GNU does not —
+# it hides /dev/hugepages via the ZERO-BLOCKS rule, and hugetlbfs reports
+# f_blocks = the number of RESERVED hugepages. So on a host with
+# `vm.nr_hugepages > 0`, GNU listed it and kriya hid it: kriya omitting a
+# filesystem GNU shows, the direction a user notices.
+#
+# ⚠ Not exercisable on a host with no hugepages reserved (f_blocks == 0 there,
+# so both hide it for the same reason and the bug is invisible) — which is
+# exactly how it survived five releases. This asserts it where it CAN be
+# asserted, and says so plainly where it cannot.
+hp_total=$(awk '/HugePages_Total/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+if [ "${hp_total:-0}" -gt 0 ]; then
+    k_hp=$("$BIN" df 2>/dev/null | awk '$NF=="/dev/hugepages"{print "yes"}' | head -1)
+    g_hp=$(df        2>/dev/null | awk '$NF=="/dev/hugepages"{print "yes"}' | head -1)
+    expect_eq "hugetlbfs with reserved pages: same as GNU" "${g_hp:-no}" "${k_hp:-no}"
+else
+    echo "skip: no hugepages reserved — hugetlbfs zero-blocks path not discriminating"
+fi
+
 # --- ⭐ duplicate-device filter, against REAL bind mounts -----------------
 #
 # GNU's `filter_mount_list` stats every mount point, groups by st_dev and keeps

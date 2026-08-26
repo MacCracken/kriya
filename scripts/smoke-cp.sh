@@ -37,7 +37,13 @@ expect_exit() {
     expected=$2
     shift 2
     rc=0
-    "$@" >/dev/null 2>&1 || rc=$?
+    # ⛔ stdin FROM /dev/null, not inherited. Without this the three `-i on
+    # pipe` assertions below tested whatever stdin the SUITE was launched
+    # with: run from an interactive terminal, `-i` sees a tty, PROMPTS, and
+    # hangs forever — the worst failure shape in CI, because it burns the
+    # whole job timeout instead of failing. Verified by running this script
+    # under a pty: it blocked until killed.
+    "$@" </dev/null >/dev/null 2>&1 || rc=$?
     expect_eq "$name" "$expected" "$rc"
 }
 

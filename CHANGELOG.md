@@ -6,6 +6,131 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.3.3] - 2026-08-25 — the checks cover the tree, and what they found
+
+1.3.2 turned the smoke suite on in CI and it immediately caught three failures. This release turns on
+the checks that were still missing, and fixes what *those* found — including two `sort` bugs that had
+shipped for five releases behind a comment claiming they were verified.
+
+### Fixed — ⛔ `sort -k` computed the wrong key window, in both forms
+
+**`-k F` means field F to the END OF THE LINE** in POSIX and GNU. kriya read it as `-k F,F`. And
+`-k F1,F2` was accepted and silently truncated to `F1`.
+
+```
+printf 'a:1:z\nb:1:a\n' | sort -t: -k2
+GNU:   b:1:a  a:1:z          (key "1:z" vs "1:a")
+kriya: a:1:z  b:1:a          (key "1" vs "1" — tie, then whole-line fallback)
+```
+
+⚠ **Both diverge only when the start field ties**, so ordinary test data never showed them: with
+distinct keys, truncation changes nothing. Exit 0, plausible output, wrong order — in the *common*
+form of the flag.
+
+⛔ **A comment in `sort.cyr` is what kept this hidden.** It stated the `F1,F2` range *"SHIPS — verified
+byte-identical to GNU"* — and the cases it named were `-k1,1` and `-k2,2`, where start equals end and
+truncation cannot show. **A verification note that names its cases can still be wrong about what those
+cases prove.** The comment now says what was actually checked and what was not.
+
+Fixed in both the delimited and whitespace-field paths, and pinned by 12 new assertions comparing
+against GNU across `-k2`, `-k2,2`, `-k2,3`, whitespace fields, `-n`, `-r`, and an inverted range as a
+usage error. ⚠ An earlier attempt here *refused* `F1,F2` rather than honouring it; that was the wrong
+call — the range is cheap once the window is computed properly, and refusing a flag GNU supports is
+its own divergence.
+
+### Fixed — ⛔ three `-i on pipe` assertions never tested a pipe, and could hang CI
+
+`expect_exit` ran `"$@" >/dev/null 2>&1` — **stdin inherited**. So `cp -i` / `mv -i` / `rm -i` saw
+whatever stdin the *suite* was launched with. Run from a terminal, `-i` sees a tty, prompts, and
+**blocks forever**. Verified by running `smoke-cp.sh` under a pty: it hung until killed. ⚠ A hang is
+the worst CI failure shape — it burns the whole job timeout instead of failing. Fixed in the helper,
+so every assertion in those scripts is launch-independent, not just the three.
+
+### Added — `scripts/lint-deferrals.sh`, and CI runs it
+
+⛔ **`cyrius lint` takes one file and does not follow includes**, so 1.3.2's lint step could only cover
+`src/main.cyr` + `src/lib/`. The 38 files in `src/cmd/` had **never been linted** and carried **56
+untracked deferrals** — comments saying "deferred", "follow-up", "TODO" with no cross-reference to
+anything. That is the bubble-up discipline the 1.2.x arc applied everywhere else, unenforced in the
+directory holding most of the code.
+
+All 56 triaged and resolved:
+
+- ⛔ **5 were stale — the thing they deferred had shipped.** `grep`'s multi-`-e` (1.2.1), `printf`'s
+  `\xHH`, `stat`'s `%x`/`%y`/`%z` (1.2.5), `touch -r` and `touch -t` (1.2.5). Each verified against the
+  built binary before rewording. **A deferral block that keeps a shipped feature reads as an admission
+  of a gap that does not exist.**
+- **12 were prose**, where the trigger word appears in an explanation — including three *function
+  names* (`_st_is_deferred_spec`) and one `help_example("grep -n TODO src/*.cyr")`. Marked `#skip-lint`.
+- **39 were real open work**, now cross-referenced to the roadmap entry that covers them.
+
+⚠ **Deferral tracking is enforced; the line-length rule is not.** `src/cmd/` has 48 over-long lines,
+every one a code line and roughly half a single string literal (`help_operands("…")`) that cannot be
+split without rewriting user-facing help text. Silencing 48 lines with `#skip-lint` would weaken the
+linter's signal to buy nothing. **Enforcing the half that carries meaning beats enforcing neither
+while waiting to agree about the other.**
+
+⭐ The lint also rejects a **dangling reference** — a `roadmap 1.4.3` pointing at an entry that does not
+exist. A cross-reference to nothing satisfies a linter while sending a reader somewhere that will not
+answer them.
+
+Five roadmap entries added for work that had no home: `realpath`'s remaining flags and the `sleep`
+multi-operand decision (1.6.3), `rm`'s cross-operand bulk-root defense and `tee -i` (1.6.4, both
+blocked on infrastructure), and `date`'s output flags and unrendered specifiers (1.8.4).
+
+### Added — `scripts/check-oracles.sh`, and CI runs it
+
+⛔ **Every parity script resolves its GNU oracle by bare name through `$PATH` and none of them check
+what they got.** Not hypothetical: on this dev box `find` resolves to **bfs** in an interactive shell.
+A BusyBox or toybox image substitutes a different implementation for every oracle at once, and the
+suite would not fail — **it would pass against the wrong answer.**
+
+Checks identity (not version — version differences are legitimate) for all 31 oracles, plus two things
+the suite silently depends on: `/usr/bin/printf` existing (`printf` is a *shell builtin*, which is why
+`smoke-printf.sh` hardcodes the path — absent on NixOS and Guix), and `C.UTF-8` being installed
+(glibc's `setlocale` fails silently, degrading GNU `wc -m` to a byte count with no diagnostic).
+
+### Fixed — `df` type filter now matches GNU by construction
+
+kriya named 11 filesystem types GNU does not — `cgroup`, `cgroup2`, `tracefs`, `pstore`, `bpf`,
+`configfs`, `securityfs`, `binfmt_misc`, `ramfs`, `sunrpc`, **`hugetlbfs`**. GNU hides all of them via
+the zero-blocks rule instead, and a type-name skip is unconditional where zero-blocks is a property of
+the mount. ⛔ **`hugetlbfs` reports `f_blocks` = the number of reserved hugepages**, so on a host with
+`vm.nr_hugepages > 0` GNU lists `/dev/hugepages` and kriya **hid** it — kriya omitting a filesystem GNU
+shows, the direction a user notices.
+
+The list is now gnulib's `ME_DUMMY_0` verbatim, plus its `type == "none"` clause. ⚠ Every one of the 11
+reports zero blocks on an ordinary host, which is exactly why matching by coincidence held for five
+releases; local output is unchanged and still byte-identical to GNU. Asserted where it can be — the
+hugepages case skips honestly on a host with none.
+
+### Fixed — `k_getdents` used a bare `217`
+
+`SYS_GETDENTS64` is **217 on x86_64 and 61 on aarch64**. ⛔ **All 46 raw numeric syscalls in kriya are
+x86_64 numbers** — `openat` 257 vs 56, `unlinkat` 263 vs 35, `write` 1 vs 64, `exit` 60 vs 93. Not a
+bug today (kriya builds x86_64 and agnos only), but an aarch64 build would compile clean and call
+entirely wrong syscalls. `k_getdents` is converted as the worked example; the sweep is on the roadmap
+as one reviewable pass.
+
+⚠ **`k_getdents` must NOT become stdlib `xgetdents`**, which is what cyrlint suggests: `xgetdents`
+returns the raw agnos record, while `k_getdents` translates it into `linux_dirent64` so every caller
+sees one format. The swap would silently mis-parse every directory entry on agnos. The reason is now
+at the call site.
+
+### Tests
+
+**3,565 smoke cases across 37 scripts** (up from 3,553), 119 unit + 18 POSIX, fuzz green under poison,
+both targets build, and four separate lints clean.
+
+⚠ **The parity audit produced 39 findings and only the verified ones are fixed here.** The rest —
+tests whose failure is manufactured with `chmod` and so does not deny root, oracle output folded
+together with stderr, `printf '\x00'` as a bash extension under `dash` — are on the roadmap with file
+and line. ⛔ Two audit claims were wrong on inspection and are not acted on; one of *mine* was wrong
+too: I dismissed the `sort -k` finding after testing with data that could not discriminate it. **The
+finding was right.**
+
+Binary 1,000,192 → 1,004,400 bytes.
+
 ## [1.3.2] - 2026-08-25 — `kriya --list`, and a CI that can actually fail
 
 Closes the **1.3.x discoverability arc** and the last of the five items kriya owed agnoshi. Also the

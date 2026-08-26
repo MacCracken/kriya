@@ -8,7 +8,7 @@
 #   -c LIST / --characters=LIST  extract char positions. ASCII-only at
 #                               M4 — behaves identically to -b. Full
 #                               multi-byte awareness is a named
-#                               follow-up (waits on a UTF-8 decoder).
+#                               follow-up (waits on a UTF-8 decoder). (roadmap 1.4.2)
 #   -f LIST / --fields=LIST   extract delimited fields.
 #
 # Other flags:
@@ -71,7 +71,7 @@ fn cut_help_declare(): i64 {
     help_begin("cut", "Print selected parts of each line.",
                "cut OPTIONS [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("Exactly one of -b, -c or -f selects what LIST means. ⚠ -c is byte-based today; multi-byte support is a named follow-up.");
+    help_operands("Exactly one of -b, -c or -f selects what LIST means. ⚠ -c is byte-based today; multi-byte support is a named follow-up.");  # roadmap 1.4.2
     help_exit(1, "a file could not be read");
     help_example("cut -d: -f1 /etc/passwd");
     help_example("cut -c 1-10 file");

@@ -109,12 +109,26 @@ release to release with both binaries measured by the same tool, and name any re
   ⚠ Also still unimplemented from GNU's filter: the `type == "none"` dummy rule, and kriya's
   unconditional `hugetlbfs` skip is stricter than GNU's (which hides it only via zero-blocks) — so a
   host with hugepages reserved would see kriya OMIT a filesystem GNU shows.
-- **1.3.x — audit the remaining GNU-parity assertions for version sensitivity.** ⚠ Two of the three
-  first-run CI failures were *the local GNU's version differing from the runner's*, and one of those
-  was masking a real kriya bug for two releases (coreutils 9.11 basenames `argv[0]`; 9.4 does not).
-  The smoke suite compares against whatever GNU is on PATH, so **an assertion can be green here and
-  wrong everywhere else**. Worth a sweep for assertions that pin an absolute where they could pin
-  parity, or that depend on behaviour known to have changed across coreutils/findutils releases.
+- **1.3.x — work through the parity audit's remaining findings.** ⭐ The audit ran at 1.3.3 and
+  produced **39 findings (11 high, 19 medium, 9 low)**. Three classes were fixed there — the
+  `-i on pipe` inherited-stdin hang, oracle identity (now `scripts/check-oracles.sh`), and the `sort
+  -k` bugs the audit surfaced. **The rest are still open**, and they cluster:
+  - ⛔ **Failures manufactured with `chmod` do not deny root.** `smoke-mv.sh:222` (parent mode 555),
+    `smoke-tee.sh:99` (file mode 0444), `smoke-ls.sh:216` (dir mode 444, needs EACCES per entry).
+    Under a root container every one silently inverts. ⚠ GitHub's hosted runners are non-root, so
+    this is latent — but "latent until someone runs CI in a container" is exactly how the `argv[0]`
+    bug survived. Either guard on `id -u` and skip, or manufacture the failure a way root cannot
+    bypass (a read-only mount, an immutable attribute, a full filesystem).
+  - **Oracle output folded together with stderr.** `smoke-realpath.sh:186` compares
+    `realpath -m "$P" 2>&1`, so on any failing input kriya must reproduce GNU's *error text*
+    byte-for-byte — pinning wording that changes between releases.
+  - **Host-shape assumptions.** `smoke-rm.sh:83` (`rm ../../` assumes `$WORK` is exactly two
+    components below `/`, which `mktemp` only guarantees when `$TMPDIR` is unset).
+  - **Non-POSIX constructs in the harness itself.** `smoke-tee.sh:110` uses `printf '\x00'`, a
+    bash/coreutils extension the POSIX `printf` format does not define — under `dash` it is not the
+    byte the test thinks it is.
+  ⚠ **Two audit findings were wrong on inspection**, so triage each against the built binary before
+  acting; the audit is a lead list, not a work list.
 - **1.3.x — lint `src/cmd/` in CI.** ⛔ `cyrlint` takes ONE FILE and does not follow includes, so the
   CI lint step covers `src/main.cyr` + `src/lib/` only. **The 38 utility files have never been
   linted**: 45 over-long lines (cosmetic) and **59 untracked deferrals** (not cosmetic — 26 `follow-up`,
@@ -180,6 +194,22 @@ audit names the safe xattr pattern — follow it rather than reinventing.
 - **1.6.2 — `ln` and the stragglers.** `ln -r` (relative symlink), `-T`/`-t` (target-dir
   disambiguation), `-b`/`--backup`; `touch -h` (symlink-aware utimensat); `cp -R` of char/block
   device nodes, currently rejected per the M8 audit decision; `mv` multi-file `--follow`.
+- **1.6.3 — `realpath` flags, and the `sleep` operand decision.** `realpath -s`/`--strip`/
+  `--no-symlinks` (text-only canonicalization), `--relative-to=DIR`, `--relative-base=DIR`, and the
+  `-L`/`-P` pair (POSIX `cd -L` semantics vs the current physical default). ⚠ Also settle `sleep`:
+  GNU sums several DURATIONs (`sleep 1m 30s`), POSIX specifies exactly one, and kriya rejects the
+  second operand today. **It is a decision, not an omission** — either implement the summing or
+  record the POSIX-strict refusal in an ADR, but stop carrying it as an unnamed follow-up.
+- **1.6.4 — Defenses that need infrastructure first.** Two items blocked on the same kind of gap:
+  - ⛔ **`rm` cross-operand bulk-root defense.** [ADR 0004](../adr/0004-rm-refuses-root.md) refuses `/`
+    per operand, but `rm -rf /*` expands **at the shell** to `/bin /boot /etc …` — every operand
+    individually legal, the aggregate catastrophic. Needs `docs/architecture/003-*.md` to define the
+    heuristic (operand count against a threshold of top-level directories?) before any code, because
+    a false positive here refuses a legitimate `rm -rf ./*`. ⚠ Design first; this is the one place a
+    wrong guess is worse than the gap.
+  - **`tee -i`/`--ignore-interrupts`** and `-p`/`--output-error=`. Gated on the signal-handler
+    infrastructure named in [`docs/architecture/002-signal-handling-model.md`](../architecture/002-signal-handling-model.md),
+    whose trigger row has never fired — `tee -i` would be its first real consumer.
 
 ---
 
@@ -214,11 +244,20 @@ implementing floats before that pin would have inherited it. The pin is past it 
   rides directly on it.
 - **1.8.1 — Sort keys.** `-h` (human-numeric), `-V` (version), `-g` (general-numeric), `-M` (month),
   `-d` (dictionary), `-i` (ignore-nonprinting), `-R` (shuffle), `-m` (merge pre-sorted), and multi-key
-  `-k F1 -k F2`. ⚠ The repeatable-`-k` half needs the same collector `grep -e` uses.
+  `-k F1 -k F2`. ⚠ The repeatable-`-k` half needs the same collector `grep -e` uses. ⭐ The key
+  *window* itself is correct as of 1.3.3 — `-k F` runs to end of line and `-k F1,F2` honours the end
+  field — so this entry is now only about additional key TYPES and multiple keys, not about what one
+  key spans. Still absent: character offsets (`-k2.3,4.5`) and per-key option suffixes (`-k2,2n`).
 - **1.8.2 — Size limits.** The byte-suffix parser (`5K`, `1M`, `1G`) serving `head -c 1K`,
   `tail -c 1K` and `sort -S`; `head -n -N` / `-c -N` (all-but-last); `tail` `+N` start-from-line,
   `-F` retry, and multi-file `-f` (single-file is enforced today, not merely absent); `sort`'s
   external-sort fallback above the 256 MiB cap, with `-T DIR`.
+- **1.8.4 — `date` output flags and specifiers.** ⚠ Distinct from 1.8.3, which is date *input*.
+  `-r FILE` (format FILE's mtime rather than now — `touch -r` already ships the reference-stat
+  pattern to copy), `-R` (RFC 5322) and `-I[=FMT]` (ISO 8601), plus the strftime specifiers `date`
+  refuses by name today: `%V`/`%G`/`%g` (ISO week-date), and the rest of `_date_is_deferred_spec`.
+  ⚠ Most want no locale data and no tzfile — they are arithmetic on a broken-down time — so they do
+  **not** belong behind the Gated chrono item the way local time does.
 - **1.8.3 — Date input.** `date -d STR` and `touch -d STR`, free-form. ⚠ Genuinely large — GNU's
   parser is notorious, and chrono's `dt_strptime` needs a format string so it does not substitute.
   Scope it to a documented subset (ISO 8601, `@epoch`, `now`, `HH:MM[:SS]`) rather than chasing GNU.
@@ -275,6 +314,21 @@ Gated on upstream acceptance, not kriya work. Both filed 2026-05-17; both zero-b
 - **`2026-05-17-syscalls-at-family-stdlib`** — sweep raw `syscall(N, …)` sites to named `sys_*at`
   wrappers. Files: `touch.cyr`, `ln.cyr`, `fs.cyr`. ⚠ Re-verified at pin 6.5.35: still absent, so the
   gate is real.
+
+⛔ **Related and NOT gated: kriya has 46 raw numeric syscalls, and every number is x86_64-only.**
+Found at 1.3.3 while resolving cyrlint's raw-`getdents` note. The numbers genuinely differ:
+`openat` 257 vs **56**, `mkdirat` 258 vs **34**, `unlinkat` 263 vs **35**, `write` 1 vs **64**,
+`exit` 60 vs **93**, `fcntl` 72 vs **25**, `getdents64` 217 vs **61** (x86_64 vs aarch64). ⚠ Not a
+bug today — kriya builds x86_64 Linux and agnos only — but **an aarch64 Linux build would compile
+clean and call entirely wrong syscalls**, which is the worst failure shape available. The stdlib
+already defines the named constants per target (`syscalls_aarch64_linux.cyr`), so the sweep is
+mechanical; do it as one reviewable pass, not opportunistically. `k_getdents` was converted at 1.3.3
+as the worked example.
+
+⚠ **Do not "fix" `k_getdents` by switching to stdlib `io.cyr`'s `xgetdents`**, which is what cyrlint
+suggests. `xgetdents` returns the RAW agnos record on agnos; `k_getdents` translates it into
+`linux_dirent64` so every caller sees one format. The swap would silently mis-parse every directory
+entry on agnos. The reason is now written at the call site.
 
 ### M14 — stdlib `getenv` post-fork bug
 

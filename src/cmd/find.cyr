@@ -29,7 +29,7 @@
 # Symlink policy (ADR 0003):
 #   default (-P)    never follow symlinks during the walk
 #   -L              follow all symlinks (operands + descent)
-#   -H              deferred — follow operands only (waits on the
+#   -H              deferred — follow operands only (waits on the (roadmap 1.7.1)
 #                   operand-vs-descent stat-mode plumbing in fs.cyr)
 #
 # Exit codes:
@@ -93,7 +93,7 @@ fn _f_init_spec(): i64 {
     # but kriya's flags-parse pulls them out wherever they sit; that's
     # POSIX-permissive and consistent with the rest of kriya.
     _f_L_idx = flags_add_bool(s, 76, "follow",         0, "follow all symlinks");
-    _f_H_idx = flags_add_bool(s, 72, "follow-operand", 0, "follow operand symlinks only (deferred)");
+    _f_H_idx = flags_add_bool(s, 72, "follow-operand", 0, "follow operand symlinks only (deferred)");  # roadmap 1.7.1
     _f_P_idx = flags_add_bool(s, 80, "no-follow",      0, "never follow symlinks (default)");
     _find_spec = s;
     return 0;
@@ -1043,7 +1043,7 @@ fn cmd_find(start: i64): i64 {
             if (streq(t0, "-L") == 1) { _f_follow_mode = 1; head = head + 1; consumed_head = 1; }
             elif (streq(t0, "-P") == 1) { _f_follow_mode = 0; head = head + 1; consumed_head = 1; }
             elif (streq(t0, "-H") == 1) {
-                _f_report_usage("-H is deferred in this release; use -P or -L");
+                _f_report_usage("-H is deferred in this release; use -P or -L");  # roadmap 1.7.1
                 return EXIT_USAGE;
             }
         }

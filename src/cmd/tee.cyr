@@ -22,11 +22,11 @@
 # semantics. Destinations inside a recursive walk would use O_NOFOLLOW
 # per ADR 0003, but tee operates on user-supplied paths only.
 #
-# Deferred (named follow-up):
+# Deferred (named follow-up): (roadmap 1.6.4)
 #   -i / --ignore-interrupts  SIGINT is ignored during the copy loop.
 #                             Needs the signal-handler infrastructure
 #                             flagged in `docs/architecture/002-signal-handling-model.md`
-#                             (M2/M3 trigger row — not yet installed).
+#                             (M2/M3 trigger row — not yet installed). (roadmap 1.6.4)
 #   -p / --output-error=...   GNU pipe-failure-mode knob; rare.
 
 var _tee_spec  = 0;

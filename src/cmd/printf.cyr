@@ -33,12 +33,15 @@
 # is reapplied from the start until args are exhausted (POSIX). When
 # args are short, missing args default to 0 / "".
 #
-# Deferred (each named follow-up):
+# Deferred (each named follow-up): (roadmap 1.8.0)
 #   %e / %E / %f / %F / %g / %G / %a / %A   floating-point conversions.
 #     Cyrius's float-printing story isn't settled, and most script
 #     usage hits `%d`/`%s`. Defer until a real consumer needs floats.
-#   `\xHH` hex escape (GNU extension; `\NNN` octal covers the cases).
 #   Positional args `%N$s`.
+#
+# ⚠ `\xHH` hex escape LEFT this list — it shipped and is implemented below
+# (see CHANGELOG). A deferral block that keeps a shipped feature reads as an
+# admission of a gap that does not exist.
 
 # Set when a directive or escape could not be honoured. printf used to WARN on
 # stderr, write the bare conversion character to stdout and exit 0 — so a script

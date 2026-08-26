@@ -24,7 +24,7 @@
 #                 [:space:] [:blank:] [:punct:] [:print:] [:graph:]
 #                 [:cntrl:] [:xdigit:]
 #
-# Deferred (named follow-ups):
+# Deferred (named follow-ups): (roadmap 1.4.2)
 #   [=c=]   equivalence classes (locale-dependent).
 #   [c*N]   character repetition (handy for padding SET2 explicitly).
 #   Locale-aware case folding (current classes are ASCII-only).

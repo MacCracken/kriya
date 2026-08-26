@@ -30,7 +30,7 @@
 # on agnos, else $COLUMNS / -w, falling back to 80. Off a tty with no width
 # hint it degrades to one-per-line (script-safe, like GNU ls piped).
 #
-# Deferred (each a named follow-up):
+# Deferred (each a named follow-up): (roadmap 1.5.0 / 1.5.1)
 #   `-t` / `-S`           alternate sort keys (mtime / size). Trivial
 #                         once a comparator-by-flag indirection lands.
 #   `-n` / `--numeric-uid-gid`  alias for the current default of

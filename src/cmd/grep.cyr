@@ -13,7 +13,8 @@
 #
 # Pattern source:
 #   positional[0]    when no -e and no -f
-#   -e PATTERN       single pattern (multi-`-e` is a flags-stdlib follow-up)
+#   -e PATTERN       repeatable; every -e contributes a pattern (shipped 1.2.1,
+#                    via `kriya_argv_collect` — see CHANGELOG)
 #   -f FILE          patterns from file, one per line (full multi-pattern path)
 #
 # Modifier flags:
@@ -125,7 +126,7 @@ fn grep_help_declare(): i64 {
     help_exit(0, "at least one line matched");
     help_exit(1, "no line matched");
     help_exit(2, "an error occurred");
-    help_example("grep -n TODO src/*.cyr");
+    help_example("grep -n TODO src/*.cyr");  #skip-lint
     help_example("grep -r -i error logs/");
     help_example("grep -e a -e b file");
     return 0;

@@ -31,11 +31,11 @@
 # Hardlink dedup: GNU du dedupes by (st_dev, st_ino) so a hardlinked
 # file is counted once per tree. kriya du at v0.7.0 does NOT dedupe —
 # hardlinks are counted at each name they appear under. Tracked as a
-# follow-up against the future inode-set helper that `cp --preserve=links`
+# follow-up against the future inode-set helper that `cp --preserve=links` (roadmap 1.6.0)
 # also needs.
 #
 # -x (one-filesystem), --exclude/--exclude-from, --inodes, and -0
-# NUL-terminated output are deferred.
+# NUL-terminated output are deferred. (roadmap 1.7.3)
 
 var _du_summarize:   i64 = 0;
 var _du_all:         i64 = 0;
@@ -496,7 +496,7 @@ fn du_help_declare(): i64 {
     help_begin("du", "Summarise disk usage of files and directories.",
                "du [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("Reports 1024-byte blocks by default. Hard links are counted once per path today; dedup is a named follow-up.");
+    help_operands("Reports 1024-byte blocks by default. Hard links are counted once per path today; dedup is a named follow-up.");  # roadmap 1.6.0
     help_exit(1, "a path could not be read");
     help_example("du -sh .");
     help_example("du -a -d 1 /var");

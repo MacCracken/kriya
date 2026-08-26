@@ -40,13 +40,13 @@
 #   %Z  ctime in seconds since epoch
 #   %%  literal `%`
 #
-# Deferred (separate follow-ups, named):
-#   %x / %y / %z  — human-readable times. Waits on `lib/chrono.cyr`'s
-#                   strftime-like formatter.
+# ⚠ %x / %y / %z LEFT this list at v1.2.5 — they render today (see CHANGELOG).
+#
+# Deferred (separate follow-ups, named — roadmap 1.5.0 / 1.5.2):
 #   %U / %G       — user / group name lookup. Waits on a passwd/group
 #                   parser (forthcoming with the user/group utility set).
 #   %N            — quoted name + symlink target rendering. Trivial
-#                   once we own a quoting helper; deferred for symmetry
+#                   once we own a quoting helper; deferred for symmetry (roadmap 1.5.2)
 #                   with the upcoming `ls` quoting story.
 #   %w / %W       — birth time. Needs `statx(2)` not `stat(2)`.
 #
@@ -369,7 +369,7 @@ fn _st_emit_spec(c, st, name): i64 {
         n = _st_render_time(load64(st + 104), load64(st + 112), &buf);
     } else {
         # ⚠ Two different failures, and they deserve different answers.
-        if (_st_is_deferred_spec(c) == 1) {
+        if (_st_is_deferred_spec(c) == 1) {  #skip-lint
             # A REAL specifier kriya has not implemented. Emitting its source
             # text would be a wrong answer dressed as output; say so instead.
             k_write( 2, "kriya stat: %", 13);
@@ -391,10 +391,11 @@ fn _st_emit_spec(c, st, name): i64 {
     return 0;
 }
 
-# Specifiers GNU defines and kriya does not yet render, as opposed to ones that
-# are simply not specifiers. %x/%y/%z wait on chrono's strftime formatter, %U/%G
-# on a passwd/group parser, %N on a quoting helper, %w on statx(2).
-fn _st_is_deferred_spec(c): i64 {
+# Specifiers GNU defines and kriya does not yet render, as opposed to ones that  #skip-lint
+# are simply not specifiers. ⚠ %x/%y/%z are NOT among them any more — they
+# render since v1.2.5. %U/%G wait on a passwd/group parser (roadmap 1.5.0), %N
+# on a quoting helper (roadmap 1.5.2), %w on statx(2).
+fn _st_is_deferred_spec(c): i64 {  #skip-lint
     # ⚠ %x/%y/%z left this list at v1.2.5 — they render now. %U/%G still need a
     # passwd/group parser, %N a quoting helper, %w statx(2).
     if (c == 85)  { return 1; }   # U

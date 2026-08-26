@@ -39,7 +39,7 @@
 #
 # Known weakness (per ADR 0004 § "shell-expanded `/*`"): `rm -rf /*`
 # expands at the shell to `/bin /boot /dev …`, none of which match `/`.
-# Cross-operand bulk-root defense is deferred to a future architecture
+# Cross-operand bulk-root defense is deferred to a future architecture (roadmap 1.6.4)
 # note. Documented in --help.
 #
 # Each operand is attempted independently after the protected-path

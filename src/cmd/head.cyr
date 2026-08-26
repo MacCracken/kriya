@@ -15,7 +15,7 @@
 # Streaming: 64 KiB reads; stops as soon as the limit is hit. No
 # buffering of the file beyond the read window.
 #
-# Deferred (GNU extensions, each a named follow-up):
+# Deferred (GNU extensions, each a named follow-up): (roadmap 1.8.2)
 #   -n -N / -c -N            "all but the last N" forms. Need a
 #                            single-buffer + tail-like backward scan.
 #   k/M/G/T/P/E suffixes     on N (e.g. `-c 5K`). Wait on a shared
