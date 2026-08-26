@@ -106,8 +106,11 @@ kriya's dependency closure for niyama.
   descent — rather than a variation on the file filter now shipped. ⭐ The ordered
   rightmost-wins/first-option-default machinery in `_gr_name_allowed` is the part to reuse; the
   matcher (`src/lib/glob.cyr`) is already shared.
-- **1.4.2 — Multi-byte text.** `cut -c` distinct from `-b`, `tr` locale-aware fold and `[=c=]`
-  equivalence classes and `[c*N]` repetition, `uniq` multi-byte `-i`. One decoder, four surfaces.
+- ⛔ **Multibyte `tr` and `uniq -i` are NON-GOALS, not pending work** — settled at 1.4.2 by measuring
+  GNU. `tr` is byte-based in every locale (`tr 'é' 'e'` on `café` yields `cafee`, two e's, because
+  SET1 is two bytes) and `uniq -i` does not fold non-ASCII. kriya matches both. Changing either would
+  **diverge from GNU and silently alter existing scripts**, so it is sovereign design needing its own
+  ADR — not a gap. ⚠ Do not re-add them to this arc as if they were unfinished.
 - **1.4.3 — Line-grouping and numbering.** `uniq --group` / `--all-repeated[=METHOD]`, `nl` section
   delimiters (`-d`/`-h`/`-f`/`-l`/`-p`) and `-b p REGEX`. Plus `echo -e` / `-E` against an escape
   table in `lib/str.cyr` — small, and it belongs with the other text work.

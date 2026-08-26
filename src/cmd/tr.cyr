@@ -24,10 +24,18 @@
 #                 [:space:] [:blank:] [:punct:] [:print:] [:graph:]
 #                 [:cntrl:] [:xdigit:]
 #
-# Deferred (named follow-ups): (roadmap 1.4.2)
-#   [=c=]   equivalence classes (locale-dependent).
-#   [c*N]   character repetition (handy for padding SET2 explicitly).
-#   Locale-aware case folding (current classes are ASCII-only).
+# Set syntax, and one deliberate NON-GOAL:
+#   ⚠ [=c=] and [c*N] SHIPPED at 1.4.2 — see the notes in `_tr_parse_set`.
+#   ⛔ Locale-aware case folding is NOT a gap — it is a deliberate non-goal.
+#   GNU `tr` IS BYTE-BASED even in a UTF-8 locale, measured rather than assumed:
+#     printf 'café' | LC_ALL=C.UTF-8 tr 'é' 'e'   ->  cafee
+#   because SET1 `é` is TWO bytes and SET2 `e` is one, so both bytes map to `e`.
+#   And `tr '[:upper:]' '[:lower:]'` on `ÉTÉ` folds only the ASCII `T`.
+#   ⚠ Making kriya's `tr` multibyte-aware would therefore DIVERGE from GNU in
+#   every locale, silently changing the output of existing scripts that rely on
+#   the byte behaviour. kriya matches GNU here, which is the POSIX floor in
+#   practice; a multibyte `tr` would be a sovereign-design choice needing its
+#   own ADR, not a parity fix. Roadmap 1.4.x if ever.
 #
 # When SET2 is shorter than SET1 in translate mode, GNU pads SET2
 # with its last character (matches our behaviour). POSIX leaves this
@@ -263,6 +271,13 @@ fn _tr_parse_byte(s, slen, off, out_byte_p): i64 {
 
 # Parse a set string `s` (length `slen`) into `seq` (ordered bytes)
 # and `mem[256]` (presence). Returns seq length, or -1 on error.
+# ⚠ `[c*]` with NO count means "repeat until this set is as long as SET1", so
+# the parser needs SET1's length. Set before parsing SET2; 0 while parsing SET1,
+# where the form is an ERROR rather than a no-op (GNU: "the [c*] repeat
+# construct may not appear in string1").
+var _tr_pad_target = 0;
+var _tr_set1_star  = 0;   # 1 when a countless [c*] was seen with no pad target
+
 fn _tr_parse_set(s, slen, seq, mem): i64 {
     var len_box[8];
     store64(&len_box, 0);
@@ -273,6 +288,86 @@ fn _tr_parse_set(s, slen, seq, mem): i64 {
 
     while (off < slen) {
         var b = load8(s + off);
+
+        # Equivalence class [=c=]
+        #
+        # ⛔ THIS USED TO FALL THROUGH TO THE LITERAL BRANCH, so `[=e=]` was read
+        # as the four-character set {'[', '=', 'e', ']'} and
+        # `tr '[=e=]' X` on `a[b=c]de` produced `aXbXcXdX` where GNU produces
+        # `a[b=c]dX`. Silent wrong output — and invisible on any input without a
+        # bracket or equals sign in it, which is most input.
+        #
+        # ⚠ In the C and C.UTF-8 locales an equivalence class holds ONLY the
+        # character itself: measured, `tr '[=e=]' x` leaves é and è untouched.
+        # kriya has no locale, so the single character is both what GNU does
+        # here and the only thing it could mean.
+        if (b == 91) {
+            if (off + 4 < slen) {
+                if (load8(s + off + 1) == 61) {
+                    if (load8(s + off + 3) == 61) {
+                        if (load8(s + off + 4) == 93) {
+                            _tr_append(seq, &len_box, mem, load8(s + off + 2));
+                            off = off + 5;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        # Repetition [c*N] / [c*] / [c*0NN] (octal)
+        if (b == 91) {
+            if (off + 3 < slen) {
+                if (load8(s + off + 2) == 42) {
+                    var rc = load8(s + off + 1);
+                    var di = off + 3;
+                    var count: i64 = 0;
+                    var have_digits: i64 = 0;
+                    # ⚠ A LEADING ZERO MEANS OCTAL, as in GNU: `[x*010]` is
+                    # eight, not ten.
+                    var base: i64 = 10;
+                    if (di < slen) {
+                        if (load8(s + di) == 48) { base = 8; }
+                    }
+                    var scanning: i64 = 1;
+                    while (scanning == 1) {
+                        if (di >= slen) { scanning = 0; }
+                        else {
+                            var dc = load8(s + di);
+                            if (dc < 48) { scanning = 0; }
+                            elif (dc > 57) { scanning = 0; }
+                            else {
+                                count = count * base + (dc - 48);
+                                have_digits = 1;
+                                di = di + 1;
+                            }
+                        }
+                    }
+                    var closed: i64 = 0;
+                    if (di < slen) {
+                        if (load8(s + di) == 93) { closed = 1; }
+                    }
+                    if (closed == 1) {
+                        if (have_digits == 0) { count = 0; }
+                        if (count == 0) {
+                            # Pad to SET1's length. ⛔ With no target we are
+                            # parsing SET1 itself, where GNU refuses the form
+                            # outright rather than guessing a length.
+                            if (_tr_pad_target == 0) { _tr_set1_star = 1; }
+                            count = _tr_pad_target - load64(&len_box);
+                            if (count < 0) { count = 0; }
+                        }
+                        var r: i64 = 0;
+                        while (r < count) {
+                            _tr_append(seq, &len_box, mem, rc);
+                            r = r + 1;
+                        }
+                        off = di + 1;
+                        continue;
+                    }
+                }
+            }
+        }
 
         # Character class [:name:]
         if (b == 91) {  # '['
@@ -637,6 +732,10 @@ fn cmd_tr(start: i64): i64 {
     var set1_seq = alloc(1024);
     var set1_mem = alloc(256);
     var s1_seq_len = _tr_parse_set(set1, set1_len, set1_seq, set1_mem);
+    if (_tr_set1_star == 1) {
+        k_write( 2, "kriya tr: error: the [c*] repeat construct may not appear in SET1\n", 66);
+        return EXIT_USAGE;
+    }
     if (s1_seq_len < 0) {
         k_write( 2, "kriya tr: error: bad SET1\n", 26);
         return EXIT_USAGE;
@@ -652,7 +751,10 @@ fn cmd_tr(start: i64): i64 {
         var set2_len = strlen(set2);
         set2_seq = alloc(1024);
         set2_mem = alloc(256);
+        # ⚠ `[c*]` in SET2 pads to SET1's length; SET1 has no target.
+        _tr_pad_target = s1_seq_len;
         s2_seq_len = _tr_parse_set(set2, set2_len, set2_seq, set2_mem);
+        _tr_pad_target = 0;
         if (s2_seq_len < 0) {
             k_write( 2, "kriya tr: error: bad SET2\n", 26);
             return EXIT_USAGE;

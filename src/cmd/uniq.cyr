@@ -33,7 +33,10 @@
 # Deferred (named follow-ups): (roadmap 1.4.3)
 #   --all-repeated[=METHOD]  emit every repeated line, optionally grouped.
 #   --group[=METHOD]         emit groups of adjacent equal lines with separators.
-#   Multi-byte case-folding   the current `-i` is ASCII-only.
+#   ⛔ Multi-byte case folding for -i is NOT a gap — GNU does not do it either.
+#   Measured under both LC_ALL=C.UTF-8 and LC_ALL=C: `uniq -i` on `café` /
+#   `cafÉ` reports TWO lines, i.e. no non-ASCII folding. kriya already matches;
+#   adding Unicode folding would DIVERGE from GNU rather than close a gap.
 
 var _uq_spec   = 0;
 var _uq_c_idx  = 0;

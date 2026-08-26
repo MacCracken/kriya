@@ -6,6 +6,111 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.4.2] - 2026-08-26 — multibyte text: `cut -c`, and `tr`'s missing set syntax
+
+⚠ **This release is smaller than the roadmap entry that prompted it, and deliberately so.** The entry
+read *"`cut -c` distinct from `-b`, `tr` locale-aware fold and `[=c=]` and `[c*N]`, `uniq` multi-byte
+`-i` — one decoder, four surfaces."* Measuring GNU first turned two of those four surfaces into
+**non-goals**, and turned one of the remaining two from a missing feature into a **silent-wrong-output
+bug**.
+
+### ⛔ Two of the four surfaces would have been divergences, not fixes
+
+**GNU `tr` is byte-based even in a UTF-8 locale.** Measured, not inferred:
+
+```
+printf 'café' | LC_ALL=C.UTF-8 tr 'é' 'e'    ->  cafee
+```
+
+Two `e`s, because SET1 `é` is **two bytes** and SET2 `e` is one, so both bytes map to `e`. Likewise
+`tr '[:upper:]' '[:lower:]'` on `ÉTÉ` folds only the ASCII `T`. ⚠ Making kriya's `tr` multibyte-aware
+would therefore diverge from GNU **in every locale**, silently changing the output of existing scripts
+that rely on the byte behaviour.
+
+**GNU `uniq -i` does not fold non-ASCII either** — `café` vs `cafÉ` stays two lines under both
+`LC_ALL=C.UTF-8` and `LC_ALL=C`. kriya already matches.
+
+Both are now recorded in their source headers as **deliberate non-goals with the measurement attached**,
+not as gaps waiting to be closed. A multibyte `tr` remains possible as a sovereign-design choice, but
+it would need its own ADR — it is not a parity fix.
+
+### Added — `cut -c` counts codepoints
+
+`-b` and `-c` shared one emitter, so `-c` was byte-based: `cut -c2` on `aébc` returned the **lead byte
+of é**, a broken UTF-8 sequence rather than a character. That is the whole difference the two flags
+exist to express.
+
+⚠ **Codepoints, not grapheme clusters** — measured. For `a` + `e` + U+0301 + `b`, GNU places the
+combining acute at position 3 in its own right, so `cut -c3` emits the combining mark alone.
+
+⚠ **An invalid byte counts as one character and passes through unchanged.** ⛔ The original bytes are
+emitted, never the decoder's U+FFFD substitute — `cut` selects text, it does not repair it.
+
+⛔ **The stdlib decoder is not strict enough on its own, and a first version of this shipped that
+gap.** `_uc_decode_utf8` validates continuation-byte **shape** only and never range-checks the
+codepoint, so three families of structurally-well-formed-but-illegal sequences came back as one
+character where GNU counts each byte separately: **overlong** forms (`C0 80`), **UTF-16 surrogates**
+(`ED A0 80`), and values **above U+10FFFF** (`F4 90 80 80`). `cut -c2` on `x\xC0\x80y` emitted two
+bytes here and one under GNU.
+
+⚠ Only their *value* is illegal — the shape is fine — which is why shape-checking let them through and
+why a fixture of ordinary text can never catch it. `cut` now re-validates the decoded codepoint against
+the shortest form for its length, the surrogate range, and the U+10FFFF ceiling. ⚠ The fix lives in
+`cut.cyr`, not the stdlib: `lib/unicode/_decode.cyr` is upstream Cyrius, and its documented "skip the
+bad byte" contract is honoured by treating a rejected sequence as one byte.
+
+⭐ Confirmed by **differential fuzz against GNU: 4,900 comparisons over random byte strings, zero
+divergences.**
+
+⚠ The oracle is GNU under `LC_ALL=C.UTF-8`; under `LC_ALL=C` GNU's `-c` collapses to `-b`. kriya has no
+locale and decodes unconditionally, which is exactly what `wc -m` already does — so this makes `cut`
+consistent with a decision the codebase had already taken.
+
+### Fixed — ⛔ `tr '[=c=]'` was silently mangling input
+
+`[=e=]` fell through to the **literal** branch, so it was read as the four-character set
+`{'[', '=', 'e', ']'}`:
+
+```
+echo 'a[b=c]de' | tr '[=e=]' X
+GNU:   a[b=c]dX
+kriya: aXbXcXdX        (before)
+```
+
+⚠ **It looked correct on any input without a bracket or an equals sign in it** — which is most input,
+and is why a first check against `eéè` appeared to pass. The fixture that exposes it has to contain the
+very characters the bug adds.
+
+⚠ In the C and C.UTF-8 locales an equivalence class holds only the character itself (measured: `[=e=]`
+leaves `é` and `è` untouched), and kriya has no locale — so expanding to the single character is both
+what GNU does and the only thing it could mean.
+
+### Added — `tr '[c*N]'` repetition
+
+`[x*3]` was read literally, so `tr abc '[x*3]'` emitted `[x*` instead of `xxx`. Now:
+
+- `[c*N]` repeats `c` N times;
+- `[c*]` with no count pads SET2 to **SET1's length**;
+- ⛔ **a leading zero means octal** — `[x*010]` is eight, not ten;
+- ⛔ `[c*]` in SET1 is **refused**, as GNU refuses it (*"the [c*] repeat construct may not appear in
+  string1"*).
+
+⚠ kriya exits 2 on that refusal where GNU exits 1 — ADR 0008's usage-error policy, pre-existing:
+`tr abc` with a missing SET2 already differs the same way.
+
+### Tests
+
+**3,922 smoke cases across 37 scripts** (up from 3,889), 143 unit + 18 POSIX, fuzz green under poison,
+four lints clean, both targets build.
+
+`smoke-cut.sh` gains 13 multibyte cases and `smoke-tr.sh` 13 set-syntax cases, all diffed as `od -c`
+byte dumps against GNU. ⚠ `smoke-tr.sh`'s existing `compare` helper builds its command with `eval`,
+which cannot carry a set containing `[`, `*` or `=` safely — the new cases pass argv directly so a set
+is never re-parsed by a shell.
+
+⭐ **The `k_write` length lint caught one of my own bugs again** — `src/cmd/tr.cyr:737 length 65 should
+be 66 — truncates the message by 1 byte`. Second release running.
+
 ## [1.4.1] - 2026-08-26 — shared glob: `grep --include`/`--exclude`, `find -regex`
 
 ### ⭐ The glob matcher is now shared

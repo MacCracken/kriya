@@ -105,6 +105,58 @@ expect_exit "-d takes one set" 2 sh -c "echo hi | '$BIN' tr -d 'a' 'b'"
 # --- empty input ---
 compare "empty input"       ""               "'a-z' 'A-Z'"
 
+# --- ⭐ [=c=] equivalence classes and [c*N] repetition -------------------
+#
+# ⛔ `[=e=]` used to fall through to the LITERAL branch, so it was read as the
+# set {'[', '=', 'e', ']'} — `tr '[=e=]' X` on `a[b=c]de` produced `aXbXcXdX`
+# where GNU produces `a[b=c]dX`. ⚠ Invisible on any input without a bracket or
+# equals sign in it, which is most input, so the fixture below deliberately
+# contains both.
+#
+# ⚠ In the C and C.UTF-8 locales an equivalence class holds only the character
+# itself — measured: `tr '[=e=]' x` leaves é and è untouched.
+# ⚠ This script's `compare` helper builds its command with `eval`, which cannot
+# carry a set containing `[`, `*` or `=` safely. These pass argv directly and
+# diff the bytes, so a set is never re-parsed by a shell.
+eq_bytes() {
+    if [ "$2" = "$3" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        printf "FAIL %s:\nexpected: %s\ngot:      %s\n" "$1" "$2" "$3" >&2
+    fi
+}
+tr_same() {
+    label=$1; inp=$2; shift 2
+    g=$(printf '%s' "$inp" | tr "$@" 2>&1 | od -An -c) || true
+    k=$(printf '%s' "$inp" | "$BIN" tr "$@" 2>&1 | od -An -c) || true
+    eq_bytes "set-syntax: $label" "$g" "$k"
+}
+tr_same "[=e=] with brackets in input" 'a[b=c]de' '[=e=]' X
+tr_same "[=e=] plain"                  'eee'      '[=e=]' X
+tr_same "[=e=] leaves é and è"         'eéè'      '[=e=]' X
+tr_same "[x*3] explicit count"         'abc'        abc '[x*3]'
+tr_same "[x*] pads to SET1 length"     'abc'        abc '[x*]'
+tr_same "[x*2] shorter than SET1"      'abc'        abc '[x*2]'
+tr_same "[a*3] under -d"               'aaabbb'   -d '[a*3]'
+tr_same "classes still work"           'abc'      '[:lower:]' '[:upper:]'
+tr_same "ranges still work"            'abc'      a-c x-z
+tr_same "a literal bracket set"        'a[b]c'    '[]' X
+
+# ⛔ A LEADING ZERO IS OCTAL, as in GNU: `[x*010]` is eight, not ten.
+tr_same "[x*010] is octal (8)"         'abcdefghij' abcdefghij '[x*010]'
+
+# ⛔ `[c*]` is refused in SET1 — GNU: "the [c*] repeat construct may not appear
+# in string1". ⚠ kriya exits 2 (ADR 0008 usage error) where GNU exits 1; that
+# policy is pre-existing, `tr abc` with a missing SET2 already differs the same
+# way, so only the REFUSAL is compared here, not the status.
+rc=0; printf 'aaa' | "$BIN" tr -s '[a*]' >/dev/null 2>&1 || rc=$?
+eq_bytes "set-syntax: [c*] refused in SET1" "2" "$rc"
+grc=0; printf 'aaa' | tr -s '[a*]' >/dev/null 2>&1 || grc=$?
+if [ "$grc" -ne 0 ]; then PASS=$((PASS + 1)); else
+    FAIL=$((FAIL + 1)); echo "FAIL set-syntax: GNU should also refuse [c*] in SET1" >&2
+fi
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

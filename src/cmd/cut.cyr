@@ -5,10 +5,10 @@
 #
 # Modes (exactly one of -b / -c / -f required):
 #   -b LIST / --bytes=LIST    extract byte positions.
-#   -c LIST / --characters=LIST  extract char positions. ASCII-only at
-#                               M4 — behaves identically to -b. Full
-#                               multi-byte awareness is a named
-#                               follow-up (waits on a UTF-8 decoder). (roadmap 1.4.2)
+#   -c LIST / --characters=LIST  extract CHARACTER (codepoint) positions.
+#        ⚠ Distinct from -b since 1.4.2: `cut -c2` on `aébc` yields the whole
+#        two-byte é, `cut -b2` its lead byte. Matches GNU under a UTF-8 locale;
+#        kriya has no locale and decodes unconditionally, as `wc -m` does.
 #   -f LIST / --fields=LIST   extract delimited fields.
 #
 # Other flags:
@@ -52,7 +52,7 @@ fn _cut_init_spec(): i64 {
     if (_cut_spec != 0) { return 0; }
     var s = flags_new();
     _cut_b_idx    = flags_add_str(s,  98,  "bytes",            0, "byte positions");
-    _cut_c_idx    = flags_add_str(s,  99,  "characters",       0, "char positions (ASCII-only)");
+    _cut_c_idx    = flags_add_str(s,  99,  "characters",       0, "character (codepoint) positions");
     _cut_f_idx    = flags_add_str(s,  102, "fields",           0, "field positions");
     _cut_d_idx    = flags_add_str(s,  100, "delimiter",        0, "field delimiter (1 byte; default TAB)");
     _cut_s_idx    = flags_add_bool(s, 115, "only-delimited",   0, "skip lines without delimiter (-f)");
@@ -71,7 +71,7 @@ fn cut_help_declare(): i64 {
     help_begin("cut", "Print selected parts of each line.",
                "cut OPTIONS [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("Exactly one of -b, -c or -f selects what LIST means. ⚠ -c is byte-based today; multi-byte support is a named follow-up.");  # roadmap 1.4.2  #skip-lint
+    help_operands("Exactly one of -b, -c or -f selects what LIST means. ⚠ -c counts CHARACTERS (codepoints) and -b counts BYTES — `cut -c2` on `aébc` yields the whole two-byte é, `cut -b2` its lead byte. An invalid byte counts as one character and passes through unchanged.");  #  #skip-lint
     help_exit(1, "a file could not be read");
     help_example("cut -d: -f1 /etc/passwd");
     help_example("cut -c 1-10 file");
@@ -272,6 +272,87 @@ fn _cut_emit_byte(b): i64 {
     return 0;
 }
 
+# Character mode (-c): positions count CODEPOINTS, not bytes.
+#
+# ⛔ `-b` and `-c` used to share one emitter, so `-c` was byte-based and
+# `cut -c2` on `aébc` returned the FIRST BYTE of é — a broken UTF-8 sequence,
+# not a character. Verified against GNU under LC_ALL=C.UTF-8: `-c2` yields the
+# whole two-byte é while `-b2` yields the lead byte, and that is the difference
+# the two flags exist to express.
+#
+# ⚠ CODEPOINTS, NOT GRAPHEME CLUSTERS — measured, not assumed. For `a` + `e` +
+# U+0301 + `b`, GNU puts the combining acute at position 3 in its own right, so
+# `cut -c3` emits the combining mark alone. Counting grapheme clusters would
+# put `b` there instead.
+#
+# ⚠ An INVALID byte counts as one character and is passed through UNCHANGED.
+# GNU does this (`cut -c2` on `a\xFFbc` emits the raw 0xFF), and the stdlib
+# decoder agrees by consuming one byte on a bad sequence. ⛔ The original bytes
+# are emitted, never the decoder's U+FFFD substitute — `cut` selects text, it
+# does not repair it.
+# Decode one character, REJECTING sequences that are structurally well-formed
+# but not valid UTF-8. Returns bytes consumed; a rejected sequence consumes 1.
+#
+# ⛔ `_uc_decode_utf8` VALIDATES CONTINUATION-BYTE SHAPE ONLY. It never range-
+# checks the codepoint it produces, so it accepts three families GNU rejects:
+#   * OVERLONG forms — `C0 80` (a two-byte NUL), `E0 80 xx`, `F0 80 xx xx`
+#   * UTF-16 SURROGATES — `ED A0 80` decodes to U+D800
+#   * OUT OF RANGE — `F4 90 80 80` decodes above U+10FFFF
+# Measured against GNU: `cut -c2` on `x\xC0\x80y` emits `c0` there and `c0 80`
+# here, because kriya counted the pair as ONE character. A differential fuzz put
+# it at 24 divergences in 4123 comparisons — every one malformed, none on valid
+# UTF-8.
+#
+# ⚠ The fix lives HERE, not in the stdlib: `lib/unicode/_decode.cyr` is upstream
+# Cyrius. Its contract ("skip the bad byte") is honoured by treating a rejected
+# sequence as one byte, which is exactly what GNU's mbrtowc does.
+fn _cut_decode_char(line, off, len, cp_out): i64 {
+    var n = _uc_decode_utf8(line, off, len, cp_out);
+    if (n < 1) { return 1; }
+    if (n == 1) { return 1; }
+    var cp = load64(cp_out);
+    # Shortest-form check: a sequence of length n must encode at least this.
+    var min: i64 = 0;
+    if (n == 2) { min = 128; }
+    elif (n == 3) { min = 2048; }
+    else { min = 65536; }
+    if (cp < min) {
+        store64(cp_out, load8(line + off));
+        return 1;
+    }
+    # UTF-16 surrogate half — never valid in UTF-8.
+    if (cp >= 55296) {
+        if (cp <= 57343) {
+            store64(cp_out, load8(line + off));
+            return 1;
+        }
+    }
+    if (cp > 1114111) {
+        store64(cp_out, load8(line + off));
+        return 1;
+    }
+    return n;
+}
+
+fn _cut_emit_chars(line, len, ranges, complement, term_byte): i64 {
+    var i: i64 = 0;
+    var pos: i64 = 0;
+    var cp[8];
+    while (i < len) {
+        var n = _cut_decode_char(line, i, len, &cp);
+        pos = pos + 1;
+        var covered = _cut_range_covers(ranges, pos);
+        var emit: i64 = covered;
+        if (complement == 1) { emit = 1 - covered; }
+        if (emit == 1) { k_write( 1, line + i, n); }
+        i = i + n;
+    }
+    var tb[2];
+    store8(&tb, term_byte);
+    k_write( 1, &tb, 1);
+    return 0;
+}
+
 # Bytes/chars mode: emit selected positions from `line[0..len)`.
 fn _cut_emit_bytes(line, len, ranges, complement, term_byte): i64 {
     var i: i64 = 0;
@@ -366,7 +447,11 @@ fn _cut_run(in_fd, mode, ranges, complement, delim, out_delim, out_delim_len, on
                         _cut_emit_fields(line_buf, line_len, ranges, complement, delim, out_delim, out_delim_len,
                                          only_delim, term_byte);
                     } else {
-                        _cut_emit_bytes(line_buf, line_len, ranges, complement, term_byte);
+if (mode == 2) {
+                            _cut_emit_chars(line_buf, line_len, ranges, complement, term_byte);
+                        } else {
+                            _cut_emit_bytes(line_buf, line_len, ranges, complement, term_byte);
+                        }
                     }
                 }
                 loop = 0;
@@ -379,7 +464,11 @@ fn _cut_run(in_fd, mode, ranges, complement, delim, out_delim, out_delim_len, on
                             _cut_emit_fields(line_buf, line_len, ranges, complement, delim, out_delim, out_delim_len,
                                              only_delim, term_byte);
                         } else {
+    if (mode == 2) {
+                            _cut_emit_chars(line_buf, line_len, ranges, complement, term_byte);
+                        } else {
                             _cut_emit_bytes(line_buf, line_len, ranges, complement, term_byte);
+                        }
                         }
                         line_len = 0;
                     } else {
@@ -432,7 +521,7 @@ fn cmd_cut(start: i64): i64 {
     var mode: i64 = 0;
     var list_arg: i64 = 0;
     if (has_b == 1) { list_arg = b_arg; mode = 0; }
-    if (has_c == 1) { list_arg = c_arg; mode = 0; }
+    if (has_c == 1) { list_arg = c_arg; mode = 2; }
     if (has_f == 1) { list_arg = f_arg; mode = 1; }
 
     var ranges = _cut_parse_list(list_arg);
