@@ -135,6 +135,45 @@ case "$err" in
     *) FAIL=$((FAIL + 1)); printf "FAIL --help=yaml message: %s\n" "$err" >&2 ;;
 esac
 
+# --- `--version`, on every utility ------------------------------------
+#
+# ⛔ `--version` is intercepted, not declared — it appears in no utility's flags
+# spec — which is the same shape that made `xargs --help` print nothing in
+# 1.3.0. It reproduced exactly on arrival: `xargs --version` printed nothing,
+# exited 0, and BLOCKED reading stdin, because the operand scan had made
+# `--version` the command to run. Both are pinned below.
+VER=$(cat "$ROOT/VERSION")
+for u in $ALL; do
+    out=$(timeout 5 "$BIN" "$u" --version </dev/null 2>&1)
+    expect_eq "$u --version" "$u (kriya) $VER" "$out"
+done
+
+# The dispatcher's own form is the bare package line, not a utility line.
+expect_eq "kriya --version" "kriya $VER" "$("$BIN" --version 2>&1)"
+
+# ⚠ Same guards as --help: a write failure is not success, `--` ends option
+# recognition, and an argument is a usage error.
+rc=0; "$BIN" ls --version >/dev/full 2>/dev/null || rc=$?
+expect_eq "--version to a full device exits 1" "1" "$rc"
+rc=0; "$BIN" --version extra >/dev/null 2>&1 || rc=$?
+expect_eq "kriya --version with an argument is a usage error" "2" "$rc"
+rc=0; "$BIN" ls -- --version >/dev/null 2>&1 || rc=$?
+expect_eq "-- makes --version an operand" "1" "$rc"
+
+# ⛔ `-V` IS NOT A VERSION ALIAS — reserved for `sort -V` (version-string sort,
+# roadmap 1.8.1), exactly as `-h` is reserved per utility. Pinned so nobody
+# "helpfully" adds it.
+rc=0; "$BIN" ls -V >/dev/null 2>&1 || rc=$?
+expect_eq "ls -V is a bad option, not version" "2" "$rc"
+
+# Routing, both directions.
+expect_eq "find -exec passes --version through" "--version ." \
+    "$("$BIN" find . -maxdepth 0 -exec echo --version {} ';' 2>&1)"
+rc=0; timeout 5 "$BIN" xargs --version </dev/null >/dev/null 2>&1 || rc=$?
+expect_eq "xargs --version is xargs' own, and does not hang" "0" "$rc"
+expect_eq "xargs --version names xargs" "xargs (kriya) $VER" \
+    "$(timeout 5 "$BIN" xargs --version </dev/null 2>&1)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

@@ -49,6 +49,14 @@ POSIX gives a floor: short flags, `--` terminator, exit 2 on usage error. GNU ad
 Every utility supports two help forms with the same content, different shape:
 
 - **`--help`** — human form. ⚠ **Not `-h`**: see the `-h` note under *Consequences → Neutral*. `-h` is reassigned per utility (`du -h`, `ls -h`, `sort -h` all mean human-readable) and `--help` carries help duty alone. Sections in fixed order: `NAME`, `SYNOPSIS`, `DESCRIPTION`, `OPTIONS`, `EXIT CODES`, `EXAMPLES`. Wrapped at 80 columns. ANSI styling only when stdout is a tty.
+- **`--version`** — `NAME (kriya) VERSION` for a utility, bare `kriya VERSION` for the dispatcher.
+  Accepted by every utility, as GNU does, so a caller need not know whether the thing it is talking to
+  is a symlink or the dispatcher. ⚠ **Not `-V`**: GNU gives that to `sort`'s version-string sort and
+  kriya reserves it for the same, so claiming it would force `sort` to be the one utility where a
+  short letter means something else — the same reasoning that keeps `-h` out of help duty.
+  ⛔ Like `--help`, it is *intercepted* rather than declared in any flags spec, so any code that scans
+  argv for an operand boundary must know about it; `xargs --version` printed nothing and hung on
+  arrival for exactly that reason.
 - **`--help=json`** — machine form. Schema in [Appendix A](#appendix-a-help-schema). Stable per major version. An agent that has not seen kriya before can `kriya <util> --help=json` and parse the flag table without prior knowledge.
 
 Top-level `kriya --list` returns the full utility table as JSON: one entry per utility, with `name`, `summary`, `exit_codes`. This is the agent's entry point for discovering what kriya can do without grepping docs.

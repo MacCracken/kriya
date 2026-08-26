@@ -360,6 +360,14 @@ fn kriya_argv_option_end(spec, start: i64): i64 {
                             # Consuming it here keeps it inside the option window,
                             # while `xargs foo --help` still hands it to `foo`.
                             i = i + 1;
+                        } elif (_kriya_tok_is_version(tok, tlen) == 3) {
+                            # ⛔ SAME TRAP, SAME SHAPE. `--version` is in no spec
+                            # either, so on arrival it reproduced the 1.3.0 bug
+                            # exactly: `xargs --version` printed nothing, exited 0,
+                            # and blocked reading stdin because `--version` had
+                            # become the command to run. Any future
+                            # intercepted-not-declared option needs an arm here.
+                            i = i + 1;
                         } else {
                             # "--name" or "--name=value".
                             var eq: i64 = 0;
@@ -452,6 +460,21 @@ enum KriyaListSchema {
 # read the format back off it without rescanning argv.
 var _kriya_help_tok = 0;
 
+# 3 when `tok` is exactly `--version`.
+#
+# ⚠ `-V` is NOT a version alias, for the same reason `-h` is not a help alias
+# (ADR 0002). GNU gives `sort -V` to version-STRING SORT, and kriya's `sort`
+# header reserves it for exactly that (roadmap 1.8.1) — so claiming `-V` here
+# would either collide on arrival or force `sort` to be the one utility where it
+# means something else. A short letter that means one thing on 37 utilities and
+# something else on one is worse than a short letter that never means it.
+fn _kriya_tok_is_version(tok, tlen): i64 {
+    if (tlen == 9) {
+        if (streq(tok, "--version") == 1) { return 3; }
+    }
+    return 0;
+}
+
 fn _kriya_tok_is_help(tok, tlen): i64 {
     if (tlen == 6) {
         if (streq(tok, "--help") == 1) { return 1; }
@@ -482,6 +505,7 @@ fn _kriya_wants_help(start: i64, end: i64): i64 {
             }
         }
         var hk = _kriya_tok_is_help(tok, tlen);
+        if (hk == 0) { hk = _kriya_tok_is_version(tok, tlen); }
         if (hk != 0) {
             _kriya_help_tok = tok;
             return hk;
@@ -514,6 +538,11 @@ fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
         # `--help=json` is the ADR-0002 machine form. Renders and exits, exactly
         # as the human form above does, and for the same reason.
         help_format_dispatch(spec, _kriya_help_tok);
+    }
+    if (hw == 3) {
+        help_render_version();
+        if (k_write_failed() == 1) { syscall(SYS_EXIT, 1); }
+        syscall(SYS_EXIT, 0);
     }
     var flat = kriya_argv_flat();
     var n = end;

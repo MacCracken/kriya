@@ -208,36 +208,51 @@ chmod 444 unstat
 # ⚠ `|| true` on the capturing assignments is load-bearing under `set -e`: this
 # invocation is EXPECTED to exit 1, and a bare assignment would abort the script
 # there — before the chmod below, leaving the trap unable to clean up.
+# ⛔ ROOT BYPASSES DAC. Mode 444 makes a directory readable-but-not-searchable,
+# which is what makes every per-entry stat fail EACCES — but uid 0 holds
+# CAP_DAC_READ_SEARCH, so as root every stat SUCCEEDS, `ls -l` exits 0, and the
+# five assertions below invert. ⚠ Latent on GitHub's non-root runners.
+SKIP_UNSTAT=0
+if [ "$(id -u)" = "0" ]; then
+    SKIP_UNSTAT=1
+    echo "skip: running as root — mode 444 cannot deny a directory search"
+fi
 out=$("$BIN" ls -l unstat 2>/dev/null || true)
 rc=0; "$BIN" ls -l unstat >/dev/null 2>&1 || rc=$?
 err=$("$BIN" ls -l unstat 2>&1 >/dev/null || true)
 chmod 755 unstat
 
-expect_eq "M17g: exits 1" "1" "$rc"
-# ⭐ The TYPE character survives — it comes from the dirent, not the stat, which
-# is what lets a symlink still read as `l` when it could not be stat'd at all.
-case "$out" in
-    *"d?????????"*) PASS=$((PASS + 1)) ;;
-    *) FAIL=$((FAIL + 1)); printf "FAIL M17g: dir row not d?????????: %s\n" "$out" >&2 ;;
-esac
-case "$out" in
-    *"l?????????"*) PASS=$((PASS + 1)) ;;
-    *) FAIL=$((FAIL + 1)); printf "FAIL M17g: symlink row not l?????????: %s\n" "$out" >&2 ;;
-esac
-case "$out" in
-    *"-?????????"*) PASS=$((PASS + 1)) ;;
-    *) FAIL=$((FAIL + 1)); printf "FAIL M17g: file row not -?????????: %s\n" "$out" >&2 ;;
-esac
-# No fabricated values anywhere in the row.
-case "$out" in
-    *"1970-01-01"*) FAIL=$((FAIL + 1)); printf "FAIL M17g: still fabricates an epoch date\n" >&2 ;;
-    *) PASS=$((PASS + 1)) ;;
-esac
-case "$err" in
-    *"cannot access"*) PASS=$((PASS + 1)) ;;
-    *) FAIL=$((FAIL + 1)); printf "FAIL M17g: no 'cannot access' on stderr: %s\n" "$err" >&2 ;;
-esac
-# A healthy listing is untouched — same fields, exit 0.
+
+if [ "$SKIP_UNSTAT" = "1" ]; then
+    echo "skip: M17g assertions need a directory search that root cannot be denied"
+else
+    expect_eq "M17g: exits 1" "1" "$rc"
+    # ⭐ The TYPE character survives — it comes from the dirent, not the stat, which
+    # is what lets a symlink still read as `l` when it could not be stat'd at all.
+    case "$out" in
+        *"d?????????"*) PASS=$((PASS + 1)) ;;
+        *) FAIL=$((FAIL + 1)); printf "FAIL M17g: dir row not d?????????: %s\n" "$out" >&2 ;;
+    esac
+    case "$out" in
+        *"l?????????"*) PASS=$((PASS + 1)) ;;
+        *) FAIL=$((FAIL + 1)); printf "FAIL M17g: symlink row not l?????????: %s\n" "$out" >&2 ;;
+    esac
+    case "$out" in
+        *"-?????????"*) PASS=$((PASS + 1)) ;;
+        *) FAIL=$((FAIL + 1)); printf "FAIL M17g: file row not -?????????: %s\n" "$out" >&2 ;;
+    esac
+    # No fabricated values anywhere in the row.
+    case "$out" in
+        *"1970-01-01"*) FAIL=$((FAIL + 1)); printf "FAIL M17g: still fabricates an epoch date\n" >&2 ;;
+        *) PASS=$((PASS + 1)) ;;
+    esac
+    case "$err" in
+        *"cannot access"*) PASS=$((PASS + 1)) ;;
+        *) FAIL=$((FAIL + 1)); printf "FAIL M17g: no 'cannot access' on stderr: %s\n" "$err" >&2 ;;
+    esac
+    # A healthy listing is untouched — same fields, exit 0.
+fi
+
 expect_exit "M17g: healthy listing still exits 0" 0 "$BIN" ls -l .
 
 # --- summary ---

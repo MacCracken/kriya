@@ -213,7 +213,8 @@ fn cmd_kriya_help(): i64 {
     _help_head("OPTIONS");
     k_write( 1, "  --list                     every utility as JSON: name, summary,\n", 67);
     k_write( 1, "                             synopsis, destructive, exit codes\n", 63);
-    k_write( 1, "  --help                     this page\n\n", 40);
+    k_write( 1, "  --help                     this page\n", 39);
+    k_write( 1, "  --version                  version, as `kriya X.Y.Z`\n\n", 56);
     _help_head("UTILITIES");
     var col: i64 = 0;
     var i: i64 = 0;
@@ -284,6 +285,19 @@ fn main(): i64 {
                 return EXIT_USAGE;
             }
             return cmd_list();
+        }
+        if (streq(name, "--version") == 1) {
+            if (argc() > 2) {
+                k_write( 2, "kriya: error: --version takes no arguments\n", 43);
+                return EXIT_USAGE;
+            }
+            # ⭐ `_VERSION_STR_KRIYA` carries its own trailing newline and
+            # `_VERSION_LEN_KRIYA` its byte length, so the write site needs no
+            # `strlen` — the whole reason `src/version_str.cyr` was shaped that
+            # way, finally used.
+            k_write( 1, _VERSION_STR_KRIYA, _VERSION_LEN_KRIYA);
+            if (k_write_failed() == 1) { return EXIT_FAILURE; }
+            return EXIT_SUCCESS;
         }
         if (streq(name, "--help") == 1) {
             if (argc() > 2) {

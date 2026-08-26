@@ -182,8 +182,16 @@ for n in 8300 20000; do
     if command -v python3 >/dev/null 2>&1; then
         dots=$(python3 -c "print('/.'*$n)")
         P="$PWD/longp/ld${dots}/f"
-        expect_eq "operand of ${#P} bytes matches GNU" \
-            "$(realpath -m "$P" 2>&1)" "$("$BIN" realpath -m "$P" 2>&1)"
+        # ⚠ stdout ONLY — `2>&1` folded GNU's ERROR TEXT into the comparison,
+        # so on any input where GNU fails, kriya had to reproduce that wording
+        # byte-for-byte. Error strings are the part of GNU that changes most
+        # freely between releases; pinning them makes the test a version
+        # detector rather than a behaviour check. Exit status IS compared,
+        # which is the part that carries meaning.
+        g=$(realpath -m "$P" 2>/dev/null); grc=$?
+        k=$("$BIN" realpath -m "$P" 2>/dev/null); krc=$?
+        expect_eq "operand of ${#P} bytes matches GNU"        "$g"   "$k"
+        expect_eq "operand of ${#P} bytes: same exit as GNU"  "$grc" "$krc"
     fi
 done
 # ⚠ Growth must not weaken the cycle guard — that bound is the ELOOP counter,

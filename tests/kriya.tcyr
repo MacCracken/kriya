@@ -3,6 +3,13 @@
 # project-local source files we exercise so this suite stays
 # independent of the dispatcher entry point in src/main.cyr.
 
+# ⚠ M15e, third occurrence. `src/lib/help.cyr` reads `_VERSION_KRIYA` for
+# `--version`, so this subset build needs the generated version file too.
+# Cyrius only rejects REACHABLE undefined symbols, so a missing include here
+# stays green until something in the subset actually touches it — which is why
+# this trap keeps firing on the release that adds the first reference, not the
+# one that adds the include.
+include "src/version_str.cyr"
 include "src/lib/exit.cyr"
 include "src/lib/errmsg.cyr"
 include "src/lib/sys.cyr"

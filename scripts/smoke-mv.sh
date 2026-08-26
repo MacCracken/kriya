@@ -220,7 +220,15 @@ fi
 # unwritable source PARENT (so the final rmdir fails after the contents are
 # gone): source emptied, destination deleted, both files gone from the filesystem
 # entirely. GNU keeps the destination; ADR 0009 adopts that.
-if [ -d /dev/shm ] && [ "$TMP_DEV" != "$SHM_DEV" ]; then
+# ⛔ ROOT BYPASSES DAC, SO THIS BLOCK CANNOT WORK AS ROOT. It manufactures its
+# failure with an unwritable PARENT directory, and CAP_DAC_OVERRIDE makes uid 0
+# succeed regardless — the final rmdir would work, no failure would occur, and
+# the assertion would report kriya broken when it is not. ⚠ GitHub's hosted
+# runners are non-root so this is latent there; "latent until someone runs CI
+# in a container" is exactly how the argv[0] bug survived two releases.
+if [ "$(id -u)" = "0" ]; then
+    echo "skip: running as root — an unwritable parent cannot deny rmdir"
+elif [ -d /dev/shm ] && [ "$TMP_DEV" != "$SHM_DEV" ]; then
     RB=/dev/shm/kriya-mv-adr9.$$
     rm -rf "$RB"; mkdir -p "$RB/ro/tree/sub"
     echo ONLY-COPY-A > "$RB/ro/tree/a.txt"

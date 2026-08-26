@@ -81,12 +81,24 @@ expect_exit "rm /tmp/.."                 2 "$BIN" rm /tmp/..
 expect_exit "rm ////"                    2 "$BIN" rm ////
 expect_exit "rm /../../../../"           2 "$BIN" rm /../../../../
 
-# Relative canonicalization: in a path where ../../ resolves to /.
-# We're in $WORK (something like /tmp/tmp.XXXXXXXX), so ../../ from
-# here goes to /tmp, ../../../ goes to /. Build that depth-relative
-# refusal exactly.
-# $WORK is /tmp/tmp.XXXXXXXX so depth is 2 dirs deep from /; ../.. → /.
-expect_exit "rm relative ../../"         2 "$BIN" rm ../../
+# Relative canonicalization: a path whose `..` chain resolves to `/` must be
+# refused exactly like a literal `/`.
+#
+# ⛔ THE DEPTH IS COMPUTED, NOT ASSUMED. This used to hardcode `../../` with a
+# comment reasoning "$WORK is /tmp/tmp.XXXXXXXX so depth is 2". `mktemp -d`
+# honours $TMPDIR, so on a host that sets it to anything but a top-level
+# directory — /var/tmp/build, ~/tmp, a container's scratch mount — `../../`
+# lands somewhere that is NOT `/`, kriya correctly declines for a different
+# reason, and the assertion fails while claiming the root guard is broken.
+# Counting the components makes the test say what it means on any host.
+depth=$(printf '%s\n' "$PWD" | awk -F/ '{n=0; for (i=1; i<=NF; i++) if ($i != "") n++; print n}')
+rel=""
+d=0
+while [ "$d" -lt "$depth" ]; do
+    rel="../$rel"
+    d=$((d + 1))
+done
+expect_exit "rm relative $rel resolves to /" 2 "$BIN" rm "$rel"
 
 # Output message check.
 out=$("$BIN" rm / 2>&1 || true)

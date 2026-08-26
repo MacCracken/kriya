@@ -92,13 +92,21 @@ expect_file_match "5MiB stdout matches"   huge.in huge.stdout
 expect_file_match "5MiB file matches"     huge.in huge.out
 
 # --- resilient per-file failure: one bad doesn't break the others ---
+# ⛔ ROOT BYPASSES DAC. Mode 0444 does not deny uid 0 — CAP_DAC_OVERRIDE means
+# open(O_WRONLY|O_TRUNC) succeeds, tee writes both files, and every assertion
+# below inverts. ⚠ Latent on GitHub's non-root runners; a root container would
+# report kriya broken when it is not.
 touch readonly
 chmod 0444 readonly
-rc=0
-echo "blocked" | "$BIN" tee readonly survivor >/dev/null 2>&1 || rc=$?
-expect_eq "partial fail rc"         "1" "$rc"
-expect_eq "survivor got data"       "blocked" "$(cat survivor)"
-expect_eq "readonly unchanged"      "" "$(cat readonly)"
+if [ "$(id -u)" = "0" ]; then
+    echo "skip: running as root — mode 0444 cannot deny a write"
+else
+    rc=0
+    echo "blocked" | "$BIN" tee readonly survivor >/dev/null 2>&1 || rc=$?
+    expect_eq "partial fail rc"         "1" "$rc"
+    expect_eq "survivor got data"       "blocked" "$(cat survivor)"
+    expect_eq "readonly unchanged"      "" "$(cat readonly)"
+fi
 
 # --- writing to a directory operand fails cleanly ---
 mkdir somedir
@@ -107,7 +115,11 @@ echo "no" | "$BIN" tee somedir >/dev/null 2>&1 || rc=$?
 expect_eq "dir target fails"        "1" "$rc"
 
 # --- binary fidelity (NULs preserved) ---
-printf 'one\x00two\x00three' > bin.in
+# ⚠ `\xHH` is a bash / GNU-coreutils extension; the POSIX `printf` FORMAT
+# defines only octal `\ddd`. Under dash (which /bin/sh is on many CI images)
+# `\x00` is not the NUL this test is about. `\000` means the same byte
+# everywhere, and this test is precisely about NUL fidelity.
+printf 'one\000two\000three' > bin.in
 "$BIN" tee bin.out < bin.in >/dev/null
 expect_file_match "binary fidelity"  bin.in bin.out
 
