@@ -210,6 +210,50 @@ rx_same "posix-extended"          . -regextype posix-extended -regex '.*aab.*'
 rx_same "ERE + quantifier"        . -regextype posix-extended -regex '\./a+b\.c'
 rx_same "combined with -type"     . -regex '.*\.c' -type f
 rx_same "negated"                 . -type f ! -regex '.*aab.*'
+
+# ⛔ `-iregex` WITH A BRACKET EXPRESSION — the 1.4.5 bug. `-iregex` folds the
+# SUBJECT to lower case, and the pattern was folded alongside it. That is right
+# for literal bytes and wrong for a bracket expression, which is a SET rather
+# than a byte: lower-casing the text `[[:upper:]]` leaves it unchanged, so
+# against a lower-cased subject it matched NOTHING where GNU matches every
+# path. ⚠ `grep -i` had the identical bug; the fix is shared in
+# `src/lib/icase.cyr` precisely so the two cannot drift apart again.
+: > rx/MiXeD.c
+rx_same "-iregex [[:upper:]]"     . -iregex '.*[[:upper:]].*'
+rx_same "-iregex [[:lower:]]"     . -iregex '.*[[:lower:]].*'
+rx_same "-iregex range lower"     . -iregex '.*[a-c].*'
+rx_same "-iregex range upper"     . -iregex '.*[A-C].*'
+rx_same "-iregex negated class"   . -iregex '.*[^[:upper:]].*'
+rx_same "-iregex ERE class"       . -regextype posix-extended -iregex '.*[[:upper:]].*'
+# ⚠ The control: plain `-regex` must be unaffected, or a bug there would hide
+# behind the `-iregex` assertions above.
+rx_same "-regex [[:upper:]] control" . -regex '.*[[:upper:]].*'
+
+# ⛔ REGRESSION GUARD — GNU `find` IS NOT GNU `grep`, and 1.4.5 briefly assumed
+# it was. `find -iregex` goes through glibc `regcomp` with `RE_ICASE`; `grep`
+# uses its own bundled matcher; the two implement DIFFERENT range rules, so
+# sharing one rewriter without a mode bit silently broke four mixed-case cases
+# that had agreed with GNU since the predicate shipped:
+#
+#   grep -i '[b-B]'           matches NOTHING
+#   find  -iregex '.*[b-B].*' matches `b` AND `B`
+#   grep -i '[Z-a]'           is an ERROR, exit 2
+#   find  -iregex '.*[Z-a].*' is silently empty, exit 0 — find has NO error
+#                             path for a bracket expression at all
+#
+# glibc's rule, verified exact over all 7,744 printable-endpoint ranges: a byte
+# `c` is in `[x-y]` iff `toupper(x) <= toupper(c) <= toupper(y)`. ⚠ None of
+# these cases involves a character class, so the class assertions above cannot
+# catch a regression here — they need their own block.
+: > rx/bB.c
+rx_same "-iregex [b-B] mixed range"  . -iregex '.*[b-B].*'
+rx_same "-iregex [a-B] mixed range"  . -iregex '.*[a-B].*'
+rx_same "-iregex [A-c] mixed range"  . -iregex '.*[A-c].*'
+# ⚠ These two are ERRORS for `grep -i` and silently empty for `find`. Asserting
+# them is what pins the two rules apart.
+rx_same "-iregex [Z-a] is silent"    . -iregex '.*[Z-a].*'
+rx_same "-iregex [W-b] is silent"    . -iregex '.*[W-b].*'
+rx_same "-iregex [B-{] translation"  . -iregex '.*[B-{].*'
 rx_same "no match at all"         . -regex '.*zzz.*'
 
 # ⛔ `-regextype emacs` is REFUSED BY NAME. GNU's default and its emacs type

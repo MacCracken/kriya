@@ -15,6 +15,6 @@
 # &str, len)` so the writer never needs `strlen()` at the version
 # print site.
 
-var _VERSION_STR_KRIYA = "kriya 1.4.4\n";
+var _VERSION_STR_KRIYA = "kriya 1.4.5\n";
 var _VERSION_LEN_KRIYA = 12;
-var _VERSION_KRIYA     = "1.4.4";
+var _VERSION_KRIYA     = "1.4.5";

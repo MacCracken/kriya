@@ -1,0 +1,636 @@
+# src/lib/icase.cyr — ASCII case-insensitive matching for BRE patterns.
+#
+# ⛔ THE PROBLEM THIS EXISTS TO SOLVE. `grep -i` and `find -iregex` both
+# implement case-insensitivity by folding the SUBJECT to lower case and folding
+# the PATTERN alongside it. That is correct for literal bytes and quietly wrong
+# for bracket expressions, because a bracket expression is not a byte — it is a
+# SET, and lower-casing its source text does not lower-case the set it denotes:
+#
+#   `[[:upper:]]` is already lower-case TEXT, so folding leaves it untouched.
+#   Matched against a lower-cased subject it can never fire.
+#   `kriya grep -i '[[:upper:]]'` returned NOTHING where GNU returns every
+#   alphabetic line. A wrong answer, with no diagnostic.
+#
+# ⭐ THE RULE GNU ACTUALLY IMPLEMENTS, measured rather than assumed — 8,100
+# ranges swept against `grep` under `LC_ALL=C`, zero mismatches, on BOTH
+# grep 3.12 (this box) and grep 3.11 (what CI runs):
+#
+#   1. `[:upper:]` and `[:lower:]` BOTH behave as `[:alpha:]`. Every other
+#      class is unaffected by `-i`.
+#   2. For a range `x-y`:
+#        a. It is an ERROR ("Invalid range end") iff toupper(x) > toupper(y).
+#           ⚠ The gate is the UPPER-case fold, not the lower-case one, and the
+#           difference is load-bearing: `[A-_]` is accepted (A<_ as uppercase)
+#           while `[B-a]` is refused (B>A as uppercase), even though BOTH have
+#           a reversed lower-case fold.
+#        b. Otherwise, if x > y raw, it matches NOTHING — and is NOT an error.
+#           ⚠ So `-i` can turn an error into silence: plain `[b-B]` is an error,
+#           `-i [b-B]` matches nothing and exits 1.
+#        c. Otherwise it denotes { c : x <= c <= y } together with the
+#           case-counterpart of every member. ⚠ The RAW span is kept, so
+#           `[A-z]` still matches the six punctuation bytes between `Z` and `a`.
+#   3. A literal byte denotes itself and its counterpart.
+#
+# ⛔ LOCALE. Every rule above is stated for the C locale, and that is not a
+# detail: `grep -i '[>-a]'` gives three DIFFERENT answers under `C`,
+# `C.UTF-8` and `en_US.UTF-8`, because a bracket range walks COLLATION order,
+# not byte order. kriya is byte-ordered and ASCII-only by design (ADR 0005), so
+# it implements the C-locale rule. ⚠ Any test comparing against GNU must pin
+# `LC_ALL=C` or it is measuring the tester's environment.
+#
+# ⭐ WHY REWRITING THE PATTERN IS ENOUGH. Every set GNU denotes under `-i` is
+# CLOSED UNDER CASE — if it holds `A` it holds `a`. A set closed under case
+# loses nothing when lower-cased, so matching `lower(S)` against a lower-cased
+# subject is exactly equivalent. That is what lets the subject fold stay and
+# keeps this a pattern-side fix.
+
+enum IcaseErr {
+    ICASE_OK        = 0;
+    ICASE_E_RANGE   = 1;   # range reversed after the upper-case fold
+    ICASE_E_BRACKET = 2;   # unterminated bracket expression
+    ICASE_E_EQUIV   = 3;   # [=c=] / [.c.] — niyama does not implement these
+}
+
+enum IcaseLimits {
+    ICASE_SET_SIZE = 256;   # one membership byte per possible input byte
+}
+
+# ⭐ Two callers, two subject conventions — so a mode bit rather than two copies
+# of the parser, the same shape `src/lib/str.cyr` took for printf vs echo.
+#
+#   FOLD   — the BRE path, which lower-cases the SUBJECT. A set closed under
+#            case loses nothing when lower-cased, so the set is emitted as
+#            lower(S) and literals outside brackets are lower-cased too.
+#   CLOSED — the ERE path, which does NOT fold the subject and instead relies on
+#            niyama's inline `(?i)`. ⚠ That flag case-closes RANGES but not
+#            NAMED CLASSES — `grep -E -i '[[:upper:]]'` matched only upper case
+#            — so the set is emitted closed under case and the literals are left
+#            alone for `(?i)` to handle.
+enum IcaseMode {
+    ICASE_MODE_FOLD   = 0;
+    ICASE_MODE_CLOSED = 1;
+    # ⛔ RANGE SEMANTICS, and it is a SEPARATE AXIS from the emission convention
+    # because GNU `grep` and GNU `find` genuinely do not agree. They are not one
+    # oracle: `grep` matches with its bundled gnulib matcher, `find -iregex`
+    # calls glibc `regcomp` with `RE_ICASE`, and the two implement different
+    # rules. Measured, not assumed:
+    #
+    #   grep -i '[b-B]'            matches NOTHING
+    #   find  -iregex '.*[b-B].*'  matches `b` AND `B`
+    #   grep -i '[Z-a]'            is an ERROR, exit 2
+    #   find  -iregex '.*[Z-a].*'  is silently empty, exit 0 — find has no
+    #                              error path for a bracket at all
+    #
+    # Without this bit, unifying both callers onto grep's rule REGRESSED
+    # `find -iregex`: four mixed-case range cases that agreed with GNU at 1.4.4
+    # stopped agreeing. The bit exists so the shared parser can serve two
+    # callers that really are different, rather than making one of them wrong.
+    #
+    # glibc's rule, verified exact over all 7,744 printable-endpoint ranges with
+    # zero mismatches: a byte `c` is in `[x-y]` iff
+    #     toupper(x) <= toupper(c) <= toupper(y)
+    # — a TRANSLATION applied to the candidate as well as to both endpoints,
+    # which is why `[B-{]` excludes `a` while containing `[`, `\`, `]` and `_`.
+    ICASE_RANGE_TRANSLATE = 2;
+    # ⛔ VALIDATE-ONLY, for the path where `-i` was NOT given. Without it kriya
+    # never checked a bracket range at all, and diverged from GNU on 4,095 of
+    # 8,281 ranges — two of them SILENT WRONG ANSWERS rather than mere silence:
+    #     grep '[a-c-e]'       GNU: exit 2      kriya: exit 0, 5 matches
+    #     grep '[[:digit:]-a]' GNU: exit 2      kriya: exit 0, 12 matches
+    # ⚠ The gate here is the RAW comparison `x > y`, NOT the upper-case fold —
+    # that one is specific to `-i`. Verified: plain `[Z-a]` is valid and plain
+    # `[b-B]` is an error, the exact inverse of the `-i` answers.
+    #
+    # The caller discards the rewritten pattern and keeps only the verdict, so
+    # the emission convention is irrelevant on this path.
+    ICASE_RANGE_PLAIN = 4;
+}
+
+fn icase_is_upper(c): i64 {
+    if (c < 65) { return 0; }
+    if (c > 90) { return 0; }
+    return 1;
+}
+
+fn icase_is_lower(c): i64 {
+    if (c < 97) { return 0; }
+    if (c > 122) { return 0; }
+    return 1;
+}
+
+fn icase_to_lower(c): i64 {
+    if (icase_is_upper(c) == 1) { return c + 32; }
+    return c;
+}
+
+fn icase_to_upper(c): i64 {
+    if (icase_is_lower(c) == 1) { return c - 32; }
+    return c;
+}
+
+# Lower-case `len` bytes of `src` into `dst`. ASCII A..Z only — kriya does not
+# case-fold non-ASCII anywhere, deliberately (see the `tr` / `uniq -i` note in
+# docs/development/roadmap.md: GNU does not either).
+fn icase_fold_bytes(src, dst, len): i64 {
+    var i: i64 = 0;
+    while (i < len) {
+        store8(dst + i, icase_to_lower(load8(src + i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _icase_set_add(set, c): i64 {
+    store8(set + (c & 255), 1);
+    return 0;
+}
+
+fn _icase_set_has(set, c): i64 {
+    return load8(set + (c & 255));
+}
+
+fn _icase_set_clear(set): i64 {
+    var i: i64 = 0;
+    while (i < ICASE_SET_SIZE) {
+        store8(set + i, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Is the class name at `pat + s` (length `n`) equal to `name`?
+fn _icase_name_is(pat, s, n, name): i64 {
+    if (strlen(name) != n) { return 0; }
+    var i: i64 = 0;
+    while (i < n) {
+        if (load8(pat + s + i) != load8(name + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Append the literal bytes of `s` to `out` at `n`; return the new length.
+fn _icase_put(out, n, s): i64 {
+    var i: i64 = 0;
+    var len = strlen(s);
+    while (i < len) {
+        store8(out + n + i, load8(s + i));
+        i = i + 1;
+    }
+    return n + len;
+}
+
+# Emit one member byte, escaping what niyama needs escaped.
+#
+# ⚠ `\` is the one byte that cannot be written raw. POSIX says a backslash
+# inside a bracket expression is a LITERAL backslash, but niyama reads it as an
+# escape — `[a\b]` denotes {a,b} there and {\,a,b} in GNU. Emitting `\\` gets
+# niyama to the POSIX meaning. (The same divergence on a pattern kriya does NOT
+# rewrite is a separate, pre-existing gap — roadmap M11.)
+fn _icase_put_member(out, n, c): i64 {
+    if (c == 92) {
+        store8(out + n, 92);
+        store8(out + n + 1, 92);
+        return n + 2;
+    }
+    store8(out + n, c);
+    return n + 1;
+}
+
+# Write the accumulated set as a bracket expression. Returns the new length.
+#
+# ⚠ POSITION IS SYNTAX inside a bracket expression, and three bytes care:
+#   `]` is a member only as the FIRST one; anywhere else it closes the set.
+#   `^` is negation only as the FIRST one; anywhere else it is a member.
+#   `-` is a member only FIRST or LAST; between two members it makes a range.
+# So the emitter is ordered rather than sorted: `]`, then classes, then the
+# ordinary bytes, then `^`, then `-`.
+fn _icase_emit_set(set, neg, cls, cls_len, out, n0, mode): i64 {
+    # Apply the mode to the raw set gathered by the parser: fold it down, or
+    # close it under case. Doing it here rather than at insert time keeps the
+    # parser mode-agnostic.
+    var i: i64 = 0;
+    while (i < ICASE_SET_SIZE) {
+        if (_icase_set_has(set, i) == 1) {
+            if ((mode & ICASE_RANGE_PLAIN) != 0) {
+                # validate-only: leave the set exactly as parsed
+                i = i + 0;
+            } elif ((mode & ICASE_MODE_CLOSED) == 0) {
+                var lo = icase_to_lower(i);
+                if (lo != i) {
+                    store8(set + i, 0);
+                    _icase_set_add(set, lo);
+                }
+            } else {
+                _icase_set_add(set, icase_to_lower(i));
+                _icase_set_add(set, icase_to_upper(i));
+            }
+        }
+        i = i + 1;
+    }
+    # ⛔ AN EMPTY SET HAS NO BRACKET SPELLING. `[]` is not "matches nothing" — it
+    # is an UNTERMINATED bracket, because a `]` in first position is a member.
+    # And the case is reachable: a raw-reversed range that clears the upper-case
+    # gate (`[a-B]`) contributes no members at all, which GNU accepts and
+    # matches nothing for. ⚠ The set cannot simply be dropped either — the
+    # bracket may sit under a `*`, where `x[a-B]*y` still matches `xy`.
+    #
+    # ⭐ So it is written as the negation of every byte there is. `[:cntrl:]`
+    # and `[:print:]` together cover 0x00-0x7F (NUL included, which is why
+    # `[^\x01-\xff]` is NOT good enough — it matches a NUL and kriya's line
+    # buffer can hold one), and the explicit 0x80-0xFF range covers the rest.
+    # Verified against all 256 byte values in both kriya and GNU.
+    var empty: i64 = 1;
+    if (cls_len > 0) { empty = 0; }
+    var e: i64 = 0;
+    while (e < ICASE_SET_SIZE) {
+        if (_icase_set_has(set, e) == 1) { empty = 0; }
+        e = e + 1;
+    }
+    if (empty == 1) {
+        var m = n0;
+        store8(out + m, 91);              # [
+        m = m + 1;
+        if (neg == 0) {                   # matches nothing
+            store8(out + m, 94);          # ^
+            m = m + 1;
+        }
+        m = _icase_put(out, m, "[:cntrl:][:print:]");
+        store8(out + m, 128);
+        store8(out + m + 1, 45);          # -
+        store8(out + m + 2, 255);
+        store8(out + m + 3, 93);          # ]
+        return m + 4;
+    }
+
+    var n = n0;
+    store8(out + n, 91);            # [
+    n = n + 1;
+    if (neg == 1) {
+        store8(out + n, 94);        # ^
+        n = n + 1;
+    }
+
+    # ⛔ The degenerate case: a POSITIVE set whose only member is `^`. Emitted
+    # plainly it would read as a negation and invert the whole match. There is
+    # no ordering that saves it — nothing can precede it — so it is written
+    # `[\^]`, which niyama reads as the single byte `^`.
+    if (neg == 0) {
+        if (cls_len == 0) {
+            if (_icase_set_has(set, 94) == 1) {
+                var only: i64 = 1;
+                var k: i64 = 0;
+                while (k < ICASE_SET_SIZE) {
+                    if (k != 94) {
+                        if (_icase_set_has(set, k) == 1) { only = 0; }
+                    }
+                    k = k + 1;
+                }
+                if (only == 1) {
+                    store8(out + n, 92);
+                    store8(out + n + 1, 94);
+                    store8(out + n + 2, 93);
+                    return n + 3;
+                }
+            }
+        }
+    }
+
+    if (_icase_set_has(set, 93) == 1) {     # `]` first
+        store8(out + n, 93);
+        n = n + 1;
+    }
+    var ci: i64 = 0;
+    while (ci < cls_len) {
+        store8(out + n, load8(cls + ci));
+        n = n + 1;
+        ci = ci + 1;
+    }
+    var c: i64 = 0;
+    while (c < ICASE_SET_SIZE) {
+        var skip: i64 = 0;
+        if (c == 93) { skip = 1; }
+        if (c == 94) { skip = 1; }
+        if (c == 45) { skip = 1; }
+        if (skip == 0) {
+            if (_icase_set_has(set, c) == 1) { n = _icase_put_member(out, n, c); }
+        }
+        c = c + 1;
+    }
+    if (_icase_set_has(set, 94) == 1) {     # `^` never first
+        store8(out + n, 94);
+        n = n + 1;
+    }
+    if (_icase_set_has(set, 45) == 1) {     # `-` last
+        store8(out + n, 45);
+        n = n + 1;
+    }
+    store8(out + n, 93);                    # ]
+    return n + 1;
+}
+
+# Rewrite the bracket expression starting at `pat + i` (which is `[`) into
+# `out`, appending from length `n0`. Stores the index just past the closing `]`
+# into `next_p`. Returns the new output length, or (0 - 1) on error.
+fn _icase_bracket(pat, plen, i, set, cls, out, n0, next_p, err_p, mode): i64 {
+    _icase_set_clear(set);
+    var cls_len: i64 = 0;
+    var p = i + 1;
+    var neg: i64 = 0;
+    if (p < plen) {
+        if (load8(pat + p) == 94) {
+            neg = 1;
+            p = p + 1;
+        }
+    }
+    var first: i64 = 1;
+    var after_multi: i64 = 0;
+    var scanning: i64 = 1;
+    while (scanning == 1) {
+        if (p >= plen) {
+            store64(err_p, ICASE_E_BRACKET);
+            return 0 - 1;
+        }
+        var c = load8(pat + p);
+        if (c == 93) {
+            # A `]` in the first member position is a literal member.
+            if (first == 1) {
+                _icase_set_add(set, 93);
+                first = 0;
+                after_multi = 0;
+                p = p + 1;
+                continue;
+            }
+            p = p + 1;
+            scanning = 0;
+            continue;
+        }
+        first = 0;
+        # ⚠ `[` is only special here when it OPENS a class, an equivalence
+        # class or a collating symbol. Bare, it is an ordinary member and may
+        # even be a range endpoint — `[Z-[]` is a legal three-byte set, and
+        # `[[-m]` is a range GNU refuses. Treating every `[` as a literal
+        # member skipped both readings.
+        if (c == 91) {
+            var k: i64 = 0;
+            if (p + 1 < plen) { k = load8(pat + p + 1); }
+            if (k == 58) {
+                # [:name:] — find the closing `:]`.
+                var s = p + 2;
+                var e = s;
+                var found: i64 = 0;
+                while (found == 0) {
+                    if (e + 1 >= plen) {
+                        store64(err_p, ICASE_E_BRACKET);
+                        return 0 - 1;
+                    }
+                    if (load8(pat + e) == 58) {
+                        if (load8(pat + e + 1) == 93) { found = 1; continue; }
+                    }
+                    e = e + 1;
+                }
+                # ⭐ The whole headline bug, in two lines: under `-i` GNU makes
+                # BOTH case classes mean `[:alpha:]`. Every other class passes
+                # through untouched.
+                var nm_len = e - s;
+                if (_icase_name_is(pat, s, nm_len, "upper") == 1) {
+                    cls_len = _icase_put(cls, cls_len, "[:alpha:]");
+                } elif (_icase_name_is(pat, s, nm_len, "lower") == 1) {
+                    cls_len = _icase_put(cls, cls_len, "[:alpha:]");
+                } else {
+                    store8(cls + cls_len, 91);
+                    store8(cls + cls_len + 1, 58);
+                    cls_len = cls_len + 2;
+                    var q: i64 = 0;
+                    while (q < nm_len) {
+                        store8(cls + cls_len + q, load8(pat + s + q));
+                        q = q + 1;
+                    }
+                    cls_len = cls_len + nm_len;
+                    store8(cls + cls_len, 58);
+                    store8(cls + cls_len + 1, 93);
+                    cls_len = cls_len + 2;
+                }
+                p = e + 2;
+                after_multi = 1;
+                continue;
+            }
+            if (k == 61) {
+                store64(err_p, ICASE_E_EQUIV);
+                return 0 - 1;
+            }
+            if (k == 46) {
+                store64(err_p, ICASE_E_EQUIV);
+                return 0 - 1;
+            }
+        }
+        # ⚠ A `-` directly after a completed range or class is an error unless
+        # it is the last member: GNU takes `[a-c-e]` and `[[:digit:]-a]` as
+        # invalid, while `[a-c-]` and `[a-cd-f]` are fine.
+        if (c == 45) {
+            if (after_multi == 1) {
+                if (p + 1 < plen) {
+                    if (load8(pat + p + 1) != 93) {
+                        store64(err_p, ICASE_E_RANGE);
+                        return 0 - 1;
+                    }
+                }
+            }
+        }
+        # A range, but only when the `-` has a member after it: in `[a-]` the
+        # dash is the last member and `a` is just `a`.
+        var is_range: i64 = 0;
+        if (p + 2 < plen) {
+            if (load8(pat + p + 1) == 45) {
+                if (load8(pat + p + 2) != 93) { is_range = 1; }
+            }
+        }
+        if (is_range == 1) {
+            var lo = c;
+            var hi = load8(pat + p + 2);
+            # A class cannot be a range endpoint — `[a-[:digit:]]` is an error,
+            # while `[a-[]` is a perfectly ordinary range ending at `[`.
+            if (hi == 91) {
+                if (p + 3 < plen) {
+                    var k3 = load8(pat + p + 3);
+                    if (k3 == 58) { store64(err_p, ICASE_E_RANGE); return 0 - 1; }
+                    if (k3 == 61) { store64(err_p, ICASE_E_RANGE); return 0 - 1; }
+                    if (k3 == 46) { store64(err_p, ICASE_E_RANGE); return 0 - 1; }
+                }
+            }
+            if ((mode & ICASE_RANGE_PLAIN) != 0) {
+                # No `-i`: the endpoints are compared as written.
+                if (lo > hi) {
+                    store64(err_p, ICASE_E_RANGE);
+                    return 0 - 1;
+                }
+                var pq = lo;
+                while (pq <= hi) {
+                    _icase_set_add(set, pq);
+                    pq = pq + 1;
+                }
+                p = p + 3;
+                after_multi = 1;
+                continue;
+            }
+            if ((mode & ICASE_RANGE_TRANSLATE) != 0) {
+                # glibc `RE_ICASE`. ⚠ Never an error — a reversed translated
+                # range is simply empty, which is exactly what GNU find does.
+                var ulo = icase_to_upper(lo);
+                var uhi = icase_to_upper(hi);
+                var tq: i64 = 0;
+                while (tq < ICASE_SET_SIZE) {
+                    var utq = icase_to_upper(tq);
+                    if (utq >= ulo) {
+                        if (utq <= uhi) { _icase_set_add(set, tq); }
+                    }
+                    tq = tq + 1;
+                }
+                p = p + 3;
+                after_multi = 1;
+                continue;
+            }
+            if (icase_to_upper(lo) > icase_to_upper(hi)) {
+                store64(err_p, ICASE_E_RANGE);
+                return 0 - 1;
+            }
+            # ⚠ A raw-reversed range that survives the gate above contributes
+            # NOTHING and is not an error — `-i '[b-B]'` matches nothing where
+            # plain `[b-B]` is a hard error.
+            var q = lo;
+            while (q <= hi) {
+                _icase_set_add(set, q);
+                q = q + 1;
+            }
+            p = p + 3;
+            after_multi = 1;
+            continue;
+        }
+        _icase_set_add(set, c);
+        after_multi = 0;
+        p = p + 1;
+    }
+    store64(next_p, p);
+    return _icase_emit_set(set, neg, cls, cls_len, out, n0, mode);
+}
+
+# Rewrite a pattern so it matches case-insensitively under the caller's subject
+# convention (see IcaseMode). Returns the new pattern (NUL terminated), storing
+# its length via `out_len_p`; returns 0 on error, with the reason via `err_p`.
+#
+# ⚠ An escaped byte is copied through untouched, both halves. Lower-casing the
+# byte after a backslash would turn `\W` into `\w` — a different operator
+# entirely in the dialects that have one.
+fn icase_rewrite(pat, plen, mode, out_len_p, err_p): i64 {
+    store64(err_p, ICASE_OK);
+    # Worst case one bracket expression expands to the whole 256-byte set with
+    # every member escaped, so size for it rather than guessing.
+    var out = alloc(plen * 264 + 64);
+    var set = alloc(ICASE_SET_SIZE);
+    var cls = alloc(plen * 4 + 32);
+    var nx = alloc(8);
+    var n: i64 = 0;
+    var i: i64 = 0;
+    var scanning: i64 = 1;
+    while (scanning == 1) {
+        if (i >= plen) { scanning = 0; continue; }
+        var c = load8(pat + i);
+        if (c == 92) {
+            store8(out + n, 92);
+            n = n + 1;
+            i = i + 1;
+            if (i < plen) {
+                store8(out + n, load8(pat + i));
+                n = n + 1;
+                i = i + 1;
+            }
+            continue;
+        }
+        if (c == 91) {
+            var r = _icase_bracket(pat, plen, i, set, cls, out, n, nx, err_p, mode);
+            if (r < 0) { return 0; }
+            n = r;
+            i = load64(nx);
+            continue;
+        }
+        # ⚠ Outside a bracket, only the FOLD caller wants the byte lower-cased;
+        # the CLOSED caller leaves it for niyama's `(?i)`.
+        if ((mode & ICASE_MODE_CLOSED) == 0) {
+            store8(out + n, icase_to_lower(c));
+        } else {
+            store8(out + n, c);
+        }
+        n = n + 1;
+        i = i + 1;
+    }
+    store8(out + n, 0);
+    store64(out_len_p, n);
+    return out;
+}
+
+# Does `pat` use a bracket construct niyama does not implement? Returns
+# ICASE_E_EQUIV for an equivalence class `[=c=]` or collating symbol `[.c.]`,
+# else ICASE_OK.
+#
+# ⛔ THIS RUNS WHETHER OR NOT `-i` WAS GIVEN, and that is the point. niyama
+# implements neither construct and fails them SILENTLY: `grep '[[=a=]]'`
+# returned no match where GNU matches, `grep '[[.a.]-c]'` returned 0 where GNU
+# returns 3, and `[[=a=]b]` matched nothing where GNU matched both lines. ⚠ The
+# 1.4.5 rewrite refused them on the `-i` path only, which left the SAME pattern
+# loud with `-i` and silently wrong without it — a worse state than uniform
+# silence, and a defect introduced by the fix rather than found by it.
+#
+# ⚠ Deliberately narrow: it answers "is this construct present", not "is this
+# bracket expression well-formed". Everything else niyama already agrees with
+# GNU about, including which reversed ranges are errors, and a second opinion
+# on that would be a second source of truth.
+fn icase_scan_unsupported(pat, plen): i64 {
+    var i: i64 = 0;
+    var scanning: i64 = 1;
+    while (scanning == 1) {
+        if (i >= plen) { scanning = 0; continue; }
+        if (load8(pat + i) == 92) { i = i + 2; continue; }
+        if (load8(pat + i) != 91) { i = i + 1; continue; }
+        # Inside a bracket expression now.
+        var p = i + 1;
+        if (p < plen) {
+            if (load8(pat + p) == 94) { p = p + 1; }
+        }
+        if (p < plen) {
+            if (load8(pat + p) == 93) { p = p + 1; }   # `]` first is a member
+        }
+        var inb: i64 = 1;
+        while (inb == 1) {
+            if (p >= plen) { inb = 0; continue; }
+            var c = load8(pat + p);
+            if (c == 93) { inb = 0; p = p + 1; continue; }
+            if (c == 91) {
+                var k: i64 = 0;
+                if (p + 1 < plen) { k = load8(pat + p + 1); }
+                if (k == 61) { return ICASE_E_EQUIV; }
+                if (k == 46) { return ICASE_E_EQUIV; }
+                if (k == 58) {
+                    # Skip the class so `[:alpha:]`'s own `:]` cannot be read
+                    # as the bracket's closing `]`.
+                    var e = p + 2;
+                    var found: i64 = 0;
+                    while (found == 0) {
+                        if (e + 1 >= plen) { found = 1; inb = 0; continue; }
+                        if (load8(pat + e) == 58) {
+                            if (load8(pat + e + 1) == 93) {
+                                found = 1;
+                                p = e + 2;
+                                continue;
+                            }
+                        }
+                        e = e + 1;
+                    }
+                    continue;
+                }
+            }
+            p = p + 1;
+        }
+        i = p;
+    }
+    return ICASE_OK;
+}

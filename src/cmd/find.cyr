@@ -162,16 +162,15 @@ fn _f_report_usage(msg): i64 {
 # the SUBJECT means the PATTERN must already be lower-case to match — the same
 # asymmetry `grep -i` carries for BRE, and the reason `-iregex` under
 # `-regextype posix-extended` uses niyama's `(?i)` instead.
+#
+# ⭐ The byte fold is `src/lib/icase.cyr`'s at 1.4.5; this wrapper stays so the
+# call sites keep reading in find's own vocabulary. ⛔ The PATTERN fold is no
+# longer this function's job, and that was a real bug: lower-casing a pattern's
+# bytes does not lower-case the SET a bracket expression denotes, so
+# `find -iregex '.*[[:upper:]].*'` matched NOTHING where GNU matches every path.
+# `icase_rewrite` does it properly — see the header of `src/lib/icase.cyr`.
 fn _f_fold_bytes(src, dst, len): i64 {
-    var i: i64 = 0;
-    while (i < len) {
-        var c = load8(src + i);
-        if (c >= 65) {
-            if (c <= 90) { c = c + 32; }
-        }
-        store8(dst + i, c);
-        i = i + 1;
-    }
+    icase_fold_bytes(src, dst, len);
     store8(dst + len, 0);
     return 0;
 }
@@ -183,6 +182,9 @@ enum FindRegexType {
 var _f_regextype = 0;
 
 fn _f_regex_compile(pat, fold): i64 {
+    # ⛔ Same rule as grep's, and for the same reason — niyama implements
+    # neither `[=c=]` nor `[.c.]` and fails both silently.
+    if (icase_scan_unsupported(pat, strlen(pat)) != ICASE_OK) { return 0; }
     # ⚠ Case folding rides on niyama's inline-flag form for ERE, matching how
     # `grep -i -E` does it (ADR 0005). BRE has no inline flag, so `-iregex`
     # under the default dialect folds the SUBJECT instead — the same asymmetry
@@ -360,11 +362,25 @@ fn _f_parse_primary(): i64 {
         # ⚠ Under BRE both sides must be folded: the subject at match time and
         # the pattern here. Folding only one is the classic half-fix that makes
         # `-iregex '.*ABC'` silently match nothing.
-        var ifold = ip;
-        if (_f_regextype == F_RX_BRE) {
-            var pb = alloc(strlen(ip) + 1);
-            _f_fold_bytes(ip, pb, strlen(ip));
-            ifold = pb;
+        var ierr: i64 = 0;
+        var ilen: i64 = 0;
+        # ⛔ `ICASE_RANGE_TRANSLATE` because GNU `find` is NOT GNU `grep`: find
+        # goes through glibc `regcomp` with `RE_ICASE` and grep does not, and
+        # the two disagree on every mixed-case range. See the enum's note.
+        var imode = ICASE_MODE_FOLD | ICASE_RANGE_TRANSLATE;
+        if (_f_regextype == F_RX_ERE) {
+            imode = ICASE_MODE_CLOSED | ICASE_RANGE_TRANSLATE;
+        }
+        var ifold = icase_rewrite(ip, strlen(ip), imode, &ilen, &ierr);
+        if (ifold == 0) {
+            if (ierr == ICASE_E_RANGE) {
+                _f_set_err("-iregex has an invalid range end");
+            } elif (ierr == ICASE_E_EQUIV) {
+                _f_set_err("-iregex: niyama implements no [=c=] / [.c.]");
+            } else {
+                _f_set_err("-iregex has an unterminated [");
+            }
+            return 0;
         }
         var inn = _f_regex_compile(ifold, 1);
         if (inn == 0) { _f_set_err("-iregex pattern failed to compile"); return 0; }

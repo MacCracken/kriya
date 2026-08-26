@@ -48,7 +48,7 @@ Two rules hold across the arcs, both learned the hard way:
 | Arc | Theme | Enabler | Gate |
 |---|---|---|---|
 | **1.3.x** | Discoverability | spec-renderer atop `flags.cyr` | ready; **consumer waiting** (agnoshi) |
-| **1.4.x** | Pattern & text parity | repeatable-option collector, UTF-8 decoder | ready |
+| **1.4.x** | Pattern & text parity | repeatable-option collector, UTF-8 decoder | ✅ closed at 1.4.5 |
 | **1.5.x** | Identity & listing | passwd/group parser, comparator indirection | ready |
 | **1.6.x** | File-op completeness | inode-set helper, xattr API | ready |
 | **1.7.x** | Traversal, exec & FS reporting | spawn helper ✅, ARG_MAX chunking | ready |
@@ -88,7 +88,7 @@ ship; the kriya side is unblocked and waiting only on agnoshi gaining interactiv
   type list that matched by coincidence.
 ---
 
-## 1.4.x — Pattern & text parity
+## 1.4.x — Pattern & text parity ✅ CLOSED at 1.4.5
 
 **Enablers:** the repeatable-option collector (`kriya_argv_collect`, shipped 1.2.1) and a UTF-8
 decoder. ⚠ Check `unicode/_decode` in the vendored stdlib before writing one — it is already in
@@ -116,11 +116,16 @@ kriya's dependency closure for niyama.
   clean and then matches nothing: the failure mode is a wrong line number, not an error. The fix
   belongs to niyama (**M11**, third item), and closing it there deletes `_nl_rx_unsupported` rather
   than growing it. ⚠ Do not re-implement these inside `nl`.
-- **1.4.5 — the BRE `-i` bracket-class quirk** in `grep`, catalogued in the M7 POSIX audit and never
-  chased down. ⚠ The last item in this arc, and the one with the least written down about it — start
-  by reproducing it against GNU rather than reading the audit note, since 1.4.2 and 1.4.4 both found
-  a local GNU that disagreed with CI's. ⭐ `nl`'s guard is the shape to reach for if niyama turns out
-  to be silently wrong here too: refuse loudly rather than answer wrongly.
+- ⛔ **Two `grep` divergences found by 1.4.5's fuzz and NOT fixed there** — both predate it, both sit
+  in paths that release did not touch, and neither is about `-i`:
+  - **A leading `*` in an ERE.** `grep -E '*'` (and `'*a'`, `'a**'`) is a LITERAL asterisk in GNU and
+    a usage error in kriya. ⚠ Check POSIX before matching GNU: a leading `*` in an ERE is undefined
+    by the standard, so this may be a deliberate divergence rather than a bug — decide, then record
+    the decision either way.
+  - **`grep -o` emits empty matches.** `grep -o 'x*'` on `abc` prints four empty lines in kriya and
+    nothing in GNU. ⚠ Related but distinct: kriya's `-o` also disagrees with GNU on a case-gap range
+    under `-i`, and there kriya is the CORRECT one — GNU's `-o` contradicts GNU's own line matcher
+    (1.4.5). Do not "fix" that second case toward GNU.
 
 ---
 
@@ -281,9 +286,16 @@ zero-behaviour-change; the third is a correctness gap and is not filed yet.
   the next step. `\+` `\?` `\|` `\b` `\B` `\w` `\W` `\s` `\S` all compile clean and then match
   NOTHING. ⚠ The failure mode is a WRONG ANSWER, not an error: `kriya grep -c 'a\+b'` returns 0
   where GNU returns 3. Measured at pin 6.5.35; `\<` `\>` `\{n,m\}` `\(…\)` `[[:class:]]` do work.
-  `nl -b pBRE` (1.4.4) REFUSES these operators rather than mis-number lines, and `grep` still returns
-  the wrong count silently — closing this upstream fixes both, and lets `_nl_rx_unsupported` be
-  deleted rather than maintained.
+  `nl -b pBRE` (1.4.4) REFUSES these operators rather than mis-number lines; `grep` and `find -regex`
+  still accept them and return the wrong answer silently. ⛔ **Re-measured at 1.4.5 and the asymmetry
+  is now INSIDE one binary**: the identical pattern is a loud exit-2 in `nl` and a silent wrong count
+  in `grep`. On the fixture `abc/A1/foo bar/aa/aA`, `grep '\w'` `'\W'` `'\s'` `'\S'` `'\B'` `'a\+'`
+  `'a\?'` `'a\|b'` all return 0 matches where GNU returns 1-5, and `grep '\b'` returns **exit 0 with
+  a count of 2 where GNU says 5** — a wrong answer that does not even signal no-match. ⚠ Deliberately
+  left out of 1.4.5, whose scope was bracket expressions: this is the regex-OPERATOR surface, it
+  predates that release, and the real fix is upstream. ⭐ If it is closed in kriya first, lift
+  `src/cmd/nl.cyr:_nl_rx_unsupported` into a shared lib so all three utilities read one list —
+  do NOT copy it. Closing it upstream deletes the guard rather than growing it.
 
 ⛔ **Related and NOT gated: kriya has 46 raw numeric syscalls, and every number is x86_64-only.**
 Found at 1.3.3 while resolving cyrlint's raw-`getdents` note. The numbers genuinely differ:

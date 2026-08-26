@@ -421,6 +421,117 @@ grc=0; (cd inc && grep --exclude='nosuch.c' hit nosuch.c) >/dev/null 2>&1 || grc
 krc=0; (cd inc && "$BIN" grep --exclude='nosuch.c' hit nosuch.c) >/dev/null 2>&1 || krc=$?
 expect_eq "include: excluded-but-missing operand still errors" "$grc" "$krc"
 
+# --- `-i` and bracket expressions (1.4.5) ------------------------------
+#
+# ⛔ LC_ALL=C IS LOAD-BEARING HERE, not hygiene. A bracket RANGE walks COLLATION
+# order, so `grep -i '[>-a]'` gives three different answers under `C`,
+# `C.UTF-8` and `en_US.UTF-8`. kriya is byte-ordered and ASCII-only by design
+# (ADR 0005), so it implements the C-locale rule and the oracle must be pinned
+# to it. `compare` already exports LC_ALL=C; the raw calls below do so too.
+#
+# ⛔ `-o` IS DELIBERATELY NOT COMPARED for a range spanning the case gap.
+# GNU CONTRADICTS ITSELF there: on a line holding just `_`, `grep -i "[A-z]"`
+# matches (exit 0, and `-c` says 1) while `grep -i -o "[A-z]"` exits 0 and
+# prints NOTHING. Verified identical on grep 3.11 and 3.12. kriya follows the
+# LINE MATCHER — the documented semantics, and the half GNU is self-consistent
+# about — so its `-o` prints what actually matched.
+printf 'lower\nUPPER\nMiXeD\n12345\n!@#$%%\n_\n' > icase_mix
+
+# The headline bug: this returned NOTHING before 1.4.5.
+compare 'i: [[:upper:]] is [[:alpha:]]'  "$(cat icase_mix)" "-i '[[:upper:]]' icase_mix"
+compare 'i: [[:lower:]] is [[:alpha:]]'  "$(cat icase_mix)" "-i '[[:lower:]]' icase_mix"
+compare 'i: [[:alpha:]] unchanged'       "$(cat icase_mix)" "-i '[[:alpha:]]' icase_mix"
+# ⚠ Digits and punctuation must still NOT match — the rule is "both cases",
+# not "everything". A fixture without them cannot tell those two apart.
+compare 'i: [[:digit:]] unaffected'      "$(cat icase_mix)" "-i '[[:digit:]]' icase_mix"
+compare 'i: [[:punct:]] unaffected'      "$(cat icase_mix)" "-i '[[:punct:]]' icase_mix"
+compare 'i: negated class'               "$(cat icase_mix)" "-i '[^[:upper:]]' icase_mix"
+compare 'i: class + digits'              "$(cat icase_mix)" "-i '[[:upper:]0-9]' icase_mix"
+compare 'i: ranges both cases'           "$(cat icase_mix)" "-i '[a-c]' icase_mix"
+compare 'i: ranges both cases (upper)'   "$(cat icase_mix)" "-i '[A-C]' icase_mix"
+compare 'i: negated literal'             "$(cat icase_mix)" "-i '[^a]' icase_mix"
+# The same rules under the ERE engine, which reaches them by a different path:
+# niyama'''s inline `(?i)` case-closes a RANGE but not a NAMED CLASS.
+compare 'i -E: [[:upper:]]'              "$(cat icase_mix)" "-i -E '[[:upper:]]' icase_mix"
+compare 'i -E: ranges'                   "$(cat icase_mix)" "-i -E '[A-C]' icase_mix"
+compare 'i -E: negated class'            "$(cat icase_mix)" "-i -E '[^[:upper:]]' icase_mix"
+
+# Range validity. ⚠ The gate is the UPPER-case fold: `[A-_]` is ACCEPTED and
+# `[B-a]` is REFUSED, though both have a reversed lower-case fold.
+icase_rc() {
+    grc=0; LC_ALL=C grep -i "$2" icase_mix >/dev/null 2>&1 || grc=$?
+    krc=0; LC_ALL=C "$BIN" grep -i "$2" icase_mix >/dev/null 2>&1 || krc=$?
+    # Collapse to match / no-match / error so the two diagnostics need not agree.
+    [ "$grc" -ge 2 ] && grc=2
+    [ "$krc" -ge 2 ] && krc=2
+    expect_eq "$1" "$grc" "$krc"
+}
+icase_rc 'i: [Z-a] refused'        '[Z-a]'
+icase_rc 'i: [W-d] refused'        '[W-d]'
+icase_rc 'i: [B-a] refused'        '[B-a]'
+icase_rc 'i: [A-_] accepted'       '[A-_]'
+icase_rc 'i: [A-z] accepted'       '[A-z]'
+# ⚠ A raw-reversed range that clears the gate matches NOTHING and is NOT an
+# error — so `-i` turns what is a hard error without it into silence.
+icase_rc 'i: [b-B] is empty not an error' '[b-B]'
+icase_rc 'i: [a-B] is empty not an error' '[a-B]'
+icase_rc 'i: [a-c-e] refused'      '[a-c-e]'
+icase_rc 'i: [a-c-] accepted'      '[a-c-]'
+icase_rc 'i: [[-m] refused'        '[[-m]'
+icase_rc 'i: [Z-[] accepted'       '[Z-[]'
+icase_rc 'i: class cannot end a range' '[a-[:digit:]]'
+
+# ⛔ `[=c=]` / `[.c.]` are REFUSED — with AND without `-i`. niyama implements
+# neither and fails both SILENTLY: `grep '[[=a=]]'` returned no match where GNU
+# matches, and `grep '[[.a.]-c]'` returned 0 where GNU returns 3. ⚠ Refusing on
+# the `-i` path alone would leave the same pattern loud one way and silently
+# wrong the other, which is worse than uniform silence. This is a deliberate
+# divergence from GNU in the direction of a loud error (roadmap M11).
+for icf in '' '-i'; do
+    for icp in '[[=a=]]' '[[.a.]]' '[[=a=]b]' '[[.a.]-c]'; do
+        rc=0; LC_ALL=C "$BIN" grep $icf -c "$icp" icase_mix >/dev/null 2>&1 || rc=$?
+        expect_eq "i: $icf $icp refused loudly" "2" "$rc"
+    done
+done
+# ⚠ And must NOT fire on an ordinary bracket that merely contains `.` or `[`.
+for icp in '[.]' '[a.b]' '[[:alpha:]x]' '[]a]'; do
+    rc=0; LC_ALL=C "$BIN" grep -c "$icp" icase_mix >/dev/null 2>&1 || rc=$?
+    grc=0; LC_ALL=C grep -c "$icp" icase_mix >/dev/null 2>&1 || grc=$?
+    [ "$rc" -ge 2 ] && rc=2
+    [ "$grc" -ge 2 ] && grc=2
+    expect_eq "i: $icp is an ordinary bracket" "$grc" "$rc"
+done
+
+# ⛔ Bracket RANGES are validated on the no-`-i` path too. Nothing checked them
+# before 1.4.5: kriya diverged from GNU on 4,095 of 8,281 ranges, and two were
+# SILENT WRONG ANSWERS rather than mere silence — `grep '[a-c-e]'` matched five
+# lines and `grep '[[:digit:]-a]'` matched twelve, where GNU exits 2.
+# ⚠ The gate here is the RAW comparison, NOT the upper-case fold that `-i` uses,
+# and the two give OPPOSITE answers on the same input: plain `[Z-a]` is valid
+# while `-i '[Z-a]'` is an error, and plain `[b-B]` is an error while
+# `-i '[b-B]'` is silently empty. Asserting both is what pins them apart.
+plain_rc() {
+    grc=0; LC_ALL=C grep "$2" icase_mix >/dev/null 2>&1 || grc=$?
+    krc=0; LC_ALL=C "$BIN" grep "$2" icase_mix >/dev/null 2>&1 || krc=$?
+    [ "$grc" -ge 2 ] && grc=2
+    [ "$krc" -ge 2 ] && krc=2
+    expect_eq "$1" "$grc" "$krc"
+}
+plain_rc 'plain: [a-c-e] refused'       '[a-c-e]'
+plain_rc 'plain: [[:digit:]-a] refused' '[[:digit:]-a]'
+plain_rc 'plain: [b-B] refused'         '[b-B]'
+plain_rc 'plain: [a-Z] refused'         '[a-Z]'
+plain_rc 'plain: [Z-a] ACCEPTED'        '[Z-a]'
+plain_rc 'plain: [A-z] accepted'        '[A-z]'
+plain_rc 'plain: [a-c] accepted'        '[a-c]'
+plain_rc 'plain: [a-] accepted'         '[a-]'
+
+# ⚠ Without `-i` nothing above changes: the control matters, because a bug that
+# broke plain bracket matching would otherwise hide behind the -i assertions.
+compare 'plain [[:upper:]] control'  "$(cat icase_mix)" "'[[:upper:]]' icase_mix"
+compare 'plain [[:lower:]] control'  "$(cat icase_mix)" "'[[:lower:]]' icase_mix"
+compare 'plain [A-C] control'        "$(cat icase_mix)" "'[A-C]' icase_mix"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

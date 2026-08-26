@@ -239,55 +239,18 @@ fn _gr_emit_dec(v): i64 {
 }
 
 # --- Case fold helpers --------------------------------------------------
+#
+# ⭐ Lifted to `src/lib/icase.cyr` at 1.4.5. The old local pair (a byte fold
+# plus a pattern fold that lower-cased every unescaped byte) was correct for
+# literals and quietly wrong for bracket expressions: lower-casing the TEXT
+# `[[:upper:]]` leaves it unchanged, so against a lower-cased subject it matched
+# NOTHING where GNU matches every alphabetic line. ⚠ `find -iregex` folds both
+# sides the same way and had the same bug, which is what makes this shared code
+# rather than a grep-local fix.
 
-# Returns 1 if byte `c` is an ASCII uppercase letter.
-fn _gr_is_upper(c): i64 {
-    if (c < 65) { return 0; }
-    if (c > 90) { return 0; }
-    return 1;
-}
-
-fn _gr_to_lower(c): i64 {
-    if (_gr_is_upper(c) == 1) { return c + 32; }
-    return c;
-}
-
-# Lower-case `src` into `dst` for `len` bytes (ASCII A..Z only).
-fn _gr_fold_bytes(src, dst, len): i64 {
-    var i: i64 = 0;
-    while (i < len) {
-        store8(dst + i, _gr_to_lower(load8(src + i)));
-        i = i + 1;
-    }
-    return 0;
-}
-
-# Pattern fold for BRE: walk `pat` once, lowercasing literal letter bytes
-# that are NOT escaped by `\` and NOT inside a `[...]` bracket (we fold
-# bracket contents too — ASCII semantics for `-i` per ADR 0005).
-# Output written to fresh alloc'd buffer; returns (ptr, len). Stores len
-# in `*out_len`.
-fn _gr_pat_fold_bre(pat, pat_len, out_len_ptr): i64 {
-    var out = alloc(pat_len + 1);
-    var i: i64 = 0;
-    while (i < pat_len) {
-        var c = load8(pat + i);
-        if (c == 92) {  # backslash — copy escape as-is including next byte
-            store8(out + i, c);
-            i = i + 1;
-            if (i < pat_len) {
-                store8(out + i, load8(pat + i));
-                i = i + 1;
-            }
-        } else {
-            store8(out + i, _gr_to_lower(c));
-            i = i + 1;
-        }
-    }
-    store8(out + i, 0);
-    store64(out_len_ptr, pat_len);
-    return out;
-}
+# Set by `_gr_compile` when the pattern rewrite fails, so the caller can say
+# WHICH pattern rule was broken instead of a flat "bad pattern".
+var _gr_icase_err = 0;
 
 # --- Engine compile + match --------------------------------------------
 
@@ -347,7 +310,32 @@ fn _gr_is_literal(pat, pat_len): i64 {
 # Compile one pattern under the chosen engine flag set. Returns handle or 0.
 # `engine_flag`: 0=BRE, 1=RE2, 2=fixed. `ignore_case`: 1 if -i.
 fn _gr_compile(pat, engine_flag, ignore_case): i64 {
+    _gr_icase_err = ICASE_OK;
     var pat_len = strlen(pat);
+    # ⛔ Checked on EVERY regex pattern, with or without `-i`. See the note on
+    # `icase_scan_unsupported`: refusing only under `-i` would leave the same
+    # pattern loud one way and silently wrong the other.
+    if (engine_flag != GR_ENG_FIXED) {
+        var uns = icase_scan_unsupported(pat, pat_len);
+        if (uns != ICASE_OK) {
+            _gr_icase_err = uns;
+            return 0;
+        }
+        # ⛔ And validate bracket RANGES on the no-`-i` path, which nothing did
+        # before. niyama accepts a reversed range and silently matches nothing —
+        # or, for `[a-c-e]`, silently matches the WRONG FIVE lines. Refusing
+        # only under `-i` would leave the identical pattern loud one way and
+        # silently wrong the other, the same trap `icase_scan_unsupported`
+        # exists to avoid. ⚠ The verdict is kept; the rewritten pattern is not.
+        if (ignore_case == 0) {
+            var vlen: i64 = 0;
+            var verr: i64 = ICASE_OK;
+            if (icase_rewrite(pat, pat_len, ICASE_RANGE_PLAIN, &vlen, &verr) == 0) {
+                _gr_icase_err = verr;
+                return 0;
+            }
+        }
+    }
     # A metacharacter-free pattern is a literal in every dialect — take the byte
     # scanner and skip the NFA entirely. See `_gr_is_literal`.
     var eff_engine = engine_flag;
@@ -358,7 +346,7 @@ fn _gr_compile(pat, engine_flag, ignore_case): i64 {
         if (ignore_case == 1) {
             var folded_len: i64 = 0;
             var folded = alloc(pat_len + 1);
-            _gr_fold_bytes(pat, folded, pat_len);
+            icase_fold_bytes(pat, folded, pat_len);
             store8(folded + pat_len, 0);
             return _gr_handle_new(GR_ENG_FIXED, 0, folded, pat_len, 1);
         }
@@ -366,8 +354,17 @@ fn _gr_compile(pat, engine_flag, ignore_case): i64 {
     }
     if (eff_engine == GR_ENG_RE2) {
         # Prepend (?i) for case-insensitive — niyama_re2 honors the inline flag.
+        # ⚠ But only for LITERALS: measured, `(?i)` case-closes a RANGE and does
+        # NOT touch a NAMED CLASS, so `-E -i '[[:upper:]]'` matched upper case
+        # only. The bracket expressions are rewritten closed-under-case first,
+        # which also supplies the range validation `(?i)` never did.
         var compile_pat = pat;
         if (ignore_case == 1) {
+            var rw_len: i64 = 0;
+            var rw = icase_rewrite(pat, pat_len, ICASE_MODE_CLOSED, &rw_len, &_gr_icase_err);
+            if (rw == 0) { return 0; }
+            pat = rw;
+            pat_len = rw_len;
             var buf = alloc(pat_len + 5);
             store8(buf + 0, 40);   # (
             store8(buf + 1, 63);   # ?
@@ -391,8 +388,9 @@ fn _gr_compile(pat, engine_flag, ignore_case): i64 {
     var fold = 0;
     if (ignore_case == 1) {
         var fl: i64 = 0;
-        use_pat = _gr_pat_fold_bre(pat, pat_len, &fl);
-        use_len = pat_len;
+        use_pat = icase_rewrite(pat, pat_len, ICASE_MODE_FOLD, &fl, &_gr_icase_err);
+        if (use_pat == 0) { return 0; }
+        use_len = fl;
         fold = 1;
     }
     var bnfa = niyama_bre_compile(use_pat);
@@ -977,7 +975,7 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                     # Apply -i input fold if engine demands it.
                     var search_buf = line_buf;
                     if (fold_active == 1) {
-                        _gr_fold_bytes(line_buf, fold_buf, line_len);
+                        icase_fold_bytes(line_buf, fold_buf, line_len);
                         search_buf = fold_buf;
                     }
                     var ms: i64 = 0;
@@ -1332,7 +1330,18 @@ fn cmd_grep(start: i64): i64 {
         var p = vec_get(patterns, pi);
         var h = _gr_compile(p, engine, ignore_case);
         if (h == 0) {
-            k_write( 2, "kriya grep: error: bad pattern: ", 32);
+            # ⚠ Name the rule that was broken. "bad pattern" alone sent readers
+            # looking for a typo when the real answer was a range GNU also
+            # refuses, or a construct niyama does not implement.
+            if (_gr_icase_err == ICASE_E_RANGE) {
+                k_write( 2, "kriya grep: error: invalid range end in: ", 41);
+            } elif (_gr_icase_err == ICASE_E_EQUIV) {
+                k_write( 2, "kriya grep: error: niyama implements no [=c=] / [.c.] in: ", 58);
+            } elif (_gr_icase_err == ICASE_E_BRACKET) {
+                k_write( 2, "kriya grep: error: unterminated [ in: ", 38);
+            } else {
+                k_write( 2, "kriya grep: error: bad pattern: ", 32);
+            }
             k_write( 2, p, strlen(p));
             k_write( 2, "\n", 1);
             return EXIT_USAGE;

@@ -21,6 +21,10 @@ include "src/lib/path.cyr"
 # after the build breaks.
 include "src/lib/glob.cyr"
 include "src/lib/str.cyr"
+# ⚠ M15e, PRE-EMPTIVELY again. `src/lib/icase.cyr` is exercised directly below;
+# `grep.cyr` and `find.cyr` are its live callers but neither is in this subset,
+# so a missing include would stay green until one of them arrived.
+include "src/lib/icase.cyr"
 include "src/lib/fs.cyr"
 include "src/lib/protected.cyr"
 include "src/lib/args.cyr"
@@ -55,6 +59,13 @@ var MODE_ECHO = 7;   # ALLOW_C | ALLOW_X | OCTAL_PREFIX      — echo -e (no DQU
 # `strlen` for the bound is the same thing printf's callers pass.
 fn _t_esc(lit, mode, out): i64 {
     return str_escape_decode(lit, 0, strlen(lit), mode, out);
+}
+
+# Rewrite `pat` and return the new pattern, storing the verdict via `err_p`.
+# ⚠ `strlen` for the bound is exactly what grep's and find's call sites pass.
+fn _t_rw(pat, mode, err_p): i64 {
+    var len: i64 = 0;
+    return icase_rewrite(pat, strlen(pat), mode, &len, err_p);
 }
 
 fn main() {
@@ -429,6 +440,140 @@ fn main() {
     store64(nst + NL_S_DELIM_LEN, 0);
     assert_eq(_nl_classify(nst, "\\:\\:\\:", 6), 0 - 1, "-d '' disables sections");
     assert_eq(_nl_classify(nst, "", 0),           0 - 1, "...including for empty lines");
+
+    test_group("icase — ASCII case helpers");
+    assert_eq(icase_to_lower(65), 97, "A -> a");
+    assert_eq(icase_to_lower(97), 97, "a -> a");
+    assert_eq(icase_to_upper(97), 65, "a -> A");
+    assert_eq(icase_to_upper(65), 65, "A -> A");
+    # ⚠ Only ASCII A-Z / a-z fold. Byte 0xE9 (é in latin-1) is left alone, and
+    # so is `_`, which sits BETWEEN the two ranges.
+    assert_eq(icase_to_lower(233), 233, "0xE9 is not folded");
+    assert_eq(icase_to_lower(95),  95,  "_ is not folded");
+    assert_eq(icase_is_upper(90), 1, "Z is upper");
+    assert_eq(icase_is_upper(91), 0, "[ is not upper");
+    assert_eq(icase_is_lower(97), 1, "a is lower");
+    assert_eq(icase_is_lower(96), 0, "` is not lower");
+
+    # ⭐ The bug this library exists for. Lower-casing the TEXT `[[:upper:]]`
+    # leaves it unchanged, so against a lower-cased subject it matched NOTHING.
+    # GNU makes BOTH case classes mean `[:alpha:]` under -i.
+    test_group("icase — the case classes both become [:alpha:]");
+    var ie = alloc(8);
+    assert_eq(streq(_t_rw("[[:upper:]]", ICASE_MODE_FOLD, ie), "[[:alpha:]]"), 1,
+              "[:upper:] -> [:alpha:]");
+    assert_eq(streq(_t_rw("[[:lower:]]", ICASE_MODE_FOLD, ie), "[[:alpha:]]"), 1,
+              "[:lower:] -> [:alpha:]");
+    # ⚠ Every OTHER class is untouched by -i.
+    assert_eq(streq(_t_rw("[[:digit:]]", ICASE_MODE_FOLD, ie), "[[:digit:]]"), 1,
+              "[:digit:] is unchanged");
+    assert_eq(streq(_t_rw("[[:punct:]]", ICASE_MODE_FOLD, ie), "[[:punct:]]"), 1,
+              "[:punct:] is unchanged");
+
+    test_group("icase — literals and escapes");
+    assert_eq(streq(_t_rw("ABC", ICASE_MODE_FOLD, ie), "abc"), 1, "literals fold");
+    # ⛔ The byte after a backslash is copied verbatim. Folding it would turn
+    # `\W` into `\w` — a different operator in the dialects that have one.
+    assert_eq(streq(_t_rw("\\W", ICASE_MODE_FOLD, ie), "\\W"), 1, "escapes survive");
+    assert_eq(streq(_t_rw("A[B-C]D", ICASE_MODE_FOLD, ie), "a[bc]d"), 1,
+              "a range folds to its members");
+    # CLOSED mode leaves literals for niyama's `(?i)` and closes the SET.
+    assert_eq(streq(_t_rw("[a]", ICASE_MODE_CLOSED, ie), "[Aa]"), 1,
+              "closed mode emits both cases");
+    assert_eq(streq(_t_rw("A", ICASE_MODE_CLOSED, ie), "A"), 1,
+              "closed mode leaves literals alone");
+
+    # ⛔ The gate is the UPPER-case fold, not the lower-case one, and the
+    # difference is load-bearing: `[A-_]` is accepted where `[B-a]` is refused,
+    # though BOTH have a reversed lower-case fold. Measured against GNU.
+    test_group("icase — the range rules");
+    store64(ie, ICASE_OK);
+    assert_eq(_t_rw("[Z-a]", ICASE_MODE_FOLD, ie), 0, "[Z-a] is refused");
+    assert_eq(load64(ie), ICASE_E_RANGE, "...as an invalid range");
+    store64(ie, ICASE_OK);
+    assert_eq(_t_rw("[B-a]", ICASE_MODE_FOLD, ie), 0, "[B-a] is refused");
+    store64(ie, ICASE_OK);
+    _t_rw("[A-_]", ICASE_MODE_FOLD, ie);
+    assert_eq(load64(ie), ICASE_OK, "[A-_] is accepted");
+    # ⚠ A raw-reversed range that clears the gate matches NOTHING and is not an
+    # error — so `-i` turns what was a hard error into silence.
+    store64(ie, ICASE_OK);
+    var empty_rw = _t_rw("[a-B]", ICASE_MODE_FOLD, ie);
+    assert_eq(load64(ie), ICASE_OK, "[a-B] is accepted");
+    assert_eq(streq(empty_rw, "[[:alpha:]]"), 0, "...and is not the alpha class");
+
+    test_group("icase — bracket syntax edges");
+    # `]` first is a member; `-` first or last is a member; `^` only negates first.
+    assert_eq(streq(_t_rw("[]a]", ICASE_MODE_FOLD, ie), "[]a]"), 1, "] first is a member");
+    assert_eq(streq(_t_rw("[a-]", ICASE_MODE_FOLD, ie), "[a-]"), 1, "- last is a member");
+    assert_eq(streq(_t_rw("[-a]", ICASE_MODE_FOLD, ie), "[a-]"), 1, "- first re-emits last");
+    assert_eq(streq(_t_rw("[^A]", ICASE_MODE_FOLD, ie), "[^a]"), 1, "negation survives");
+    # ⛔ A `-` after a COMPLETED range or class is an error unless it is last —
+    # GNU refuses `[a-c-e]` and accepts `[a-c-]`.
+    store64(ie, ICASE_OK);
+    assert_eq(_t_rw("[a-c-e]", ICASE_MODE_FOLD, ie), 0, "[a-c-e] is refused");
+    store64(ie, ICASE_OK);
+    _t_rw("[a-c-]", ICASE_MODE_FOLD, ie);
+    assert_eq(load64(ie), ICASE_OK, "[a-c-] is accepted");
+    store64(ie, ICASE_OK);
+    assert_eq(_t_rw("[a-[:digit:]]", ICASE_MODE_FOLD, ie), 0, "a class cannot end a range");
+
+    # ⛔ niyama implements neither, and its failure mode is SILENT — `[[=a=]]`
+    # matched nothing where GNU matches. Refusing loudly beats numbering the
+    # wrong lines, the same call `nl -b pBRE` makes (roadmap M11).
+    test_group("icase — [=c=] and [.c.] are refused, not silently empty");
+    store64(ie, ICASE_OK);
+    assert_eq(_t_rw("[[=a=]]", ICASE_MODE_FOLD, ie), 0, "[=a=] is refused");
+    assert_eq(load64(ie), ICASE_E_EQUIV, "...as an equivalence class");
+    store64(ie, ICASE_OK);
+    assert_eq(_t_rw("[[.a.]]", ICASE_MODE_FOLD, ie), 0, "[.a.] is refused");
+    store64(ie, ICASE_OK);
+    assert_eq(_t_rw("[abc", ICASE_MODE_FOLD, ie), 0, "an unterminated [ is refused");
+    assert_eq(load64(ie), ICASE_E_BRACKET, "...as an unterminated bracket");
+
+    # ⛔ GNU `find` is NOT GNU `grep` — glibc's `RE_ICASE` translates the
+    # CANDIDATE as well as the endpoints, so `[b-B]` denotes {b,B} there and
+    # nothing in grep. Unifying both onto grep's rule regressed `find -iregex`.
+    test_group("icase — find's translate range rule differs from grep's");
+    store64(ie, ICASE_OK);
+    var trm = ICASE_MODE_FOLD | ICASE_RANGE_TRANSLATE;
+    _t_rw("[b-B]", trm, ie);
+    assert_eq(load64(ie), ICASE_OK, "[b-B] is not an error under translate");
+    store64(ie, ICASE_OK);
+    _t_rw("[Z-a]", trm, ie);
+    assert_eq(load64(ie), ICASE_OK, "[Z-a] is not an error either");
+    # ...where grep's rule refuses that very range.
+    store64(ie, ICASE_OK);
+    assert_eq(_t_rw("[Z-a]", ICASE_MODE_FOLD, ie), 0, "grep's rule still refuses it");
+
+    # ⚠ The no-`-i` gate is the RAW comparison, giving OPPOSITE answers to the
+    # `-i` gate on the same two inputs.
+    test_group("icase — the plain range gate is the raw comparison");
+    store64(ie, ICASE_OK);
+    assert_eq(_t_rw("[b-B]", ICASE_RANGE_PLAIN, ie), 0, "plain [b-B] is refused");
+    assert_eq(load64(ie), ICASE_E_RANGE, "...as an invalid range");
+    store64(ie, ICASE_OK);
+    _t_rw("[Z-a]", ICASE_RANGE_PLAIN, ie);
+    assert_eq(load64(ie), ICASE_OK, "plain [Z-a] is ACCEPTED");
+    store64(ie, ICASE_OK);
+    assert_eq(_t_rw("[a-c-e]", ICASE_RANGE_PLAIN, ie), 0, "plain [a-c-e] is refused");
+
+    # ⛔ The scan runs with AND without `-i`. Refusing on the `-i` path alone
+    # left the same pattern loud one way and silently wrong the other.
+    test_group("icase — the unsupported-construct scan");
+    assert_eq(icase_scan_unsupported("[[=a=]]", 7),   ICASE_E_EQUIV, "[=a=] is caught");
+    assert_eq(icase_scan_unsupported("[[.a.]]", 7),   ICASE_E_EQUIV, "[.a.] is caught");
+    assert_eq(icase_scan_unsupported("x[[=a=]b]y", 10), ICASE_E_EQUIV, "...mid-pattern too");
+    # ⚠ Must not fire on an ordinary bracket that merely contains `.` or `[`,
+    # nor read `[:alpha:]`'s own `:]` as the bracket's closing `]`.
+    assert_eq(icase_scan_unsupported("[.]", 3),        ICASE_OK, "[.] is ordinary");
+    assert_eq(icase_scan_unsupported("[a.b]", 5),      ICASE_OK, "[a.b] is ordinary");
+    assert_eq(icase_scan_unsupported("[[:alpha:]]", 11), ICASE_OK, "a class is not a collating symbol");
+    assert_eq(icase_scan_unsupported("[[:alpha:].]", 12), ICASE_OK, "class then a literal dot");
+    assert_eq(icase_scan_unsupported("[]a]", 4),       ICASE_OK, "] first is a member");
+    assert_eq(icase_scan_unsupported("a.b", 3),        ICASE_OK, "no bracket at all");
+    # An escaped `[` does not open a bracket expression.
+    assert_eq(icase_scan_unsupported("a\\[=b=]", 7),   ICASE_OK, "an escaped [ opens nothing");
 
     return assert_summary();
 }

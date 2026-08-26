@@ -6,6 +6,173 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.4.5] - 2026-08-26 — the `-i` bracket-class quirk; 1.4.x closes
+
+### Fixed — ⛔ `grep -i` and `find -iregex` mis-matched every bracket expression
+
+⭐ **`kriya grep -i '[[:upper:]]' ` returned NOTHING where GNU returns every alphabetic line**, with no
+diagnostic. The last item on the 1.4.x arc, carried since the M7 POSIX audit and never chased down.
+
+⛔ **The cause is one sentence, and it generalises past this bug: a bracket expression is not a byte,
+it is a SET, and lower-casing its source TEXT does not lower-case the set it denotes.** Both utilities
+implement `-i` by folding the SUBJECT to lower case and folding the pattern alongside it. That is
+exactly right for literal bytes — and for `[[:upper:]]`, whose text is *already* lower case, the fold
+is a no-op, so the class survived intact and could never fire against a lower-cased subject. ⚠ The
+same line of reasoning explains why `[[:lower:]]` looked fine: it was **accidentally** correct, which
+is why the bug reads as "one broken class" rather than "the whole mechanism is wrong".
+
+⭐ **The rule GNU actually implements, measured rather than assumed** — and it took four attempts to
+state correctly, each earlier one killed by brute force rather than by inspection:
+
+- **`[:upper:]` and `[:lower:]` BOTH behave as `[:alpha:]`.** ⚠ Not "match everything": digits and
+  punctuation still do not match, and a fixture without them cannot tell those two readings apart.
+  Every other class is unaffected by `-i`.
+- **A range `x-y` is an ERROR iff `toupper(x) > toupper(y)`.** ⛔ The gate is the UPPER-case fold, and
+  the difference is load-bearing rather than cosmetic: `[A-_]` is **accepted** and `[B-a]` is
+  **refused**, though *both* have a reversed lower-case fold. A lower-case gate fits most of the data
+  and gets exactly these wrong.
+- **Otherwise, if `x > y` raw, it matches NOTHING and is NOT an error.** ⚠ So `-i` can turn an error
+  into silence: plain `[b-B]` is a hard error, `-i '[b-B]'` matches nothing and exits 1.
+- **Otherwise the RAW span is kept, plus the case-counterpart of every member** — so `[A-z]` still
+  covers the six punctuation bytes between `Z` and `a`.
+
+⭐ **Verified by brute force, not by reading**: **41,868 range comparisons — zero divergences.** All
+8,281 printable-endpoint ranges in `grep`'s BRE and ERE engines, with `-i` and without, plus all
+7,744 in `find -iregex`, plus **5,000 randomised bracket patterns** across seven flag combinations. ⚠ Three earlier models of GNU's behaviour passed every hand-picked example and
+died on the sweep; the fourth is the one above.
+
+### ⛔ Two traps in the oracle itself, both of which would have silently mis-taught the fix
+
+**1. The rule is LOCALE-DEPENDENT, and dramatically so.** `grep -i '[>-a]'` gives **three different
+answers** under `LC_ALL=C`, `C.UTF-8` and `en_US.UTF-8`, because a bracket range walks **collation**
+order rather than byte order. ⚠ An early measurement pass produced a model that fit nothing, purely
+because the ambient locale was not what it appeared to be. kriya is byte-ordered and ASCII-only by
+design (ADR 0005), so it implements the **C-locale** rule and every comparison pins `LC_ALL=C`.
+⭐ The verification matrix gained two locale conditions to keep that honest.
+
+**2. GNU grep CONTRADICTS ITSELF, and kriya deliberately does not follow it.** On a line holding just
+`_`, `grep -i '[A-z]'` **matches** — exit 0, and `-c` reports 1 — while `grep -i -o '[A-z]'` exits 0
+and prints **nothing**. ⚠ Reproduced identically on grep **3.11** (what CI runs) and **3.12** (this
+box), so it is neither version drift nor a local patch. kriya follows the **line matcher** — the
+documented semantics, and the half GNU is self-consistent about — which makes kriya's `-o` print what
+actually matched. ⛔ The smoke suite therefore does NOT compare `-o` for a range spanning the case
+gap, and says why at the assertion.
+
+### Added — `src/lib/icase.cyr`, shared by both callers
+
+⛔ **`find -iregex` had the identical bug** — `find . -iregex '.*[[:upper:]].*'` listed nothing where
+GNU lists every path — because it folds both sides exactly the way `grep` does. ⭐ That is what makes
+this shared code rather than a `grep`-local patch: two implementations of "match case-insensitively"
+in one binary is two sets of edge cases that drift apart silently, the same argument that lifted
+`glob.cyr` out of `find` at 1.4.1 and the escape table into `str.cyr` at 1.4.3.
+
+⭐ **One mode bit, two subject conventions**, the shape `str.cyr` already took: `ICASE_MODE_FOLD` for
+the BRE path (which lower-cases the subject, so the set is emitted lower-cased) and
+`ICASE_MODE_CLOSED` for the ERE path (which does not fold, and relies on niyama's inline `(?i)`).
+⚠ **`(?i)` case-closes a RANGE but not a NAMED CLASS** — measured — so `grep -E -i '[[:upper:]]'`
+matched upper case only, a *different* wrong answer from the BRE path's. The rewrite supplies both
+the class substitution and the range validation `(?i)` never did.
+
+⛔ **GNU `grep` and GNU `find` ARE NOT ONE ORACLE, and sharing the rewriter without saying so
+REGRESSED `find`.** `grep` matches with its own bundled matcher; `find -iregex` calls glibc
+`regcomp` with `RE_ICASE`; the two implement **different range rules**:
+
+    grep -i '[b-B]'            matches NOTHING
+    find  -iregex '.*[b-B].*'  matches `b` AND `B`
+    grep -i '[Z-a]'            is an ERROR, exit 2
+    find  -iregex '.*[Z-a].*'  is silently empty, exit 0 — find has no error path at all
+
+⚠ **This was a regression introduced by this release and caught before it shipped, not a bug it
+found.** Unifying both callers onto grep's rule broke four mixed-case range cases in `find` that had
+agreed with GNU since the predicate shipped — while fixing the one class case that was wrong. ⛔ The
+existing `-iregex` tests could not have caught it: none of them used a range, so they stayed green
+through a real behavioural regression. glibc's rule is now a separate mode bit, verified exact over
+all **7,744** printable-endpoint ranges: a byte `c` is in `[x-y]` iff
+`toupper(x) <= toupper(c) <= toupper(y)` — a translation applied to the **candidate** as well as
+both endpoints, which is why `[B-{]` excludes `a` while containing `[`, `\`, `]` and `_`.
+
+⭐ **What makes a pattern rewrite sufficient at all**: every set GNU denotes under `-i` is **closed
+under case**, and a case-closed set loses nothing when lower-cased. So matching `lower(S)` against a
+lower-cased subject is exactly equivalent, which is what keeps this a pattern-side fix and leaves the
+subject fold — and the `-F` engine, which was never wrong — alone.
+
+### Fixed — the bracket parser's own edges, found by the fuzz rather than by design
+
+- ⛔ **An empty set has no bracket spelling.** `[]` is not "matches nothing", it is an
+  **unterminated** bracket, because a `]` in first position is a member. And the case is reachable:
+  a raw-reversed range that clears the upper-case gate (`[a-B]`) contributes no members at all. ⚠ It
+  cannot be dropped either — under a `*`, `x[a-B]*y` still matches `xy`. It is now written as the
+  negation of every byte there is; `[^\x01-\xff]` is **not** good enough, because it matches a NUL
+  and kriya's line buffer can hold one.
+- ⛔ **`[` is only special when it opens `[:`, `[=` or `[.`.** Bare, it is an ordinary member and may
+  be a range endpoint: `[Z-[]` is a legal three-byte set and `[[-m]` is a range GNU refuses. Treating
+  every `[` as a literal member missed both readings.
+- ⛔ **A `-` after a COMPLETED range or class is an error unless it is last** — GNU refuses
+  `[a-c-e]` and `[[:digit:]-a]`, and accepts `[a-c-]` and `[a-cd-f]`. A class cannot be a range
+  endpoint (`[a-[:digit:]]`), though `[a-[]` is perfectly ordinary.
+- ⛔ **`[[=a=]]` and `[[.a.]]` are now REFUSED rather than silently matching nothing** — **with and
+  without `-i`**. niyama implements neither and fails them the way it fails the GNU operators in
+  `nl -b pBRE`: a wrong answer, not an error. `grep '[[=a=]]'` returned no match where GNU matches,
+  `grep '[[.a.]-c]'` returned 0 where GNU returns 3, and `[[=a=]b]` matched nothing where GNU matched
+  both lines. Refusing loudly is the same call, and the gap is tracked at **M11**.
+  ⚠ **This started as a defect the fix INTRODUCED, not one it found.** Refusing on the `-i` path
+  alone left the identical pattern loud one way and silently wrong the other — a worse state than
+  the uniform silence it replaced. The scan now runs on every regex pattern, and is deliberately
+  narrow: it asks "is this construct present", not "is this bracket well-formed", because niyama
+  already agrees with GNU on everything else and a second opinion would be a second source of truth.
+- ⭐ **Diagnostics now name the rule that was broken** — "invalid range end", "unterminated `[`",
+  "no `[=c=]` / `[.c.]`" — where a flat "bad pattern" sent readers looking for a typo.
+
+### Fixed — ⛔ the no-`-i` path validated nothing at all
+
+⚠ **Correcting a claim made while this release was in progress: the plain and `-i` paths did NOT
+agree.** Without `-i`, no bracket range was ever checked — kriya diverged from GNU on **4,095 of
+8,281** ranges, and two of them were **silent wrong answers** rather than mere silence:
+
+    grep '[a-c-e]'        GNU: exit 2       kriya: exit 0, five matches
+    grep '[[:digit:]-a]'  GNU: exit 2       kriya: exit 0, twelve matches
+
+⛔ **The gate here is the RAW comparison, not the upper-case fold `-i` uses, and the two give
+OPPOSITE answers on the same input**: plain `[Z-a]` is valid while `-i '[Z-a]'` is an error, and
+plain `[b-B]` is an error while `-i '[b-B]'` is silently empty. Both are now asserted, which is what
+pins the two rules apart rather than letting one stand in for the other.
+
+⚠ Fixing this was not scope creep but the same argument twice: leaving it would have left the
+identical pattern **loud with `-i` and silently wrong without it** — the exact trap that made
+refusing `[=c=]` on one path only a defect rather than a fix.
+
+### ⚠ On conformance: this was a POSIX violation, and matching GNU does not fully end it
+
+⛔ **The pre-fix behaviour broke the standard, not merely GNU parity.** POSIX.1-2024 (Issue 8) chains
+`grep -i` → XBD 9.2 → XBD 4.1 "Case Insensitive Comparisons"; Issue 7 has no XBD 4.1 but its XBD 9.2
+independently mandates the same result with a character-level rule ("not only the character, but also
+its case counterpart (if any), shall be matched"). ⚠ Cite Issue 8 explicitly — in POSIX.1-2017,
+XBD 4.1 is "Concurrent Execution", so the obvious citation points at the wrong section.
+
+⚠ **GNU is not a conformance oracle, and on one case the two goals conflict.** The same rule applied
+to `[^[:upper:]]` arguably requires `B` to match under `-i`, since its counterpart `b` is not upper.
+GNU returns no-match on 3.11 and 3.12 under all three locales, and POSIX grants no exemption for
+complemented brackets. **kriya deliberately mirrors GNU here**, which makes this a behaviour that is
+simultaneously a 4.1 violation and a defensible parity choice — recorded rather than papered over.
+
+### Release totals
+
+**4,278 smoke cases across 38 scripts** (up from 4,217) — `smoke-grep.sh` 165 → **213**,
+`smoke-find.sh` 64 → **77**. **274 unit** (up from 220); 18 POSIX; fuzz green under poison; four
+lints clean; both targets build. `vet` reports **51 deps** (new `src/lib/icase.cyr`).
+Binary 1,038,256 → 1,046,808 bytes (+8,552).
+
+⭐ **Verified under all six matrix conditions**, two of them added by this release because a bracket
+range walks collation order: baseline 38/38 4,278; hostile block-size + `POSIXLY_CORRECT` env
+38/38 4,278; **`en_US.UTF-8` 38/38 4,278**; **`C.UTF-8` 38/38 4,278**; deep `$TMPDIR` 38/38 4,278;
+simulated root 38/38 4,262 (root-only paths skipping).
+
+⚠ **Two pre-existing `grep` divergences surfaced by the fuzz and deliberately NOT fixed here** — both
+are in paths this release did not touch, and both are now on the roadmap rather than absorbed
+silently: a leading `*` in an ERE (`grep -E '*'`) is a literal in GNU and a usage error in kriya, and
+`grep -o` emits empty matches for an empty-matchable pattern (`grep -o 'x*'`) where GNU suppresses
+them.
+
 ## [1.4.4] - 2026-08-26 — `nl` sections, `echo -e`, and one escape table
 
 ### Added — `echo -e` / `-E`
