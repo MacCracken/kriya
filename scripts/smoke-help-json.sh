@@ -65,7 +65,12 @@ DESTRUCTIVE = {"cp", "mv", "rm", "ln", "mkdir", "rmdir", "touch",
 # Utilities that genuinely accept no options, as against a hand-rolled parser
 # whose options are not machine-declared (which must render null, never []).
 NO_OPTIONS  = {"true", "false", "yes", "sleep", "printf"}
-HAND_ROLLED = {"find", "date", "du", "df", "env", "echo", "seq"}
+# ⭐ EMPTY AS OF 1.3.7, and that is the point: every utility now declares its
+# option table, so nothing renders `"options": null` any more. The three-way
+# encoding stays in the renderer — a future hand-rolled utility would need it —
+# but no utility uses it today, and this set is what would catch a regression
+# back to an undeclared table.
+HAND_ROLLED = set()
 
 def emit(name, want, got):
     print("%s\t%s\t%s" % (name, want, got))
@@ -238,6 +243,66 @@ for u in ls stat wc head tail nl sort; do
     "$BIN" "$u" m1 m2 m3 m4 m5 </dev/null >/dev/null 2>&1 || rc=$?
     expect_eq "$u: five operands accepted (max null)" "0" "$rc"
 done
+
+# --- ⭐ every advertised option is actually accepted ---------------------
+#
+# ⛔ The invariant a completer depends on: **an option in the table can be
+# typed.** Before 1.3.7 seven utilities rendered `"options": null` because their
+# hand-rolled parsers had no spec to read back; they now declare one that the
+# parser itself consults as its acceptance gate, so the two cannot disagree.
+# This checks the claim end-to-end rather than trusting the wiring.
+#
+# ⚠ Restricted to utilities that cannot modify anything when handed a bare flag.
+# Running every advertised option against `rm` or `mv` to see whether it parses
+# is not a test, it is a way to lose files.
+# ⚠ Only utilities whose `positional.min` is 0. `stat -L` exits 2 not because
+# `-L` is unknown but because `stat` needs an operand — a usage error for a
+# reason that has nothing to do with the option table. Checking those would
+# need a per-utility fixture, and this invariant does not need one.
+for u in df du date echo ls wc; do
+    for o in $("$BIN" "$u" --help=json | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for e in (d["options"] or []):
+    # bool shorts only: a value-taking option needs an argument, and a missing
+    # one is a usage error for a reason that has nothing to do with this check.
+    if e["kind"] == "bool" and e["short"] and "NOT IMPLEMENTED" not in (e["description"] or ""):
+        print("-" + e["short"])'); do
+        rc=0
+        "$BIN" "$u" "$o" </dev/null >/dev/null 2>&1 || rc=$?
+        if [ "$rc" = "2" ]; then
+            FAIL=$((FAIL + 1))
+            printf "FAIL %s advertises %s but rejects it as a usage error\n" "$u" "$o" >&2
+        else
+            PASS=$((PASS + 1))
+        fi
+    done
+done
+
+# ⚠ And the other direction: a letter NOT in the table must be refused. Without
+# this, "every advertised option works" would be satisfied by accepting
+# everything.
+for u in df du date seq env; do
+    rc=0
+    "$BIN" "$u" -Z </dev/null >/dev/null 2>&1 || rc=$?
+    expect_eq "$u rejects an unadvertised short option" "2" "$rc"
+    rc=0
+    "$BIN" "$u" --definitely-not-an-option </dev/null >/dev/null 2>&1 || rc=$?
+    expect_eq "$u rejects an unadvertised long option" "2" "$rc"
+done
+
+# ⚠ `find -H` is advertised AND refused, deliberately — it is a named deferral
+# (roadmap 1.7.1) and "unknown option" would be a worse answer than naming it.
+# Its description says NOT IMPLEMENTED, which is what excludes it above; pin
+# both halves so neither drifts.
+rc=0; "$BIN" find . -maxdepth 0 -H >/dev/null 2>&1 || rc=$?
+expect_eq "find -H is refused, not silently accepted" "2" "$rc"
+expect_eq "find -H says so in its description" "yes" \
+    "$("$BIN" find --help=json | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print("yes" if any("NOT IMPLEMENTED" in (e["description"] or "")
+                   for e in (d["options"] or []) if e["short"] == "H") else "no")')"
 
 # --- escaping ----------------------------------------------------------
 #

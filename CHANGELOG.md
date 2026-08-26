@@ -6,6 +6,66 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.3.7] - 2026-08-26 — every utility declares its option table
+
+The last consumer-facing gap in the 1.3.x arc. ⭐ **No utility renders
+`"options": null` any more** — agnoshi can offer flag completion for all 38.
+
+### The constraint that shaped this
+
+Seven utilities — `find`, `date`, `du`, `df`, `env`, `echo`, `seq` — hand-roll their argv walks and so
+had no flags spec to read back. The roadmap's rule for closing that was explicit: **either the parser
+moves onto the spec, or the utility stays `null`.** ⛔ Declaring a documentation-only spec beside the
+real parser is the second source of truth 1.3.0 and 1.3.1 were built to prevent.
+
+⚠ **They still hand-roll, and they should.** Each does it because its *operand* grammar is irregular —
+`date`'s `+FORMAT`, `seq`'s bare `-DIGIT` negative operand, POSIX `echo`'s passthrough of everything
+after the first operand, `find`'s expression of predicates and operators. A general flags parser handed
+`find`'s argv would eat `-name` as an unknown option.
+
+⭐ **What changed is where the option set is written.** Each utility now declares a spec that **its own
+walk consults**: the walk asks the spec whether an option exists before dispatching on it, and refuses
+anything the spec does not carry. The spec owns *existence*; the walk owns *meaning*. That makes
+rendering it honest — it is the parser's data, not a description of it.
+
+### ⛔ `find` carried a dead spec for five releases
+
+`_f_init_spec()` built a `flags_new()` table, assigned three index globals, and stored it in
+`_find_spec`. **None of them were ever read, and the function was never called.** Meanwhile the parser
+hardcoded the same three letters twenty lines away. Exactly the failure mode the rule above exists to
+prevent, sitting in the tree unnoticed since the utility shipped — and the reason `find` rendered
+`null`: there was nothing trustworthy to show.
+
+### The invariant, and how it is now checked
+
+The property a completer depends on is that **an advertised option can be typed**. Pinned end-to-end
+rather than trusted:
+
+- every advertised boolean short is run against the binary and must not come back as a usage error;
+- ⚠ **and the converse** — an unadvertised letter must be *refused*, or "accept everything" would
+  satisfy the first check on its own.
+
+⚠ Restricted to utilities whose `positional.min` is 0. `stat -L` exits 2 because `stat` needs an
+operand, not because `-L` is unknown — and running every advertised option against `rm` or `mv` to see
+whether it parses is not a test, it is a way to lose files.
+
+⭐ **The check found a real one on its first run**: `find -H` is advertised and always refused, because
+it is a named deferral (roadmap 1.7.1). Refusing it with *"use -P or -L"* is a better answer than
+"unknown option", so it stays listed — but its description now reads `NOT IMPLEMENTED - refused`, and
+both halves are pinned so neither drifts.
+
+### Tests
+
+**3,774 smoke cases across 37 scripts** (up from 3,612), 119 unit + 18 POSIX, fuzz green under poison,
+four lints clean, both targets build.
+
+⚠ Two expectations encoded the old state and had to be retired, which is the release working as
+intended: `smoke-help-json.sh`'s `HAND_ROLLED` set — the utilities required to render `null` — is now
+**empty**. The three-way encoding stays in the renderer for a future utility that cannot declare a
+spec, and the empty set is what would catch a regression back to an undeclared table.
+
+Binary 1,004,520 → 1,009,576 bytes (+5,056), all of it option descriptions.
+
 ## [1.3.6] - 2026-08-26 — the parity audit's low findings; the audit closes
 
 Third and last batch from the 1.3.3 audit. **All 39 findings are now resolved: 11 high at 1.3.4,

@@ -388,9 +388,31 @@ fn _date_format(fmt, epoch, buf, bufsz): i64 {
     return 0;
 }
 
+# ⭐ THE OPTION TABLE, AND THE PARSER'S ONLY SOURCE FOR IT. `date` cannot hand
+# its whole argv to `flags_parse` — `+FORMAT` is an operand that begins with a
+# character no option parser would accept — so it walks argv itself. But the
+# walk ASKS this spec what exists rather than hardcoding letters, which is what
+# makes rendering it in `--help` and `--help=json` honest: it IS the parser's
+# data, not a description of it.
+#
+# ⛔ A spec the parser does not consult is a second source of truth, and that is
+# exactly what 1.3.0 and 1.3.1 were built to avoid. `find` carried one for five
+# releases — built, never read, never even called — until 1.3.7 deleted it.
+var _date_spec = 0;
+
+fn _date_init_spec(): i64 {
+    if (_date_spec != 0) { return 0; }
+    var s = flags_new();
+    flags_add_bool(s, 117, "utc",       0, "no-op; kriya date is UTC-only (ADR 0007)");
+    flags_add_bool(s, 0,   "universal", 0, "synonym for --utc");
+    _date_spec = s;
+    return 0;
+}
+
 fn cmd_date(start: i64): i64 {
+    _date_init_spec();
     date_help_declare();
-    help_if_requested(0, start);
+    help_if_requested(_date_spec, start);
     var n_argv = kriya_argv_count();
     var fmt: i64 = 0;
     var i = start;
@@ -416,13 +438,10 @@ fn cmd_date(start: i64): i64 {
                     }
                     var name = tok + 2;
                     var nlen = tlen - 2;
+                    # ⭐ Ask the spec. Adding a long option is one spec row, and
+                    # `--help` picks it up without a second edit here.
                     var hit: i64 = 0;
-                    if (nlen == 3) {
-                        if (_seq_bytes_eq(name, "utc", 3) == 1) { hit = 1; }
-                    }
-                    if (nlen == 9) {
-                        if (_seq_bytes_eq(name, "universal", 9) == 1) { hit = 1; }
-                    }
+                    if (kriya_long_type(_date_spec, name, nlen) >= 0) { hit = 1; }
                     if (hit == 1) {
                         i = i + 1;
                         continue;
@@ -435,8 +454,10 @@ fn cmd_date(start: i64): i64 {
                 var ok: i64 = 1;
                 while (p < tlen) {
                     var c = load8(tok + p);
-                    if (c == 117) {
-                        # -u: no-op, UTC is the default already.
+                    # ⭐ Ask the spec, same as the long form above.
+                    if (kriya_short_type(_date_spec, c) >= 0) {
+                        # Every short `date` takes today is a no-op bool: kriya
+                        # is UTC-only, so -u asks for what already happens.
                         p = p + 1;
                     } else {
                         ok = 0;

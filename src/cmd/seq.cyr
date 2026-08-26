@@ -171,9 +171,26 @@ fn _seq_write_int_w(buf, offset, v, width): i64 {
     return off;
 }
 
+# ⭐ THE OPTION TABLE, AND THE AUTHORITY ON WHAT IS ACCEPTED — see the fuller
+# note in `src/cmd/du.cyr`. The walk owns each option's MEANING; this spec owns
+# whether an option exists at all, so `--help=json` cannot advertise a flag the
+# parser rejects, nor miss one it accepts.
+var _seq_spec = 0;
+
+fn _seq_init_spec(): i64 {
+    if (_seq_spec != 0) { return 0; }
+    var s = flags_new();
+    flags_add_str(s,  115, "separator", 0, "string between numbers (default newline)");
+    flags_add_bool(s, 119, "equal-width", 0, "pad with leading zeroes to equal width");
+    flags_add_str(s,  102, "format",      0, "printf-style format (deferred, roadmap 1.8.0)");
+    _seq_spec = s;
+    return 0;
+}
+
 fn cmd_seq(start: i64): i64 {
+    _seq_init_spec();
     seq_help_declare();
-    help_if_requested(0, start);
+    help_if_requested(_seq_spec, start);
     var n_argv = kriya_argv_count();
     var sep    = "\n";
     var seplen: i64 = 1;

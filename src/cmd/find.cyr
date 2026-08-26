@@ -86,14 +86,24 @@ var _f_follow_mode = 0;
 # Cached AST root.
 var _f_ast = 0;
 
+# ⭐ The PRE-EXPRESSION option table, and the parser's only source for it.
+#
+# ⛔ This function previously built a spec that was assigned to `_find_spec`,
+# never read, and never even CALLED — five releases of a documentation-only
+# table sitting beside a parser that hardcoded the same three letters. That is
+# the exact second-source-of-truth the 1.3.x arc exists to prevent, and it is
+# why `find` rendered `"options": null`: there was nothing trustworthy to show.
+#
+# ⚠ Only `-H`/`-L`/`-P` belong here. Everything after the start paths is an
+# EXPRESSION — `-name`, `-type`, `-exec`, `(`, `!`, `-o` — and those are
+# predicates and operators, not options. A flags parser handed find's argv would
+# eat `-name` as an unknown option; the walk below owns the grammar and asks
+# this spec only about the leading flags.
 fn _f_init_spec(): i64 {
     if (_find_spec != 0) { return 0; }
     var s = flags_new();
-    # Pre-expression flags. Note GNU's expression parser is positional,
-    # but kriya's flags-parse pulls them out wherever they sit; that's
-    # POSIX-permissive and consistent with the rest of kriya.
     _f_L_idx = flags_add_bool(s, 76, "follow",         0, "follow all symlinks");
-    _f_H_idx = flags_add_bool(s, 72, "follow-operand", 0, "follow operand symlinks only (deferred)");  # roadmap 1.7.1
+    _f_H_idx = flags_add_bool(s, 72, "follow-operand", 0, "NOT IMPLEMENTED - refused; use -P or -L (roadmap 1.7.1)");
     _f_P_idx = flags_add_bool(s, 80, "no-follow",      0, "never follow symlinks (default)");
     _find_spec = s;
     return 0;
@@ -1001,8 +1011,9 @@ fn _f_walk(path, depth, max_depth): i64 {
 # --- Entry point ------------------------------------------------------
 
 fn cmd_find(start: i64): i64 {
+    _f_init_spec();
     find_help_declare();
-    help_if_requested(0, start);
+    help_if_requested(_find_spec, start);
     # find DOES NOT go through the standard flags parser — its expression
     # grammar uses tokens like `-type` / `-name` that would be rejected
     # as unknown options. Instead we walk argv directly: -L / -H / -P
@@ -1040,7 +1051,19 @@ fn cmd_find(start: i64): i64 {
         consumed_head = 0;
         if (head < _f_argv_n) {
             var t0 = load64(_f_argv_flat + head * 8);
-            if (streq(t0, "-L") == 1) { _f_follow_mode = 1; head = head + 1; consumed_head = 1; }
+            # ⚠ The spec decides WHETHER a leading token is one of the three
+            # pre-expression flags; this walk decides what each MEANS, because
+            # they set a mode rather than a boolean. Adding a fourth is a spec
+            # row plus one arm here, and `--help` needs no separate edit.
+            var t0len = strlen(t0);
+            var is_pre: i64 = 0;
+            if (t0len == 2) {
+                if (load8(t0) == 45) {
+                    if (kriya_short_type(_find_spec, load8(t0 + 1)) >= 0) { is_pre = 1; }
+                }
+            }
+            if (is_pre == 0) { consumed_head = 0; }
+            elif (streq(t0, "-L") == 1) { _f_follow_mode = 1; head = head + 1; consumed_head = 1; }
             elif (streq(t0, "-P") == 1) { _f_follow_mode = 0; head = head + 1; consumed_head = 1; }
             elif (streq(t0, "-H") == 1) {
                 _f_report_usage("-H is deferred in this release; use -P or -L");  # roadmap 1.7.1

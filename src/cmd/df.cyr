@@ -555,9 +555,29 @@ fn _df_load_mounts(): i64 {
     return ret;
 }
 
+# ⭐ THE OPTION TABLE, AND THE AUTHORITY ON WHAT IS ACCEPTED — see the fuller
+# note in `src/cmd/du.cyr`. The walk owns each option's MEANING; this spec owns
+# whether an option exists at all, so `--help=json` cannot advertise a flag the
+# parser rejects, nor miss one it accepts.
+var _df_spec = 0;
+
+fn _df_init_spec(): i64 {
+    if (_df_spec != 0) { return 0; }
+    var s = flags_new();
+    flags_add_bool(s, 104, "human-readable", 0, "K/M/G/T size suffixes with 1-decimal precision");
+    flags_add_bool(s, 107, "",               0, "1024-byte blocks (the default)");
+    flags_add_bool(s, 84,  "print-type",     0, "add a filesystem Type column");
+    flags_add_bool(s, 105, "inodes",         0, "inode counts instead of block counts");
+    flags_add_bool(s, 97,  "all",            0, "include the pseudo-filesystems skipped by default");
+    flags_add_bool(s, 80,  "portability",    0, "POSIX-strict output (no smart column widths)");
+    _df_spec = s;
+    return 0;
+}
+
 fn cmd_df(start: i64): i64 {
+    _df_init_spec();
     df_help_declare();
-    help_if_requested(0, start);
+    help_if_requested(_df_spec, start);
     # df is built entirely on statfs(2), which agnos does not provide
     # (K_HAVE_STATFS == 0). Refuse cleanly up front rather than walking a
     # mount table that does not exist. On Linux this branch is DCE'd.
@@ -602,6 +622,8 @@ fn cmd_df(start: i64): i64 {
                     if (nlen == 11) {
                         if (_seq_bytes_eq(name, "portability", 11) == 1) { _df_portable = 1; hit = 1; }
                     }
+                    # ⭐ Same gate for long forms: the spec decides existence.
+                    if (kriya_long_type(_df_spec, name, nlen) < 0) { hit = 0; }
                     if (hit == 0) {
                         k_write( 2, "kriya df: error: unknown long option\n", 37);
                         return EXIT_USAGE;

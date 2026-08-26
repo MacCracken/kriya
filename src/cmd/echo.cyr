@@ -10,9 +10,24 @@
 # / `-E` (escape interpretation) are not implemented yet — they will
 # come with an ADR once the C-string escape table lands in `lib/str.cyr`.
 
+# ⭐ The option table, and the parser's only source for it — see the note in
+# `src/cmd/date.cyr`. `echo` cannot use `flags_parse`: POSIX echo passes every
+# operand through untouched, so a leading `-` after the first operand is DATA,
+# not an option, and a general parser would eat it.
+var _echo_spec = 0;
+
+fn _echo_init_spec(): i64 {
+    if (_echo_spec != 0) { return 0; }
+    var s = flags_new();
+    flags_add_bool(s, 110, "", 0, "do not output the trailing newline");
+    _echo_spec = s;
+    return 0;
+}
+
 fn cmd_echo(start: i64): i64 {
+    _echo_init_spec();
     echo_help_declare();
-    help_if_requested(0, start);
+    help_if_requested(_echo_spec, start);
     var n = kriya_argv_count();
     var i = start;
     var omit_newline: i64 = 0;
@@ -23,7 +38,10 @@ fn cmd_echo(start: i64): i64 {
         if (i < n) {
             var tok = argv(i);
             if (load8(tok) == 45) {
-                if (load8(tok + 1) == 110) {
+                # ⭐ Ask the spec which single letters are options. Still a
+                # one-letter-only test: POSIX echo takes no clustered or long
+                # options, and `-ne` is an operand, not two flags.
+                if (kriya_short_type(_echo_spec, load8(tok + 1)) >= 0) {
                     if (load8(tok + 2) == 0) {
                         omit_newline = 1;
                         i = i + 1;

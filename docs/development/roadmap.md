@@ -82,15 +82,6 @@ the old harness timed kriya plus a whole `date` fork, so ~60% of those figures w
 release to release with both binaries measured by the same tool, and name any reference binary
 `kriya` or the dispatcher rejects it on `argv[0]`.
 
-- **1.3.x — machine-declare the seven hand-rolled option tables.** ⛔ **`find`, `date`, `du`, `df`,
-  `env`, `echo` and `seq` render `"options": null`** in `--help=json`, because they walk argv
-  themselves and have no `flags_new()` spec to read back. That is the honest encoding — `[]` would
-  claim `du` has no `-h` — but it means **a completer cannot offer flags for seven utilities**, which
-  is most of what agnoshi wants this interface for. ⚠ Not a mechanical conversion: each hand-rolls
-  for a reason (`find`'s expression grammar, `date`'s `+FORMAT`, `seq`'s bare `-DIGIT`, `env`'s
-  order-sensitive assignment/`-u` interleave). ⛔ Do **not** solve it by declaring a documentation-only
-  spec beside the real parser — that reintroduces exactly the second source of truth 1.3.0 and 1.3.1
-  were built to avoid. Either the parser moves onto the spec or the utility stays `null`.
 - **1.3.x — `df`: confirm the `/dev` mismatch is gone, then drop the tolerance.** 1.3.2 implemented
   GNU's duplicate-device filter, which is the only GNU mechanism that can hide `/dev` where kriya
   showed it (no GNU rule excludes `devtmpfs` by type). ⚠ **The next CI run settles it**: if

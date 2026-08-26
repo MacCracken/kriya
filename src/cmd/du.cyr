@@ -305,9 +305,41 @@ fn _du_walk(parent_dirfd, name, display, depth): i64 {
 
 var _du_any_failed: i64 = 0;
 
+# ⭐ THE OPTION TABLE, AND THE AUTHORITY ON WHAT IS ACCEPTED.
+#
+# `du` walks argv itself, so the per-letter meanings live in that walk — but
+# the walk asks THIS spec whether a letter exists before dispatching on it, and
+# rejects anything the spec does not carry. That makes the invariant a consumer
+# needs true by construction: **every option `--help=json` advertises is
+# accepted, and nothing outside the table is.** A letter added to the walk but
+# not to the spec is refused at the gate rather than silently working while
+# being undocumented — which is the direction that matters.
+#
+# ⛔ A spec the parser never consults is a second source of truth. `find` carried
+# one for five releases — built, never read, never even called.
+var _du_spec = 0;
+
+fn _du_init_spec(): i64 {
+    if (_du_spec != 0) { return 0; }
+    var s = flags_new();
+    flags_add_bool(s, 115, "summarize",      0, "only print a total for each operand");
+    flags_add_bool(s, 97,  "all",            0, "show counts for every file, not just directories");
+    flags_add_bool(s, 99,  "total",          0, "grand total line at the end");
+    flags_add_bool(s, 104, "human-readable", 0, "K/M/G with 1-decimal precision");
+    flags_add_bool(s, 107, "",               0, "1024-byte blocks (the default)");
+    flags_add_bool(s, 98,  "bytes",          0, "apparent size (st_size), not allocated blocks");
+    flags_add_bool(s, 76,  "dereference",    0, "follow symbolic links");
+    flags_add_bool(s, 80,  "no-dereference", 0, "do not follow symlinks (default, ADR 0003)");
+    flags_add_bool(s, 83,  "separate-dirs",  0, "do not include subdirectories in directory totals");
+    flags_add_int(s,  100, "max-depth",      0, "only print entries at depth <= N");
+    _du_spec = s;
+    return 0;
+}
+
 fn cmd_du(start: i64): i64 {
+    _du_init_spec();
     du_help_declare();
-    help_if_requested(0, start);
+    help_if_requested(_du_spec, start);
     _du_summarize   = 0;
     _du_all         = 0;
     _du_total       = 0;
@@ -347,6 +379,11 @@ fn cmd_du(start: i64): i64 {
                         }
                         var nlen = tlen - 2;
                         if (eq_off > 0) { nlen = eq_off - 2; }
+                        # ⭐ Same gate for long forms.
+                        if (kriya_long_type(_du_spec, tok + 2, nlen) < 0) {
+                            k_write( 2, "kriya du: error: unknown long option\n", 37);
+                            return EXIT_USAGE;
+                        }
                         var handled: i64 = 0;
                         if (nlen == 9) {
                             if (_seq_bytes_eq(tok + 2, "summarize", 9) == 1) { _du_summarize = 1; handled = 1; }
@@ -407,6 +444,12 @@ fn cmd_du(start: i64): i64 {
                             loop = 0;
                         } else {
                             var c = load8(tok + p);
+                            # ⭐ The spec is the gate: a letter it does not carry
+                            # is rejected here, before the meaning chain below.
+                            if (kriya_short_type(_du_spec, c) < 0) {
+                                k_write( 2, "kriya du: error: unknown short option\n", 38);
+                                return EXIT_USAGE;
+                            }
                             if (c == 115) {                # -s
                                 _du_summarize = 1; p = p + 1;
                             } else { if (c == 97) {        # -a

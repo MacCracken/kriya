@@ -180,14 +180,29 @@ Fields are required unless explicitly nullable. Unknown fields are reserved
   `rmdir`, `touch`, `sort` (`-o`), `tee`, `uniq` (`OUTPUT`), `env`, `xargs`,
   `find`.
 
-- **`options`** — **three-way, not two.**
+- **`options`** — **three-way, not two.** ⚠ The invariant a completer depends on
+  is that **an advertised option can be typed**: `scripts/smoke-help-json.sh`
+  runs every advertised boolean short against the binary and fails if it comes
+  back as a usage error, and checks the converse — that an unadvertised letter is
+  refused — so "everything is accepted" cannot satisfy it. The one deliberate
+  exception is an option that is *named but refused*, like `find -H`, whose
+  description must say `NOT IMPLEMENTED`.
   - an array — the option table, read back out of the same `flags_new()` spec the
     parser uses, so it cannot drift from what is actually accepted;
   - `[]` — the utility genuinely accepts no options;
-  - `null` — the utility hand-rolls its argv walk and its options are **not
-    machine-declared**. ⛔ Collapsing `null` into `[]` would tell an agent that
-    `du` has no `-h`, which is false. `null` means "read the human form".
-    As of 1.3.1: `find`, `date`, `du`, `df`, `env`, `echo`, `seq`.
+  - `null` — the utility's options are **not machine-declared**. ⛔ Collapsing
+    `null` into `[]` would tell an agent that `du` has no `-h`, which would be
+    false. `null` means "read the human form".
+    ⭐ **As of 1.3.7 no utility renders `null`.** The seven that did — `find`,
+    `date`, `du`, `df`, `env`, `echo`, `seq` — still hand-roll their argv walks,
+    because their operand grammars are irregular (`+FORMAT`, a bare `-DIGIT`
+    negative operand, POSIX echo's passthrough, find's expression). But each now
+    declares a spec that **its own parser consults as the acceptance gate**: the
+    walk asks the spec whether an option exists before dispatching on it, and
+    refuses anything the spec does not carry. ⛔ That is the distinction that
+    matters — a spec the parser never reads is a second source of truth, and
+    `find` carried one for five releases that was built, never read, and never
+    even called. The encoding stays for a future utility that cannot do this.
 
 - **`positional.min`** — the smallest operand count **any valid invocation** may
   have. ⚠ An option that supplies the operand's role (`grep -e PATTERN`) or
