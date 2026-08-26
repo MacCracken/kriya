@@ -56,6 +56,7 @@ enum FindNode {
     F_N_NEWER     = 16,
     F_N_MAXDEPTH  = 17,
     F_N_MINDEPTH  = 18,
+    F_N_REGEX     = 19,
     F_N_PRINT     = 30,
     F_N_PRINT0    = 31,
     F_N_EXEC      = 32,
@@ -144,108 +145,66 @@ fn _f_report_usage(msg): i64 {
     return 0;
 }
 
+# --- -regex / -iregex --------------------------------------------------
+#
+# ⛔ kriya's DEFAULT DIALECT IS POSIX BRE. GNU's is EMACS regex, and the two
+# disagree on exactly the characters people reach for: measured against GNU,
+# `-regex '.*a+b'` treats `+` as ONE-OR-MORE there and as a LITERAL PLUS here.
+# ⚠ That is a silent difference in results, not an error, which is the worst
+# shape a divergence can take — so it is stated in `--help`, in ADR 0005, and
+# `-regextype emacs` is REFUSED by name rather than quietly treated as BRE.
+#
+# ⭐ The pattern is matched against the WHOLE PATH AS WRITTEN, anchored at both
+# ends — verified against GNU: `find . -regex 'aab'` finds nothing while
+# `-regex '\./aab\.c'` finds `./aab.c`, leading `./` included. That is a
+# property of the path the walk built, so `find sub` matches `sub/x.c`.
+# ASCII case fold for `-iregex` under BRE, which has no inline flag. ⚠ Folding
+# the SUBJECT means the PATTERN must already be lower-case to match — the same
+# asymmetry `grep -i` carries for BRE, and the reason `-iregex` under
+# `-regextype posix-extended` uses niyama's `(?i)` instead.
+fn _f_fold_bytes(src, dst, len): i64 {
+    var i: i64 = 0;
+    while (i < len) {
+        var c = load8(src + i);
+        if (c >= 65) {
+            if (c <= 90) { c = c + 32; }
+        }
+        store8(dst + i, c);
+        i = i + 1;
+    }
+    store8(dst + len, 0);
+    return 0;
+}
+
+enum FindRegexType {
+    F_RX_BRE = 0,
+    F_RX_ERE = 1,
+}
+var _f_regextype = 0;
+
+fn _f_regex_compile(pat, fold): i64 {
+    # ⚠ Case folding rides on niyama's inline-flag form for ERE, matching how
+    # `grep -i -E` does it (ADR 0005). BRE has no inline flag, so `-iregex`
+    # under the default dialect folds the SUBJECT instead — the same asymmetry
+    # grep already carries.
+    if (_f_regextype == F_RX_ERE) {
+        if (fold == 1) {
+            var buf = alloc(strlen(pat) + 8);
+            memcpy(buf, "(?i)", 4);
+            memcpy(buf + 4, pat, strlen(pat) + 1);
+            return niyama_re2_compile(buf);
+        }
+        return niyama_re2_compile(pat);
+    }
+    return niyama_bre_compile(pat);
+}
+
 # --- fnmatch-style glob -----------------------------------------------
 
-# Match `pat` (length `plen`) against `text` (length `tlen`). Supports
-# `*` (zero-or-more), `?` (one), `[abc]` / `[a-z]` / `[!...]` brackets.
-# Iterative algorithm with backtrack-on-`*` to keep stack flat.
+# ⚠ The matcher itself now lives in `src/lib/glob.cyr`, shared with `grep`.
+# This wrapper stays so find's call sites keep reading in find's own vocabulary.
 fn _f_glob_match(pat, plen, text, tlen): i64 {
-    var pi: i64 = 0;
-    var ti: i64 = 0;
-    var star_pi: i64 = 0 - 1;
-    var star_ti: i64 = 0;
-    while (ti <= tlen) {
-        var matched: i64 = 0;
-        if (pi < plen) {
-            var pc = load8(pat + pi);
-            if (pc == 42) {
-                star_pi = pi;
-                star_ti = ti;
-                pi = pi + 1;
-                matched = 1;
-            } elif (pc == 91) {
-                # bracket: scan for matching ']'
-                if (ti >= tlen) {
-                    # no char to match
-                } else {
-                    var bi = pi + 1;
-                    var negate: i64 = 0;
-                    if (bi < plen) {
-                        if (load8(pat + bi) == 33) { negate = 1; bi = bi + 1; }
-                    }
-                    var tc = load8(text + ti);
-                    var hit: i64 = 0;
-                    var closed: i64 = 0;
-                    while (closed == 0) {
-                        if (bi >= plen) { closed = 0 - 1; }
-                        else {
-                            var bc = load8(pat + bi);
-                            if (bc == 93 && bi > pi + 1 + negate) {
-                                closed = 1;
-                            } else {
-                                # Check for range a-z
-                                if (bi + 2 < plen) {
-                                    if (load8(pat + bi + 1) == 45) {
-                                        if (load8(pat + bi + 2) != 93) {
-                                            var lo = bc;
-                                            var hi = load8(pat + bi + 2);
-                                            if (tc >= lo && tc <= hi) { hit = 1; }
-                                            bi = bi + 3;
-                                            continue;
-                                        }
-                                    }
-                                }
-                                if (bc == tc) { hit = 1; }
-                                bi = bi + 1;
-                            }
-                        }
-                    }
-                    if (closed == 1) {
-                        if (negate == 1) { hit = 1 - hit; }
-                        if (hit == 1) {
-                            pi = bi + 1;
-                            ti = ti + 1;
-                            matched = 1;
-                        }
-                    }
-                }
-            } elif (pc == 63) {
-                if (ti < tlen) {
-                    pi = pi + 1;
-                    ti = ti + 1;
-                    matched = 1;
-                }
-            } elif (pc == 92) {
-                # backslash: next char literal
-                if (pi + 1 < plen && ti < tlen) {
-                    if (load8(pat + pi + 1) == load8(text + ti)) {
-                        pi = pi + 2;
-                        ti = ti + 1;
-                        matched = 1;
-                    }
-                }
-            } else {
-                if (ti < tlen) {
-                    if (pc == load8(text + ti)) {
-                        pi = pi + 1;
-                        ti = ti + 1;
-                        matched = 1;
-                    }
-                }
-            }
-        }
-        if (matched == 0) {
-            if (star_pi >= 0) {
-                pi = star_pi + 1;
-                star_ti = star_ti + 1;
-                ti = star_ti;
-            } else {
-                return 0;
-            }
-        }
-        if (pi == plen && ti == tlen) { return 1; }
-    }
-    return 0;
+    return glob_match(pat, plen, text, tlen);
 }
 
 # --- Token helpers (argv navigation) ----------------------------------
@@ -370,6 +329,46 @@ fn _f_parse_primary(): i64 {
         var pat = _f_consume();
         if (pat == 0) { _f_set_err("-name needs an argument"); return 0; }
         return _f_node_new(F_N_NAME, pat, strlen(pat), 0);
+    }
+    if (streq(t, "-regextype") == 1) {
+        _f_consume();
+        var rt = _f_consume();
+        if (rt == 0) { _f_set_err("-regextype needs an argument"); return 0; }
+        if (streq(rt, "posix-basic") == 1) { _f_regextype = F_RX_BRE; return _f_parse_primary(); }
+        if (streq(rt, "posix-extended") == 1) { _f_regextype = F_RX_ERE; return _f_parse_primary(); }
+        # ⛔ REFUSED BY NAME, not quietly aliased. GNU's default and its `emacs`
+        # type accept `a+` as one-or-more; kriya's engines are POSIX BRE and ERE
+        # (ADR 0005), where an unescaped `+` is a LITERAL under BRE. Silently
+        # treating `-regextype emacs` as BRE would return different files with
+        # no diagnostic — the exact shape this project treats as worse than a
+        # clean refusal.
+        _f_set_err("-regextype: only posix-basic and posix-extended are supported (ADR 0005); GNU's emacs/findutils-default dialect is not");  #skip-lint
+        return 0;
+    }
+    if (streq(t, "-regex") == 1) {
+        _f_consume();
+        var rp = _f_consume();
+        if (rp == 0) { _f_set_err("-regex needs an argument"); return 0; }
+        var rn = _f_regex_compile(rp, 0);
+        if (rn == 0) { _f_set_err("-regex pattern failed to compile"); return 0; }
+        return _f_node_new(F_N_REGEX, rn, 0, 0);
+    }
+    if (streq(t, "-iregex") == 1) {
+        _f_consume();
+        var ip = _f_consume();
+        if (ip == 0) { _f_set_err("-iregex needs an argument"); return 0; }
+        # ⚠ Under BRE both sides must be folded: the subject at match time and
+        # the pattern here. Folding only one is the classic half-fix that makes
+        # `-iregex '.*ABC'` silently match nothing.
+        var ifold = ip;
+        if (_f_regextype == F_RX_BRE) {
+            var pb = alloc(strlen(ip) + 1);
+            _f_fold_bytes(ip, pb, strlen(ip));
+            ifold = pb;
+        }
+        var inn = _f_regex_compile(ifold, 1);
+        if (inn == 0) { _f_set_err("-iregex pattern failed to compile"); return 0; }
+        return _f_node_new(F_N_REGEX, inn, 1, 0);
     }
     if (streq(t, "-type") == 1) {
         _f_consume();
@@ -862,6 +861,32 @@ fn _f_eval(n, ctx): i64 {
         var plen = load64(n + 16);
         return _f_glob_match(pat, plen, name, strlen(name));
     }
+    if (k == F_N_REGEX) {
+        # ⭐ Whole path, anchored at both ends. niyama's search finds an
+        # unanchored match, so a full-length match is required explicitly —
+        # `-regex 'aab'` must NOT match `./aab.c`, which is what GNU does.
+        var subj = path;
+        var slen = strlen(subj);
+        var fold = load64(n + 16);
+        if (fold == 1) {
+            if (_f_regextype == F_RX_BRE) {
+                var fb = alloc(slen + 1);
+                _f_fold_bytes(subj, fb, slen);
+                subj = fb;
+            }
+        }
+        var nfa = load64(n + 8);
+        if (_f_regextype == F_RX_ERE) {
+            var rp = niyama_re2_search_at(nfa, subj, slen, 0);
+            if (rp != 0) { return 0; }
+            if (niyama_re2_group_end(nfa, 0) != slen) { return 0; }
+            return 1;
+        }
+        var bp = niyama_bre_search_at(nfa, subj, slen, 0);
+        if (bp != 0) { return 0; }
+        if (niyama_bre_group_end(nfa, 0) != slen) { return 0; }
+        return 1;
+    }
     if (k == F_N_TYPE)   { return _f_eval_type_predicate(load64(n + 8), st); }
     if (k == F_N_SIZE)   { return _f_eval_size_predicate(load64(n + 8), load64(n + 16), load64(n + 24),
         load64(st + 48)); }
@@ -1137,7 +1162,7 @@ fn find_help_declare(): i64 {
                "find [STARTPATH...] [EXPRESSION]");
     help_positional(0, HELP_POS_UNBOUNDED, "STARTPATH,EXPRESSION");
     help_destructive(1);
-    help_operands("Predicates combine with ! , -a and -o; parentheses group. The default action is -print. Symlinks are not followed unless -L is given (ADR 0003).");  #skip-lint
+    help_operands("Predicates combine with ! , -a and -o; parentheses group. The default action is -print. Symlinks are not followed unless -L is given (ADR 0003). ⚠ -regex/-iregex match the WHOLE PATH as written (leading `./` included) and default to POSIX BRE — GNU defaults to EMACS regex, where an unescaped `+` is a quantifier rather than a literal. Use -regextype posix-extended for `+`/`?`; -regextype emacs is refused by name (ADR 0005).");  #skip-lint
     help_exit(1, "an entry could not be read, or -exec reported failure");
     help_example("find . -name '*.log'");
     help_example("find /var -type f -size +1M");

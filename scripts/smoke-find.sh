@@ -181,6 +181,51 @@ esac
 # A command that cannot be executed is reported, not silently treated as false.
 expect_exit "-exec missing command -> 1" 1 "$BIN" find gag -name '*.tmp' -exec ./nosuchcmd {} \;
 
+# --- ⭐ -regex / -iregex / -regextype, against GNU ------------------------
+#
+# ⛔ kriya's DEFAULT DIALECT IS POSIX BRE; GNU's is EMACS. They disagree on the
+# characters people actually reach for — `-regex '.*a+b'` is one-or-more under
+# GNU and a LITERAL PLUS here — so the cases below use patterns valid in BOTH,
+# and the dialect divergence is asserted separately as a named refusal rather
+# than pretended away. See ADR 0005.
+#
+# ⭐ The pattern matches the WHOLE PATH AS WRITTEN, anchored both ends: `find .`
+# yields `./aab.c` with the leading `./` included, so `-regex 'aab'` finds
+# nothing. That is GNU's behaviour, verified.
+mkdir -p rx/sub
+: > rx/aab.c; : > rx/sub/x.c
+
+rx_same() {
+    label=$1; shift
+    g=$(cd rx && find "$@" 2>&1 | sort); k=$(cd rx && "$BIN" find "$@" 2>&1 | sort)
+    expect_eq "regex: $label" "$g" "$k"
+}
+rx_same "whole path"              . -regex '.*aab.*'
+rx_same "substring does not match" . -regex 'aab'
+rx_same "anchored literal"        . -regex '\./aab\.c'
+rx_same "leading ./ is part of it" . -regex 'aab\.c'
+rx_same "-iregex folds"           . -iregex '.*AAB.*'
+rx_same "posix-basic explicit"    . -regextype posix-basic -regex '.*aab.*'
+rx_same "posix-extended"          . -regextype posix-extended -regex '.*aab.*'
+rx_same "ERE + quantifier"        . -regextype posix-extended -regex '\./a+b\.c'
+rx_same "combined with -type"     . -regex '.*\.c' -type f
+rx_same "negated"                 . -type f ! -regex '.*aab.*'
+rx_same "no match at all"         . -regex '.*zzz.*'
+
+# ⛔ `-regextype emacs` is REFUSED BY NAME. GNU's default and its emacs type
+# read `a+` as one-or-more; kriya's engines are POSIX (ADR 0005), where an
+# unescaped `+` is a literal. Silently aliasing emacs to BRE would return
+# different files with no diagnostic.
+rc=0; "$BIN" find rx -regextype emacs -regex 'x' >/dev/null 2>&1 || rc=$?
+expect_eq "regex: -regextype emacs refused" "2" "$rc"
+err=$("$BIN" find rx -regextype emacs -regex 'x' 2>&1 >/dev/null || true)
+case "$err" in
+    *"posix-basic"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL regex: refusal does not name what IS supported: %s\n" "$err" >&2 ;;
+esac
+rc=0; "$BIN" find rx -regex >/dev/null 2>&1 || rc=$?
+expect_eq "regex: missing argument is a usage error" "2" "$rc"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

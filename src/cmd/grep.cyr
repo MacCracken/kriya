@@ -86,6 +86,8 @@ var _gr_A_idx     = 0;
 var _gr_B_idx     = 0;
 var _gr_C_idx     = 0;
 var _gr_Z_idx     = 0;
+var _gr_inc_idx   = 0;
+var _gr_exc_idx   = 0;
 
 var _gr_read_buf  = 0;
 var _gr_line_buf  = 0;
@@ -134,6 +136,8 @@ fn _gr_init_spec(): i64 {
     _gr_A_idx = flags_add_int(s,  65,  "after-context",     (0 - 1), "print NUM lines after each match");
     _gr_B_idx = flags_add_int(s,  66,  "before-context",    (0 - 1), "print NUM lines before each match");
     _gr_C_idx = flags_add_int(s,  67,  "context",           (0 - 1), "print NUM lines before and after");
+    _gr_inc_idx = flags_add_str(s,  0, "include",  0, "admit files matching GLOB (rightmost --include/--exclude wins)");
+    _gr_exc_idx = flags_add_str(s,  0, "exclude",  0, "skip files matching GLOB (rightmost --include/--exclude wins)");
     _gr_Z_idx = flags_add_bool(s, 90,  "null",              0, "NUL after each file name (pairs with xargs -0)");
     _gr_f_idx = flags_add_str(s,  102, "file",              0, "read patterns from file, one per line");
     _grep_spec = s;
@@ -148,7 +152,7 @@ fn grep_help_declare(): i64 {
     help_begin("grep", "Search files for lines matching a pattern.",
                "grep [OPTIONS] PATTERN [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "PATTERN,FILE");
-    help_operands("PATTERN is an operand only when neither -e nor -f supplies it. BRE by default; -E for ERE, -F for fixed strings. ⚠ Context lines print with `-` where matching lines print `:`, and `--` separates non-adjacent groups. ⚠ -r skips symlinks (ADR 0003). -P is rejected (ADR 0005). GNU's -NUM shorthand is not implemented (roadmap 1.4.x).");  #skip-lint
+    help_operands("PATTERN is an operand only when neither -e nor -f supplies it. BRE by default; -E for ERE, -F for fixed strings. ⚠ Context lines print with `-` where matching lines print `:`, and `--` separates non-adjacent groups. ⚠ -r skips symlinks (ADR 0003). -P is rejected (ADR 0005). GNU's -NUM shorthand is not implemented (roadmap 1.4.x). ⚠ --include/--exclude: the RIGHTMOST matching one wins, and a name matching neither is decided by the FIRST option's type — so `--exclude=X --include=*.c` searches everything while `--include=*.c --exclude=X` searches only .c files. Under -r the glob sees the BASE NAME (a pattern with `/` never matches); for a command-line operand it sees the path as typed and each `/`-suffix. Directories are never filtered.");  #skip-lint
     help_exit(0, "at least one line matched");
     help_exit(1, "no line matched");
     help_exit(2, "an error occurred");
@@ -156,6 +160,7 @@ fn grep_help_declare(): i64 {
     help_example("grep -r -i error logs/");
     help_example("grep -e a -e b file");
     help_example("grep -C 2 -n panic server.log");
+    help_example("grep -r --include=*.c --exclude=*_test.c panic src/");
     help_example("grep -rlZ TODO src/ | xargs -0 wc -l");  #skip-lint
     return 0;
 }
@@ -675,6 +680,127 @@ fn _gr_ctx_gap(first_line, term): i64 {
     return 0;
 }
 
+# --- --include / --exclude ---------------------------------------------
+#
+# ⛔ THREE RULES HERE ARE NOT WHAT A CAREFUL READING WOULD GUESS, and a first
+# implementation got all three wrong while passing a nine-case test — because
+# none of those cases discriminated them. All measured against GNU:
+#
+#  1. ⛔ PRECEDENCE IS RIGHTMOST-WINS, not "exclude beats include". A later
+#     `--include` re-admits a file an earlier `--exclude` rejected:
+#       --include='*.h' --exclude='a.c' --include='*.c'   searches a.c.
+#
+#  2. ⛔ THE DEFAULT FOR AN UNMATCHED NAME IS SET BY THE FIRST OPTION'S TYPE.
+#     If the first is an --include, unmatched names are skipped; if the first is
+#     an --exclude, they are searched. So putting --exclude before --include
+#     silently destroys the "only these files" meaning of --include:
+#       --include='*.c' --exclude='zzz'   searches only .c files
+#       --exclude='zzz' --include='*.c'   searches EVERYTHING
+#     Same two options, order swapped, opposite result.
+#
+#  3. ⛔ THE SUBJECT DIFFERS BY HOW GREP REACHED THE FILE. Under -r descent the
+#     glob sees the BASE NAME only, so a pattern containing '/' can never match.
+#     For a file named on the COMMAND LINE it sees the operand as typed and
+#     every trailing part beginning after a '/', so `--exclude='sub/c.c'` and
+#     `--exclude='c.c'` both skip the operand `sub/c.c`. The identical file is
+#     therefore filtered differently depending on how it was found.
+#
+# ⚠ Also measured: directories are exempt entirely (never pruned, always
+# descended — that is `--exclude-dir`, not shipped, roadmap 1.4.x); stdin is
+# never filtered; and an excluded operand that cannot be OPENED still reports
+# its error and exits 2, because filtering happens after the open attempt.
+enum GrFilterKind {
+    GR_FILT_INCLUDE = 1,
+    GR_FILT_EXCLUDE = 2,
+}
+var _gr_filt_kind = 0;   # vec of GR_FILT_*
+var _gr_filt_pat  = 0;   # vec of cstr, parallel
+var _gr_filt_n    = 0;
+var _gr_filt_first = 0;  # kind of the FIRST option given; 0 = none given
+
+# Collect the two options IN COMMAND-LINE ORDER. ⚠ `kriya_argv_collect` gathers
+# one option name at a time and so loses the interleaving, which rules 1 and 2
+# both depend on — hence a dedicated walk.
+fn _gr_filter_init(): i64 {
+    _gr_filt_kind = vec_new();
+    _gr_filt_pat  = vec_new();
+    _gr_filt_n    = 0;
+    _gr_filt_first = 0;
+    var n = kriya_argv_count();
+    var flat = kriya_argv_flat();
+    var i: i64 = 1;
+    while (i < n) {
+        var tok = load64(flat + i * 8);
+        var tlen = strlen(tok);
+        var kind: i64 = 0;
+        var pat: i64 = 0;
+        if (tlen >= 9) {
+            if (_seq_bytes_eq(tok, "--include", 9) == 1) { kind = GR_FILT_INCLUDE; }
+            if (_seq_bytes_eq(tok, "--exclude", 9) == 1) { kind = GR_FILT_EXCLUDE; }
+        }
+        if (kind != 0) {
+            # ⚠ `--exclude-dir` also starts with `--exclude`; it is a DIFFERENT
+            # option and must not be swallowed here.
+            if (tlen > 9) {
+                if (load8(tok + 9) == 61) { pat = tok + 10; }
+                else { kind = 0; }
+            } else {
+                i = i + 1;
+                if (i < n) { pat = load64(flat + i * 8); }
+            }
+        }
+        if (kind != 0) {
+            if (pat != 0) {
+                vec_push(_gr_filt_kind, kind);
+                vec_push(_gr_filt_pat, pat);
+                _gr_filt_n = _gr_filt_n + 1;
+                if (_gr_filt_first == 0) { _gr_filt_first = kind; }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Does `pat` match `subject`? `whole_path == 1` selects the command-line rule:
+# the operand as typed, plus every suffix starting after a '/'.
+fn _gr_filt_hit(pat, subject, whole_path): i64 {
+    var plen = strlen(pat);
+    if (whole_path == 0) {
+        var base = path_basename_ptr(subject);
+        return glob_match(pat, plen, base, strlen(base));
+    }
+    var slen = strlen(subject);
+    if (glob_match(pat, plen, subject, slen) == 1) { return 1; }
+    var i: i64 = 0;
+    while (i < slen) {
+        if (load8(subject + i) == 47) {
+            if (glob_match(pat, plen, subject + i + 1, slen - i - 1) == 1) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when the file should be searched.
+fn _gr_name_allowed(path, whole_path): i64 {
+    if (_gr_filt_n == 0) { return 1; }
+    # Rightmost match decides.
+    var decided: i64 = 0;
+    var i: i64 = 0;
+    while (i < _gr_filt_n) {
+        if (_gr_filt_hit(vec_get(_gr_filt_pat, i), path, whole_path) == 1) {
+            decided = vec_get(_gr_filt_kind, i);
+        }
+        i = i + 1;
+    }
+    if (decided == GR_FILT_INCLUDE) { return 1; }
+    if (decided == GR_FILT_EXCLUDE) { return 0; }
+    # Nothing matched: the FIRST option's type sets the default.
+    if (_gr_filt_first == GR_FILT_INCLUDE) { return 0; }
+    return 1;
+}
+
 fn _gr_emit_prefix2(name, show_name, show_line, lineno, sep, null_fname): i64 {
     if (show_name == 1) {
         k_write( 1, name, strlen(name));
@@ -1082,7 +1208,16 @@ fn _gr_walk_dir(parent_dirfd, dir_name, dir_path, handles, n_handles, opts, term
                                 if (fd < 0) {
                                     _gr_report(sub, 0 - fd, suppress);
                                 } else {
-                                    var pr = _gr_process_fd(fd, sub, handles, n_handles, opts, term_byte);
+                                    # ⚠ Filter here, not at emit time: a file
+                                    # excluded by name must not be opened or
+                                    # counted, and must not affect the exit
+                                    # status.
+                                    var pr: i64 = 0;
+                                    if (_gr_name_allowed(sub, 0) == 1) {
+                                        pr = _gr_process_fd(fd, sub, handles, n_handles, opts, term_byte);
+                                    } else {
+                                        k_close(fd);
+                                    }
                                     k_close( fd);
                                     if (pr < 0) { _gr_report(sub, 0 - pr, suppress); }
                                     elif (pr == 1) { found_any = 1; }
@@ -1294,6 +1429,7 @@ fn cmd_grep(start: i64): i64 {
     if (quiet_mode == 1)  { ctx_active = 0; }
     if (only_match == 1)  { ctx_active = 0; }
     if (ctx_active == 0)  { before_ctx = 0; after_ctx = 0; }
+    _gr_filter_init();
     _gr_ring_init(before_ctx);
     store64(opts + 80, before_ctx);
     store64(opts + 88, after_ctx);
@@ -1348,6 +1484,13 @@ fn cmd_grep(start: i64): i64 {
                         }
                         any_failed = 1;
                     }
+                } elif (_gr_name_allowed(name, 1) == 0) {
+                    # ⚠ GNU applies --include/--exclude to files named EXPLICITLY
+                    # on the command line, not only to those found under -r.
+                    # Measured: `grep --include='*.c' -l hit a.c b.h` reports
+                    # only a.c. A filtered operand is silently skipped — not an
+                    # error, and it does not affect the exit status.
+                    var skipped: i64 = 0;
                 } else {
                     var fd = k_open(name, 0, 0);
                     if (fd < 0) {

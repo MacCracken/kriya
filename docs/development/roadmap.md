@@ -100,9 +100,12 @@ kriya's dependency closure for niyama.
   walk (`_seq_token_is_negnum`); lifting that into `src/lib/args.cyr` would serve both. ⛔ Do not
   special-case it inside `grep` — that is the second-source-of-truth shape the 1.3.x arc spent nine
   releases removing.
-- **1.4.1 — Shared glob: `grep --include`/`--exclude`, `find -regex`.** `find` already owns an
-  fnmatch-style matcher (`_f_glob_match`); lifting it into `src/lib/` serves both, and `-regex` is
-  niyama on the path string rather than the basename.
+- **1.4.x — `grep --exclude-dir`.** ⚠ Deliberately not in 1.4.1. `--exclude` does NOT prune
+  directories (measured against GNU: a directory matching `--exclude` is still descended), so
+  `--exclude-dir` is a genuinely separate flag with its own subject — the directory name during
+  descent — rather than a variation on the file filter now shipped. ⭐ The ordered
+  rightmost-wins/first-option-default machinery in `_gr_name_allowed` is the part to reuse; the
+  matcher (`src/lib/glob.cyr`) is already shared.
 - **1.4.2 — Multi-byte text.** `cut -c` distinct from `-b`, `tr` locale-aware fold and `[=c=]`
   equivalence classes and `[c*N]` repetition, `uniq` multi-byte `-i`. One decoder, four surfaces.
 - **1.4.3 — Line-grouping and numbering.** `uniq --group` / `--all-repeated[=METHOD]`, `nl` section

@@ -105,6 +105,38 @@ ASCII only at v1.0. niyama operates on bytes. UTF-8 input mostly works for plain
 
 `niyama_*_compile` returns an `alloc()`-backed NFA pointer. We do NOT `fl_free` it — the NFA lives until process exit, which for `grep` is fine (one process per invocation, ~kilobytes per pattern). When/if kriya gains a persistent daemon mode (it doesn't; out of scope), an NFA destructor will need to ship in niyama.
 
+## Amendment — 2026-08-26 (kriya 1.4.1): `find -regex`
+
+`find` gains `-regex`, `-iregex` and `-regextype`, so the engine mapping above extends:
+
+| Caller flag | Engine | Why |
+|---|---|---|
+| `find -regex` (default) | `niyama_bre_*` | POSIX BRE, consistent with `grep`'s default. |
+| `find -regextype posix-basic` | `niyama_bre_*` | The default, named explicitly. |
+| `find -regextype posix-extended` | `niyama_re2_*` | Same engine `grep -E` uses. |
+| `find -iregex` | as above, case-folded | ⚠ ERE folds via niyama's `(?i)` inline flag; BRE has no inline flag, so **both the pattern and the subject are folded** — the same asymmetry `grep -i` already carries. |
+| `find -regextype emacs` / `findutils-default` | **refused** | See below. |
+
+⛔ **kriya's default dialect differs from GNU's, and the difference is silent unless refused.** GNU
+findutils defaults to **Emacs** regex, where an unescaped `+` means one-or-more; POSIX BRE reads the
+same byte as a **literal plus**. Measured: `find . -regex '.*a+b'` matches `aab` under GNU and matches
+nothing under a BRE engine. A pattern therefore does not error — it returns a *different set of files*,
+which is the worst shape a divergence can take.
+
+Two things follow, and both are deliberate:
+
+1. **The default is POSIX BRE, not Emacs.** kriya's regex story is POSIX (this ADR); adding an Emacs
+   dialect to niyama for one predicate is not justified, and `grep`'s default is already BRE, so a
+   user carries one mental model across both utilities.
+2. ⛔ **`-regextype emacs` and `findutils-default` are REFUSED BY NAME**, with a message saying which
+   types *are* supported. Quietly treating them as BRE would be the silent-wrong-results case above.
+   A caller who wants `+` and `?` writes `-regextype posix-extended`, which GNU also accepts — so a
+   portable invocation exists.
+
+⚠ `-regex` matches the **whole path as written**, anchored at both ends, including the leading `./`
+that `find .` produces. niyama's search is unanchored, so the match is required to start at 0 and end
+at the subject length explicitly.
+
 ## Consequences
 
 - **Positive**

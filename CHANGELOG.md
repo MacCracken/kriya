@@ -6,6 +6,100 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.4.1] - 2026-08-26 — shared glob: `grep --include`/`--exclude`, `find -regex`
+
+### ⭐ The glob matcher is now shared
+
+`find`'s fnmatch-style matcher moved out of `src/cmd/find.cyr` into **`src/lib/glob.cyr`**, so
+`grep --include` uses the same code `find -name` does. Two implementations of *"does this name match
+this pattern"* in one binary is two sets of edge cases to keep in agreement, and they drift silently —
+a `[a-z]` range behaving differently in `find` than in `grep` is the kind of thing nobody notices
+until it matters.
+
+⚠ It is a **pure** matcher: bytes in, 0/1 out, no filesystem, no path awareness. Deciding whether to
+hand it a basename or a whole path is the *caller's* business, and `find` and `grep` answer that
+differently — which is why it does not live in `path.cyr`, whose subject is path *structure*.
+
+⭐ **Being in `src/lib/` is what makes it unit-testable at all.** Buried in `find.cyr` it could only be
+exercised end-to-end through `find -name`, so its bracket and backtracking edges had no direct
+coverage. **26 new unit assertions**, and they found one:
+
+⛔ **`glob_match("", 0, "", 0)` returned 0.** POSIX `fnmatch("", "", 0)` **matches** (verified against
+libc) — a pattern exhausted exactly when the text is has matched by definition. The success test sat
+*after* the failure branch had already returned, so the one case consuming no input fell through. No
+live caller passes an empty pattern (`find -name ''` and `grep --include=` both match nothing because
+no file has an empty name), but a shared matcher should hold its contract at the edges rather than
+only where today's callers stand.
+
+### Added — `grep --include` / `--exclude`
+
+⛔ **Three of these rules are not what a careful reading would guess, and my first implementation got
+all three wrong while passing a nine-case test — because none of those cases discriminated them.**
+That is the 1.3.x lesson arriving in a new release: a green test is not a finding.
+
+1. ⛔ **Precedence is RIGHTMOST-WINS, not "exclude beats include".** A later `--include` re-admits a
+   file an earlier `--exclude` rejected: `--include='*.h' --exclude=a.c --include='*.c'` searches
+   `a.c`.
+2. ⛔ **The default for an unmatched name comes from the FIRST option's type.** So
+   `--exclude=zzz --include='*.c'` searches **everything**, while the same two options in the other
+   order search only `.c` files. Same options, order swapped, opposite result.
+3. ⛔ **The subject differs by how grep reached the file.** Under `-r` descent the glob sees the
+   **base name** only, so a pattern containing `/` can never match. For a file named on the **command
+   line** it sees the operand as typed *and every trailing part beginning after a `/`* — so
+   `--exclude='sub/c.c'` and `--exclude=c.c` both skip the operand `sub/c.c`. The identical file is
+   filtered differently depending on how it was found.
+
+⚠ Also measured rather than assumed: directories are exempt entirely — never pruned, always descended
+(that is `--exclude-dir`, not shipped, roadmap); stdin is never filtered however aggressive the
+pattern; and an excluded operand that cannot be **opened** still reports its error and exits 2,
+because filtering happens after the open attempt.
+
+⚠ Order matters, so `kriya_argv_collect` could not be used — it gathers one option name at a time and
+loses the interleaving that rules 1 and 2 both depend on.
+
+### Added — `find -regex` / `-iregex` / `-regextype`
+
+Matches the **whole path as written**, anchored at both ends, including the leading `./` that `find .`
+produces — verified against GNU: `find . -regex 'aab'` finds nothing while `-regex '\./aab\.c'` finds
+`./aab.c`. niyama's search is unanchored, so the match is required to start at 0 and end at the subject
+length explicitly.
+
+⛔ **kriya's default dialect is POSIX BRE; GNU's is EMACS, and the difference is silent.** They
+disagree on exactly the characters people reach for: `-regex '.*a+b'` reads `+` as one-or-more under
+GNU and as a **literal plus** under BRE. A pattern does not error — it returns a *different set of
+files*, the worst shape a divergence can take. Two consequences, both deliberate and recorded in
+[ADR 0005](docs/adr/0005-regex-engine-niyama.md):
+
+- The default is POSIX BRE, matching `grep`'s, so one mental model covers both utilities.
+- ⛔ **`-regextype emacs` and `findutils-default` are REFUSED BY NAME**, with a message naming what
+  *is* supported. Quietly aliasing them to BRE would be the silent case above. A caller wanting `+`
+  writes `-regextype posix-extended`, which GNU also accepts — so a portable invocation exists.
+
+⚠ `-iregex` under ERE folds via niyama's `(?i)` inline flag; BRE has no inline flag, so **both the
+pattern and the subject are folded** — the same asymmetry `grep -i` already carries. Folding only one
+side is the classic half-fix that makes `-iregex '.*ABC'` match nothing.
+
+⚠ A malformed pattern exits **2**, where GNU exits 1. That is ADR 0008's usage-error policy and is
+pre-existing — `find -type` and `find -name` with a missing argument already do the same.
+
+### Fixed
+
+⚠ `scripts/lint-deferrals.sh` reported a **line-length** warning under the summary *"N untracked
+deferral(s)"*, sending a reader to look for a deferral that was not there. Two rules share one counter
+since 1.3.8; the summary now names both.
+
+### Tests
+
+**3,889 smoke cases across 37 scripts** (up from 3,873), **143 unit** (up from 119), 18 POSIX, fuzz
+green under poison, four lints clean, both targets build.
+
+⚠ The `--include`/`--exclude` smoke block was **replaced, not extended**: its original nine cases were
+exactly the ones that could not distinguish the three rules above. Every case now present fails if a
+rule is dropped — including the pair that differ *only* in option order and must produce different
+output.
+
+`vet` now reports **49 deps** (was 48): `src/lib/glob.cyr` is a new module in the closure.
+
 ## [1.4.0] - 2026-08-26 — `grep` context
 
 Opens the **1.4.x pattern-and-text arc**, and the first feature release since the 1.3.x discoverability

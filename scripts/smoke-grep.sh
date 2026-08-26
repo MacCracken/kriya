@@ -358,6 +358,69 @@ z_same "-HZ"            -HZ MATCH ctx.txt
 z_same "-HnZ keeps :"   -HnZ MATCH ctx.txt
 z_same "-HZ with -C1"   -HZ -C1 MATCH ctx.txt
 
+# --- ⭐ --include / --exclude, against GNU -------------------------------
+#
+# ⛔ THREE RULES HERE ARE NOT WHAT A CAREFUL READING WOULD GUESS. The first
+# implementation of this filter got all three wrong AND passed a nine-case
+# test — because none of those cases discriminated them. Every case below is
+# chosen to fail if a rule is dropped.
+#
+#  1. PRECEDENCE IS RIGHTMOST-WINS, not "exclude beats include".
+#  2. THE DEFAULT FOR AN UNMATCHED NAME comes from the FIRST option's type, so
+#     `--exclude=zzz --include='*.c'` searches EVERYTHING while the same two
+#     options in the other order search only .c files.
+#  3. THE SUBJECT DIFFERS BY HOW THE FILE WAS REACHED: base name under -r
+#     descent, operand-as-typed plus every '/'-suffix on the command line.
+mkdir -p inc/sub
+printf 'hit\n' > inc/a.c; printf 'hit\n' > inc/b.h
+printf 'hit\n' > inc/sub/c.c; printf 'hit\n' > inc/sub/d.h
+
+inc_same() {
+    label=$1; shift
+    grc=0; g=$(cd inc && grep "$@" 2>&1 | sort) || grc=$?
+    krc=0; k=$(cd inc && "$BIN" grep "$@" 2>&1 | sort) || krc=$?
+    expect_eq "include: $label" "$g" "$k"
+    expect_eq "include: $label (exit)" "$grc" "$krc"
+}
+# 1 — rightmost wins. ⚠ The third case is the one that fails under an
+# "exclude always wins" implementation.
+inc_same "rightmost: inc exc inc"      -rl --include=*.h --exclude=a.c --include=*.c hit .
+inc_same "rightmost: inc then exc"     -rl --include=*.c --exclude=a.c hit .
+inc_same "rightmost: exc inc same glob" -rl --exclude=*.c --include=*.c hit .
+inc_same "rightmost: inc exc same glob" -rl --include=*.c --exclude=*.c hit .
+
+# 2 — default set by the FIRST option. ⚠ These two differ ONLY in order and
+# must produce different output; an implementation that ignores order passes
+# one and fails the other.
+inc_same "default from first: inc,exc" -rl --include=*.c --exclude=zzz hit .
+inc_same "default from first: exc,inc" -rl --exclude=zzz --include=*.c hit .
+
+# 3 — subject depends on how the file was reached.
+inc_same "operand: full path suffix"   --exclude=sub/c.c hit sub/c.c
+inc_same "operand: bare basename"      --exclude=c.c hit sub/c.c
+inc_same "operand: glob with slash"    --exclude=*/c.c hit sub/c.c
+inc_same "operand: non-suffix misses"  --exclude=sub hit sub/c.c
+inc_same "descent: slash never matches" -rl --include=sub/*.c hit .
+
+# Directories are exempt entirely — never pruned, always descended.
+inc_same "dirs exempt from --exclude"  -rl --exclude=sub hit .
+inc_same "dir operand still descended" -rl --include=*.c hit sub
+
+inc_same "repeatable includes OR"      -rl --include=*.c --include=*.h hit .
+inc_same "no filters"                  -rl hit .
+inc_same "all filtered out"            -rl --include=*.nomatch hit .
+
+# ⚠ stdin is never filtered, however aggressive the pattern.
+sg=$(echo hit | grep --exclude='*' hit) || true
+sk=$(echo hit | "$BIN" grep --exclude='*' hit) || true
+expect_eq "include: stdin is never filtered" "$sg" "$sk"
+
+# ⚠ Filtering happens AFTER the open attempt, so an excluded operand that
+# cannot be opened still reports and exits 2.
+grc=0; (cd inc && grep --exclude='nosuch.c' hit nosuch.c) >/dev/null 2>&1 || grc=$?
+krc=0; (cd inc && "$BIN" grep --exclude='nosuch.c' hit nosuch.c) >/dev/null 2>&1 || krc=$?
+expect_eq "include: excluded-but-missing operand still errors" "$grc" "$krc"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

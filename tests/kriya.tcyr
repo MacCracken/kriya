@@ -14,6 +14,12 @@ include "src/lib/exit.cyr"
 include "src/lib/errmsg.cyr"
 include "src/lib/sys.cyr"
 include "src/lib/path.cyr"
+# ⚠ M15e, PRE-EMPTIVELY. `src/cmd/find.cyr` (included below) now calls into
+# `src/lib/glob.cyr`, and cyrius only rejects REACHABLE undefined symbols — so
+# omitting this would stay green until something in the subset touched it. That
+# trap has fired three times; this include is added with the reference, not
+# after the build breaks.
+include "src/lib/glob.cyr"
 include "src/lib/fs.cyr"
 include "src/lib/protected.cyr"
 include "src/lib/args.cyr"
@@ -208,6 +214,49 @@ fn main() {
     assert_eq(path_is_under("/a/b", "/a"),      0, "parent is not under child");
     assert_eq(path_is_under("/a", "/b"),        0, "siblings are unrelated");
     assert_eq(path_is_under("/a", "/a/../b"),   0, ".. in the candidate normalizes out first");
+
+    # =================================================================
+    # glob_match — lifted out of find.cyr at 1.4.1 and shared with grep.
+    # ⭐ Being in src/lib/ is what makes it unit-testable at all: buried in
+    # find.cyr it could only ever be exercised end-to-end through `find -name`,
+    # so its bracket and backtracking edges had no direct coverage. Two callers
+    # with different needs (find sees one path COMPONENT, grep may see a whole
+    # path) is exactly when those edges start to matter.
+    # =================================================================
+    test_group("glob_match — literals, wildcards, brackets");
+    assert_eq(glob_match("abc", 3, "abc", 3),      1, "exact literal matches");
+    assert_eq(glob_match("abc", 3, "abd", 3),      0, "one byte different fails");
+    assert_eq(glob_match("", 0, "", 0),            1, "empty pattern matches empty text");
+    assert_eq(glob_match("", 0, "a", 1),           0, "empty pattern does not match text");
+    assert_eq(glob_match("*", 1, "", 0),           1, "* matches the empty string");
+    assert_eq(glob_match("*", 1, "anything", 8),   1, "* matches everything");
+    assert_eq(glob_match("*.c", 3, "main.c", 6),   1, "suffix glob");
+    assert_eq(glob_match("*.c", 3, "main.h", 6),   0, "suffix glob rejects");
+    assert_eq(glob_match("a?c", 3, "abc", 3),      1, "? matches exactly one");
+    assert_eq(glob_match("a?c", 3, "ac", 2),       0, "? does not match zero");
+    assert_eq(glob_match("a?c", 3, "abbc", 4),     0, "? does not match two");
+
+    test_group("glob_match — brackets");
+    assert_eq(glob_match("[abc]", 5, "b", 1),      1, "bracket set hit");
+    assert_eq(glob_match("[abc]", 5, "d", 1),      0, "bracket set miss");
+    assert_eq(glob_match("[a-z]", 5, "q", 1),      1, "range hit");
+    assert_eq(glob_match("[a-z]", 5, "Q", 1),      0, "range is byte-exact, not case-folded");
+    assert_eq(glob_match("[!a]", 4, "b", 1),       1, "negation admits others");
+    assert_eq(glob_match("[!a]", 4, "a", 1),       0, "negation rejects the listed byte");
+    assert_eq(glob_match("[a-", 3, "a", 1),        0, "unterminated bracket does not match");
+
+    test_group("glob_match — backtracking and slashes");
+    # ⚠ The backtrack path: a pattern that must retry the star repeatedly.
+    assert_eq(glob_match("*a*a*a*", 7, "aaa", 3),          1, "repeated stars backtrack");
+    assert_eq(glob_match("*a*a*a*", 7, "aa", 2),           0, "backtracking still rejects");
+    assert_eq(glob_match("*x", 2, "aaaaaaaaaaaaaaaax", 17), 1, "long text, trailing anchor");
+    # ⛔ `*` CROSSES `/`. Correct for `find -name`, which is handed a single path
+    # component, and it is what lets a `grep --include` pattern containing a
+    # slash match against a whole path. A caller wanting segment-awareness must
+    # split the path itself — the matcher does not do it for them.
+    assert_eq(glob_match("*.c", 3, "sub/main.c", 10),      1, "* crosses a slash");
+    assert_eq(glob_match("sub/*.c", 7, "sub/main.c", 10),  1, "pattern may contain a slash");
+    assert_eq(glob_match("a/*", 3, "a/b/c", 5),            1, "* spans multiple segments");
 
     return assert_summary();
 }

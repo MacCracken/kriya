@@ -1,0 +1,134 @@
+# glob.cyr — fnmatch-style glob matching, shared.
+#
+# ⭐ LIFTED OUT OF `src/cmd/find.cyr` AT 1.4.1 so `grep --include`/`--exclude`
+# uses the SAME matcher `find -name` does. Two implementations of "does this
+# name match this pattern" in one binary is two sets of edge cases to keep in
+# agreement, and the pair would drift silently — a `[a-z]` range or a `[!x]`
+# negation behaving differently in `find` than in `grep` is the kind of thing
+# nobody notices until it matters.
+#
+# ⚠ This is a PURE matcher: bytes in, 0/1 out. It touches no filesystem and
+# knows nothing about paths — deciding whether to hand it a basename or a whole
+# path is the CALLER's business, and `find` and `grep` answer that differently.
+# That is why it does not live in `path.cyr`, whose header promises the same
+# purity but whose subject is path *structure*.
+#
+# Supports `*` (zero or more), `?` (exactly one), and brackets `[abc]`,
+# `[a-z]`, `[!abc]`. ⚠ `*` crosses `/` freely — there is no path-segment
+# awareness here, which is correct for `find -name` (it sees one component) and
+# is what lets `grep --include` match a pattern containing a slash against a
+# whole path.
+#
+# Iterative with backtrack-on-`*` to keep the stack flat: a pathological pattern
+# like `*a*a*a*` against a long name must not recurse.
+
+fn glob_match(pat, plen, text, tlen): i64 {
+    var pi: i64 = 0;
+    var ti: i64 = 0;
+    var star_pi: i64 = 0 - 1;
+    var star_ti: i64 = 0;
+    while (ti <= tlen) {
+        # ⛔ SUCCESS IS CHECKED FIRST. It used to be tested only at the BOTTOM of
+        # the loop, after the failure branch had already returned — so the one
+        # case that consumes no input, an empty pattern against empty text,
+        # fell through to `return 0`. POSIX `fnmatch("", "", 0)` MATCHES
+        # (verified against libc), and a pattern that is exhausted exactly when
+        # the text is has matched by definition. No live caller passes an empty
+        # pattern — `find -name ''` and `grep --include=` both match nothing
+        # because no file has an empty name — but a shared matcher should hold
+        # its contract at the edges, not just where today's callers stand.
+        if (pi == plen) {
+            if (ti == tlen) { return 1; }
+        }
+        var matched: i64 = 0;
+        if (pi < plen) {
+            var pc = load8(pat + pi);
+            if (pc == 42) {
+                star_pi = pi;
+                star_ti = ti;
+                pi = pi + 1;
+                matched = 1;
+            } elif (pc == 91) {
+                # bracket: scan for matching ']'
+                if (ti >= tlen) {
+                    # no char to match
+                } else {
+                    var bi = pi + 1;
+                    var negate: i64 = 0;
+                    if (bi < plen) {
+                        if (load8(pat + bi) == 33) { negate = 1; bi = bi + 1; }
+                    }
+                    var tc = load8(text + ti);
+                    var hit: i64 = 0;
+                    var closed: i64 = 0;
+                    while (closed == 0) {
+                        if (bi >= plen) { closed = 0 - 1; }
+                        else {
+                            var bc = load8(pat + bi);
+                            if (bc == 93 && bi > pi + 1 + negate) {
+                                closed = 1;
+                            } else {
+                                # Check for range a-z
+                                if (bi + 2 < plen) {
+                                    if (load8(pat + bi + 1) == 45) {
+                                        if (load8(pat + bi + 2) != 93) {
+                                            var lo = bc;
+                                            var hi = load8(pat + bi + 2);
+                                            if (tc >= lo && tc <= hi) { hit = 1; }
+                                            bi = bi + 3;
+                                            continue;
+                                        }
+                                    }
+                                }
+                                if (bc == tc) { hit = 1; }
+                                bi = bi + 1;
+                            }
+                        }
+                    }
+                    if (closed == 1) {
+                        if (negate == 1) { hit = 1 - hit; }
+                        if (hit == 1) {
+                            pi = bi + 1;
+                            ti = ti + 1;
+                            matched = 1;
+                        }
+                    }
+                }
+            } elif (pc == 63) {
+                if (ti < tlen) {
+                    pi = pi + 1;
+                    ti = ti + 1;
+                    matched = 1;
+                }
+            } elif (pc == 92) {
+                # backslash: next char literal
+                if (pi + 1 < plen && ti < tlen) {
+                    if (load8(pat + pi + 1) == load8(text + ti)) {
+                        pi = pi + 2;
+                        ti = ti + 1;
+                        matched = 1;
+                    }
+                }
+            } else {
+                if (ti < tlen) {
+                    if (pc == load8(text + ti)) {
+                        pi = pi + 1;
+                        ti = ti + 1;
+                        matched = 1;
+                    }
+                }
+            }
+        }
+        if (matched == 0) {
+            if (star_pi >= 0) {
+                pi = star_pi + 1;
+                star_ti = star_ti + 1;
+                ti = star_ti;
+            } else {
+                return 0;
+            }
+        }
+        if (pi == plen && ti == tlen) { return 1; }
+    }
+    return 0;
+}

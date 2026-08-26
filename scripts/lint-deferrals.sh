@@ -64,9 +64,13 @@ if [ -n "$missing" ]; then
 fi
 
 if [ "$fail" -gt 0 ]; then
-    printf '\nlint-deferrals: %s untracked deferral(s).\n' "$fail" >&2
-    printf 'Each must either cross-reference a roadmap/CHANGELOG entry, or be marked #skip-lint\n' >&2
-    printf 'when the words appear in an explanation rather than deferring anything.\n' >&2
+    # ⚠ Two rules share this counter, so the summary must not name only one of
+    # them — it used to say "untracked deferral(s)" for a line-length warning,
+    # which sent a reader looking for a deferral that was not there.
+    printf '\nlint-deferrals: %s problem(s) above.\n' "$fail" >&2
+    printf '  deferral   — cross-reference a roadmap/CHANGELOG entry, or mark #skip-lint when\n' >&2
+    printf '               the words appear in an explanation rather than deferring anything.\n' >&2
+    printf '  line >120  — wrap it. Mark #skip-lint only when the length is ONE string literal.\n' >&2
     exit 1
 fi
 
