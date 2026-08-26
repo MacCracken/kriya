@@ -68,7 +68,17 @@ expect_eq "-c"             "$(wc -c simple)"    "$($BIN wc -c simple)"
 # multibyte; with LANG/LC_ALL unset it silently degrades to counting BYTES, so this line compared
 # kriya's (correct) 12 against GNU's byte count of 14 and reported kriya as broken. kriya decodes
 # UTF-8 unconditionally and has no locale to degrade to — the test was wrong, not the code.
-expect_eq "-m UTF-8"       "$(LC_ALL=C.UTF-8 wc -m utf8)" "$($BIN wc -m utf8)"
+# ⚠ Same oracle-capability guard as smoke-cut.sh. `wc -m` has counted
+# characters for far longer than `cut -c` has, so this has never fired — but an
+# unusable UTF-8 locale degrades it to a BYTE count with no diagnostic, and then
+# this assertion blames kriya for the host. ⭐ kriya's own answer is asserted
+# unconditionally below: POSIX defines it, so it holds with or without an oracle.
+expect_eq "-m counts characters (POSIX)" "12 utf8" "$($BIN wc -m utf8)"
+if [ "$(printf 'a\303\251\n' | LC_ALL=C.UTF-8 wc -m 2>/dev/null | tr -d ' ')" = "3" ]; then
+    expect_eq "-m UTF-8 vs GNU" "$(LC_ALL=C.UTF-8 wc -m utf8)" "$($BIN wc -m utf8)"
+else
+    echo "note: this GNU wc -m counts bytes here — character comparison skipped"
+fi
 expect_eq "-c UTF-8"       "$(wc -c utf8)"      "$($BIN wc -c utf8)"
 expect_eq "-L max-line"    "$(wc -L simple)"    "$($BIN wc -L simple)"
 

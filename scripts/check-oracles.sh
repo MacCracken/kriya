@@ -68,14 +68,39 @@ check grep "GNU grep"
 check find "GNU findutils"
 check xargs "GNU findutils"
 
-# ⚠ Not an oracle, but the suite depends on it: GNU `wc -m` counts CHARACTERS
-# only in a multibyte locale, and glibc's setlocale fails SILENTLY when the named
-# locale is absent — degrading the oracle to a byte count with no diagnostic.
-if locale -a 2>/dev/null | grep -qiE '^C\.utf-?8$'; then
-    note "C.UTF-8" "present (wc -m oracle is character-accurate)"
+# ⛔ CAPABILITY IS PROBED BY BEHAVIOUR, NOT BY NAME. This used to check that a
+# locale called `C.UTF-8` appeared in `locale -a`, which is a proxy for the
+# thing that matters and not the thing itself — and the proxy held while the
+# property did not. CI went red on `smoke-cut.sh` with this check passing,
+# because the runner's coreutils is **9.4**, and `cut -c` only became
+# multibyte-aware in **9.5**: no locale would have fixed it.
+#
+# ⚠ An unusable locale ALSO degrades silently — `LC_ALL=invalid.locale cut -c2`
+# emits the lead byte with no diagnostic at all — so the two failure modes are
+# indistinguishable from the outside and a single behavioural probe covers both.
+#
+# ⚠ These are NOT failures. An older GNU is a legitimate host; it just limits
+# which comparisons are possible, and the affected suites asserted kriya against
+# POSIX instead. Reported so a reader knows which coverage was available.
+echo
+echo "oracle capability (informational — affects which comparisons run):"
+
+probe_mb() {   # probe_mb <label> <expected-hex> <cmd...>
+    _lbl=$1; _want=$2
+    shift 2                      # ⚠ without this, "$@" still holds the label
+    got=$(printf 'a\303\251\n' | LC_ALL=C.UTF-8 "$@" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    if [ "$got" = "$_want" ]; then
+        note "$_lbl" "multibyte-capable"
+    else
+        note "$_lbl" "BYTE-BASED here (pre-9.5 coreutils, or no usable UTF-8 locale)"
+    fi
+}
+probe_mb "cut -c"  "c3a90a" cut -c2
+mb_wc=$(printf 'a\303\251\n' | LC_ALL=C.UTF-8 wc -m 2>/dev/null | tr -d ' ')
+if [ "$mb_wc" = "3" ]; then
+    note "wc -m" "counts characters"
 else
-    note "C.UTF-8" "ABSENT — GNU wc -m will silently count BYTES, not characters"
-    fail=$((fail + 1))
+    note "wc -m" "counts BYTES here (got $mb_wc, expected 3: a + é + newline) — character comparisons unavailable"
 fi
 
 if [ "$fail" -gt 0 ]; then

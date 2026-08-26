@@ -120,13 +120,58 @@ printf 'aébc\n'        > mb.txt
 printf 'a\377bc\n'     > mbbad.txt
 printf 'ae\314\201b\n' > mbcomb.txt
 printf '日本語x\n'      > mbcjk.txt
+printf 'x\300\200y\n'         > mbover2.txt
+printf 'x\340\200\200y\n'     > mbover3.txt
+printf 'x\355\240\200y\n'     > mbsurr.txt
+printf 'x\364\220\200\200y\n' > mbrange.txt
+printf 'x\370\200\200\200\200y\n' > mbfive.txt
+printf 'x\346\227y\n'         > mbtrunc.txt
 
+# ⛔ GNU IS ONLY AN ORACLE HERE IF IT CAN COUNT CHARACTERS AT ALL. `cut -c`
+# gained multibyte support in coreutils 9.5; 9.4 — which Ubuntu 24.04 ships, and
+# which CI runs — is byte-based no matter the locale, and an unavailable locale
+# degrades to the same thing silently. This suite went red on CI for exactly
+# that reason while being correct locally: the same shape as the `find -exec`
+# argv[0] incident, where the LOCAL GNU's version decided whether a test passed.
+#
+# ⭐ So the oracle is PROBED, not assumed — and, more importantly, kriya's
+# behaviour is asserted against POSIX rather than against whichever GNU is
+# installed. POSIX says `-c` selects CHARACTERS; that is a specification, and
+# `cut -c2` on `aébc` must yield the two-byte é on every host. The absolute
+# assertions below therefore keep their teeth on an old-GNU runner, and the
+# GNU comparison is an extra check where it can be had.
+MB_ORACLE=no
+if [ "$(printf 'aé\n' | LC_ALL=C.UTF-8 cut -c2 2>/dev/null | od -An -tx1 | tr -d ' ')" = "c3a90a" ]; then
+    MB_ORACLE=yes
+fi
+[ "$MB_ORACLE" = "yes" ] || echo "note: this GNU cut is byte-based (pre-9.5 or no UTF-8 locale) — comparing kriya against POSIX only"
+
+# Assert kriya's own bytes, always. `want` is an `od -An -tx1` hex string.
+mb_is() {
+    label=$1; want=$2; shift 2
+    got=$("$BIN" cut "$@" 2>&1 | od -An -tx1 | tr -s ' ' | sed 's/^ //;s/ $//')
+    expect_eq "multibyte: $label" "$want" "$got"
+}
+
+# Compare against GNU too, but only where GNU can actually do the job.
 mb_same() {
     label=$1; shift
+    [ "$MB_ORACLE" = "yes" ] || return 0
     g=$(LC_ALL=C.UTF-8 cut "$@" 2>&1 | od -An -c) || true
     k=$("$BIN" cut "$@" 2>&1 | od -An -c) || true
-    expect_eq "multibyte: $label" "$g" "$k"
+    expect_eq "multibyte vs GNU: $label" "$g" "$k"
 }
+# ⭐ POSIX absolutes — these hold on ANY host, old GNU or none at all.
+mb_is "-c2 is the whole é"        "61 c3 a9 62 63 0a" -c1-5 mb.txt
+mb_is "-c2 alone"                 "c3 a9 0a"          -c2 mb.txt
+mb_is "-b2 is one byte"           "c3 0a"             -b2 mb.txt
+mb_is "-c1,3 skips the é"         "61 62 0a"          -c1,3 mb.txt
+mb_is "-c CJK second char"        "e6 9c ac 0a"       -c2 mbcjk.txt
+mb_is "-c invalid byte passes"    "ff 0a"             -c2 mbbad.txt
+mb_is "-c combining mark alone"   "cc 81 0a"          -c3 mbcomb.txt
+mb_is "-c overlong is 2 chars"    "c0 0a"             -c2 mbover2.txt
+mb_is "-c surrogate is 3 chars"   "ed 0a"             -c2 mbsurr.txt
+
 mb_same "-c2 takes the whole é"   -c2 mb.txt
 mb_same "-b2 still takes a byte"  -b2 mb.txt
 mb_same "-c1-2 range"             -c1-2 mb.txt
@@ -153,12 +198,6 @@ mb_same "-c after a combiner"     -c4 mbcomb.txt
 # ⚠ These sequences are structurally valid UTF-8; only their VALUE is illegal,
 # which is why shape-checking alone let them through and why a fixture of
 # ordinary text can never catch it.
-printf 'x\300\200y\n'         > mbover2.txt
-printf 'x\340\200\200y\n'     > mbover3.txt
-printf 'x\355\240\200y\n'     > mbsurr.txt
-printf 'x\364\220\200\200y\n' > mbrange.txt
-printf 'x\370\200\200\200\200y\n' > mbfive.txt
-printf 'x\346\227y\n'         > mbtrunc.txt
 mb_same "overlong 2-byte C0 80"   -c2 mbover2.txt
 mb_same "overlong 3-byte E0 80"   -c2 mbover3.txt
 mb_same "UTF-16 surrogate ED A0"  -c2 mbsurr.txt

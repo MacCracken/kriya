@@ -98,13 +98,44 @@ what GNU does and the only thing it could mean.
 ⚠ kriya exits 2 on that refusal where GNU exits 1 — ADR 0008's usage-error policy, pre-existing:
 `tr abc` with a missing SET2 already differs the same way.
 
+### Fixed — ⛔ the new `cut` tests went red on CI while being correct locally
+
+**`cut -c` only became multibyte-aware in coreutils 9.5.** My local build is 9.11; the CI runner ships
+**9.4**, where `-c` is byte-based no matter the locale. So the twelve GNU comparisons I used to justify
+this feature asserted **my machine's coreutils version**, and CI failed on all nine multibyte cases with
+GNU returning lead bytes.
+
+⛔ **This is the `find -exec` argv[0] incident again** — a GNU-parity test that passes because of the
+*local GNU's version* rather than because kriya is right. The lesson had been written down twice and
+the mechanism still got past me a third time.
+
+⚠ An unusable UTF-8 locale degrades identically and silently: `LC_ALL=invalid.locale cut -c2` emits the
+lead byte with **no diagnostic at all**, so the two causes are indistinguishable from outside.
+
+⭐ **The fix is not to skip — it is to assert the specification.** POSIX says `-c` selects *characters*,
+so `cut -c2` on `aébc` must yield the two-byte é on every host regardless of what GNU is installed.
+`smoke-cut.sh` now carries **nine POSIX absolutes** that hold everywhere, and *additionally* compares
+against GNU only after probing that GNU can actually do the job. Verified against a shimmed byte-based
+`cut`: the suite prints an honest note, skips the 20 comparisons, and still runs 40 assertions.
+
+⛔ **`check-oracles.sh` should have caught this and could not**, because it tested a locale *name* —
+a proxy for the property rather than the property. It now **probes behaviour**: it runs GNU on a known
+two-byte character and reports whether `cut -c` and `wc -m` are actually character-capable. ⚠ Reported,
+not failed: an older GNU is a legitimate host; it only limits which comparisons are possible.
+
+⚠ Two bugs in that probe on the way, both caught before shipping: the helper never `shift`ed, so `"$@"`
+still held the label and expected value, and `wc -m` counts the trailing newline (`a` + `é` + `\n` = 3,
+not 2). `smoke-wc.sh` got the same guard — it has never fired, since `wc -m` has been multibyte far
+longer than `cut -c`, but it carried the identical latent shape.
+
 ### Tests
 
-**3,922 smoke cases across 37 scripts** (up from 3,889), 143 unit + 18 POSIX, fuzz green under poison,
+**3,932 smoke cases across 37 scripts** (up from 3,889), 143 unit + 18 POSIX, fuzz green under poison,
 four lints clean, both targets build.
 
-`smoke-cut.sh` gains 13 multibyte cases and `smoke-tr.sh` 13 set-syntax cases, all diffed as `od -c`
-byte dumps against GNU. ⚠ `smoke-tr.sh`'s existing `compare` helper builds its command with `eval`,
+`smoke-cut.sh` gains 20 multibyte cases and `smoke-tr.sh` 13 set-syntax cases. ⚠ Verified under **both**
+oracle conditions — 3,932 cases with a multibyte-capable GNU, **3,912 with a byte-based one**, which is
+what CI actually has. ⚠ `smoke-tr.sh`'s existing `compare` helper builds its command with `eval`,
 which cannot carry a set containing `[`, `*` or `=` safely — the new cases pass argv directly so a set
 is never re-parsed by a shell.
 
