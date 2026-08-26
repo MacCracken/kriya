@@ -484,7 +484,7 @@ fn cmd_xargs(start: i64): i64 {
         _xa_report("error: bad option (see ADR 0002 for accepted syntax)");
         return EXIT_USAGE;
     }
-    _xa_path_env = getenv("PATH");
+    _xa_path_env = kriya_getenv("PATH");
     _xa_env_vec = 0;
 
     var zero_mode = flags_get_bool(_xa_spec, _xa_zero_idx);

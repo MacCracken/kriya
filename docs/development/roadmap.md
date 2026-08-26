@@ -142,39 +142,18 @@ kriya's dependency closure for niyama.
 - ✅ **1.5.1 — `ls` sort keys** (shipped). `-t` and `-S`, descending with a name tie-break,
   nanosecond precision, rightmost-of-`-t`/`-S` wins. ⭐ The insertion sort became a merge sort in
   the same pass: 8,000 entries went 0.755 s → 0.022 s (GNU 0.004 s).
-- **1.5.2 — `ls --color`.** ⚠ Split out of 1.5.1 once measured, because the roadmap's description —
-  "a per-type table and tty detection" — does not survive contact with GNU. **Everything below was
-  measured, so this starts from data:**
-  - ⛔ **There is NO per-type table to ship.** With `LS_COLORS` unset, `ls --color=always` emits no
-    escapes at all; there is no compiled-in default. The table IS the environment variable, so
-    shipping a built-in one would make kriya colour where GNU does not.
-  - **Precedence, verified**: `tw`/`ow`/`st` override `di`; for regular files `su`/`sg`/`ex` beat an
-    extension match, which beats `fi`. An executable `run.c` takes `ex`; a non-executable `plain.c`
-    takes `*.c`.
-  - ⚠ **Extension matching has a case-folding subtlety**: `*.c` alone also matches `t.C`, but
-    defining both `*.c` and `*.C` makes each match its own case exactly.
-  - `ln=target` renders a symlink as its TARGET's type. Niche; decide whether to honour it.
-  - ⛔ A malformed `LS_COLORS` makes GNU print diagnostics (`ls: unrecognized prefix: 'zz'`) and
-    then disable colour ENTIRELY. Decide whether kriya matches that or refuses more quietly.
-  - **Emission is exact**: a leading `ESC[0m` ONCE per run (not per line), then
-    `ESC[` code `m` name `ESC[0m`; the `-F` indicator sits OUTSIDE the escape; symlink targets in
-    `-l` are left uncoloured.
-  - ⭐ **Escapes do NOT count toward column width** — verified in a pty at 40 columns.
-  - ⚠ **GNU pads with a TAB when not colouring and with SPACES when colouring.** kriya always uses
-    spaces, so the tab case is a pre-existing divergence (below) that this release has to settle
-    anyway.
-  - `--color=auto` colours iff stdout is a tty; ⚠ `TERM=dumb` does NOT disable it, which is worth
-    knowing because it is the obvious wrong guess. `k_isatty` returns 0 on agnos, so `=auto` means
-    no colour there — the same "fallback is the normal path" shape as `userdb`.
-  - ⛔ **THE CONSTRAINT THAT MAY DECIDE THE DESIGN: kriya's `getenv` cannot read a real
-    `LS_COLORS` reliably.** See the M11 entry below — an 8 KB scan window versus a ~1.9 KB variable
-    whose position in the environment is not under kriya's control. ⚠ This puts the two obvious
-    designs in direct tension: honouring `LS_COLORS` matches GNU but is position-dependent and
-    SILENT when it fails, while a built-in table is reliable but colours where GNU emits nothing.
-    Settle that in the ADR; do not pick one without naming the other.
-  - ⚠ **ADR question**: colour is the first kriya feature whose OUTPUT FORMAT is driven by an
-    environment variable, which sits against ADR 0002's "behaviour is a function of the command
-    line". Settle it in the ADR, do not let it pass unremarked.
+- ✅ **1.5.2 — `ls --color`** (shipped). `--color=WHEN` with `LS_COLORS`, GNU's compiled-in defaults,
+  extension patterns, the full type precedence, and tty detection for `=auto`. ⭐ Enabled by
+  `src/lib/env.cyr`, which removed an 8 KB cliff in kriya's environment lookup that was also
+  silently breaking **PATH** in `which`/`xargs`/`find`.
+  - ⚠ **One measured gap remains**: `no=` (the "normal" key) positions its prefix at the START OF
+    THE LINE — before the `-l` columns and before the `-i` inode — where kriya emits it before the
+    NAME. 140 of 2,500 pathological comparisons; **zero** on realistic input, because a real
+    `dircolors -b` never emits `no=`. Closing it means moving the prefix from the name to the line.
+  - ⛔ **1.5.1's note here claimed "there is NO per-type table to ship". That was half wrong.** With
+    `LS_COLORS` unset there are no escapes at all — but set it to any valid key and GNU loads a
+    compiled-in default table and overlays the variable. Both halves are needed. Left recorded
+    because the wrong half was written down with as much confidence as the right one.
 - ⛔ **Two pre-existing `ls` divergences found while measuring 1.5.1**, both confirmed against the
   1.4.4 binary and neither caused by it:
   - **`ls -d` with no operand lists the directory's CONTENTS**; GNU lists `.`. Small and clearly
@@ -339,8 +318,11 @@ zero-behaviour-change; the third is a correctness gap and is not filed yet.
   `src/cmd/nl.cyr:_nl_rx_unsupported` into a shared lib so all three utilities read one list —
   do NOT copy it. Closing it upstream deletes the guard rather than growing it.
 
-- **stdlib `getenv` silently misses variables past 8 KB** — ⚠ upstream Cyrius, and a LIVE latent bug
-  in shipped behaviour rather than a future concern. `io.cyr` reads `/proc/self/environ` into an
+- **stdlib `getenv` silently misses variables past 8 KB** — ⚠ upstream Cyrius. ⭐ **WORKED AROUND
+  kriya-side at 1.5.2** by `src/lib/env.cyr`, which reads `/proc/self/environ` into a HEAP buffer with
+  no window and delegates to the stdlib on agnos; all five kriya call sites now use it. Still worth
+  filing upstream, since every other Cyrius program has the same cliff. What follows is the original
+  finding, kept because it is the evidence: `io.cyr` reads `/proc/self/environ` into an
   8 KB buffer and scans only what fits (agnos instead caps at 256 envp entries). Demonstrated with
   kriya's existing `COLUMNS` read, 40 directories, a 9 KB variable:
   `env COLUMNS=80 BIG=<9KB> kriya ls` columns correctly, `env BIG=<9KB> COLUMNS=80 kriya ls`

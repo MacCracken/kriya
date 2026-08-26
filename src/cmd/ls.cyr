@@ -62,6 +62,7 @@ var _ls_i_idx  = 0;
 var _ls_n_idx  = 0;
 var _ls_t_idx  = 0;
 var _ls_S_idx  = 0;
+var _ls_color_idx = 0;
 var _ls_d_idx  = 0;
 var _ls_R_idx  = 0;
 var _ls_w_idx  = 0;
@@ -80,6 +81,7 @@ fn _ls_init_spec(): i64 {
     _ls_n_idx = flags_add_bool(s, 110, "numeric-uid-gid", 0, "list numeric uid/gid, never names");
     _ls_t_idx = flags_add_bool(s, 116, "",                0, "sort by modification time, newest first");
     _ls_S_idx = flags_add_bool(s, 83,  "",                0, "sort by size, largest first");
+    _ls_color_idx = flags_add_str(s, 0, "color", 0, "colourise output: always|auto|never");
     _ls_d_idx = flags_add_bool(s, 100, "directory",       0, "list dir operands as entries, not contents");
     _ls_R_idx = flags_add_bool(s, 82,  "recursive",       0, "descend into subdirectories");
     _ls_w_idx = flags_add_int(s, 119, "width",            0, "assume terminal width COLS (0 = auto)");
@@ -157,12 +159,17 @@ var _ls_stat_failed = 0;
 var _ls_numeric = 0;
 
 fn _ls_rec_new(name_cstr): i64 {
-    var rec = alloc(168);
+    var rec = alloc(184);
     store64(rec, name_cstr);
     store64(rec + 152, 0);
     store64(rec + 160, 0);          # 1 = stat failed; fields are unknown
+    store64(rec + 168, 0);          # 1 = symlink whose target does not resolve
+    store64(rec + 176, 0);          # colour code for the -l link TARGET, or 0
     return rec;
 }
+
+fn _ls_rec_broken(rec): i64     { return load64(rec + 168); }
+fn _ls_rec_tgt_code(rec): i64   { return load64(rec + 176); }
 
 fn _ls_rec_bad(rec): i64        { return load64(rec + 160); }
 fn _ls_rec_set_bad(rec): i64    { store64(rec + 160, 1); return 0; }
@@ -454,12 +461,413 @@ fn _ls_emit_suffix(st): i64 {
 
 # Read and cache the symlink target into the record (for -l rendering).
 fn _ls_load_link_target(parent_dirfd, rec): i64 {
+    # ⛔ Also decide whether the link is BROKEN, because `or` needs it and this
+    # is the only place with both the dirfd and the name. ⚠ Gated on colour
+    # being active AND `or` actually being set: it costs one extra stat per
+    # symlink, and the non-colour path should not pay for a colour feature.
+    # ⛔ `or` or `mi` being COLOURABLE is the switch that makes GNU stat the
+    # target — and, having stat'd it, colour the `-l` target text by the
+    # TARGET's own type. ⚠ Neither `mi=00` nor `mi=` counts, and a real
+    # `dircolors -b` emits no `mi` at all; but it DOES emit `or`, so this is an
+    # ordinary-user path rather than an exotic one.
+    if (_ls_color == 1) {
+        # ⚠ SET, not colourable: `or=0` still makes GNU stat the target and
+        # colour it, even though `or=0` does not colour the link NAME.
+        var want: i64 = 0;
+        if (_ls_code(LSK_OR) != 0) { want = 1; }
+        if (_ls_code(LSK_MI) != 0) { want = 1; }
+        if (want == 1) {
+            var tst[FS_STAT_BUFSZ];
+            # flags 0 = FOLLOW, the opposite of `fs_lstat_at`'s 256.
+            #ifndef CYRIUS_TARGET_AGNOS
+            if (syscall(262, parent_dirfd, _ls_rec_name(rec), &tst, 0) != 0) {
+                store64(rec + 168, 1);
+                # ⚠ A MISSING target takes `mi` when set and falls back to `or`
+                # — not to nothing. With `or=31` and no `mi`, GNU paints the
+                # target text `31` just like the link name.
+                var mc2 = _ls_code(LSK_MI);
+                if (mc2 == 0) { mc2 = _ls_code(LSK_OR); }
+                store64(rec + 176, mc2);
+            } else {
+                store64(rec + 176, _ls_color_for_stat(&tst, _ls_rec_name(rec), 0, 0));
+            }
+            #endif
+        }
+    }
     if (_ls_rec_link_target(rec) != 0) { return 0; }
     var buf = alloc(4096);
     var n = fs_readlinkat(parent_dirfd, _ls_rec_name(rec), buf, 4095);
     if (n < 0) { return n; }
     store8(buf + n, 0);
     _ls_rec_set_link_target(rec, buf);
+    return 0;
+}
+
+# --- colour (1.5.2) ----------------------------------------------------
+#
+# ⛔ THERE IS A BUILT-IN TABLE, AND IT IS GATED ON LS_COLORS BEING NON-EMPTY.
+# This took two passes to get right and the first reading was wrong. With
+# `LS_COLORS` unset or empty, GNU's `ls --color=always` emits NO escapes at all
+# — which looks exactly like "there is no default table". But set it to any
+# valid key at all, even one that colours nothing (`rs=0`), and directories
+# come out `01;34`: the compiled-in defaults are loaded and the variable is
+# overlaid on top. So kriya needs both the table AND the gate.
+#
+# ⚠ `dircolors -p` is NOT the source of those defaults and disagrees with them:
+# it gives `BLK 40;33;01` and `FIFO 40;33` where `ls`'s own defaults are `01;33`
+# and `33`. The values below were measured out of `ls` itself, on stock
+# coreutils 9.4 in a container as well as 9.11 here.
+#
+# ⚠ Reading it needs `kriya_getenv`, not the stdlib's: a `dircolors -b` value is
+# ~1.9 KB and the stdlib scans only the first 8 KB of the environment, so
+# whether the variable was found would depend on where the shell placed it.
+# See `src/lib/env.cyr`.
+
+enum LsColorWhen {
+    LS_CW_NEVER  = 0;
+    LS_CW_ALWAYS = 1;
+    LS_CW_AUTO   = 2;
+}
+
+# Type keys, in the order `_ls_color_for` tests them.
+enum LsColorKey {
+    LSK_RS = 0;    # reset (the lazy leading prefix)
+    LSK_NO = 1;    # normal — the fallback for anything unmatched
+    LSK_FI = 2;    # regular file
+    LSK_DI = 3;    # directory
+    LSK_LN = 4;    # symlink
+    LSK_PI = 5;    # fifo
+    LSK_SO = 6;    # socket
+    LSK_BD = 7;    # block device
+    LSK_CD = 8;    # char device
+    LSK_OR = 9;    # orphaned (broken) symlink
+    LSK_MI = 10;   # missing target
+    LSK_EX = 11;   # executable
+    LSK_SU = 12;   # setuid
+    LSK_SG = 13;   # setgid
+    LSK_ST = 14;   # sticky
+    LSK_OW = 15;   # other-writable
+    LSK_TW = 16;   # sticky AND other-writable
+    LSK_COUNT = 17;
+}
+
+var _ls_color      = 0;   # 1 = emit escapes
+var _ls_color_init = 0;   # 0 = LS_COLORS not parsed yet
+var _ls_ckey       = 0;   # LSK_COUNT slots: code cstring, or 0
+var _ls_cext       = 0;   # 2 slots per entry: extension cstring, code cstring
+var _ls_cext_n     = 0;
+var _ls_color_lead = 0;   # 1 = the leading reset has been emitted
+
+# Map a two-letter LS_COLORS key to an LSK_* slot, or (0 - 1).
+fn _ls_ckey_index(a, b): i64 {
+    if (a == 114) { if (b == 115) { return LSK_RS; } }   # rs
+    if (a == 110) { if (b == 111) { return LSK_NO; } }   # no
+    if (a == 102) { if (b == 105) { return LSK_FI; } }   # fi
+    if (a == 100) { if (b == 105) { return LSK_DI; } }   # di
+    if (a == 108) { if (b == 110) { return LSK_LN; } }   # ln
+    if (a == 112) { if (b == 105) { return LSK_PI; } }   # pi
+    if (a == 115) { if (b == 111) { return LSK_SO; } }   # so
+    if (a == 98)  { if (b == 100) { return LSK_BD; } }   # bd
+    if (a == 99)  { if (b == 100) { return LSK_CD; } }   # cd
+    if (a == 111) { if (b == 114) { return LSK_OR; } }   # or
+    if (a == 109) { if (b == 105) { return LSK_MI; } }   # mi
+    if (a == 101) { if (b == 120) { return LSK_EX; } }   # ex
+    if (a == 115) { if (b == 117) { return LSK_SU; } }   # su
+    if (a == 115) { if (b == 103) { return LSK_SG; } }   # sg
+    if (a == 115) { if (b == 116) { return LSK_ST; } }   # st
+    if (a == 111) { if (b == 119) { return LSK_OW; } }   # ow
+    if (a == 116) { if (b == 119) { return LSK_TW; } }   # tw
+    return 0 - 1;
+}
+
+# Parse LS_COLORS once. ⚠ Parsed IN PLACE in a private copy: each `=` and `:`
+# becomes a NUL so keys and values are plain cstrings pointing into it.
+fn _ls_color_load(): i64 {
+    if (_ls_color_init == 1) { return 0; }
+    _ls_color_init = 1;
+    _ls_ckey = alloc(LSK_COUNT * 8);
+    var z: i64 = 0;
+    while (z < LSK_COUNT) {
+        store64(_ls_ckey + z * 8, 0);
+        z = z + 1;
+    }
+    var env = kriya_getenv("LS_COLORS");
+    if (env == 0) { return 0; }
+    var n = strlen(env);
+    if (n == 0) { return 0; }
+    # ⭐ Non-empty: load the compiled-in defaults, then let the variable
+    # overlay them. ⚠ `fi`, `or`, `mi` and `no` default to UNSET, not to a
+    # code — a plain file is uncoloured, and a broken symlink falls through to
+    # `ln`, which is why `or` looks like it defaults to `01;36`.
+    store64(_ls_ckey + LSK_RS * 8, "0");
+    store64(_ls_ckey + LSK_DI * 8, "01;34");
+    store64(_ls_ckey + LSK_LN * 8, "01;36");
+    store64(_ls_ckey + LSK_SO * 8, "01;35");
+    store64(_ls_ckey + LSK_PI * 8, "33");
+    store64(_ls_ckey + LSK_BD * 8, "01;33");
+    store64(_ls_ckey + LSK_CD * 8, "01;33");
+    store64(_ls_ckey + LSK_EX * 8, "01;32");
+    store64(_ls_ckey + LSK_SU * 8, "37;41");
+    store64(_ls_ckey + LSK_SG * 8, "30;43");
+    store64(_ls_ckey + LSK_ST * 8, "37;44");
+    store64(_ls_ckey + LSK_OW * 8, "34;42");
+    store64(_ls_ckey + LSK_TW * 8, "30;42");
+    var buf = alloc(n + 1);
+    memcpy(buf, env, n + 1);
+    # Worst case every item is an extension.
+    _ls_cext = alloc((n + 1) * 16);
+    var i: i64 = 0;
+    while (i <= n) {
+        # One item spans [i, e) where e is the next `:` or the end.
+        var e = i;
+        var scan: i64 = 1;
+        while (scan == 1) {
+            if (e >= n) { scan = 0; }
+            elif (load8(buf + e) == 58) { scan = 0; }
+            else { e = e + 1; }
+        }
+        if (e > i) {
+            # Split on the first `=`.
+            var q = i;
+            var eqp: i64 = 0 - 1;
+            while (q < e) {
+                if (load8(buf + q) == 61) {
+                    if (eqp < 0) { eqp = q; }
+                }
+                q = q + 1;
+            }
+            if (eqp > i) {
+                store8(buf + eqp, 0);
+                store8(buf + e, 0);
+                var key = buf + i;
+                var val = buf + eqp + 1;
+                if (load8(key) == 42) {
+                    # `*.ext=CODE` — the pattern includes the dot.
+                    store64(_ls_cext + _ls_cext_n * 16, key + 1);
+                    store64(_ls_cext + _ls_cext_n * 16 + 8, val);
+                    _ls_cext_n = _ls_cext_n + 1;
+                } else {
+                    var ki = _ls_ckey_index(load8(key), load8(key + 1));
+                    # ⚠ An unknown two-letter key is IGNORED rather than fatal.
+                    # GNU prints a diagnostic and disables colour entirely; kriya
+                    # ignores the item and colours the rest (roadmap 1.5.3).
+                    if (ki >= 0) {
+                        if (load8(key + 2) == 0) { store64(_ls_ckey + ki * 8, val); }
+                    }
+                }
+            }
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+
+fn _ls_code(k): i64 {
+    if (_ls_ckey == 0) { return 0; }
+    return load64(_ls_ckey + k * 8);
+}
+
+# ⛔ GNU's `is_colored()`: a code of "", "0" or "00" counts as NOT coloured.
+# ⚠ AND IT GATES ONLY THE SUB-TYPE SELECTION, not the lookup — that distinction
+# took a fuzz to find. `di=0` still emits `ESC[0m` around a directory, but
+# `ow=0` falls THROUGH to `di`, because the other-writable branch asks
+# `is_colored(ow)` before choosing it. Same for `st`/`tw`, for `su`/`sg`/`ex` on
+# a regular file, and for the `no` prefix. Filtering it inside `_ls_code`
+# instead — the obvious place — makes `di=0` print an uncoloured name.
+fn _ls_is_colored(k): i64 {
+    var c = _ls_code(k);
+    if (c == 0) { return 0; }
+    var l = strlen(c);
+    if (l == 0) { return 0; }
+    if (l == 1) {
+        if (load8(c) == 48) { return 0; }
+    }
+    if (l == 2) {
+        if (load8(c) == 48) {
+            if (load8(c + 1) == 48) { return 0; }
+        }
+    }
+    return 1;
+}
+
+# Does `name` end with `ext`? `fold` = 1 compares case-insensitively.
+fn _ls_ext_match(name, ext, fold): i64 {
+    var nl = strlen(name);
+    var el = strlen(ext);
+    if (el == 0) { return 0; }
+    if (el > nl) { return 0; }
+    var i: i64 = 0;
+    while (i < el) {
+        var a = load8(name + nl - el + i);
+        var b = load8(ext + i);
+        if (fold == 1) {
+            a = icase_to_lower(a);
+            b = icase_to_lower(b);
+        }
+        if (a != b) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ⚠ Exact case first, then case-insensitive. Measured: `*.c` alone also matches
+# `t.C`, but defining BOTH `*.c` and `*.C` makes each match its own case — which
+# is exactly what a two-pass exact-then-folded search produces.
+# ⚠ The LAST match in LS_COLORS order wins, not the first and not the longest:
+# with `*.tar.gz=01;32:*.gz=33`, GNU colours `t.tar.gz` with `33`. Exact case is
+# still preferred over a folded match, which is what makes `*.c` alone match
+# `t.C` while defining both `*.c` and `*.C` keeps each exact.
+fn _ls_ext_code(name): i64 {
+    var found: i64 = 0;
+    var i: i64 = 0;
+    while (i < _ls_cext_n) {
+        if (_ls_ext_match(name, load64(_ls_cext + i * 16), 0) == 1) {
+            found = load64(_ls_cext + i * 16 + 8);
+        }
+        i = i + 1;
+    }
+    if (found != 0) { return found; }
+    i = 0;
+    while (i < _ls_cext_n) {
+        if (_ls_ext_match(name, load64(_ls_cext + i * 16), 1) == 1) {
+            found = load64(_ls_cext + i * 16 + 8);
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
+# Which colour code applies to this entry, or 0 for none.
+#
+# ⛔ The precedence is measured, not guessed: `tw`/`ow`/`st` override `di`, and
+# for a regular file `su`/`sg`/`ex` beat an EXTENSION match, which beats `fi`.
+# An executable `run.c` takes `ex`; a non-executable `plain.c` takes `*.c`.
+fn _ls_color_for(rec): i64 {
+    return _ls_color_for_stat(_ls_rec_st(rec), _ls_rec_name(rec),
+                              _ls_rec_bad(rec), _ls_rec_broken(rec));
+}
+
+fn _ls_color_for_stat(st, name, bad, broken): i64 {
+    var mode = load64(st + 24);
+    if (bad == 1) {
+        var mc = _ls_code(LSK_MI);
+        if (mc != 0) { return mc; }
+        return _ls_code(LSK_OR);
+    }
+    if (fs_is_dir(st) == 1) {
+        var other_w: i64 = 0;
+        if ((mode & 2) != 0) { other_w = 1; }
+        var sticky: i64 = 0;
+        if ((mode & 512) != 0) { sticky = 1; }
+        if (other_w == 1) {
+            if (sticky == 1) {
+                if (_ls_is_colored(LSK_TW) == 1) { return _ls_code(LSK_TW); }
+            }
+            if (_ls_is_colored(LSK_OW) == 1) { return _ls_code(LSK_OW); }
+        } elif (sticky == 1) {
+            if (_ls_is_colored(LSK_ST) == 1) { return _ls_code(LSK_ST); }
+        }
+        return _ls_code(LSK_DI);
+    }
+    if (fs_is_lnk(st) == 1) {
+        # ⚠ `or` applies only when it is SET *and* the target does not resolve.
+        # Unset, a broken link takes `ln` like any other — which is why `or`
+        # appears to default to `01;36`.
+        if (broken == 1) {
+            if (_ls_is_colored(LSK_OR) == 1) { return _ls_code(LSK_OR); }
+        }
+        return _ls_code(LSK_LN);
+    }
+    # ⚠ `fs.cyr` exposes predicates for reg/dir/lnk only, so the remaining
+    # types are tested against `FS_S_IFMT` directly rather than adding four
+    # one-line helpers for a single caller.
+    var ty = mode & FS_S_IFMT;
+    if (ty == FS_S_IFIFO) { return _ls_code(LSK_PI); }
+    if (ty == FS_S_IFSOCK) { return _ls_code(LSK_SO); }
+    if (ty == FS_S_IFBLK) { return _ls_code(LSK_BD); }
+    if (ty == FS_S_IFCHR) { return _ls_code(LSK_CD); }
+    if ((mode & 2048) != 0) {
+        if (_ls_is_colored(LSK_SU) == 1) { return _ls_code(LSK_SU); }
+    }
+    if ((mode & 1024) != 0) {
+        if (_ls_is_colored(LSK_SG) == 1) { return _ls_code(LSK_SG); }
+    }
+    if ((mode & 73) != 0) {
+        if (_ls_is_colored(LSK_EX) == 1) { return _ls_code(LSK_EX); }
+    }
+    var xc = _ls_ext_code(name);
+    if (xc != 0) { return xc; }
+    return _ls_code(LSK_FI);
+}
+
+# Emit one entry's NAME, wrapped in its colour when one applies.
+#
+# ⚠ The leading reset is LAZY — emitted once, before the first COLOURED entry,
+# and never at all if nothing is coloured. Measured: listing only plain files
+# with `di` set produces no escape bytes whatsoever. `rs=` overrides its code.
+# ⚠ The `-F` type indicator is written by the CALLER, after this returns, which
+# is what puts it OUTSIDE the escape exactly as GNU does.
+# ⚠ Cyrius string literals have no octal escape: `"\033["` is NOT `ESC [`, it is
+# a NUL followed by `3`. The byte is built explicitly instead — caught by a
+# byte-exact comparison against GNU, which is the only kind that would.
+fn _ls_emit_csi(): i64 {
+    var b[2];
+    store8(&b, 27);
+    k_write( 1, &b, 1);
+    k_write( 1, "[", 1);
+    return 0;
+}
+
+fn _ls_emit_name(rec): i64 {
+    var name = _ls_rec_name(rec);
+    var nlen = strlen(name);
+    if (_ls_color == 0) {
+        k_write( 1, name, nlen);
+        return 0;
+    }
+    var code = _ls_color_for(rec);
+    if (code == 0) {
+        # ⚠ The `no` fallback takes the same `is_colored` gate: `no=0` means the
+        # entry is left PLAIN, not wrapped in `ESC[0m`.
+        if (_ls_is_colored(LSK_NO) == 1) { code = _ls_code(LSK_NO); }
+    }
+    if (code == 0) {
+        k_write( 1, name, nlen);
+        return 0;
+    }
+    if (_ls_color_lead == 0) {
+        _ls_color_lead = 1;
+        _ls_emit_csi();
+        var rs = _ls_code(LSK_RS);
+        if (rs != 0) { k_write( 1, rs, strlen(rs)); }
+        else { k_write( 1, "0", 1); }
+        k_write( 1, "m", 1);
+    }
+    # ⛔ When `no` (normal) is set, GNU restores it and then CLEARS before
+    # applying the entry's own colour: `ESC[<no>m ESC[m ESC[<code>m name`.
+    # ⚠ An entry that takes `no` ITSELF gets no such prefix — just `no`. The
+    # empty `ESC[m` in the middle is not a typo; it is what GNU writes.
+    var nc = _ls_code(LSK_NO);
+    if (_ls_is_colored(LSK_NO) == 1) {
+        if (code != nc) {
+            _ls_emit_csi();
+            k_write( 1, nc, strlen(nc));
+            k_write( 1, "m", 1);
+            _ls_emit_csi();
+            k_write( 1, "m", 1);
+        }
+    }
+    _ls_emit_csi();
+    k_write( 1, code, strlen(code));
+    k_write( 1, "m", 1);
+    k_write( 1, name, nlen);
+    # ⚠ The trailing reset uses `rs` too when it is set: with `rs=99`, GNU
+    # closes with `ESC[99m`, not `ESC[0m`.
+    _ls_emit_csi();
+    var rs2 = _ls_code(LSK_RS);
+    if (rs2 != 0) { k_write( 1, rs2, strlen(rs2)); }
+    else { k_write( 1, "0", 1); }
+    k_write( 1, "m", 1);
     return 0;
 }
 
@@ -697,7 +1105,7 @@ fn _ls_collect(dir_path, all_mode, almost_all): i64 {
 fn _ls_term_width(): i64 {
     var wf = flags_get_int(_ls_spec, _ls_w_idx);
     if (wf > 0) { return wf; }
-    var ce = getenv("COLUMNS");
+    var ce = kriya_getenv("COLUMNS");
     if (ce != 0) {
         var cw = atoi(ce);
         if (cw > 0) { return cw; }
@@ -835,8 +1243,7 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width): i64 {
                     _ls_emit_dec_padded(load64(st + 8), ino_w);
                     k_write( 1, " ", 1);
                 }
-                var name = _ls_rec_name(rec);
-                k_write( 1, name, strlen(name));
+                _ls_emit_name(rec);
                 if (F_mode == 1) { _ls_emit_suffix(st); }
                 if (k2 < last_k) {
                     var pad = load64(colw + k2 * 8) - load64(ew + idx * 8);
@@ -880,7 +1287,7 @@ fn _ls_print_simple(entries, F_mode, inode_mode): i64 {
             _ls_emit_dec_padded(load64(st + 8), ino_w);
             k_write( 1, " ", 1);
         }
-        k_write( 1, name, strlen(name));
+        _ls_emit_name(rec);
         if (F_mode == 1) { _ls_emit_suffix(st); }
         k_write( 1, "\n", 1);
         i = i + 1;
@@ -968,13 +1375,27 @@ fn _ls_print_long(entries, human, F_mode, inode_mode, numeric): i64 {
             k_write( 1, " ", 1);
             _ls_emit_mtime(load64(st + 88));
         }
-        k_write( 1, name, strlen(name));
-        # Symlink target.
+        _ls_emit_name(rec);
+        # Symlink target. ⚠ Left UNCOLOURED, matching GNU: with `fi` set, the
+        # name after `->` still prints plain.
         if (fs_is_lnk(st) == 1) {
             var tgt = _ls_rec_link_target(rec);
             if (tgt != 0) {
                 k_write( 1, " -> ", 4);
-                k_write( 1, tgt, strlen(tgt));
+                var tc = _ls_rec_tgt_code(rec);
+                if (tc == 0) {
+                    k_write( 1, tgt, strlen(tgt));
+                } else {
+                    _ls_emit_csi();
+                    k_write( 1, tc, strlen(tc));
+                    k_write( 1, "m", 1);
+                    k_write( 1, tgt, strlen(tgt));
+                    _ls_emit_csi();
+                    var trs = _ls_code(LSK_RS);
+                    if (trs != 0) { k_write( 1, trs, strlen(trs)); }
+                    else { k_write( 1, "0", 1); }
+                    k_write( 1, "m", 1);
+                }
             }
         }
         if (F_mode == 1) { _ls_emit_suffix(st); }
@@ -1060,7 +1481,7 @@ fn _ls_print_entry(name, st_buf, long_mode, human, F_mode, inode_mode): i64 {
 
 fn cmd_ls(start: i64): i64 {
     _ls_init_spec();
-    if (kriya_args_parse(_ls_spec, start) != 0) {
+    if (kriya_args_parse_optval(_ls_spec, start, 0, "color") != 0) {
         k_write( 2, "kriya ls: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
         return EXIT_USAGE;
     }
@@ -1085,6 +1506,33 @@ fn cmd_ls(start: i64): i64 {
         long_mode = 1;
     }
     _ls_sortkey = _ls_pick_sortkey();
+    # ⚠ `--color` takes an OPTIONAL value: bare means `always`. GNU also accepts
+    # `yes`/`force`, `tty`/`if-tty` and `no`/`none` as aliases.
+    var cw = LS_CW_NEVER;
+    var cv = flags_get_str(_ls_spec, _ls_color_idx);
+    if (cv != 0) {
+        if (load8(cv) == 0)              { cw = LS_CW_ALWAYS; }
+        elif (streq(cv, "always") == 1)  { cw = LS_CW_ALWAYS; }
+        elif (streq(cv, "yes") == 1)     { cw = LS_CW_ALWAYS; }
+        elif (streq(cv, "force") == 1)   { cw = LS_CW_ALWAYS; }
+        elif (streq(cv, "auto") == 1)    { cw = LS_CW_AUTO; }
+        elif (streq(cv, "tty") == 1)     { cw = LS_CW_AUTO; }
+        elif (streq(cv, "if-tty") == 1)  { cw = LS_CW_AUTO; }
+        elif (streq(cv, "never") == 1)   { cw = LS_CW_NEVER; }
+        elif (streq(cv, "no") == 1)      { cw = LS_CW_NEVER; }
+        elif (streq(cv, "none") == 1)    { cw = LS_CW_NEVER; }
+        else {
+            k_write( 2, "kriya ls: error: invalid --color argument\n", 42);
+            return EXIT_USAGE;
+        }
+    }
+    if (cw == LS_CW_ALWAYS) { _ls_color = 1; }
+    if (cw == LS_CW_AUTO) {
+        # ⚠ agnos has no tty concept and `k_isatty` returns 0 there, so `=auto`
+        # means no colour on that target — the fallback IS the normal path.
+        if (k_isatty(1) == 1) { _ls_color = 1; }
+    }
+    if (_ls_color == 1) { _ls_color_load(); }
     var d_mode: i64 = 0;
     if (flags_get_bool(_ls_spec, _ls_d_idx) == 1) { d_mode = 1; }
     var R_mode: i64 = 0;

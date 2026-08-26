@@ -1144,7 +1144,7 @@ fn cmd_find(start: i64): i64 {
     # first call returns the right value, subsequent calls see /proc/
     # self/environ as empty). Caching the heap copy once at startup
     # sidesteps it.
-    _f_path_env = getenv("PATH");
+    _f_path_env = kriya_getenv("PATH");
 
     var total = kriya_argv_count();
     # Build a private flat argv view of argv[start..].

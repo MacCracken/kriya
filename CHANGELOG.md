@@ -6,6 +6,85 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.5.2] - 2026-08-26 — `ls --color`, and the environment stops having a cliff
+
+### Added — `src/lib/env.cyr`, which had to come first
+
+⛔ **kriya's environment lookup silently missed anything past 8 KB, and `LS_COLORS` is ~1.9 KB.**
+The stdlib `getenv` reads `/proc/self/environ` into an 8 KB **stack** buffer and scans only what
+fits, so whether a variable is found depends on where the shell happened to put it. ⚠ **That is not
+an oversight upstream** — `io.cyr` documents the reason: a function-local `var[8192]` still reserves
+stack in the prologue even when the agnos path returns first, and agnos hands ring-3 only ~12 KB of
+init stack. The constraint is real; it simply does not apply to a **heap** buffer, which is what
+kriya now uses. On agnos there is no `/proc` and the stdlib reads the init-stack envp with no
+window, so that path delegates unchanged.
+
+⛔ **Five call sites were affected and `COLUMNS` was the least of them**: `which`, `xargs` and
+`find` all look up **PATH**. Demonstrated against the shipped 1.5.1 binary:
+
+    env BIG=<9KB> PATH=/usr/bin  kriya-1.5.1 which ls   -> (nothing)
+    env BIG=<9KB> PATH=/usr/bin  kriya-1.5.2 which ls   -> /usr/bin/ls
+    env BIG=<9KB> PATH=/usr/bin  /usr/bin/which ls      -> /usr/bin/ls
+
+A command silently not found, with no diagnostic. Filed at M11 as an upstream gap; fixed here
+because the fix belongs on kriya's side of the line.
+
+### Added — `--color=WHEN` with LS_COLORS
+
+`--color[=always|yes|force|auto|tty|if-tty|never|no|none]`; bare `--color` means `always`; an
+invalid value is a usage error. `--color=auto` colours iff stdout is a tty — verified in both
+directions under a real pty. ⚠ `k_isatty` returns 0 on agnos, so `=auto` means no colour there.
+
+⛔ **THE HEADLINE FINDING FROM 1.5.1 WAS HALF WRONG, AND CHECKING IT IS WHY THIS RELEASE IS RIGHT.**
+That entry recorded "there is NO per-type table to ship" because `LS_COLORS` unset produces no
+escapes at all. True — and it is not the whole rule. Set `LS_COLORS` to any valid key, even one that
+colours nothing (`rs=0`), and directories come out `01;34`: GNU loads a **compiled-in default table**
+and overlays the variable on top. So kriya needs both the table **and** the gate; shipping either
+half alone produces plausible output that is wrong in one direction.
+
+⚠ **`dircolors -p` is NOT the source of those defaults and disagrees with them** — it gives
+`BLK 40;33;01` and `FIFO 40;33` where `ls`'s own defaults are `01;33` and `33`. The values shipped
+were measured out of `ls` itself, on stock coreutils 9.4 in a container as well as 9.11 here.
+
+Rules that a careful reading would have got wrong, each found by differential fuzzing:
+
+- ⛔ **A code of `""`, `"0"` or `"00"` means NOT COLOURED — but it gates only the SUB-TYPE
+  selection, not the lookup.** `di=0` still emits `ESC[0m` around a directory, while `ow=0` falls
+  THROUGH to `di`. Filtering it in the obvious place (the lookup) breaks the first case.
+- ⛔ **Extension matching prefers an exact-case match and otherwise takes the LAST** — `*.c` alone
+  matches `t.C`, but defining both `*.c` and `*.C` makes each exact.
+- ⛔ **A broken symlink's `-l` TARGET is coloured, gated on `or` or `mi` being SET** (not
+  colourable — `or=0` still enables it), and a missing target takes `mi` if set, else **`or`**.
+- ⚠ The leading `ESC[0m` is emitted **lazily**: once, before the first coloured entry, and not at
+  all if nothing is coloured. `rs=` overrides it, at both ends.
+- ⚠ The `-F` indicator sits OUTSIDE the escape, and `TERM=dumb` does NOT disable colour.
+- ⚠ **Cyrius string literals have no octal escape**: `"\033["` is a NUL followed by `3`, not
+  `ESC [`. Caught only because the comparison was byte-exact.
+
+⭐ **2,500 randomised differential comparisons against GNU with realistic `dircolors`-shaped values
+— zero divergences.** The fuzz drove the whole implementation: it went 378 → 87 → 42 → 35 → 4 → 0,
+and every drop was a rule above that inspection had missed.
+
+### ⚠ One measured gap, deliberately not closed
+
+⛔ **`no=` (the "normal" key) positions its prefix at the START OF THE LINE**, before the `-l`
+columns and before the `-i` inode — kriya emits it before the NAME. On pathological input the
+residual is 140 of 2,500; on realistic input it is **zero**, because ⚠ **a real `dircolors -b` never
+emits `no=` at all** (verified on both coreutils versions). Closing it means moving the prefix from
+the name to the line, which is a larger change than the key justifies. Recorded on the roadmap with
+the measurement rather than left to be rediscovered.
+
+### Release totals
+
+**4,373 smoke cases across 38 scripts** (up from 4,346) — `smoke-ls.sh` 81 → **105**. 322 unit;
+18 POSIX; fuzz green under poison; four lints clean; both targets build. `vet` reports **53 deps**
+(new `src/lib/env.cyr`). Binary 1,059,680 → 1,072,424 bytes (+12,744).
+
+⭐ **The `k_write` length lint caught one of my own off-by-ones again — fourth release running.**
+
+⭐ **Verified inside the `ubuntu:24.04` container as a non-root user** — 38 scripts, 0 failures,
+4,351 cases.
+
 ## [1.5.1] - 2026-08-26 — `ls -t` / `-S`, and the sort stops being quadratic
 
 ### Added — `-t` (mtime) and `-S` (size) sort keys

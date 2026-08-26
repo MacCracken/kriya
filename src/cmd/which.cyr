@@ -91,7 +91,7 @@ fn _wh_emit(path, term_byte): i64 {
 # matches are still counted so the caller can return the right exit
 # code.
 fn _wh_search_path(program, all_mode, silent, term_byte): i64 {
-    var path_env = getenv("PATH");
+    var path_env = kriya_getenv("PATH");
     if (path_env == 0)        { return 0; }
     if (load8(path_env) == 0) { return 0; }
 

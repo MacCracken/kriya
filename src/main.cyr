@@ -11,6 +11,8 @@ include "src/version_str.cyr"
 include "src/lib/exit.cyr"
 include "src/lib/errmsg.cyr"
 include "src/lib/sys.cyr"
+# ⚠ after sys.cyr: env.cyr uses k_open/k_read/k_close.
+include "src/lib/env.cyr"
 include "src/lib/path.cyr"
 include "src/lib/glob.cyr"
 include "src/lib/str.cyr"

@@ -390,6 +390,77 @@ expect_eq "sort: mixed operands, whole output" \
     "$(cd secdir && ls -1 s3 ../sortdir/s_big s1 2>&1)" \
     "$(cd secdir && "$BIN" ls -1 s3 ../sortdir/s_big s1 2>&1)"
 
+# --- --color (1.5.2) ---------------------------------------------------
+#
+# ⛔ LS_COLORS IS SET EXPLICITLY ON EVERY CASE, never inherited. It is set in an
+# interactive shell and unset in CI, so a test that relied on the ambient value
+# would colour here and print plain text on the runner — or vice versa.
+#
+# ⛔ And the gate matters as much as the table: with LS_COLORS UNSET or EMPTY,
+# GNU emits NO escapes at all even under `--color=always`. Set it to any valid
+# key and the compiled-in DEFAULTS load and the variable overlays them. Both
+# halves are asserted, because implementing only one produces plausible output
+# that is wrong in one direction.
+mkdir -p cdir && cd cdir && mkdir -p sub && : > plain && : > runme && chmod +x runme
+ln -s plain ok_link && ln -s /nonexistent-target bad_link && cd ..
+
+col_same() {
+    label=$1; lsc=$2; shift 2
+    g=$(cd cdir && LS_COLORS="$lsc" ls --color=always "$@" 2>&1 | od -An -c)
+    k=$(cd cdir && LS_COLORS="$lsc" "$BIN" ls --color=always "$@" 2>&1 | od -An -c)
+    expect_eq "color: $label" "$g" "$k"
+}
+CB='di=01;34:ln=01;36:ex=01;32'
+col_same "types"              "$CB" -1 -d sub runme ok_link plain
+col_same "-F outside escape"  "$CB" -1 -F -d sub runme
+col_same "extension"          "di=01;34:*.c=01;33" -1 -d plain sub
+col_same "defaults via rs=0"  "rs=0" -1 -d sub runme ok_link
+col_same "di override"        "di=01;35" -1 -d sub
+col_same "or on a broken link" "or=01;31:ln=01;36" -1 -d bad_link
+# ⚠ Only the text AFTER `->` is compared: kriya's `-l` date column is ISO+UTC
+# by design (ADR 0007), so a whole-line compare would fail on the date rather
+# than on the colour under test.
+lt_g=$(cd cdir && LS_COLORS='or=01;31' ls --color=always -l -d bad_link | sed 's/^.* -> //' | od -An -c)
+lt_k=$(cd cdir && LS_COLORS='or=01;31' "$BIN" ls --color=always -l -d bad_link | sed 's/^.* -> //' | od -An -c)
+expect_eq "color: or colours the -l target" "$lt_g" "$lt_k"
+col_same "zero code falls through" "ow=0:di=01;34" -1 -d sub
+# ⛔ The gate: unset and empty must produce NO escapes at all.
+gu=$(cd cdir && env -u LS_COLORS ls --color=always -1 -d sub plain | od -An -c)
+ku=$(cd cdir && env -u LS_COLORS "$BIN" ls --color=always -1 -d sub plain | od -An -c)
+expect_eq "color: LS_COLORS unset emits nothing" "$gu" "$ku"
+col_same "LS_COLORS empty"    "" -1 -d sub plain
+# ⚠ ...and it must really be nothing, not merely equal — a pair of
+# both-broken implementations would pass the comparison above.
+case "$ku" in
+    *033*) FAIL=$((FAIL + 1)); printf 'FAIL color: unset LS_COLORS still emitted an escape\n' >&2 ;;
+    *)     PASS=$((PASS + 1)) ;;
+esac
+
+# --color=never / the default must never colour.
+col_never=$(cd cdir && LS_COLORS="$CB" "$BIN" ls --color=never -1 -d sub | od -An -c)
+case "$col_never" in
+    *033*) FAIL=$((FAIL + 1)); printf 'FAIL color: --color=never emitted an escape\n' >&2 ;;
+    *)     PASS=$((PASS + 1)) ;;
+esac
+col_default=$(cd cdir && LS_COLORS="$CB" "$BIN" ls -1 -d sub | od -An -c)
+case "$col_default" in
+    *033*) FAIL=$((FAIL + 1)); printf 'FAIL color: default emitted an escape\n' >&2 ;;
+    *)     PASS=$((PASS + 1)) ;;
+esac
+# ⚠ `--color=auto` off a tty is the CI condition and must be plain.
+col_auto=$(cd cdir && LS_COLORS="$CB" "$BIN" ls --color=auto -1 -d sub | od -An -c)
+case "$col_auto" in
+    *033*) FAIL=$((FAIL + 1)); printf 'FAIL color: --color=auto coloured off a tty\n' >&2 ;;
+    *)     PASS=$((PASS + 1)) ;;
+esac
+# Aliases and a bad value.
+for w in always yes force auto tty if-tty never no none; do
+    rc=0; (cd cdir && LS_COLORS="$CB" "$BIN" ls --color=$w -1 -d sub) >/dev/null 2>&1 || rc=$?
+    expect_eq "color: --color=$w accepted" "0" "$rc"
+done
+rc=0; (cd cdir && "$BIN" ls --color=bogus -1 -d sub) >/dev/null 2>&1 || rc=$?
+expect_eq "color: --color=bogus is a usage error" "2" "$rc"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"
