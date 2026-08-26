@@ -111,16 +111,16 @@ kriya's dependency closure for niyama.
   SET1 is two bytes) and `uniq -i` does not fold non-ASCII. kriya matches both. Changing either would
   **diverge from GNU and silently alter existing scripts**, so it is sovereign design needing its own
   ADR — not a gap. ⚠ Do not re-add them to this arc as if they were unfinished.
-- **1.4.4 — `nl` sections, and `echo -e`/`-E`.** ⚠ Split out of 1.4.3, where `uniq --group` shipped
-  alone. `nl` section delimiters (`-d`/`-h`/`-f`/`-l`/`-p`) and `-b pREGEX` are a release of their own:
-  three numbering styles across header/body/footer, delimiter-line detection, and a regex whose
-  DIALECT needs the same scrutiny `find -regex` got — GNU's `nl -b p` dialect must be measured, not
-  assumed, before a line of it is written. ⛔ `echo -e`/`-E` is small but has its own trap: POSIX
-  `echo` has no `-e` and prints operands literally, XSI says escapes are ALWAYS interpreted, and the
-  SHELL BUILTIN most scripts actually hit differs from `/usr/bin/echo` — so establish which one kriya
-  is matching before choosing. ⚠ `\c` is the escape with the surprising effect.
-- ⚠ Also here: the **BRE `-i` bracket-class quirk** in `grep`, catalogued in the M7 POSIX audit and
-  never chased down.
+- ⛔ **`nl -b pBRE`'s GNU-only operators are a NON-GOAL here — the gap is upstream.** Shipped at
+  1.4.4 with `\+ \? \| \b \B \w \W \s \S` REFUSED at parse time, because niyama compiles them
+  clean and then matches nothing: the failure mode is a wrong line number, not an error. The fix
+  belongs to niyama (**M11**, third item), and closing it there deletes `_nl_rx_unsupported` rather
+  than growing it. ⚠ Do not re-implement these inside `nl`.
+- **1.4.5 — the BRE `-i` bracket-class quirk** in `grep`, catalogued in the M7 POSIX audit and never
+  chased down. ⚠ The last item in this arc, and the one with the least written down about it — start
+  by reproducing it against GNU rather than reading the audit note, since 1.4.2 and 1.4.4 both found
+  a local GNU that disagreed with CI's. ⭐ `nl`'s guard is the shape to reach for if niyama turns out
+  to be silently wrong here too: refuse loudly rather than answer wrongly.
 
 ---
 
@@ -269,13 +269,21 @@ real script usage rather than guesswork. That last one may resequence every arc 
 
 ### M11 — Cyrius proposal sweeps
 
-Gated on upstream acceptance, not kriya work. Both filed 2026-05-17; both zero-behaviour-change.
+Gated on upstream acceptance, not kriya work. The first two were filed 2026-05-17 and are both
+zero-behaviour-change; the third is a correctness gap and is not filed yet.
 
 - **`2026-05-17-octal-literal-syntax`** — sweep decimal POSIX-mode constants (`511 # 0o777`) back to
   octal. Files: `mkdir.cyr`, `touch.cyr`, `fs.cyr`, `protected.cyr`.
 - **`2026-05-17-syscalls-at-family-stdlib`** — sweep raw `syscall(N, …)` sites to named `sys_*at`
   wrappers. Files: `touch.cyr`, `ln.cyr`, `fs.cyr`. ⚠ Re-verified at pin 6.5.35: still absent, so the
   gate is real.
+- **niyama BRE is missing the GNU operators** — ⛔ NOT YET FILED, unlike the two above; filing it is
+  the next step. `\+` `\?` `\|` `\b` `\B` `\w` `\W` `\s` `\S` all compile clean and then match
+  NOTHING. ⚠ The failure mode is a WRONG ANSWER, not an error: `kriya grep -c 'a\+b'` returns 0
+  where GNU returns 3. Measured at pin 6.5.35; `\<` `\>` `\{n,m\}` `\(…\)` `[[:class:]]` do work.
+  `nl -b pBRE` (1.4.4) REFUSES these operators rather than mis-number lines, and `grep` still returns
+  the wrong count silently — closing this upstream fixes both, and lets `_nl_rx_unsupported` be
+  deleted rather than maintained.
 
 ⛔ **Related and NOT gated: kriya has 46 raw numeric syscalls, and every number is x86_64-only.**
 Found at 1.3.3 while resolving cyrlint's raw-`getdents` note. The numbers genuinely differ:

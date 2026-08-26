@@ -1,20 +1,14 @@
 # echo — POSIX `echo(1)`: print operands separated by spaces, then \n.
 #
-# kriya recognises a leading `-n` operand as "suppress trailing newline"
-# (BSD / GNU / bash convention). Only the literal token `-n` counts;
-# `-nn`, `-en`, `--` and friends are data, not flags. This matches GNU
-# echo's quirk: option scanning stops at the first non-`-n` operand.
+# kriya recognises a leading cluster of `-n`, `-e` and `-E` as options
+# (BSD / GNU / bash convention); the first token that is not such a
+# cluster ends option scanning and everything after it is data. POSIX
+# itself marks the meaning of a leading `-n` as implementation-defined
+# and gives XSI implementations the opposite escape default, so which
+# `echo` kriya matches is a decision rather than a reading — see
+# ADR 0011. The short answer: kriya matches GNU `/usr/bin/echo` in its
+# DEFAULT (non-XSI) mode, and `POSIXLY_CORRECT` does not flip it.
 #
-# POSIX itself marks the meaning of a leading `-n` as
-# implementation-defined; we document this as the kriya choice. `-e`
-# / `-E` (escape interpretation) are not implemented yet (roadmap 1.4.4).
-# ⭐ The blocker is gone: the C-string escape table LANDED in `src/lib/str.cyr`,
-# and `echo -e` is a `str_escape_decode` call with `STR_ESC_OCTAL_PREFIX |
-# STR_ESC_ALLOW_C` — the modes GNU echo uses. What remains is the ADR, and the
-# question it has to settle is not the decoding: POSIX echo has no `-e`, XSI
-# says escapes are ALWAYS interpreted, and the shell BUILTIN most scripts hit
-# differs from `/usr/bin/echo`. Which one kriya matches is the decision.
-
 # ⭐ The option table, and the parser's only source for it — see the note in
 # `src/cmd/date.cyr`. `echo` cannot use `flags_parse`: POSIX echo passes every
 # operand through untouched, so a leading `-` after the first operand is DATA,
@@ -25,8 +19,91 @@ fn _echo_init_spec(): i64 {
     if (_echo_spec != 0) { return 0; }
     var s = flags_new();
     flags_add_bool(s, 110, "", 0, "do not output the trailing newline");
+    flags_add_bool(s, 101, "", 0, "interpret backslash escapes");
+    flags_add_bool(s, 69,  "", 0, "do not interpret backslash escapes (default)");
     _echo_spec = s;
     return 0;
+}
+
+# Is `tok` an option cluster? ⚠ GNU's rule is all-or-nothing: the token must be
+# `-` followed by one or more characters that are EVERY one of them an option
+# letter. `-ne` is two options, `-ex` is the four-byte operand `-ex`, and a bare
+# `-` is the one-byte operand `-`. There is no `--` terminator: `echo -- x`
+# prints `-- x`. ⭐ The spec stays the only source of truth for which letters
+# qualify, so adding a flag to the table above is the whole change.
+fn _echo_is_cluster(tok): i64 {
+    if (load8(tok) != 45) { return 0; }
+    if (load8(tok + 1) == 0) { return 0; }
+    var i: i64 = 1;
+    var ok: i64 = 1;
+    var scanning: i64 = 1;
+    while (scanning == 1) {
+        var c = load8(tok + i);
+        if (c == 0) { scanning = 0; }
+        elif (kriya_short_type(_echo_spec, c) < 0) { ok = 0; scanning = 0; }
+        else { i = i + 1; }
+    }
+    return ok;
+}
+
+fn _echo_putc(c): i64 {
+    var b[2];
+    store8(&b, c);
+    k_write( 1, &b, 1);
+    return 0;
+}
+
+# The escape set for `echo -e`. ⚠ It is NOT printf's: `\0ddd` takes the octal
+# PREFIX rule (`\101` and `\0101` are both `A`), and `\"` is absent, so the
+# backslash survives. Both measured against GNU.
+fn _echo_esc_mode(): i64 {
+    return STR_ESC_OCTAL_PREFIX | STR_ESC_ALLOW_C | STR_ESC_ALLOW_X;
+}
+
+# Emit one operand with escapes interpreted. Returns 1 if `\c` was seen.
+#
+# ⛔ `\c` is not "stop this operand". It cancels the REST OF THE COMMAND —
+# the remainder of this string, every later operand, and the trailing
+# newline — and still exits 0. That is why the verdict is returned to the
+# caller instead of handled locally.
+#
+# Literal runs are written in one go rather than byte-at-a-time, so an
+# operand with no backslash in it costs exactly the one write it did before
+# `-e` existed.
+fn _echo_emit_escaped(arg): i64 {
+    var slen = strlen(arg);
+    var mode = _echo_esc_mode();
+    var esc[STR_ESC_OUT_SIZE];
+    var i: i64 = 0;
+    var run_start: i64 = 0;
+    var stopped: i64 = 0;
+    var scanning: i64 = 1;
+    while (scanning == 1) {
+        if (i >= slen) { scanning = 0; continue; }
+        if (load8(arg + i) != 92) { i = i + 1; continue; }
+        if (i > run_start) { k_write( 1, arg + run_start, i - run_start); }
+        var v = str_escape_decode(arg, i, slen, mode, &esc);
+        var n = load64(&esc + STR_ESC_O_LEN);
+        if (v == STR_ESC_STOP) {
+            stopped = 1;
+            scanning = 0;
+            i = slen;
+            run_start = slen;
+            continue;
+        }
+        if (v == STR_ESC_ERR) {
+            # `\x` with no hex digit after it. printf calls that an error;
+            # GNU echo prints the two bytes verbatim and carries on.
+            k_write( 1, arg + i, n);
+        } else {
+            if (v == STR_ESC_LITERAL) { _echo_putc(92); }
+            _echo_putc(load64(&esc + STR_ESC_O_BYTE));
+        }
+        i = i + n;
+        run_start = i;
+    }
+    if (i > run_start) { k_write( 1, arg + run_start, i - run_start); }
+    return stopped;
 }
 
 fn cmd_echo(start: i64): i64 {
@@ -36,36 +113,43 @@ fn cmd_echo(start: i64): i64 {
     var n = kriya_argv_count();
     var i = start;
     var omit_newline: i64 = 0;
+    var interpret: i64 = 0;
     var scanning: i64 = 1;
 
     while (scanning == 1) {
-        var consumed: i64 = 0;
-        if (i < n) {
-            var tok = argv(i);
-            if (load8(tok) == 45) {
-                # ⭐ Ask the spec which single letters are options. Still a
-                # one-letter-only test: POSIX echo takes no clustered or long
-                # options, and `-ne` is an operand, not two flags.
-                if (kriya_short_type(_echo_spec, load8(tok + 1)) >= 0) {
-                    if (load8(tok + 2) == 0) {
-                        omit_newline = 1;
-                        i = i + 1;
-                        consumed = 1;
-                    }
-                }
-            }
+        if (i >= n) { scanning = 0; continue; }
+        var tok = argv(i);
+        if (_echo_is_cluster(tok) == 0) { scanning = 0; continue; }
+        # ⚠ Applying the letters left to right IS the last-one-wins rule for
+        # `-e` / `-E`, and it holds across cluster boundaries as well as
+        # inside one: `-eE`, `-e -E` and `-E -e` all resolve the same way.
+        var j: i64 = 1;
+        while (load8(tok + j) != 0) {
+            var c = load8(tok + j);
+            if (c == 110) { omit_newline = 1; }
+            if (c == 101) { interpret = 1; }
+            if (c == 69)  { interpret = 0; }
+            j = j + 1;
         }
-        if (consumed == 0) { scanning = 0; }
+        i = i + 1;
     }
 
     var first = i;
+    var stopped: i64 = 0;
     while (i < n) {
+        if (stopped == 1) { i = n; continue; }
         var arg = argv(i);
         if (i > first) { k_write( 1, " ", 1); }
-        k_write( 1, arg, strlen(arg));
+        if (interpret == 1) {
+            stopped = _echo_emit_escaped(arg);
+        } else {
+            k_write( 1, arg, strlen(arg));
+        }
         i = i + 1;
     }
-    if (omit_newline == 0) { k_write( 1, "\n", 1); }
+    if (stopped == 0) {
+        if (omit_newline == 0) { k_write( 1, "\n", 1); }
+    }
     return EXIT_SUCCESS;
 }
 
@@ -74,9 +158,10 @@ fn cmd_echo(start: i64): i64 {
 # `--help=json` and `--list` alike.
 fn echo_help_declare(): i64 {
     help_begin("echo", "Print arguments separated by spaces.",
-               "echo [-n] [STRING...]");
+               "echo [-neE] [STRING...]");
     help_positional(0, HELP_POS_UNBOUNDED, "STRING");
     help_example("echo hello");
     help_example("echo -n no-newline");
+    help_example("echo -e 'col1\\tcol2'");
     return 0;
 }

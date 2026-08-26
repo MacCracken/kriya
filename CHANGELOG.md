@@ -6,12 +6,119 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
-## [Unreleased]
+## [1.4.4] - 2026-08-26 — `nl` sections, `echo -e`, and one escape table
+
+### Added — `echo -e` / `-E`
+
+⭐ **`echo` interprets backslash escapes on request**, built on the `str_escape_decode` table below
+rather than a third copy of it. ⛔ **The decision was never the decoding — it was WHICH `echo`**, and
+there are three incompatible answers: POSIX (non-XSI) prints operands literally and has no `-e`; XSI
+interprets escapes ALWAYS with no flag either way; and the shell BUILTIN most scripts actually reach
+is not one target either (`bash`'s defaults to escapes-off and honours `-e`, `dash`'s interprets
+always and has no `-e`). [ADR 0011](docs/adr/0011-echo-matches-the-non-xsi-binary-not-the-shell-builtin.md)
+records the pick: **kriya matches GNU `/usr/bin/echo`'s DEFAULT, non-XSI mode.**
+
+⛔ **`POSIXLY_CORRECT` deliberately does NOT flip kriya to XSI, and this is a measured deviation from
+GNU.** Under GNU's rule, exporting that variable for some *unrelated* utility silently turns every
+`echo -e` in the same shell into a command that prints `-e` as literal data — verified here:
+`POSIXLY_CORRECT=1 /usr/bin/echo -e 'x\ty'` emits `-e x<TAB>y`. The environment variable and the
+broken `echo` are usually in different files, which is the worst shape a bug can take. kriya keeps
+the command line as the only input to its behaviour, which is the property ADR 0002 exists to hold.
+
+Measured against GNU rather than assumed, and the surprises were real:
+
+- ⚠ **`\c` is not "stop this operand" — it cancels the REST OF THE COMMAND.** The remainder of the
+  string, **every later operand**, and the trailing newline, still exiting 0: `echo -e 'A\cB' SECOND
+  THIRD` prints exactly `A`. It cannot be a local `break` in a per-operand decoder.
+- ⚠ **The octal leading zero is OPTIONAL.** The grammar is backslash, an optional `0`, then one to
+  three octal digits — and the `0` does not count toward the three. `\101` and `\0101` are both `A`;
+  `\10` is a backspace. This is `%b`'s prefix rule, **not** the FORMAT rule.
+- ⛔ **`\"` is in `printf`'s table and NOT in `echo`'s.** `printf '\"'` emits `"`; `echo -e '\"'`
+  emits `\"`, backslash kept. A shared decoder that hard-codes either answer is wrong for the other
+  caller, so this became the fourth mode bit (`STR_ESC_DQUOTE`) rather than a special case.
+- ⚠ **Option clusters are all-or-nothing.** A token is options only if it is `-` followed by
+  characters that are EVERY one of them `n`, `e` or `E`. `-neE` is three options; `-ex` is the
+  four-byte operand `-ex`; a bare `-` is data; and **`--` has no special meaning** — `echo -- x`
+  prints `-- x`. The last of `-e`/`-E` wins, inside one cluster as well as across several.
+
+⭐ **130 byte-exact parity cases** in a new `scripts/smoke-echo.sh`, plus **1,400 randomised
+differential comparisons** against GNU over escape-dense operands — zero divergences.
+⚠ The suite compares `od` output, not `$(...)`: command substitution strips trailing newlines, which
+is exactly what `-n` and `\c` exist to remove, so a `$(...)` comparison would pass whether or not
+either flag worked at all.
+
+⛔ **The hostile-environment matrix caught that suite failing 99 of 129 cases on its first run** —
+because the ORACLE flips under `POSIXLY_CORRECT` while kriya deliberately does not, so every parity
+case diverged at once with kriya behaving exactly as ADR 0011 says it should. The GNU side now runs
+with the variable unset. ⚠ **Third time a GNU oracle has been environment-controlled where kriya is
+not** (`du` and `df` took this treatment for `BLOCK_SIZE`/`POSIXLY_CORRECT` at 1.3.5), and the rule
+that generalises is now written into the script: **if kriya ignores a variable by design, the oracle
+must ignore it too, or the test measures the environment rather than the code.**
+
+### Added — `nl` sections: `-d`, `-h`, `-f`, `-l`, `-p`, and `-b pBRE`
+
+⭐ **`nl` understands the three-delimiter section model**, replacing the single-section stub. A line
+whose ENTIRE content is the delimiter repeated three times starts a header, twice a body, once a
+footer; input before the first marker is a body. ⚠ **Whole line, not prefix** — `\:\:\:\:` and
+` \:\:\:` are ordinary numbered text, and a run of six is NOT header-plus-footer. A marker line is
+replaced on output by a **bare newline** — no number, no separator, no padding, whatever `-w` and
+`-s` say. The counter resets to `-v` at every marker unless `-p` is given.
+
+⭐ **One state block replaced a 9-argument emitter.** `-h`/`-b`/`-f` are three parallel style+regex
+pairs indexed by the current section, which is what makes the per-section reset and the three
+independent regexes fall out rather than being coded three times.
+
+⛔ **`-b pBRE` REFUSES the GNU-only regex operators instead of silently mis-numbering.** GNU's
+dialect is POSIX BRE *plus* the GNU operators; niyama implements only the POSIX core, and its
+failure mode for the rest is **silent** — `a\+b` compiles clean and then matches nothing, so
+`kriya grep -c 'a\+b'` returns **0 where GNU returns 3**. For `nl` that would mean numbering the
+wrong lines with no diagnostic, so `\+ \? \| \b \B \w \W \s \S` are rejected at parse time with
+exit 2. ⚠ `\< \> \{n,m\} \(…\) [[:class:]]` DO work and are deliberately not refused, and a
+backslash inside a bracket expression is a literal — `[\+]` is data, not the operator. The upstream
+gap is now tracked as a third M11 item; closing it deletes the guard rather than growing it.
+
+⛔ **`nl -b p` is POSIX BRE, NOT the Emacs dialect `find -regex` takes.** A bare `+` here is a
+LITERAL plus and `\+` is one-or-more — the exact opposite of `find`, whose GNU default is Emacs
+syntax. GNU `nl` dropped Emacs syntax in coreutils **6.6** (2006). The warning block in `find.cyr`
+must not be copied into `nl.cyr`, and now says so in both files.
+
+⛔ **`-d ''` is NOT tested against local GNU, on purpose.** GNU documents it as "disables section
+matching" and coreutils **9.4** (what CI runs) does exactly that — but **9.11** (this box) regressed
+it: the multi-byte rewrite of `check_section` turned every EMPTY input line into a header marker, so
+the oracle contradicts its own `--help` and disagrees with itself across the two versions kriya must
+satisfy. ⚠ This is the third time a GNU-parity test could have passed because of the local GNU's
+VERSION rather than because kriya was right (`find -exec` argv[0], `cut -c`, now this), so the smoke
+script asserts the DOCUMENTED behaviour as an absolute instead. kriya's pre-1.4.4 single-section
+`nl` was already a bit-exact implementation of that mode.
+
+Other measured rules now honoured: `-d C` with ONE character implies `:` as the second (so `-d '\'`
+reproduces the default and `-d ':'` means `::`), `-d` with three or more characters takes the whole
+string as the unit, and `-l N` applies to style `a` ALONE — GNU checks the blank run inside
+`case 'a'`, so `t`, `n` and `p` ignore it entirely.
+
+⭐ **4,100 randomised differential comparisons** against GNU — 2,500 across section-heavy inputs and
+32 option combinations, plus 1,600 aimed specifically at `-l` crossing a section boundary, since the
+blank-run counter and the per-section reset are the two pieces of state that could plausibly
+interfere. Zero divergences. `scripts/smoke-nl.sh` 23 → **48** cases.
+
+### Changed — the deferral lint validates M-number cross-references
+
+⚠ **A deferral that outlives its release has to be repointed at something durable**, and `nl -b pBRE`
+moved from `roadmap 1.4.4` to `roadmap M11` the moment 1.4.4 shipped. The dangling-reference check
+added at 1.3.8 only validated `roadmap N.N.N`, so "repoint it at an M-number" would have been the way
+to launder a reference past the very check that exists to catch it. It now validates both.
+
+⭐ **It found a live problem on its first run** — and then a second one in itself. `M12a`/`M12c` are
+referenced from `cp.cyr`, `stat.cyr` and `date.cyr` and are legitimately documented, but as TABLE
+ROWS rather than `###` headers; and matching `M[0-9]+` truncated `M12a` to `M12`, an entry that does
+not exist. ⚠ The suffix letter is load-bearing. All three documented shapes now count: a `###`
+header for an open bucket, a table row for a retired one, and a **bold paragraph lead** for an M15
+watchlist item. Negative-controlled against a deliberately dangling `M99`.
 
 ### Fixed — `printf` escape parity: one decoder where there were two
 
 ⭐ **printf's two escape decoders are now one `str_escape_decode` call** in a new
-`src/lib/str.cyr`, parameterised by three mode bits. ⛔ **Six divergences from GNU, and NOT ONE is a
+`src/lib/str.cyr`, parameterised by four mode bits. ⛔ **Six divergences from GNU, and NOT ONE is a
 flaw in either decoder's logic** — every one is a line present in one copy and missing from the
 other, or a rule copied onto the path it does not belong to. That is what two escape tables in one
 binary cost, and which half is wrong is invisible until a script hits it. `src/lib/glob.cyr` was
@@ -41,8 +148,9 @@ tables, because writing one decoder forces every case to be answered once:
 - ⛔ **Unknown escapes dropped the backslash.** `printf '[\q]'` printed `[q]`; GNU prints `[\q]`,
   both bytes, in both paths. A silent deletion of a byte the user typed is the worst shape this can
   take — a script meaning a literal backslash got no diagnostic and no backslash. ⚠ `\"` **is** in
-  GNU's named table (so `\"` is `"`) and `\'` is **not** (so `\'` keeps its backslash); the
-  asymmetry reads like an upstream oversight and is not one.
+  GNU's PRINTF named table (so `\"` is `"`) and `\'` is **not** (so `\'` keeps its backslash); the
+  asymmetry reads like an upstream oversight and is not one. ⛔ `echo`'s table does not contain `\"`
+  at all — see the `echo -e` entry above, and `STR_ESC_DQUOTE`.
 - ⛔ **Octal overflow refused the digit instead of truncating.** `\777` is 511; GNU eats all three
   digits and emits `0xff`, while kriya emitted `\77` (`?`) and left a literal `7` in the stream —
   ⚠ **two bytes of output where GNU writes one**, so the damage is not confined to the escape.
@@ -58,18 +166,29 @@ both octal readings, overflow, the mode bits switched off, and the `\"`/`\'` asy
 ⚠ The verdict is **four-valued, not two**: an unknown escape is two output bytes and `\c` is none,
 so a caller cannot simply "emit the byte".
 
-⭐ **Unblocks `echo -e`/`-E` (roadmap 1.4.4)**, which was waiting on exactly this table —
-`STR_ESC_OCTAL_PREFIX | STR_ESC_ALLOW_C` is the mode GNU echo uses. ⚠ What remains there is the ADR,
-and its question is not the decoding: POSIX echo has no `-e`, XSI says escapes are ALWAYS
-interpreted, and the shell BUILTIN most scripts hit differs from `/usr/bin/echo`.
+⭐ **This unblocked `echo -e`/`-E`, which ships in the same release above.** ⚠ The mode named here
+while the table was being written — `STR_ESC_OCTAL_PREFIX | STR_ESC_ALLOW_C` — turned out to be
+short by one bit and long by another once echo's table was actually measured: GNU echo DOES honour
+`\xHH`, and does NOT honour `\"`. echo's real mode is
+`STR_ESC_OCTAL_PREFIX | STR_ESC_ALLOW_C | STR_ESC_ALLOW_X`, and `STR_ESC_DQUOTE` was added as a
+fourth bit for the one named escape the two callers genuinely disagree about.
 
-**4032 smoke cases across 37 scripts** (up from 4002) — `smoke-printf.sh` 68 → 98, ⭐ the new block
-running the **same case list through both paths**, byte-exact through `od`, since the bug was never
-the decoding. ⚠ Its `compare` helper could not be reused: `$(...)` strips trailing newlines and
-drops NULs, which is precisely what `\0` and `\c` produce. **178 unit** (up from 143); 18 POSIX;
-fuzz green under poison (the printf format-engine harness included); four lints clean; both targets
-build. `vet` now reports **50 deps** (new `src/lib/str.cyr`). Binary 1,029,200 → 1,029,280 bytes
-(+80) — two decoders became one call site plus one shared table.
+`smoke-printf.sh` 68 → 98, ⭐ the new block running the **same case list through both paths**,
+byte-exact through `od`, since the bug was never the decoding. ⚠ Its `compare` helper could not be
+reused: `$(...)` strips trailing newlines and drops NULs, which is precisely what `\0` and `\c`
+produce.
+
+### Release totals
+
+**4,217 smoke cases across 38 scripts** (up from 4,032/37) — `smoke-echo.sh` is new at 130,
+`smoke-nl.sh` 23 → 48, and the remaining +30 falls out of `smoke-help.sh` / `smoke-help-json.sh`,
+which iterate the option tables and saw seven options added. **220 unit** (up from 178); 18 POSIX;
+fuzz green under poison; four lints clean; both targets build. `vet` reports **50 deps**.
+Binary 1,029,280 → 1,038,256 bytes (+8,976).
+
+⭐ **Verified under all four matrix conditions**: baseline 38/38 4,217; hostile block-size +
+`POSIXLY_CORRECT` env 38/38 **4,217**; deep `$TMPDIR` 38/38 4,217; simulated root 38/38 4,201
+(root-only paths skipping).
 
 ## [1.4.3] - 2026-08-26 — `uniq` line grouping
 

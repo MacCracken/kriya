@@ -313,8 +313,10 @@ fn _pf_emit_str(s, left, width, prec): i64 {
 # escape paths is the octal rule — `\0101` is backspace-then-`1` in a FORMAT
 # string and `A` in a `%b` operand. GNU's own decoder is one function with one
 # `octal_0` flag for exactly this; kriya's is now the same shape.
-fn _pf_esc_mode_fmt(): i64 { return STR_ESC_ALLOW_C | STR_ESC_ALLOW_X; }
-fn _pf_esc_mode_b(): i64   { return STR_ESC_ALLOW_C | STR_ESC_ALLOW_X | STR_ESC_OCTAL_PREFIX; }
+fn _pf_esc_mode_fmt(): i64 { return STR_ESC_ALLOW_C | STR_ESC_ALLOW_X | STR_ESC_DQUOTE; }
+fn _pf_esc_mode_b(): i64 {
+    return STR_ESC_ALLOW_C | STR_ESC_ALLOW_X | STR_ESC_DQUOTE | STR_ESC_OCTAL_PREFIX;
+}
 
 # Emit one decoded escape. Returns 1 if `\c` was seen (caller stops output
 # entirely), 0 otherwise; `out_len_p` receives the input bytes consumed.

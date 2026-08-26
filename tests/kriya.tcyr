@@ -31,11 +31,25 @@ include "src/lib/args.cyr"
 include "src/lib/help.cyr"
 include "src/cmd/true.cyr"
 include "src/cmd/false.cyr"
+# ⚠ M15e again. `nl.cyr` and `echo.cyr` are pulled in for their PURE helpers —
+# the regex-operator guard, the section classifier, the option-cluster test.
+# Nothing here runs a command; these are the parts that are testable without a
+# file descriptor, and they are the parts most likely to be quietly wrong.
+include "src/cmd/echo.cyr"
+include "src/cmd/nl.cyr"
 
-# ⭐ The two modes printf actually uses, so a test reads as "FORMAT says this,
-# `%b` says that" rather than as a bitmask.
-var MODE_FMT = 6;   # STR_ESC_ALLOW_C | STR_ESC_ALLOW_X
-var MODE_B   = 7;   # ...| STR_ESC_OCTAL_PREFIX
+# ⭐ The modes the real callers use, so a test reads as "FORMAT says this, `%b`
+# says that" rather than as a bitmask.
+#
+# ⛔ These are literals because a `var` with an EXPRESSION initializer costs a
+# gvar_toks slot — which makes them silently driftable, and they DID drift: 1.4.4
+# added `STR_ESC_DQUOTE` and `MODE_FMT = 6` went stale, turning a correct `\"`
+# assertion into a failure with no hint of the cause. The `mode constants` group
+# below now PINS each literal against the enum, so the next added bit fails on a
+# line that names the problem.
+var MODE_FMT  = 14;  # ALLOW_C | ALLOW_X | DQUOTE            — printf FORMAT
+var MODE_B    = 15;  # ...| OCTAL_PREFIX                     — printf %b
+var MODE_ECHO = 7;   # ALLOW_C | ALLOW_X | OCTAL_PREFIX      — echo -e (no DQUOTE)
 
 # Decode the escape at the START of `lit`, which must begin with a backslash.
 # `strlen` for the bound is the same thing printf's callers pass.
@@ -343,6 +357,78 @@ fn main() {
     # ⚠ Mode bits OFF: both fall back to the unknown-escape path, backslash kept.
     assert_eq(_t_esc("\\c", 0, &esc), STR_ESC_LITERAL, "\\c is literal without ALLOW_C");
     assert_eq(_t_esc("\\x41", 0, &esc), STR_ESC_LITERAL, "\\x is literal without ALLOW_X");
+
+    test_group("mode constants still encode what they claim");
+    assert_eq(STR_ESC_ALLOW_C | STR_ESC_ALLOW_X | STR_ESC_DQUOTE,
+              MODE_FMT, "MODE_FMT == printf FORMAT mode");
+    assert_eq(MODE_B, MODE_FMT | STR_ESC_OCTAL_PREFIX, "MODE_B adds the octal prefix");
+    assert_eq(STR_ESC_ALLOW_C | STR_ESC_ALLOW_X | STR_ESC_OCTAL_PREFIX,
+              MODE_ECHO, "MODE_ECHO == echo -e mode");
+    assert_eq(MODE_ECHO & STR_ESC_DQUOTE, 0, "echo does NOT take the DQUOTE bit");
+
+    # ⛔ The one place echo and printf genuinely disagree on a named escape.
+    # Measured against GNU: `printf '\"'` emits `"`, `echo -e '\"'` emits `\"`.
+    test_group("str_escape_decode — \\\" is mode-gated");
+    assert_eq(_t_esc("\\\"", MODE_FMT, &esc), STR_ESC_BYTE,
+              "printf drops the backslash");
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 34, "...leaving a plain quote");
+    assert_eq(_t_esc("\\\"", MODE_ECHO, &esc), STR_ESC_LITERAL,
+              "echo keeps the backslash");
+    assert_eq(load64(&esc + STR_ESC_O_LEN), 2, "...consuming both bytes");
+
+    test_group("echo option clusters");
+    _echo_init_spec();
+    assert_eq(_echo_is_cluster("-n"),   1, "-n is an option");
+    assert_eq(_echo_is_cluster("-e"),   1, "-e is an option");
+    assert_eq(_echo_is_cluster("-neE"), 1, "-neE is three options");
+    assert_eq(_echo_is_cluster("-eE"),  1, "-eE clusters");
+    # ⚠ All-or-nothing: ONE foreign character makes the whole token data.
+    assert_eq(_echo_is_cluster("-ex"),  0, "-ex is an operand, not -e plus junk");
+    assert_eq(_echo_is_cluster("-ne5"), 0, "-ne5 is an operand");
+    assert_eq(_echo_is_cluster("-"),    0, "a bare - is an operand");
+    assert_eq(_echo_is_cluster("--"),   0, "-- is an operand, not a terminator");
+    assert_eq(_echo_is_cluster("hi"),   0, "a plain word is an operand");
+
+    # ⛔ niyama compiles these clean and then matches NOTHING (roadmap M11), so
+    # `nl -b p` must refuse them rather than number the wrong lines.
+    test_group("nl -b pBRE — GNU-only operators are refused");
+    assert_eq(_nl_rx_unsupported("a\\+b"),     43,  "\\+ is caught");
+    assert_eq(_nl_rx_unsupported("a\\?b"),     63,  "\\? is caught");
+    assert_eq(_nl_rx_unsupported("foo\\|bar"), 124, "\\| is caught");
+    assert_eq(_nl_rx_unsupported("\\bfoo"),    98,  "\\b is caught");
+    assert_eq(_nl_rx_unsupported("\\wx"),      119, "\\w is caught");
+    assert_eq(_nl_rx_unsupported("\\sx"),      115, "\\s is caught");
+    # ⚠ These niyama DOES implement — refusing them would be a false alarm.
+    assert_eq(_nl_rx_unsupported("\\<foo"),    0, "\\< is supported");
+    assert_eq(_nl_rx_unsupported("foo\\>"),    0, "\\> is supported");
+    assert_eq(_nl_rx_unsupported("a\\{1,2\\}"), 0, "\\{n,m\\} is supported");
+    assert_eq(_nl_rx_unsupported("\\(foo\\)"),  0, "\\(...\\) is supported");
+    assert_eq(_nl_rx_unsupported("^a.*z$"),   0, "plain BRE is supported");
+    # ⚠ Inside a bracket expression `\` is a literal, so `[\+]` is not the
+    # operator and must not be refused.
+    assert_eq(_nl_rx_unsupported("[\\+]"),     0, "[\\+] is a bracket literal");
+    assert_eq(_nl_rx_unsupported("[]+]"),     0, "[]+] closes on the second ]");
+    assert_eq(_nl_rx_unsupported("[^\\|]"),    0, "[^\\|] is negated-bracket data");
+    assert_eq(_nl_rx_unsupported("\\\\+"),      0, "\\\\+ is an escaped backslash");
+
+    test_group("nl section classification");
+    var nst = alloc(NL_STATE_SIZE);
+    store64(nst + NL_S_DELIM, "\\:");
+    store64(nst + NL_S_DELIM_LEN, 2);
+    assert_eq(_nl_classify(nst, "\\:\\:\\:", 6), NL_SEC_HEADER, "3 reps = header");
+    assert_eq(_nl_classify(nst, "\\:\\:", 4),     NL_SEC_BODY,   "2 reps = body");
+    assert_eq(_nl_classify(nst, "\\:", 2),         NL_SEC_FOOTER, "1 rep = footer");
+    # ⚠ Whole line, not prefix. Four reps is TEXT, not header-plus-footer.
+    assert_eq(_nl_classify(nst, "\\:\\:\\:\\:", 8), 0 - 1, "4 reps is text");
+    assert_eq(_nl_classify(nst, "\\:\\:\\:x", 7),   0 - 1, "a trailing byte makes it text");
+    assert_eq(_nl_classify(nst, " \\:\\:\\:", 7),   0 - 1, "leading space makes it text");
+    assert_eq(_nl_classify(nst, "", 0),             0 - 1, "an empty line is text");
+    assert_eq(_nl_classify(nst, "hello", 5),        0 - 1, "ordinary text is text");
+    # `-d ''` disables matching entirely — the DOCUMENTED behaviour, which is
+    # what coreutils 9.4 does. ⛔ 9.11 regressed this; never use it as an oracle.
+    store64(nst + NL_S_DELIM_LEN, 0);
+    assert_eq(_nl_classify(nst, "\\:\\:\\:", 6), 0 - 1, "-d '' disables sections");
+    assert_eq(_nl_classify(nst, "", 0),           0 - 1, "...including for empty lines");
 
     return assert_summary();
 }

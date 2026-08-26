@@ -52,6 +52,11 @@ enum StrEscMode {
     # `\xHH`, 1-2 hex digits. A GNU extension rather than POSIX, honoured by GNU
     # in both paths. A caller that leaves it off gets `\x` as an unknown escape.
     STR_ESC_ALLOW_X      = 4;
+    # `\"` — GNU's `printf` table takes the backslash OFF; GNU's `echo -e` table
+    # does not contain `\"` at all and keeps it. ⛔ Measured, not assumed:
+    # `printf '\"'` emits `"`, `echo -e '\"'` emits `\"`. A shared decoder that
+    # hard-codes either one is wrong for the other caller.
+    STR_ESC_DQUOTE       = 8;
 }
 
 # Out-box layout — declare as `var box[STR_ESC_OUT_SIZE]`.
@@ -89,9 +94,11 @@ fn str_escape_decode(s, i, slen, mode, out): i64 {
     if (nx == 116) { named = 9;  }    # \t  horizontal tab
     if (nx == 118) { named = 11; }    # \v  vertical tab
     if (nx == 92)  { named = 92; }    # \\  backslash
-    # ⚠ `\"` is in GNU's named table and takes the backslash off; `\'` is NOT and
-    # keeps it. The asymmetry looks like an oversight upstream and is not one.
-    if (nx == 34)  { named = 34; }    # \"  double quote
+    # ⚠ `\'` is in NO caller's table and always keeps its backslash. `\"` is in
+    # printf's and not echo's, so it is mode-gated rather than listed here.
+    if (nx == 34) {                   # \"  double quote — opt-in, see STR_ESC_DQUOTE
+        if ((mode & STR_ESC_DQUOTE) != 0) { named = 34; }
+    }
     if (named >= 0) {
         store64(out + STR_ESC_O_BYTE, named);
         store64(out + STR_ESC_O_LEN, 2);

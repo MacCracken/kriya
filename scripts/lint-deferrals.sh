@@ -50,11 +50,30 @@ done
 # ⛔ A CROSS-REFERENCE THAT POINTS AT NOTHING IS WORSE THAN NONE — it satisfies
 # the linter while telling a reader to go look somewhere that will not answer
 # them. Every `roadmap N.N.N` written into the source must name a real entry.
+#
+# ⚠ M-numbers are checked too, and were NOT until 1.4.4. A deferral that outlives
+# its release has to be repointed at something durable, and the gated sections are
+# where it goes — `nl -b pBRE` moved from `roadmap 1.4.4` to `roadmap M11` the
+# moment 1.4.4 shipped. Leaving M-numbers unchecked would have made "repoint it at
+# an M-number" the way to launder a reference past this very check.
+#
+# ⚠ The suffix letter is load-bearing: `M12a` is a live reference while `M12` is
+# not an entry at all, so matching only `M[0-9]+` truncates the first into the
+# second and reports a dangling reference that is nothing of the kind. The three
+# documented shapes all count: a `###` header for an open bucket, a TABLE ROW for
+# a retired one, and a BOLD paragraph lead for an M15 watchlist item.
 missing=$(
   grep -rhoE 'roadmap [0-9]+\.[0-9]+\.[0-9]+' src/ 2>/dev/null \
     | sed 's/^roadmap //' | sort -u \
     | while read -r ver; do
         grep -q "\*\*$ver —" docs/development/roadmap.md || echo "$ver"
+      done
+  grep -rhoE 'roadmap M[0-9]+[a-z]?' src/ 2>/dev/null \
+    | sed 's/^roadmap //' | sort -u \
+    | while read -r m; do
+        grep -q "^### $m —" docs/development/roadmap.md && continue
+        grep -q "\*\*$m —" docs/development/roadmap.md && continue
+        grep -q "^| $m " docs/development/roadmap.md || echo "$m"
       done
 )
 if [ -n "$missing" ]; then
