@@ -60,6 +60,8 @@ var _ls_1_idx  = 0;
 var _ls_F_idx  = 0;
 var _ls_i_idx  = 0;
 var _ls_n_idx  = 0;
+var _ls_t_idx  = 0;
+var _ls_S_idx  = 0;
 var _ls_d_idx  = 0;
 var _ls_R_idx  = 0;
 var _ls_w_idx  = 0;
@@ -76,6 +78,8 @@ fn _ls_init_spec(): i64 {
     _ls_F_idx = flags_add_bool(s, 70,  "",                0, "append type indicator");
     _ls_i_idx = flags_add_bool(s, 105, "inode",           0, "print inode number");
     _ls_n_idx = flags_add_bool(s, 110, "numeric-uid-gid", 0, "list numeric uid/gid, never names");
+    _ls_t_idx = flags_add_bool(s, 116, "",                0, "sort by modification time, newest first");
+    _ls_S_idx = flags_add_bool(s, 83,  "",                0, "sort by size, largest first");
     _ls_d_idx = flags_add_bool(s, 100, "directory",       0, "list dir operands as entries, not contents");
     _ls_R_idx = flags_add_bool(s, 82,  "recursive",       0, "descend into subdirectories");
     _ls_w_idx = flags_add_int(s, 119, "width",            0, "assume terminal width COLS (0 = auto)");
@@ -461,6 +465,16 @@ fn _ls_load_link_target(parent_dirfd, rec): i64 {
 
 # --- collection + sorting ---
 
+# ⭐ The sort key, resolved from the command line rather than from a pair of
+# booleans. `flags_get_bool` answers "was it given", and GNU resolves `-t` vs
+# `-S` by ORDER: `ls -tS` sorts by SIZE and `ls -St` by TIME. Measured.
+enum LsSortKey {
+    LS_SORT_NAME = 0;
+    LS_SORT_TIME = 1;
+    LS_SORT_SIZE = 2;
+}
+var _ls_sortkey = 0;
+
 # Three-way byte-comparison: < 0 if a<b, 0 if equal, > 0 if a>b.
 # Cyrius stdlib only exposes `streq`; we need ordering for the sort.
 fn _ls_strcmp(a, b): i64 {
@@ -475,32 +489,121 @@ fn _ls_strcmp(a, b): i64 {
     return 0;
 }
 
-# Insertion sort entries by name (case-sensitive). `reverse` flips
-# the comparator.
+# Which of `-t` / `-S` appeared LAST? ⚠ Both may be given, and the answer is
+# not "whichever is set" — GNU takes the rightmost, so `ls -tS` is a SIZE sort
+# and `ls -St` a TIME sort.
+#
+# ⛔ Asks the PARSER via `kriya_short_seq` rather than re-scanning argv here.
+# The first version of this walked the raw argv bounded by
+# `kriya_argv_option_end`, which stops at the first operand — while the parser
+# permutes. `ls aa bb cc -rt` therefore honoured the `-r` and SILENTLY DROPPED
+# the `-t` from the same cluster, sorting by name and exiting 0.
+fn _ls_pick_sortkey(): i64 {
+    var st = kriya_short_seq(_ls_spec, 116);   # -t
+    var ss = kriya_short_seq(_ls_spec, 83);    # -S
+    if (st == 0) {
+        if (ss == 0) { return LS_SORT_NAME; }
+        return LS_SORT_SIZE;
+    }
+    if (ss == 0) { return LS_SORT_TIME; }
+    if (ss > st) { return LS_SORT_SIZE; }
+    return LS_SORT_TIME;
+}
+
+# Three-way order of two entries under the active sort key: negative when `a`
+# sorts first.
+#
+# ⭐ EVERY key falls through to the NAME comparison, which is what makes the
+# order total: two distinct entries never compare equal, so `-r` is a true
+# reversal rather than a stable-sort artefact. Measured against GNU — three
+# files given an EXACT mtime tie come out `alpha mid zeta` under `-t` and
+# `zeta mid alpha` under `-tr`, so the tie-break reverses too.
+#
+# ⚠ `-t` compares NANOSECONDS as well as seconds: two files one nanosecond
+# apart sort correctly in GNU, so comparing `st_mtime` alone would be a silent
+# wrong order on any filesystem with sub-second stamps.
+fn _ls_cmp(a, b): i64 {
+    if (_ls_sortkey == LS_SORT_TIME) {
+        var ta = load64(_ls_rec_st(a) + FS_STAT_MTIME);
+        var tb = load64(_ls_rec_st(b) + FS_STAT_MTIME);
+        if (ta != tb) {
+            if (ta > tb) { return 0 - 1; }      # newest first
+            return 1;
+        }
+        var na = load64(_ls_rec_st(a) + FS_STAT_MTIME_NSEC);
+        var nb = load64(_ls_rec_st(b) + FS_STAT_MTIME_NSEC);
+        if (na != nb) {
+            if (na > nb) { return 0 - 1; }
+            return 1;
+        }
+    }
+    if (_ls_sortkey == LS_SORT_SIZE) {
+        var sa = load64(_ls_rec_st(a) + FS_STAT_SIZE);
+        var sb = load64(_ls_rec_st(b) + FS_STAT_SIZE);
+        if (sa != sb) {
+            if (sa > sb) { return 0 - 1; }      # largest first
+            return 1;
+        }
+    }
+    return _ls_strcmp(_ls_rec_name(a), _ls_rec_name(b));
+}
+
+# Bottom-up merge sort. `reverse` negates the comparator.
+#
+# ⛔ Was an INSERTION sort, which is O(n^2) and showed it: `ls` over an
+# 8,000-entry directory took 0.755 s against GNU's 0.004 s — a 190x gap on a
+# directory size that is not unusual. The comparator had to be restructured for
+# `-t`/`-S` anyway, and leaving a quadratic sort inside the release that is
+# ABOUT sorting would have been an odd place to draw the line.
 fn _ls_sort(entries, reverse): i64 {
     var n = vec_len(entries);
-    var i: i64 = 1;
+    if (n < 2) { return 0; }
+    var src = alloc(n * 8);
+    var dst = alloc(n * 8);
+    var i: i64 = 0;
     while (i < n) {
-        var cur = vec_get(entries, i);
-        var cur_name = _ls_rec_name(cur);
-        var j = i;
-        var done: i64 = 0;
-        while (done == 0) {
-            if (j == 0) { done = 1; }
-            else {
-                var prev = vec_get(entries, j - 1);
-                var prev_name = _ls_rec_name(prev);
-                var cmp = _ls_strcmp(prev_name, cur_name);
-                if (reverse == 1) { cmp = 0 - cmp; }
-                if (cmp > 0) {
-                    vec_set(entries, j, prev);
-                    j = j - 1;
-                } else {
-                    done = 1;
+        store64(src + i * 8, vec_get(entries, i));
+        i = i + 1;
+    }
+    var width: i64 = 1;
+    while (width < n) {
+        var lo: i64 = 0;
+        while (lo < n) {
+            var mid = lo + width;
+            var hi = lo + width + width;
+            if (mid > n) { mid = n; }
+            if (hi > n)  { hi = n; }
+            var ai = lo;
+            var bi = mid;
+            var o = lo;
+            while (o < hi) {
+                var take_a: i64 = 0;
+                if (ai >= mid) { take_a = 0; }
+                elif (bi >= hi) { take_a = 1; }
+                else {
+                    var c = _ls_cmp(load64(src + ai * 8), load64(src + bi * 8));
+                    if (reverse == 1) { c = 0 - c; }
+                    if (c <= 0) { take_a = 1; }
                 }
+                if (take_a == 1) {
+                    store64(dst + o * 8, load64(src + ai * 8));
+                    ai = ai + 1;
+                } else {
+                    store64(dst + o * 8, load64(src + bi * 8));
+                    bi = bi + 1;
+                }
+                o = o + 1;
             }
+            lo = lo + width + width;
         }
-        vec_set(entries, j, cur);
+        var tmp = src;
+        src = dst;
+        dst = tmp;
+        width = width + width;
+    }
+    i = 0;
+    while (i < n) {
+        vec_set(entries, i, load64(src + i * 8));
         i = i + 1;
     }
     return 0;
@@ -981,6 +1084,7 @@ fn cmd_ls(start: i64): i64 {
         _ls_numeric = 1;
         long_mode = 1;
     }
+    _ls_sortkey = _ls_pick_sortkey();
     var d_mode: i64 = 0;
     if (flags_get_bool(_ls_spec, _ls_d_idx) == 1) { d_mode = 1; }
     var R_mode: i64 = 0;
@@ -1024,7 +1128,20 @@ fn cmd_ls(start: i64): i64 {
             if (fs_is_dir(&st) == 1) { is_dir = 1; }
             if (d_mode == 1)         { is_dir = 0; }
             if (is_dir == 1) {
-                vec_push(dir_paths, p);
+                # ⛔ A RECORD, not the raw path, so the directory-section list
+                # can go through the same `_ls_sort` the flat list does. It was
+                # a bare `vec_push(dir_paths, p)` and therefore permanently in
+                # ARGV ORDER under every flag: `ls d3 d1 d2` emitted
+                # `d3: d1: d2:` where GNU emits `d1: d2: d3:`, and `-t`/`-r`
+                # changed nothing. ⚠ The stat is already in hand here, so
+                # carrying it costs nothing and is what makes `-t`/`-S` work on
+                # the section order too.
+                var dlen = strlen(p);
+                var dname = alloc(dlen + 1);
+                memcpy(dname, p, dlen + 1);
+                var drec = _ls_rec_new(dname);
+                memcpy(_ls_rec_st(drec), &st, 144);
+                vec_push(dir_paths, drec);
             } else {
                 # Single-entry record for the flat list.
                 var nlen = strlen(p);
@@ -1047,7 +1164,8 @@ fn cmd_ls(start: i64): i64 {
         _ls_print_dir(nondir_entries, long_mode, human, F_mode, inode_mode);
     }
 
-    # Then each directory operand. Header if multiple sources, or if -R.
+    # Then each directory operand, in the SAME order the flat list uses.
+    _ls_sort(dir_paths, reverse);
     var ndir = vec_len(dir_paths);
     var multi_dir: i64 = 0;
     if (ndir > 1) { multi_dir = 1; }
@@ -1057,7 +1175,7 @@ fn cmd_ls(start: i64): i64 {
 
     var di: i64 = 0;
     while (di < ndir) {
-        var dp = vec_get(dir_paths, di);
+        var dp = _ls_rec_name(vec_get(dir_paths, di));
         var header: i64 = 0;
         if (multi_dir == 1) { header = 1; }
         if (any_nondir == 1) { header = 1; }

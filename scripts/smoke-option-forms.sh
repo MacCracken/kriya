@@ -75,7 +75,22 @@ same "sort -r -n"        sort -r -n nums
 same "uniq -cd"          uniq -cd fdup
 same "sort -u -f"        sort -uf f
 expect_exit "ls -la accepted"      0 "$BIN" ls -la tree
-expect_exit "ls -lart accepted?"   2 "$BIN" ls -lart tree   # -t is still deferred (M12d)
+# ⭐ `-t` shipped at 1.5.1, so this cluster is now ACCEPTED. ⚠ The assertion
+# used to pin the opposite — that `-lart` was a usage error because `-t` did
+# not exist — and it going red is the SUCCESS signal for the release that adds
+# the flag, not a regression. Compared against GNU rather than pinned to 0, so
+# it cannot go stale the same way twice.
+# ⚠ ORDER only: kriya's `-l` date column is ISO and UTC by design (ADR 0007)
+# and it prints no `total N`, so a whole-line compare would fail for reasons
+# unrelated to the cluster being parsed.
+cluster_order() {
+    label=$1; shift
+    g=$(ls "$@" | awk '{ if ($1 == "total") next; print $NF }')
+    k=$("$BIN" ls "$@" | awk '{ if ($1 == "total") next; print $NF }')
+    expect_eq "$label" "$g" "$k"
+}
+cluster_order "ls -lart order"  -lart tree
+cluster_order "ls -laSr order"  -laSr tree
 
 # --- clustered bools on destructive verbs -----------------------------
 # `rm -rf` is the single most-typed command in Unix; it must work.

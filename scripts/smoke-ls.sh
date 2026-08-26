@@ -294,6 +294,102 @@ expect_eq "-l vs -n differ exactly as GNU's do" \
 # passwd entry, which cannot be created without chown privileges. It is covered
 # in the container run instead; noted here so the gap is deliberate.
 
+# --- -t / -S sort keys (1.5.1) -----------------------------------------
+#
+# ⚠ Compared by ORDER only, via the last field of each line: kriya's `-l` date
+# column is deliberately ISO and UTC (ADR 0007) where GNU's is `Mon DD` local,
+# and kriya prints no `total N` header. Comparing whole lines would fail for
+# reasons that have nothing to do with sorting.
+mkdir -p sortdir && cd sortdir
+printf 'aaa' > s_big; printf 'b' > s_small; printf 'cc' > s_mid
+: > t_new;  touch -d '2030-01-01 00:00:00' t_new
+: > t_old;  touch -d '2020-01-01 00:00:00' t_old
+# ⛔ An EXACT mtime tie, forced rather than hoped for: the tie-break is the
+# whole point, and two files created moments apart may or may not collide
+# depending on the filesystem's timestamp granularity.
+: > z_tie; : > a_tie; : > m_tie
+touch -d '2021-06-01 12:00:00' z_tie a_tie m_tie
+cd ..
+
+sort_names() { awk '{ if ($1 == "total") next; print $NF }'; }
+sort_same() {
+    label=$1; shift
+    g=$(cd sortdir && ls "$@" | sort_names)
+    k=$(cd sortdir && "$BIN" ls "$@" | sort_names)
+    expect_eq "sort: $label" "$g" "$k"
+}
+sort_same "-t"        -t
+sort_same "-S"        -S
+sort_same "-tr"       -tr
+sort_same "-Sr"       -Sr
+sort_same "-t -1"     -t -1
+sort_same "-S -1"     -S -1
+sort_same "-lt"       -lt
+sort_same "-lS"       -lS
+sort_same "-ltr"      -ltr
+sort_same "-t -a"     -t -a
+sort_same "-t -F"     -t -F
+# ⛔ BOTH given: GNU takes the RIGHTMOST, so these two differ from each other.
+# `flags_get_bool` cannot answer this — it says "was it given", not "which came
+# last" — so `ls` scans argv for the order.
+sort_same "-tS (size wins)"  -tS
+sort_same "-St (time wins)"  -St
+sort_same "-t -S separate"   -t -S
+sort_same "-S -t separate"   -S -t
+# ⚠ ...and they must actually DIFFER, or the pair above proves nothing.
+expect_eq "sort: -tS and -St disagree" \
+    "$(if [ "$(cd sortdir && ls -tS | sort_names)" = "$(cd sortdir && ls -St | sort_names)" ]; then echo same; else echo differ; fi)" \
+    "$(if [ "$(cd sortdir && "$BIN" ls -tS | sort_names)" = "$(cd sortdir && "$BIN" ls -St | sort_names)" ]; then echo same; else echo differ; fi)"
+# The exact-tie tie-break, and that -r reverses it too.
+expect_eq "sort: exact mtime tie breaks by name" \
+    "$(cd sortdir && ls -t a_tie m_tie z_tie)" "$(cd sortdir && "$BIN" ls -t a_tie m_tie z_tie)"
+expect_eq "sort: -tr reverses the tie-break" \
+    "$(cd sortdir && ls -tr a_tie m_tie z_tie)" "$(cd sortdir && "$BIN" ls -tr a_tie m_tie z_tie)"
+expect_eq "sort: equal sizes break by name" \
+    "$(cd sortdir && ls -S a_tie m_tie z_tie)" "$(cd sortdir && "$BIN" ls -S a_tie m_tie z_tie)"
+# ⚠ And the DEFAULT must still be the plain name sort — a regression there
+# would otherwise hide behind all the -t/-S assertions above.
+expect_eq "sort: default is still by name" \
+    "$(cd sortdir && ls | sort_names)" "$(cd sortdir && "$BIN" ls | sort_names)"
+expect_eq "sort: default -r is still by name" \
+    "$(cd sortdir && ls -r | sort_names)" "$(cd sortdir && "$BIN" ls -r | sort_names)"
+
+# ⛔ REGRESSION GUARD — a sort flag AFTER the operands. kriya's first cut
+# scanned the raw argv only as far as `kriya_argv_option_end`, which stops at
+# the first operand, while the PARSER permutes. So `ls aa bb cc -rt` honoured
+# the `-r` and SILENTLY DROPPED the `-t` from the same cluster: name order,
+# exit 0, empty stderr. ⚠ Every assertion above put the flags FIRST, so none of
+# them could have caught it.
+sort_same "-t after the operands"   -1 s_big s_small s_mid -t
+sort_same "-S after the operands"   -1 s_big s_small s_mid -S
+sort_same "-rt after the operands"  -1 s_big s_small s_mid -rt
+sort_same "-t between operands"     -1 s_big -t s_small s_mid
+sort_same "-tS after the operands"  -1 s_big s_small s_mid -tS
+sort_same "-St after the operands"  -1 s_big s_small s_mid -St
+
+# ⛔ REGRESSION GUARD — the DIRECTORY-SECTION list. It was built as raw paths
+# and never sorted, so `ls d3 d1 d2` emitted `d3: d1: d2:` where GNU emits
+# `d1: d2: d3:`, and `-t`/`-r` changed nothing. ⚠ The flat non-directory list
+# WAS sorted correctly, which is why every existing assertion passed.
+mkdir -p secdir && cd secdir && mkdir -p s3 s1 s2 && : > s1/x && : > s2/y && : > s3/z
+touch -d '2020-01-01' s2; touch -d '2025-01-01' s3; touch -d '2030-01-01' s1
+cd ..
+sec_same() {
+    label=$1; shift
+    g=$(cd secdir && ls "$@" 2>&1 | grep ':$')
+    k=$(cd secdir && "$BIN" ls "$@" 2>&1 | grep ':$')
+    expect_eq "sort: $label" "$g" "$k"
+}
+sec_same "dir sections sorted"      -1 s3 s1 s2
+sec_same "dir sections -t"          -1t s3 s1 s2
+sec_same "dir sections -r"          -1r s3 s1 s2
+sec_same "dir sections -tr"         -1tr s3 s1 s2
+# ⚠ Files and directories together: the flat list comes first, then the
+# sections, and BOTH must be ordered.
+expect_eq "sort: mixed operands, whole output" \
+    "$(cd secdir && ls -1 s3 ../sortdir/s_big s1 2>&1)" \
+    "$(cd secdir && "$BIN" ls -1 s3 ../sortdir/s_big s1 2>&1)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

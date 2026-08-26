@@ -6,6 +6,132 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.5.1] - 2026-08-26 — `ls -t` / `-S`, and the sort stops being quadratic
+
+### Added — `-t` (mtime) and `-S` (size) sort keys
+
+⭐ **`ls` sorts by time and size**, the first alternative keys it has had. Every rule was measured
+against GNU rather than assumed:
+
+- **Both sort DESCENDING** — newest first, largest first — and **both break ties by NAME ascending**.
+- ⚠ **`-t` compares NANOSECONDS, not just seconds.** Two files one nanosecond apart sort correctly
+  in GNU, so comparing `st_mtime` alone would be a silent wrong order on any filesystem with
+  sub-second stamps. The tie-break test forces an EXACT tie with `touch -d` rather than hoping two
+  files created moments apart collide.
+- ⭐ **Every key falls through to the name comparison**, which makes the order TOTAL: two distinct
+  entries never compare equal, so `-r` is a true reversal rather than a stable-sort artefact.
+  Verified — three files given an exact mtime tie come out `a m z` under `-t` and `z m a` under
+  `-tr`, so the tie-break reverses too.
+- ⛔ **When BOTH `-t` and `-S` are given, the RIGHTMOST wins**: `ls -tS` is a size sort and
+  `ls -St` a time sort. `flags_get_bool` cannot answer that — it says "was it given", not "which
+  came last" — so `ls` scans argv for the order, clusters included. ⚠ The smoke test asserts that
+  the two forms *disagree with each other*, because a pair that both resolved the same way would
+  pass while proving nothing.
+
+### Fixed — ⛔ the sort was O(n²), and it showed
+
+**`ls` over an 8,000-entry directory took 0.755 s against GNU's 0.004 s — a 190× gap** on a
+directory size that is not unusual. The cause was an insertion sort. Replacing it with a bottom-up
+merge sort takes it to **0.022 s, a 34× improvement**, and closes the gap to roughly 5×.
+
+⚠ **This is a scope call worth stating rather than sliding past.** The comparator had to be
+restructured for `-t`/`-S` regardless, and leaving a quadratic sort inside the release that is
+*about sorting* would have been an odd place to draw the line. The new `-t`/`-S` tests exercise the
+new algorithm directly, including the tie and reversal cases where a merge sort's stability matters.
+
+### Fixed — ⛔ two sort defects found AFTER this release was first reported green
+
+**1. A sort flag AFTER the operands was silently dropped — and this release introduced it.**
+
+    ls -1 aa bb cc -rt      GNU: bb cc aa      kriya: cc bb aa
+
+⛔ The `-r` was honoured and the `-t` from the SAME CLUSTER was not, giving name order with exit 0
+and empty stderr. ⚠ The cause is one line: `_ls_scan_sortkey` bounded itself with
+`kriya_argv_option_end`, which stops at the first operand — while the flags PARSER permutes. Two
+independent notions of "the option window", kept in sync by hand.
+
+⭐ **The fix was not to widen the window but to stop having a second one.** kriya's parser already
+produces a NORMALISED EXPANDED ARGV — clusters split, long forms normalised, `--` honoured,
+permutation resolved — so `kriya_short_seq(spec, ch)` in `src/lib/args.cyr` asks the parser where a
+flag last appeared and `ls` compares two integers. Widening the scan instead would have re-created
+the same class of bug at the next value-taking option, since `ls -w -t` must not read `-t` as a flag
+the parser consumed as the width. ⚠ **Every existing assertion put the flags FIRST**, so none of
+them could have caught this; the guard now covers post-operand, between-operand and clustered forms.
+
+**2. The directory-SECTION list was never sorted** — pre-existing, not from this release.
+
+    ls -1 d3 d1 d2      GNU: d1: d2: d3:      kriya: d3: d1: d2:
+
+⛔ Permanently in argv order under EVERY flag; `-t` and `-r` changed nothing. ⚠ The flat
+non-directory list WAS sorted correctly, which is exactly why every existing assertion passed. The
+section list is now built as records carrying the stat already in hand, and goes through the same
+`_ls_sort`.
+
+⭐ Both guards were negative-controlled: reverting fix 1 fails 18 assertions and reverting fix 2
+fails 5.
+
+### ⚠ Scope: `--color` is deferred to 1.5.2, and here is the measured reason
+
+The roadmap paired sort keys with "`--color=auto|always|never` with a per-type table and tty
+detection". ⛔ **That description does not survive contact with GNU**, and the measurement changed
+the shape of the work rather than just its size:
+
+- ⛔ **There is no per-type table to ship.** With `LS_COLORS` unset, `ls --color=always` emits **no
+  escapes at all** — no compiled-in default. The table IS the environment variable, so a built-in
+  one would make kriya colour where GNU does not.
+- The real surface, all measured: ~17 type keys with a **precedence order** (`tw`/`ow`/`st` override
+  `di`; `su`/`sg`/`ex` beat an extension match, which beats `fi` — verified: an executable `run.c`
+  takes `ex`, a non-executable `plain.c` takes `*.c`); `*.ext` patterns with a **case-folding
+  subtlety** (`*.c` alone matches `t.C`, but defining both `*.c` and `*.C` makes each exact);
+  `ln=target` indirection; and a malformed `LS_COLORS` making GNU print diagnostics and disable
+  colour entirely.
+- Emission is exact and easy to get wrong: a **leading `ESC[0m` once per run**, not per line; the
+  `-F` indicator OUTSIDE the escape (`ESC[…m adir ESC[0m /`); symlink targets in `-l` left
+  uncoloured.
+- ⭐ **Escapes do NOT count toward column width** — verified in a pty at 40 columns, the layout is
+  byte-identical with and without colour except for the padding note below.
+
+⛔ **And a constraint that may decide the design outright: kriya's `getenv` cannot read a real
+`LS_COLORS` reliably.** Upstream `io.cyr` reads `/proc/self/environ` into an **8 KB** buffer and
+scans only what fits. A `dircolors -b` `LS_COLORS` is ~1.9 KB, so whether it is found depends on
+where the shell happened to place it. Demonstrated with kriya's EXISTING `COLUMNS` read:
+
+    env COLUMNS=80 BIG=<9KB> kriya ls   -> columns          (COLUMNS early, found)
+    env BIG=<9KB> COLUMNS=80 kriya ls   -> one-per-line     (COLUMNS past 8 KB, silently absent)
+    env BIG=<9KB> COLUMNS=80 /usr/bin/ls -C -w 80 -> columns (real getenv, correct)
+
+⚠ **That is a live latent bug in shipped behaviour, not just a colour problem** — `COLUMNS` already
+degrades this way today. It is upstream and out of bounds to fix here, so it is filed at **M11**.
+⛔ It also puts the two obvious colour designs in direct tension: honouring `LS_COLORS` matches GNU
+but is position-dependent and silent, while a built-in table is reliable but colours where GNU emits
+nothing. **That tension is the ADR 1.5.2 has to settle**, and it is recorded rather than pre-decided.
+
+⚠ That is a release of its own, and this entry records the measurements so 1.5.2 starts from data
+rather than from scratch. The roadmap entry has been rewritten with all of it.
+
+### ⚠ Two pre-existing `ls` divergences found while measuring, deliberately NOT fixed here
+
+Both predate this release — confirmed against the 1.4.4 binary — and both are now on the roadmap
+rather than absorbed silently:
+
+- **`ls -d` with no operand lists the directory's CONTENTS**; GNU lists `.`.
+- **Multi-column padding uses spaces where GNU uses a TAB.** Visible only on a tty and only in the
+  bytes — the column positions are identical — which is why the piped smoke comparisons never saw
+  it. ⚠ GNU switches to spaces when colouring, so 1.5.2 has to know this rule anyway.
+
+### Release totals
+
+**4,346 smoke cases across 38 scripts** (up from 4,303) — `smoke-ls.sh` 49 → **81**,
+`smoke-option-forms.sh` 53 → **55**. 322 unit; 18 POSIX; fuzz green under poison; four lints clean;
+both targets build. `vet` reports 52 deps. Binary 1,059,568 → 1,059,680 bytes (+112).
+
+⭐ **An assertion going red was the success signal**: `smoke-option-forms.sh` pinned `ls -lart` as a
+usage error *because `-t` did not exist*. It now compares against GNU instead of a frozen exit code,
+so it cannot go stale the same way twice.
+
+⭐ **Verified inside the `ubuntu:24.04` container as a non-root user** — 38 scripts, 0 failures,
+4,324 cases.
+
 ## [1.5.0] - 2026-08-26 — the passwd/group parser; `ls -l`, `stat %U`/`%G`, `find -user` get names
 
 ### Added — `src/lib/userdb.cyr`, and the three consumers it unblocks

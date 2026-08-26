@@ -657,6 +657,48 @@ fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
 # ⭐ Walks the EXPANDED argv, not the raw one, so every spelling has already been
 # normalised to `-e VALUE` — `-ealpha`, `-ie alpha` and `--regexp=alpha` all
 # arrive here in the same shape. Call after `kriya_args_parse*`.
+# Where did boolean short option `short_ch` LAST appear on the command line?
+# Returns a positive position, or 0 if it never did.
+#
+# ⛔ THIS EXISTS BECAUSE "WAS IT GIVEN" IS NOT ENOUGH FOR A PAIR THAT CONFLICTS.
+# `ls -tS` is a SIZE sort and `ls -St` a TIME sort, so the answer depends on
+# ORDER and `flags_get_bool` cannot supply it.
+#
+# ⛔ AND IT WALKS THE EXPANDED ARGV, WHICH IS THE WHOLE POINT. `ls` first
+# answered this by scanning the RAW argv up to `kriya_argv_option_end`, and that
+# window stops at the first operand while the parser happily permutes — so
+# `ls aa bb cc -rt` honoured the `-r` and SILENTLY DROPPED the `-t` from the
+# same cluster, giving name order with exit 0. Two independent notions of "the
+# option window", kept in sync by hand, is what produced that. The expanded argv
+# is the parser's own view: clusters already split, long forms normalised,
+# `--` already honoured, permutation already resolved.
+#
+# ⚠ A value-taking option's VALUE is skipped, so `ls -w -t` cannot be read as a
+# `-t` that the parser consumed as the width.
+fn kriya_short_seq(spec, short_ch): i64 {
+    var av = _kriya_expanded;
+    var n  = _kriya_expanded_n;
+    if (av == 0) { return 0; }
+    var seen: i64 = 0;
+    var i: i64 = 1;
+    while (i < n) {
+        var tok = load64(av + i * 8);
+        if (strlen(tok) == 2) {
+            if (load8(tok) == 45) {
+                var c = load8(tok + 1);
+                var ty = kriya_short_type(spec, c);
+                if (ty == FLAG_BOOL) {
+                    if (c == short_ch) { seen = i; }
+                } elif (ty > 0) {
+                    i = i + 1;              # skip this option's value
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return seen;
+}
+
 fn kriya_argv_collect(short_ch, long_name, out): i64 {
     var av = _kriya_expanded;
     var n  = _kriya_expanded_n;
