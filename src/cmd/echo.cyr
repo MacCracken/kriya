@@ -7,8 +7,13 @@
 #
 # POSIX itself marks the meaning of a leading `-n` as
 # implementation-defined; we document this as the kriya choice. `-e`
-# / `-E` (escape interpretation) are not implemented yet — they will
-# come with an ADR once the C-string escape table lands in `lib/str.cyr`.
+# / `-E` (escape interpretation) are not implemented yet (roadmap 1.4.4).
+# ⭐ The blocker is gone: the C-string escape table LANDED in `src/lib/str.cyr`,
+# and `echo -e` is a `str_escape_decode` call with `STR_ESC_OCTAL_PREFIX |
+# STR_ESC_ALLOW_C` — the modes GNU echo uses. What remains is the ADR, and the
+# question it has to settle is not the decoding: POSIX echo has no `-e`, XSI
+# says escapes are ALWAYS interpreted, and the shell BUILTIN most scripts hit
+# differs from `/usr/bin/echo`. Which one kriya matches is the decision.
 
 # ⭐ The option table, and the parser's only source for it — see the note in
 # `src/cmd/date.cyr`. `echo` cannot use `flags_parse`: POSIX echo passes every

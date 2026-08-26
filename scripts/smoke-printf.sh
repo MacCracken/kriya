@@ -161,6 +161,40 @@ rc=0; "$BIN" printf '\xZ' >/dev/null 2>&1 || rc=$?
 expect_eq "\\xZ exits 1" "1" "$rc"
 expect_eq "abc\\xZdef stops after abc" "$(/usr/bin/printf 'abc\xZdef' 2>/dev/null)" "$("$BIN" printf 'abc\xZdef' 2>/dev/null)"
 
+# --- escape parity, byte-exact, BOTH paths (shared decoder) ---
+# ⚠ `compare` above goes through `$(...)`, which strips trailing newlines and
+# cannot carry a NUL — useless for `\0` and `\c`. These go through `od`.
+#
+# ⛔ Every case here was a DIVERGENCE before printf's two escape decoders became
+# one `str_escape_decode` call. The FORMAT path and the `%b` path are checked
+# with the SAME list on purpose: the bug was never the decoding, it was a rule
+# living in one copy and not the other.
+compare_bytes() {
+    name=$1
+    shift
+    mine=$("$BIN" printf "$@" 2>/dev/null | od -An -tx1 || true)
+    gnu=$("$GNU" "$@" 2>/dev/null | od -An -tx1 || true)
+    expect_eq "$name" "$gnu" "$mine"
+}
+
+for e in 'X\eY' 'X\cY' '[\q]' '[\"]' '[\0101]' '[\101]' '[\0]' '[\777]' '[\400]' '[\18]' '[\x41]' 'a\'; do
+    compare_bytes "FORMAT $e" "$e"
+    compare_bytes "%b     $e" '%b' "$e"
+done
+# A backslash before a single quote is NOT in GNU's named table, unlike `\"`.
+compare_bytes "FORMAT backslash-quote" '[\'"'"']'
+compare_bytes "%b     backslash-quote" '%b' '[\'"'"']'
+
+# `\c` cancels output and exits 0 — in FORMAT too, argument reuse included.
+expect_exit "FORMAT \\c exits 0" 0 "$BIN" printf 'X\cY'
+expect_exit "%b \\c exits 0"     0 "$BIN" printf '%b' 'X\cY'
+expect_eq "FORMAT \\c stops arg reuse" \
+    "$("$GNU" '%s\c' a b c | od -An -tx1)" \
+    "$("$BIN" printf '%s\c' a b c | od -An -tx1)"
+
+# A malformed `\x` fails in `%b` as well, where it used to print a literal "xZ".
+expect_exit "%b \\xZ exits 1" 1 "$BIN" printf '%b' '[\xZ]'
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

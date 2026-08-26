@@ -6,6 +6,71 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [Unreleased]
+
+### Fixed — `printf` escape parity: one decoder where there were two
+
+⭐ **printf's two escape decoders are now one `str_escape_decode` call** in a new
+`src/lib/str.cyr`, parameterised by three mode bits. ⛔ **Six divergences from GNU, and NOT ONE is a
+flaw in either decoder's logic** — every one is a line present in one copy and missing from the
+other, or a rule copied onto the path it does not belong to. That is what two escape tables in one
+binary cost, and which half is wrong is invisible until a script hits it. `src/lib/glob.cyr` was
+lifted out of `find` at 1.4.1 on exactly this argument.
+
+All six measured byte-for-byte against GNU coreutils **9.11** (this box) and **9.4** (ubuntu:24.04),
+which agree with each other — ⚠ so none of this is version drift, the failure mode that made the
+`find -exec` argv[0] bug and the `cut -c` tests look green for two releases:
+
+- **`\e` (ESC, 0x1b) was in NEITHER table**, so both paths printed a literal `e`. GNU has had it in
+  printf *and* echo since coreutils **8.1** (2009-11-18).
+- **`\c` worked in `%b` and printed a literal `c` in FORMAT.** ⚠ It cancels the rest of the output
+  and exits 0 — **argument reuse included**, so `printf '%s\c' a b c` prints `a` and stops rather
+  than cycling the format over `b` and `c`.
+- **`\xHH` worked in FORMAT and printed a literal `x41` in `%b`.** A malformed `\xZ` now fails the
+  `%b` path too, where it used to print `xZ` and exit 0.
+- **`\0101` in `%b` was decoded by FORMAT's rule** — backspace then a literal `1`, where GNU gives
+  `A`. ⛔ **This is the one place the two paths genuinely differ and it is the whole reason the mode
+  bit exists**: POSIX defines `%b`'s `\0ddd` with the leading `0` as a **prefix** followed by up to
+  three MORE octal digits, while a FORMAT string takes at most three digits **total**. Both readings
+  are correct, for different inputs, and GNU implements both — its own decoder is one function with
+  one `octal_0` flag. ⚠ **The FORMAT path was right here and was deliberately left alone.**
+
+The two below were **not in the report that prompted this** — they surfaced while unifying the
+tables, because writing one decoder forces every case to be answered once:
+
+- ⛔ **Unknown escapes dropped the backslash.** `printf '[\q]'` printed `[q]`; GNU prints `[\q]`,
+  both bytes, in both paths. A silent deletion of a byte the user typed is the worst shape this can
+  take — a script meaning a literal backslash got no diagnostic and no backslash. ⚠ `\"` **is** in
+  GNU's named table (so `\"` is `"`) and `\'` is **not** (so `\'` keeps its backslash); the
+  asymmetry reads like an upstream oversight and is not one.
+- ⛔ **Octal overflow refused the digit instead of truncating.** `\777` is 511; GNU eats all three
+  digits and emits `0xff`, while kriya emitted `\77` (`?`) and left a literal `7` in the stream —
+  ⚠ **two bytes of output where GNU writes one**, so the damage is not confined to the escape.
+
+⚠ **`\e` and `\x` are GNU extensions, not POSIX**, and no ADR is opened for them: POSIX leaves an
+undefined escape's behaviour unspecified, so this makes unspecified input useful rather than
+diverging from a defined rule — the same call `\xHH` shipped under in the FORMAT path at 1.2.1.
+
+⭐ **Being in `src/lib/` is what makes the table unit-testable at all.** Both old decoders wrote
+straight to fd 1, so the only way to check either was to run the binary and read bytes back;
+`str_escape_decode` is pure — bytes in, one verdict out — and takes **35 new assertions** covering
+both octal readings, overflow, the mode bits switched off, and the `\"`/`\'` asymmetry.
+⚠ The verdict is **four-valued, not two**: an unknown escape is two output bytes and `\c` is none,
+so a caller cannot simply "emit the byte".
+
+⭐ **Unblocks `echo -e`/`-E` (roadmap 1.4.4)**, which was waiting on exactly this table —
+`STR_ESC_OCTAL_PREFIX | STR_ESC_ALLOW_C` is the mode GNU echo uses. ⚠ What remains there is the ADR,
+and its question is not the decoding: POSIX echo has no `-e`, XSI says escapes are ALWAYS
+interpreted, and the shell BUILTIN most scripts hit differs from `/usr/bin/echo`.
+
+**4032 smoke cases across 37 scripts** (up from 4002) — `smoke-printf.sh` 68 → 98, ⭐ the new block
+running the **same case list through both paths**, byte-exact through `od`, since the bug was never
+the decoding. ⚠ Its `compare` helper could not be reused: `$(...)` strips trailing newlines and
+drops NULs, which is precisely what `\0` and `\c` produce. **178 unit** (up from 143); 18 POSIX;
+fuzz green under poison (the printf format-engine harness included); four lints clean; both targets
+build. `vet` now reports **50 deps** (new `src/lib/str.cyr`). Binary 1,029,200 → 1,029,280 bytes
+(+80) — two decoders became one call site plus one shared table.
+
 ## [1.4.3] - 2026-08-26 — `uniq` line grouping
 
 ⚠ **Scoped down from the roadmap entry.** That entry paired `uniq --group` with `nl` section

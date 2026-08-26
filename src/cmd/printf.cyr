@@ -26,8 +26,15 @@
 #
 # Escape sequences in FORMAT (always honored — printf processes them
 # directly, unlike most utilities where `\n` in arg is literal):
-#   \\  \a (07)  \b (08)  \f (0c)  \n (0a)  \r (0d)  \t (09)  \v (0b)
-#   \NNN  (1-3 octal digits)
+#   \\  \a (07)  \b (08)  \e (1b)  \f (0c)  \n (0a)  \r (0d)  \t (09)
+#   \v (0b)  \"  \NNN (1-3 octal digits)  \xHH (1-2 hex digits)
+#   \c    cancel the rest of the output and exit 0
+#
+# ⭐ The table itself lives in `src/lib/str.cyr` and is called from BOTH escape
+# paths here — see that file's header for the six divergences from GNU that two
+# separate copies had accumulated. ⚠ The paths differ in ONE rule and it is
+# passed as a mode bit: a FORMAT `\0101` is `\010` then a literal `1`, while a
+# `%b` operand reads the `0` as a PREFIX and gets `A`. Both match GNU.
 #
 # **Argument reuse**: when args exceed format specifiers, the FORMAT
 # is reapplied from the start until args are exhausted (POSIX). When
@@ -39,9 +46,9 @@
 #     usage hits `%d`/`%s`. Defer until a real consumer needs floats.
 #   Positional args `%N$s`.
 #
-# ⚠ `\xHH` hex escape LEFT this list — it shipped and is implemented below
-# (see CHANGELOG). A deferral block that keeps a shipped feature reads as an
-# admission of a gap that does not exist.
+# ⚠ `\xHH` hex escape LEFT this list — it shipped and is documented above with
+# the rest of the escape table. A deferral block that keeps a shipped feature
+# reads as an admission of a gap that does not exist.
 
 # Set when a directive or escape could not be honoured. printf used to WARN on
 # stderr, write the bare conversion character to stdout and exit 0 — so a script
@@ -302,136 +309,66 @@ fn _pf_emit_str(s, left, width, prec): i64 {
     return 0;
 }
 
+# The escape modes, named once. ⚠ The ONLY difference between printf's two
+# escape paths is the octal rule — `\0101` is backspace-then-`1` in a FORMAT
+# string and `A` in a `%b` operand. GNU's own decoder is one function with one
+# `octal_0` flag for exactly this; kriya's is now the same shape.
+fn _pf_esc_mode_fmt(): i64 { return STR_ESC_ALLOW_C | STR_ESC_ALLOW_X; }
+fn _pf_esc_mode_b(): i64   { return STR_ESC_ALLOW_C | STR_ESC_ALLOW_X | STR_ESC_OCTAL_PREFIX; }
+
+# Emit one decoded escape. Returns 1 if `\c` was seen (caller stops output
+# entirely), 0 otherwise; `out_len_p` receives the input bytes consumed.
+fn _pf_emit_decoded(s, i, slen, mode, out_len_p): i64 {
+    var esc[STR_ESC_OUT_SIZE];
+    var v = str_escape_decode(s, i, slen, mode, &esc);
+    store64(out_len_p, load64(&esc + STR_ESC_O_LEN));
+    if (v == STR_ESC_STOP) { return 1; }
+    if (v == STR_ESC_ERR) {
+        k_write( 2, "kriya printf: missing hexadecimal number in escape\n", 51);
+        _pf_bad = 1;
+        return 0;
+    }
+    if (v == STR_ESC_LITERAL) { _pf_putc(92); }
+    _pf_putc(load64(&esc + STR_ESC_O_BYTE));
+    return 0;
+}
+
 # Process backslash escapes in a string for `%b`. Returns 1 if `\c`
 # was encountered (caller should stop output entirely).
 fn _pf_emit_b(s): i64 {
     if (s == 0) { return 0; }
+    var slen = strlen(s);
+    var mode = _pf_esc_mode_b();
+    var stopped: i64 = 0;
     var i: i64 = 0;
-    while (load8(s + i) != 0) {
+    while (i < slen) {
         var b = load8(s + i);
         if (b != 92) {
             _pf_putc(b);
             i = i + 1;
         } else {
-            var nx = load8(s + i + 1);
-            var out_byte: i64 = nx;
-            var consumed: i64 = 2;
-            var stop_here: i64 = 0;
-            if (nx == 0) {
-                # Trailing backslash: emit literal '\'.
-                out_byte = 92;
-                consumed = 1;
+            var elen_box[8];
+            var stop = _pf_emit_decoded(s, i, slen, mode, &elen_box);
+            if (stop == 1) {
+                stopped = 1;
+                i = slen;
+            } else {
+                # ⚠ A malformed `\x` stops this operand too — GNU exits 1 there
+                # rather than printing the rest. Before the shared decoder `%b`
+                # had no `\x` at all and printed a literal `xZ`.
+                if (_pf_bad == 1) { i = slen; }
+                else { i = i + load64(&elen_box); }
             }
-            if (nx == 97)  { out_byte = 7;  }
-            if (nx == 98)  { out_byte = 8;  }
-            if (nx == 102) { out_byte = 12; }
-            if (nx == 110) { out_byte = 10; }
-            if (nx == 114) { out_byte = 13; }
-            if (nx == 116) { out_byte = 9;  }
-            if (nx == 118) { out_byte = 11; }
-            if (nx == 92)  { out_byte = 92; }
-            if (nx == 99)  { stop_here = 1; }
-            # Octal \NNN (1-3 digits).
-            if (nx >= 48) {
-                if (nx <= 55) {
-                    var val: i64 = nx - 48;
-                    consumed = 2;
-                    var n2 = load8(s + i + 2);
-                    if (n2 >= 48) { if (n2 <= 55) {
-                        val = val * 8 + (n2 - 48);
-                        consumed = 3;
-                        var n3 = load8(s + i + 3);
-                        if (n3 >= 48) { if (n3 <= 55) {
-                            var v3 = val * 8 + (n3 - 48);
-                            if (v3 <= 255) { val = v3; consumed = 4; }
-                        } }
-                    } }
-                    out_byte = val & 255;
-                }
-            }
-            if (stop_here == 1) { return 1; }
-            _pf_putc(out_byte);
-            i = i + consumed;
         }
     }
-    return 0;
+    return stopped;
 }
 
-# Process FORMAT-string escapes (always-on). Returns the number of
-# bytes consumed (escape sequence length including the backslash).
-fn _pf_emit_escape(s, i, slen): i64 {
-    var nx = load8(s + i + 1);
-    if (nx == 0) {
-        _pf_putc(92);
-        return 1;
-    }
-    var out_byte: i64 = nx;
-    var consumed: i64 = 2;
-    if (nx == 97)  { out_byte = 7;  }
-    if (nx == 98)  { out_byte = 8;  }
-    if (nx == 102) { out_byte = 12; }
-    if (nx == 110) { out_byte = 10; }
-    if (nx == 114) { out_byte = 13; }
-    if (nx == 116) { out_byte = 9;  }
-    if (nx == 118) { out_byte = 11; }
-    if (nx == 92)  { out_byte = 92; }
-    # Octal \NNN (1-3 digits).
-    if (nx >= 48) {
-        if (nx <= 55) {
-            var val: i64 = nx - 48;
-            consumed = 2;
-            if (i + 2 < slen) {
-                var n2 = load8(s + i + 2);
-                if (n2 >= 48) { if (n2 <= 55) {
-                    val = val * 8 + (n2 - 48);
-                    consumed = 3;
-                    if (i + 3 < slen) {
-                        var n3 = load8(s + i + 3);
-                        if (n3 >= 48) { if (n3 <= 55) {
-                            var v3 = val * 8 + (n3 - 48);
-                            if (v3 <= 255) { val = v3; consumed = 4; }
-                        } }
-                    }
-                } }
-            }
-            out_byte = val & 255;
-        }
-    }
-    # `\xHH` — 1-2 hex digits. A GNU extension, but a common one, and cheap
-    # enough that erroring on it would have been the wrong trade. Before this it
-    # fell through to the "unknown escape" path and printed a literal `x41`.
-    if (nx == 120) {
-        var hv: i64 = 0;
-        var ndig: i64 = 0;
-        var hp = i + 2;
-        var scanning: i64 = 1;
-        while (scanning == 1) {
-            if (ndig >= 2) { scanning = 0; }
-            elif (hp >= slen) { scanning = 0; }
-            else {
-                var hc = load8(s + hp);
-                var d: i64 = 0 - 1;
-                if (hc >= 48) { if (hc <= 57)  { d = hc - 48; } }
-                if (hc >= 97) { if (hc <= 102) { d = hc - 87; } }
-                if (hc >= 65) { if (hc <= 70)  { d = hc - 55; } }
-                if (d < 0) { scanning = 0; }
-                else {
-                    hv = hv * 16 + d;
-                    ndig = ndig + 1;
-                    hp = hp + 1;
-                }
-            }
-        }
-        if (ndig == 0) {
-            k_write( 2, "kriya printf: missing hexadecimal number in escape\n", 51);
-            _pf_bad = 1;
-            return 2;
-        }
-        _pf_putc(hv & 255);
-        return 2 + ndig;
-    }
-    _pf_putc(out_byte);
-    return consumed;
+# Process FORMAT-string escapes (always-on). Returns 1 if `\c` was seen —
+# GNU cancels the remaining output and exits 0. `out_len_p` receives the
+# escape's length, the backslash included.
+fn _pf_emit_escape(s, i, slen, out_len_p): i64 {
+    return _pf_emit_decoded(s, i, slen, _pf_esc_mode_fmt(), out_len_p);
 }
 
 # One byte to stderr — the conversion letter inside a diagnostic.
@@ -475,7 +412,11 @@ fn _pf_process(fmt, arg_count): i64 {
             else {
                 var b = load8(fmt + i);
                 if (b == 92) {
-                    i = i + _pf_emit_escape(fmt, i, slen);
+                    # ⚠ `\c` cancels the rest of the output HERE too, not just in
+                    # `%b` — GNU exits 0 on the spot, argument reuse included.
+                    var elen_box[8];
+                    if (_pf_emit_escape(fmt, i, slen, &elen_box) == 1) { stop = 1; }
+                    i = i + load64(&elen_box);
                 } else {
                     if (b == 37) {
                         i = i + 1;

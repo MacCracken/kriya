@@ -1,0 +1,186 @@
+# str.cyr — C-string backslash-escape decoding, shared.
+#
+# ⭐ LIFTED OUT OF `src/cmd/printf.cyr` so printf's FORMAT path, printf's `%b`
+# and (next) `echo -e` decode escapes through ONE table. printf carried two
+# near-identical decoders and they HAD ALREADY DRIFTED — measured byte-for-byte
+# against GNU coreutils 9.11 and 9.4, which agree with each other, so none of
+# this is version drift:
+#
+#   `\e`     absent from BOTH copies, so it printed a literal `e`. GNU added it
+#            to printf and echo in coreutils 8.1 (2009-11-18).
+#   `\c`     honoured in `%b`, a literal `c` in FORMAT.
+#   `\xHH`   honoured in FORMAT, a literal `x41` in `%b`.
+#   `\0101`  the `%b` copy applied FORMAT's octal rule and printed
+#            backspace-then-`1` where GNU prints `A`.
+#   `\q`     both copies dropped the backslash; GNU keeps it and prints `\q`.
+#   `\777`   both copies refused the third digit rather than overflow and left a
+#            literal `7`; GNU takes three digits and truncates to `0xff`.
+#
+# ⛔ Six divergences and NOT ONE is a flaw in the decoding logic — every one is a
+# line present in one copy and missing from the other, or a rule copied onto a
+# path where it does not belong. That is what two escape tables in one binary
+# cost, and nobody notices which half is wrong until a script hits it.
+# `glob.cyr` was lifted out of `find` for exactly this reason.
+#
+# ⚠ This is a PURE decoder: bytes in, one verdict out. It writes to no fd, holds
+# no state, and knows nothing about printf's format engine — emitting is the
+# CALLER's business, which is what lets one call serve a caller that writes a
+# byte at a time and one that buffers.
+
+# Verdicts. ⚠ Four, not two: a caller cannot simply "emit the byte", because two
+# of the four cases are not one byte. An unknown escape is TWO (GNU keeps the
+# backslash) and `\c` is none.
+enum StrEscVerdict {
+    STR_ESC_BYTE    = 0;   # emit the decoded byte
+    STR_ESC_LITERAL = 1;   # emit `\` and THEN the decoded byte
+    STR_ESC_STOP    = 2;   # `\c` — cancel the rest of the output entirely
+    STR_ESC_ERR     = 3;   # malformed `\x`; the decoder writes NO diagnostic
+}
+
+# Mode bits. ⚠ Each is a place two REAL callers disagree; there is nothing
+# speculative in this list.
+enum StrEscMode {
+    # `\0ddd` — the leading `0` is a PREFIX and up to three MORE octal digits
+    # follow it. POSIX defines `%b` this way (and `echo` likewise); a FORMAT
+    # string takes the other rule, at most three digits TOTAL. ⛔ The difference
+    # is load-bearing, not cosmetic: `\0101` is `A` under the prefix rule and
+    # backspace-then-`1` without it. GNU agrees on both readings.
+    STR_ESC_OCTAL_PREFIX = 1;
+    # `\c` cancels the rest of the output. POSIX gives it to `%b`; GNU also
+    # honours it in FORMAT, where it exits 0 on the spot.
+    STR_ESC_ALLOW_C      = 2;
+    # `\xHH`, 1-2 hex digits. A GNU extension rather than POSIX, honoured by GNU
+    # in both paths. A caller that leaves it off gets `\x` as an unknown escape.
+    STR_ESC_ALLOW_X      = 4;
+}
+
+# Out-box layout — declare as `var box[STR_ESC_OUT_SIZE]`.
+enum StrEscOut {
+    STR_ESC_O_BYTE   = 0;    # decoded byte, 0-255
+    STR_ESC_O_LEN    = 8;    # INPUT bytes consumed, the backslash included
+    STR_ESC_OUT_SIZE = 16;
+}
+
+# Decode ONE escape sequence. `s + i` must point AT the backslash. `slen` bounds
+# the scan, so a truncated `\x` or `\1` at the end of the buffer cannot read past
+# it — callers holding a NUL-terminated string pass `strlen`.
+#
+# ⚠ The LEN field is set on EVERY path, STR_ESC_ERR included: a caller that
+# reports the error and keeps walking still needs to know how far to skip.
+fn str_escape_decode(s, i, slen, mode, out): i64 {
+    store64(out + STR_ESC_O_BYTE, 92);
+    store64(out + STR_ESC_O_LEN, 1);
+
+    # Trailing backslash — the escape is the last byte in the buffer. GNU emits
+    # a bare `\` and consumes just it.
+    if (i + 1 >= slen) { return STR_ESC_BYTE; }
+    var nx = load8(s + i + 1);
+    if (nx == 0) { return STR_ESC_BYTE; }
+
+    # --- named single-character escapes ---
+    # ⚠ `(0 - 1)` as "no match", because 0 is a legitimate decoded byte here.
+    var named: i64 = 0 - 1;
+    if (nx == 97)  { named = 7;  }    # \a  alert
+    if (nx == 98)  { named = 8;  }    # \b  backspace
+    if (nx == 101) { named = 27; }    # \e  escape (GNU, coreutils 8.1)
+    if (nx == 102) { named = 12; }    # \f  form feed
+    if (nx == 110) { named = 10; }    # \n  newline
+    if (nx == 114) { named = 13; }    # \r  carriage return
+    if (nx == 116) { named = 9;  }    # \t  horizontal tab
+    if (nx == 118) { named = 11; }    # \v  vertical tab
+    if (nx == 92)  { named = 92; }    # \\  backslash
+    # ⚠ `\"` is in GNU's named table and takes the backslash off; `\'` is NOT and
+    # keeps it. The asymmetry looks like an oversight upstream and is not one.
+    if (nx == 34)  { named = 34; }    # \"  double quote
+    if (named >= 0) {
+        store64(out + STR_ESC_O_BYTE, named);
+        store64(out + STR_ESC_O_LEN, 2);
+        return STR_ESC_BYTE;
+    }
+
+    # --- \c : cancel all remaining output ---
+    if (nx == 99) {
+        if ((mode & STR_ESC_ALLOW_C) != 0) {
+            store64(out + STR_ESC_O_LEN, 2);
+            return STR_ESC_STOP;
+        }
+    }
+
+    # --- octal \NNN / \0NNN ---
+    if (nx >= 48) {
+        if (nx <= 55) {
+            var p = i + 1;
+            # The prefix rule: `\0` is an INTRODUCER here, not the first digit,
+            # so three more digits may follow it.
+            if ((mode & STR_ESC_OCTAL_PREFIX) != 0) {
+                if (nx == 48) { p = p + 1; }
+            }
+            var val: i64 = 0;
+            var ndig: i64 = 0;
+            var scanning: i64 = 1;
+            while (scanning == 1) {
+                if (ndig >= 3) { scanning = 0; }
+                elif (p >= slen) { scanning = 0; }
+                else {
+                    var c = load8(s + p);
+                    if (c < 48) { scanning = 0; }
+                    elif (c > 55) { scanning = 0; }
+                    else {
+                        # ⚠ Overflow TRUNCATES, it does not stop the scan. `\777`
+                        # is 511, emitted as `0xff`, with all three digits eaten.
+                        # The old copies refused the digit that overflowed and
+                        # left it in the stream as a literal `7`.
+                        val = val * 8 + (c - 48);
+                        ndig = ndig + 1;
+                        p = p + 1;
+                    }
+                }
+            }
+            store64(out + STR_ESC_O_BYTE, val & 255);
+            store64(out + STR_ESC_O_LEN, p - i);
+            return STR_ESC_BYTE;
+        }
+    }
+
+    # --- \xHH : 1-2 hex digits ---
+    if (nx == 120) {
+        if ((mode & STR_ESC_ALLOW_X) != 0) {
+            var hv: i64 = 0;
+            var ndigx: i64 = 0;
+            var hp = i + 2;
+            var hscan: i64 = 1;
+            while (hscan == 1) {
+                if (ndigx >= 2) { hscan = 0; }
+                elif (hp >= slen) { hscan = 0; }
+                else {
+                    var hc = load8(s + hp);
+                    var d: i64 = 0 - 1;
+                    if (hc >= 48) { if (hc <= 57)  { d = hc - 48; } }
+                    if (hc >= 97) { if (hc <= 102) { d = hc - 87; } }
+                    if (hc >= 65) { if (hc <= 70)  { d = hc - 55; } }
+                    if (d < 0) { hscan = 0; }
+                    else {
+                        hv = hv * 16 + d;
+                        ndigx = ndigx + 1;
+                        hp = hp + 1;
+                    }
+                }
+            }
+            if (ndigx == 0) {
+                store64(out + STR_ESC_O_LEN, 2);
+                return STR_ESC_ERR;
+            }
+            store64(out + STR_ESC_O_BYTE, hv & 255);
+            store64(out + STR_ESC_O_LEN, 2 + ndigx);
+            return STR_ESC_BYTE;
+        }
+    }
+
+    # --- unknown escape ---
+    # ⚠ GNU keeps the backslash: `\q` is `\q`, two bytes, not `q`. Dropping it
+    # loses information the user typed, and a shell script that meant a literal
+    # backslash got a silent deletion instead.
+    store64(out + STR_ESC_O_BYTE, nx);
+    store64(out + STR_ESC_O_LEN, 2);
+    return STR_ESC_LITERAL;
+}

@@ -20,6 +20,7 @@ include "src/lib/path.cyr"
 # trap has fired three times; this include is added with the reference, not
 # after the build breaks.
 include "src/lib/glob.cyr"
+include "src/lib/str.cyr"
 include "src/lib/fs.cyr"
 include "src/lib/protected.cyr"
 include "src/lib/args.cyr"
@@ -30,6 +31,17 @@ include "src/lib/args.cyr"
 include "src/lib/help.cyr"
 include "src/cmd/true.cyr"
 include "src/cmd/false.cyr"
+
+# ⭐ The two modes printf actually uses, so a test reads as "FORMAT says this,
+# `%b` says that" rather than as a bitmask.
+var MODE_FMT = 6;   # STR_ESC_ALLOW_C | STR_ESC_ALLOW_X
+var MODE_B   = 7;   # ...| STR_ESC_OCTAL_PREFIX
+
+# Decode the escape at the START of `lit`, which must begin with a backslash.
+# `strlen` for the bound is the same thing printf's callers pass.
+fn _t_esc(lit, mode, out): i64 {
+    return str_escape_decode(lit, 0, strlen(lit), mode, out);
+}
 
 fn main() {
     alloc_init();
@@ -257,6 +269,80 @@ fn main() {
     assert_eq(glob_match("*.c", 3, "sub/main.c", 10),      1, "* crosses a slash");
     assert_eq(glob_match("sub/*.c", 7, "sub/main.c", 10),  1, "pattern may contain a slash");
     assert_eq(glob_match("a/*", 3, "a/b/c", 5),            1, "* spans multiple segments");
+
+    # ⭐ `str_escape_decode` is unit-testable at all BECAUSE it is pure — the two
+    # decoders it replaced wrote straight to fd 1, so the only way to check them
+    # was to run the binary and read bytes back. Every case below was measured
+    # against GNU coreutils 9.11 first; `scripts/smoke-printf.sh` re-checks the
+    # same ground end-to-end through the real binary.
+    var esc[STR_ESC_OUT_SIZE];
+
+    test_group("str_escape_decode — named escapes");
+    assert_eq(_t_esc("\\n", MODE_FMT, &esc), STR_ESC_BYTE, "\\n decodes");
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 10, "\\n is 0x0a");
+    assert_eq(load64(&esc + STR_ESC_O_LEN),   2, "\\n consumes 2");
+    # ⚠ The escape that was in NEITHER old copy. GNU has had it since 8.1 (2009).
+    _t_esc("\\e", MODE_FMT, &esc);
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 27, "\\e is 0x1b (ESC)");
+    _t_esc("\\a", MODE_FMT, &esc);
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 7,  "\\a is 0x07");
+    _t_esc("\\\\", MODE_FMT, &esc);
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 92, "\\\\ is a backslash");
+
+    test_group("str_escape_decode — unknown escapes keep the backslash");
+    # ⛔ GNU prints `\q`, both bytes. The old copies dropped the backslash and
+    # printed a bare `q`, silently deleting a byte the user typed.
+    assert_eq(_t_esc("\\q", MODE_FMT, &esc), STR_ESC_LITERAL, "\\q is a literal pair");
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 113, "...whose second byte is `q`");
+    assert_eq(load64(&esc + STR_ESC_O_LEN),    2, "...consuming both");
+    # ⚠ `\"` IS in GNU's named table and `\'` is NOT — the asymmetry is real.
+    assert_eq(_t_esc("\\\"", MODE_FMT, &esc), STR_ESC_BYTE,    "\\\" is a plain quote");
+    assert_eq(_t_esc("\\'", MODE_FMT, &esc),   STR_ESC_LITERAL, "\\' keeps its backslash");
+    # A trailing backslash is a literal backslash, consuming only itself.
+    assert_eq(_t_esc("\\", MODE_FMT, &esc), STR_ESC_BYTE, "trailing \\ decodes");
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 92, "...to a backslash");
+    assert_eq(load64(&esc + STR_ESC_O_LEN),   1, "...consuming 1");
+
+    test_group("str_escape_decode — the octal rule, both readings");
+    # ⛔ THE divergence that made `%b` wrong: same input, two correct answers.
+    _t_esc("\\0101", MODE_FMT, &esc);
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 8, "FORMAT \\0101 is `\\010` = backspace");
+    assert_eq(load64(&esc + STR_ESC_O_LEN),  4, "...leaving the `1` in the stream");
+    _t_esc("\\0101", MODE_B, &esc);
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 65, "%b \\0101 is `A` — the 0 is a PREFIX");
+    assert_eq(load64(&esc + STR_ESC_O_LEN),   5, "...consuming all four digits");
+    # Without the leading zero both modes agree: 3 digits, no prefix to skip.
+    _t_esc("\\101", MODE_B, &esc);
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 65, "%b \\101 is `A` too");
+    _t_esc("\\0", MODE_B, &esc);
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 0, "%b \\0 is NUL");
+    assert_eq(load64(&esc + STR_ESC_O_LEN),  2, "...consuming just `\\0`");
+    # ⚠ Overflow TRUNCATES and still eats three digits. The old copies refused
+    # the third digit and left a literal `7` behind.
+    _t_esc("\\777", MODE_FMT, &esc);
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 255, "\\777 truncates to 0xff");
+    assert_eq(load64(&esc + STR_ESC_O_LEN),    4, "...consuming all three digits");
+    _t_esc("\\400", MODE_FMT, &esc);
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 0, "\\400 truncates to 0x00");
+    # A non-octal digit ends the run rather than joining it.
+    _t_esc("\\18", MODE_FMT, &esc);
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 1, "\\18 is \\1 then a literal 8");
+    assert_eq(load64(&esc + STR_ESC_O_LEN),  2, "...consuming 2");
+
+    test_group("str_escape_decode — \\xHH and \\c are opt-in");
+    _t_esc("\\x41", MODE_FMT, &esc);
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 65, "\\x41 is `A`");
+    assert_eq(load64(&esc + STR_ESC_O_LEN),   4, "...consuming 4");
+    _t_esc("\\x4", MODE_FMT, &esc);
+    assert_eq(load64(&esc + STR_ESC_O_BYTE), 4, "\\x4 takes one digit");
+    _t_esc("\\x41B", MODE_FMT, &esc);
+    assert_eq(load64(&esc + STR_ESC_O_LEN), 4, "\\x stops at two digits");
+    assert_eq(_t_esc("\\xZ", MODE_FMT, &esc), STR_ESC_ERR, "\\xZ is malformed");
+    assert_eq(load64(&esc + STR_ESC_O_LEN), 2, "...and still reports a length");
+    assert_eq(_t_esc("\\c", MODE_FMT, &esc), STR_ESC_STOP, "\\c cancels output");
+    # ⚠ Mode bits OFF: both fall back to the unknown-escape path, backslash kept.
+    assert_eq(_t_esc("\\c", 0, &esc), STR_ESC_LITERAL, "\\c is literal without ALLOW_C");
+    assert_eq(_t_esc("\\x41", 0, &esc), STR_ESC_LITERAL, "\\x is literal without ALLOW_X");
 
     return assert_summary();
 }
