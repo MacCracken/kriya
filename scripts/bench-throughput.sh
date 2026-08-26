@@ -86,6 +86,14 @@ echo "[grep]"
 bench_pair "grep literal 10M"   grep "line-0000005678" "$CORPUS_10M"
 bench_pair "grep regex 10M"     grep -E "line-0+5678"  "$CORPUS_10M"
 bench_pair "grep -F fixed 10M"  grep -F "line-0000005678" "$CORPUS_10M"
+# ⚠ Context is where the interesting cost is. `-B` keeps a ring of the last N
+# lines, so every NON-matching line does a memcpy that plain grep skips — and a
+# corpus with one match in millions of lines is close to worst case: the ring is
+# fed constantly and flushed once. Measured at 2M lines / 66 MB: plain 547 ms,
+# -A 3 553 ms (+1%), -B 3 671 ms (+23%), -C 3 679 ms (+24%).
+bench_pair "grep -A 3 10M"      grep -A 3 "line-0000005678" "$CORPUS_10M"
+bench_pair "grep -B 3 10M"      grep -B 3 "line-0000005678" "$CORPUS_10M"
+bench_pair "grep -C 3 10M"      grep -C 3 "line-0000005678" "$CORPUS_10M"
 echo ""
 
 echo "[sort]"

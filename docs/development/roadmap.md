@@ -94,8 +94,12 @@ ship; the kriya side is unblocked and waiting only on agnoshi gaining interactiv
 decoder. ⚠ Check `unicode/_decode` in the vendored stdlib before writing one — it is already in
 kriya's dependency closure for niyama.
 
-- **1.4.0 — `grep` context.** `-A N` / `-B N` / `-C N` and `-Z` (NUL-separated output). Context needs
-  a ring buffer over the input stream; `-Z` pairs with `find -print0` the way `-z` already does.
+- **1.4.x — `grep -NUM` shorthand.** ⚠ Left out of 1.4.0 deliberately: `grep -3` for `-C 3` needs a
+  bare `-DIGIT` to parse as an OPTION rather than an operand, and `grep` goes through the shared
+  parser where a digit is not a registered short. `seq` solves the same problem with a dedicated argv
+  walk (`_seq_token_is_negnum`); lifting that into `src/lib/args.cyr` would serve both. ⛔ Do not
+  special-case it inside `grep` — that is the second-source-of-truth shape the 1.3.x arc spent nine
+  releases removing.
 - **1.4.1 — Shared glob: `grep --include`/`--exclude`, `find -regex`.** `find` already owns an
   fnmatch-style matcher (`_f_glob_match`); lifting it into `src/lib/` serves both, and `-regex` is
   niyama on the path string rather than the basename.

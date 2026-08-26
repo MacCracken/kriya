@@ -284,6 +284,80 @@ f.close()' bigmem 2>/dev/null || true
     fi
 fi
 
+# --- ⭐ context: -A / -B / -C, compared cell-by-cell against GNU ---------
+#
+# ⛔ The subtleties, each verified against GNU before being encoded here:
+#   * a CONTEXT line's field separator is `-`, a MATCHING line's is `:` — that
+#     is the only thing telling a reader which lines in a block actually matched;
+#   * `--` goes between NON-CONTIGUOUS groups, and appears between FILES too;
+#   * `grep -C 0` still separates while a plain `grep` never does, so the
+#     trigger is "the option was supplied", not "the value is nonzero";
+#   * overlapping windows MERGE into one block with no separator;
+#   * an explicit -A or -B overrides the -C that set both;
+#   * -c / -l / -L / -q / -o ignore context rather than erroring.
+printf 'a1\na2\nMATCH1\na4\na5\na6\na7\nMATCH2\na9\na10\n' > ctx.txt
+cp ctx.txt ctx2.txt
+printf 'x\nMATCH\ny\n' > ctxv.txt
+
+ctx_same() {           # ctx_same <label> <args...>  — kriya must equal GNU
+    label=$1; shift
+    # ⚠ `rc=0; cmd || rc=$?` is load-bearing under `set -e`. A no-match case is
+    # EXPECTED to exit 1, and `g=$(grep ...)` takes the substitution's status as
+    # the assignment's, so a bare form aborts the whole script mid-suite — which
+    # it did, silently, on the first run of this block.
+    grc=0
+    g=$(grep "$@" 2>&1) || grc=$?
+    krc=0
+    k=$("$BIN" grep "$@" 2>&1) || krc=$?
+    expect_eq "context: $label" "$g" "$k"
+    expect_eq "context: $label (exit)" "$grc" "$krc"
+}
+ctx_same "-A 1"                  -A 1 MATCH ctx.txt
+ctx_same "-B 1"                  -B 1 MATCH ctx.txt
+ctx_same "-C 1"                  -C 1 MATCH ctx.txt
+ctx_same "-C 1 -n separators"    -C 1 -n MATCH ctx.txt
+ctx_same "-C 3 windows merge"    -C 3 -n MATCH ctx.txt
+ctx_same "-C 0 still separates"  -C 0 -n MATCH ctx.txt
+ctx_same "no context, no --"     -n MATCH ctx.txt
+ctx_same "-C 5 -A 1 precedence"  -C 5 -A 1 -n MATCH ctx.txt
+ctx_same "-A 1 -B 2 independent" -A 1 -B 2 -n MATCH ctx.txt
+ctx_same "two files"             -C 1 -n MATCH ctx.txt ctx2.txt
+ctx_same "-v context"            -v -C 1 -n MATCH ctxv.txt
+ctx_same "-c ignores context"    -c -C 2 MATCH ctx.txt
+ctx_same "-l ignores context"    -l -C 2 MATCH ctx.txt
+ctx_same "no match at all"       -C 1 -n ZZZ ctx.txt
+ctx_same "window clipped at BOF" -C 2 -n a1 ctx.txt
+ctx_same "window clipped at EOF" -C 2 -n a10 ctx.txt
+ctx_same "-i with context"       -i -C 1 -n match ctx.txt
+ctx_same "-w with context"       -w -C 1 -n MATCH1 ctx.txt
+
+# stdin, where there is no filename to prefix
+sg=$(grep -C1 -n MATCH < ctxv.txt) || true
+sk=$("$BIN" grep -C1 -n MATCH < ctxv.txt) || true
+expect_eq "context: stdin" "$sg" "$sk"
+
+# ⚠ A context window larger than the file must not fabricate lines.
+ctx_same "-C 999 over-large"     -C 999 -n MATCH1 ctx.txt
+
+# --- ⭐ -Z: NUL after the FILE NAME only ---------------------------------
+#
+# ⛔ Two different rules, both verified against GNU: with -l the NUL REPLACES
+# the line terminator (`f\0f2\0`, no newline at all), while with -c it replaces
+# the `:` separator and the trailing newline stays (`f\0 2 \n`). And the line
+# number keeps its own `:`/`-`, so `grep -HnZ` is `f\0 3 : line`.
+z_same() {
+    label=$1; shift
+    g=$(grep "$@" 2>&1 | od -An -c) || true
+    k=$("$BIN" grep "$@" 2>&1 | od -An -c) || true
+    expect_eq "-Z: $label" "$g" "$k"
+}
+z_same "-lZ"            -lZ MATCH ctx.txt ctx2.txt
+z_same "-LZ"            -LZ MATCH ctx.txt ctxv.txt
+z_same "-Z -c"          -Z -c MATCH ctx.txt ctx2.txt
+z_same "-HZ"            -HZ MATCH ctx.txt
+z_same "-HnZ keeps :"   -HnZ MATCH ctx.txt
+z_same "-HZ with -C1"   -HZ -C1 MATCH ctx.txt
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

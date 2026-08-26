@@ -6,6 +6,93 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.4.0] - 2026-08-26 — `grep` context
+
+Opens the **1.4.x pattern-and-text arc**, and the first feature release since the 1.3.x discoverability
+work. `grep` gains `-A NUM`, `-B NUM`, `-C NUM` and `-Z`.
+
+### Added — `-A` / `-B` / `-C` context
+
+Every rule below was **verified against GNU before being written down**, not inferred from the man
+page — several are not what a reasonable reading would guess:
+
+- ⛔ **A context line's field separator is `-`; a matching line's is `:`.** Inside a block that is the
+  only thing telling a reader which lines actually matched, so it is not cosmetic.
+- **`--` separates non-contiguous groups — and appears between *files* too**, not just within one.
+- ⛔ **`grep -C 0` still separates; a plain `grep` never does.** The trigger is *"a context option was
+  supplied"*, not *"the value is nonzero"* — which is why the spec defaults are `(0 - 1)` rather than
+  `0`. A zero default cannot tell `-C 0` from no flag at all.
+- **Overlapping windows merge** into one block with no separator.
+- **An explicit `-A` or `-B` overrides the `-C` that set both** — GNU resolves `-C 5 -A 1` to one line
+  after and five before.
+- **`-c` / `-l` / `-L` / `-q` / `-o` ignore context** rather than erroring, matching GNU.
+
+### Added — `-Z`, NUL after each file name
+
+⛔ **Two different rules, and they are easy to conflate.** With `-l` the NUL **replaces the line
+terminator** (`f\0f2\0` — no newline anywhere, which is what `xargs -0` wants). With `-c` it replaces
+the `:` separator and **the trailing newline stays** (`f\0 2 \n`). ⚠ And the *line number* keeps its
+own separator either way, so `grep -HnZ` emits `f\0 3 : line` — a consumer splitting on NUL gets the
+name while one reading the rest still sees the match-vs-context marker.
+
+The documented pipeline works end to end:
+
+```sh
+kriya grep -rlZ TODO src/ | kriya xargs -0 wc -l
+```
+
+### ⭐ The ring buffer grows by doubling rather than sizing for the worst case
+
+`-B` needs the last N lines before a match arrives. A ring of N slots each big enough for grep's 64 KiB
+line cap would be **6.4 MB at `-B 100` and 640 MB at `-B 10000`** — for input whose lines are almost
+always short. Each slot instead starts at 256 bytes and doubles when a longer line arrives, so memory
+tracks the content actually seen.
+
+⚠ **No cap on `-B`, deliberately.** A cap is a silent divergence the day someone passes a bigger
+number, and the growth policy makes one unnecessary. The superseded buffer is not reclaimed — `alloc`
+is a bump allocator — but doubling bounds the total discarded per slot below the slot's final size.
+
+### Not implemented
+
+⚠ **GNU's `-NUM` shorthand (`grep -3` for `-C 3`)**. It requires a bare `-DIGIT` to parse as an option
+rather than an operand — the shape `seq -5` handles with its own argv walk — and `grep` goes through
+the shared parser, where a digit is not a registered short. Named in `--help` and on the roadmap
+rather than silently absent.
+
+### Performance
+
+Context costs what its mechanism implies, measured on 2M lines / 66 MB with a single match — close to
+worst case, since the ring is fed constantly and flushed once:
+
+| | time | vs plain |
+|---|---|---|
+| plain | 547 ms | — |
+| `-A 3` | 553 ms | +1% |
+| `-B 3` | 671 ms | +23% |
+| `-C 3` | 679 ms | +24% |
+
+⭐ `-A` is nearly free because it needs no buffering — a countdown, not a ring. `-B`'s 23% is one
+`memcpy` per **non-matching** line, which is the cost of not knowing a match is coming.
+
+⚠ **Unrelated and pre-existing, but worth recording since it was measured here:** GNU scans the same
+corpus in ~8 ms against kriya's ~543 ms on a literal pattern. GNU uses SIMD `memchr` plus Boyer-Moore;
+kriya's literal fast path is a byte scan. Not touched by this release — see roadmap 1.9.x.
+
+### Tests
+
+**3,835 smoke cases across 37 scripts** (up from 3,774), 119 unit + 18 POSIX, fuzz green under poison,
+four lints clean, both targets build.
+
+`scripts/smoke-grep.sh` gains 45 cases: every context rule above compared **cell-by-cell against GNU**
+including exit status, window clipping at both ends of the file, `-C 999` over-large windows not
+fabricating lines, context under `-i`/`-w`/`-v`, stdin with no filename to prefix, and all six `-Z`
+shapes diffed as `od -c` byte dumps.
+
+⚠ The block aborted the whole script on its first run: `g=$(grep ...)` takes the substitution's exit
+status as the assignment's, and the no-match case is *expected* to exit 1 — so `set -e` killed the
+suite mid-file, silently. **Fourth release this has come up**; the `rc=0; cmd || rc=$?` form is now in
+this block too, with the reason.
+
 ## [1.3.8] - 2026-08-26 — the last two items; 1.3.x closes
 
 ⭐ **The discoverability arc is complete.** Nine releases: `--help` (1.3.0), `--help=json` (1.3.1),

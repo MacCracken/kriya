@@ -28,6 +28,24 @@
 #   -L   list filenames with NO matches (per-file)
 #   -n   prefix each emit with `LINENO:`
 #   -q   quiet: exit on first match, no output
+#   -A N / -B N / -C N   trailing / leading / both context around each match
+#   -Z   NUL after each FILE NAME (pairs with `xargs -0`, like `find -print0`)
+#
+# Context rules, each verified against GNU rather than inferred:
+#   * a CONTEXT line's field separator is `-`; a MATCHING line's is `:`. That is
+#     the only marker distinguishing them inside a block.
+#   * `--` separates NON-CONTIGUOUS groups, and appears between FILES too.
+#   * `grep -C 0` still separates; a plain `grep` never does. The trigger is
+#     "a context option was supplied", not "the value is nonzero" — which is why
+#     the spec defaults are (0 - 1) rather than 0.
+#   * overlapping windows MERGE into one block, with no separator.
+#   * an explicit -A or -B overrides the -C that set both.
+#   * -c / -l / -L / -q / -o ignore context (GNU ignores rather than erroring).
+#
+# ⚠ GNU's `-NUM` shorthand (`grep -3` for `-C 3`) is NOT implemented. It needs a
+# bare `-DIGIT` to be read as an option rather than an operand — the same shape
+# `seq -5` handles with a dedicated argv walk — and grep goes through the shared
+# parser, where a digit is not a registered short. Deferred, roadmap 1.4.x.
 #   -s   suppress filesystem-error messages
 #   -h / -H   filename header control (auto when 2+ operands or -r)
 #   -o   emit only the matched substring(s) on each matching line
@@ -64,6 +82,10 @@ var _gr_F_idx     = 0;
 var _gr_P_idx     = 0;
 var _gr_e_idx     = 0;
 var _gr_f_idx     = 0;
+var _gr_A_idx     = 0;
+var _gr_B_idx     = 0;
+var _gr_C_idx     = 0;
+var _gr_Z_idx     = 0;
 
 var _gr_read_buf  = 0;
 var _gr_line_buf  = 0;
@@ -109,6 +131,10 @@ fn _gr_init_spec(): i64 {
     _gr_F_idx = flags_add_bool(s, 70,  "fixed-strings",     0, "literal-string match (no regex)");
     _gr_P_idx = flags_add_bool(s, 80,  "perl-regexp",       0, "PCRE (rejected in v1.0 per ADR 0005)");
     _gr_e_idx = flags_add_str(s,  101, "regexp",            0, "pattern (overrides positional[0])");
+    _gr_A_idx = flags_add_int(s,  65,  "after-context",     (0 - 1), "print NUM lines after each match");
+    _gr_B_idx = flags_add_int(s,  66,  "before-context",    (0 - 1), "print NUM lines before each match");
+    _gr_C_idx = flags_add_int(s,  67,  "context",           (0 - 1), "print NUM lines before and after");
+    _gr_Z_idx = flags_add_bool(s, 90,  "null",              0, "NUL after each file name (pairs with xargs -0)");
     _gr_f_idx = flags_add_str(s,  102, "file",              0, "read patterns from file, one per line");
     _grep_spec = s;
     grep_help_declare();
@@ -122,13 +148,15 @@ fn grep_help_declare(): i64 {
     help_begin("grep", "Search files for lines matching a pattern.",
                "grep [OPTIONS] PATTERN [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "PATTERN,FILE");
-    help_operands("PATTERN is an operand only when neither -e nor -f supplies it. BRE by default; -E for ERE, -F for fixed strings. ⚠ -r skips symlinks (ADR 0003). -P is rejected (ADR 0005).");  #skip-lint
+    help_operands("PATTERN is an operand only when neither -e nor -f supplies it. BRE by default; -E for ERE, -F for fixed strings. ⚠ Context lines print with `-` where matching lines print `:`, and `--` separates non-adjacent groups. ⚠ -r skips symlinks (ADR 0003). -P is rejected (ADR 0005). GNU's -NUM shorthand is not implemented (roadmap 1.4.x).");  #skip-lint
     help_exit(0, "at least one line matched");
     help_exit(1, "no line matched");
     help_exit(2, "an error occurred");
     help_example("grep -n TODO src/*.cyr");  #skip-lint
     help_example("grep -r -i error logs/");
     help_example("grep -e a -e b file");
+    help_example("grep -C 2 -n panic server.log");
+    help_example("grep -rlZ TODO src/ | xargs -0 wc -l");  #skip-lint
     return 0;
 }
 
@@ -539,16 +567,133 @@ fn _gr_search_at(handle, line, len, from, match_end_ptr): i64 {
 
 # Emit `name:` prefix (or `name:LINENO:`) when needed. Uses the configured
 # field separator (`:` or `-` for context lines — but we don't ship context).
-fn _gr_emit_prefix(name, show_name, show_line, lineno): i64 {
+# `sep` is the byte that follows each prefix field: ':' on a MATCHING line and
+# '-' on a CONTEXT line. That distinction is the only thing telling a reader
+# which lines inside a context block actually matched, so it is not cosmetic.
+#
+# ⚠ `-Z` replaces the byte after the FILE NAME only — never the one after the
+# line number. Verified against GNU: `grep -HnZ` emits `f\0 3 : line`, so a
+# consumer splitting on NUL gets the name while one reading the rest still sees
+# the match-vs-context marker.
+# --- Context ring (-A / -B / -C) ---------------------------------------
+#
+# ⭐ SLOTS GROW BY DOUBLING RATHER THAN BEING SIZED FOR THE WORST CASE. A ring of
+# `before_ctx` slots each big enough for grep's 64 KiB line cap would be 6.4 MB
+# at `-B 100` and 640 MB at `-B 10000`, for input whose lines are almost always
+# short. Each slot instead starts at 256 bytes and doubles when a longer line
+# arrives, so memory tracks the content actually seen. ⚠ The superseded buffer
+# is not reclaimed — `alloc` is a bump allocator — but doubling makes the total
+# discarded per slot smaller than the slot's final size, which is the standard
+# geometric bound.
+#
+# ⚠ Deliberately NOT capping `-B`: a cap is a silent divergence the day someone
+# passes a bigger number, and the growth policy above makes one unnecessary.
+#
+# Slot layout (32 B): +0 buf, +8 cap, +16 len, +24 lineno.
+var _GR_CTX_SLOT = 32;
+var _GR_CTX_MIN  = 256;
+
+var _gr_ring      = 0;   # slot array
+var _gr_ring_cap  = 0;   # number of slots (= before_ctx)
+var _gr_ring_n    = 0;   # slots currently filled (<= cap)
+var _gr_ring_head = 0;   # index of the OLDEST buffered line
+
+# Has anything been emitted yet in this grep run? ⚠ Spans FILES: GNU prints a
+# `--` between the last group of one file and the first of the next, so this
+# cannot be reset per file.
+var _gr_ctx_emitted = 0;
+# Last line number emitted for the CURRENT file; 0 = nothing yet.
+var _gr_ctx_last    = 0;
+
+fn _gr_ring_init(before): i64 {
+    _gr_ring_cap  = before;
+    _gr_ring_n    = 0;
+    _gr_ring_head = 0;
+    if (before <= 0) { return 0; }
+    if (_gr_ring != 0) { return 0; }
+    _gr_ring = alloc(before * _GR_CTX_SLOT);
+    var i: i64 = 0;
+    while (i < before) {
+        store64(_gr_ring + i * _GR_CTX_SLOT, 0);
+        store64(_gr_ring + i * _GR_CTX_SLOT + 8, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Remember `line` as possible leading context, evicting the oldest when full.
+fn _gr_ring_push(line, len, lineno): i64 {
+    if (_gr_ring_cap <= 0) { return 0; }
+    var idx = _gr_ring_head;
+    if (_gr_ring_n < _gr_ring_cap) {
+        idx = (_gr_ring_head + _gr_ring_n) % _gr_ring_cap;
+        _gr_ring_n = _gr_ring_n + 1;
+    } else {
+        _gr_ring_head = (_gr_ring_head + 1) % _gr_ring_cap;
+    }
+    var sp = _gr_ring + idx * _GR_CTX_SLOT;
+    var cap = load64(sp + 8);
+    if (cap < len) {
+        var want = _GR_CTX_MIN;
+        while (want < len) { want = want * 2; }
+        store64(sp, alloc(want));
+        store64(sp + 8, want);
+    }
+    if (len > 0) { memcpy(load64(sp), line, len); }
+    store64(sp + 16, len);
+    store64(sp + 24, lineno);
+    return 0;
+}
+
+fn _gr_ring_clear(): i64 {
+    _gr_ring_n = 0;
+    _gr_ring_head = 0;
+    return 0;
+}
+
+# Line number of the oldest buffered line, or `fallback` when empty.
+fn _gr_ring_first_lineno(fallback): i64 {
+    if (_gr_ring_n <= 0) { return fallback; }
+    return load64(_gr_ring + _gr_ring_head * _GR_CTX_SLOT + 24);
+}
+
+# ⛔ `--` GOES BETWEEN NON-CONTIGUOUS GROUPS, AND ONLY WHEN A CONTEXT FLAG WAS
+# GIVEN. `grep -C 0` still separates (verified against GNU) while a plain
+# `grep` never does — so the trigger is "the option was supplied", not "the
+# value is nonzero".
+fn _gr_ctx_gap(first_line, term): i64 {
+    if (_gr_ctx_emitted == 0) { return 0; }
+    var contiguous: i64 = 0;
+    if (_gr_ctx_last > 0) {
+        if (first_line <= _gr_ctx_last + 1) { contiguous = 1; }
+    }
+    if (contiguous == 1) { return 0; }
+    k_write( 1, "--", 2);
+    var tb[2];
+    store8(&tb, term);
+    k_write( 1, &tb, 1);
+    return 0;
+}
+
+fn _gr_emit_prefix2(name, show_name, show_line, lineno, sep, null_fname): i64 {
     if (show_name == 1) {
         k_write( 1, name, strlen(name));
-        k_write( 1, ":", 1);
+        var sb[2];
+        if (null_fname == 1) { store8(&sb, 0); }
+        else { store8(&sb, sep); }
+        k_write( 1, &sb, 1);
     }
     if (show_line == 1) {
         _gr_emit_dec(lineno);
-        k_write( 1, ":", 1);
+        var lb[2];
+        store8(&lb, sep);
+        k_write( 1, &lb, 1);
     }
     return 0;
+}
+
+fn _gr_emit_prefix(name, show_name, show_line, lineno): i64 {
+    return _gr_emit_prefix2(name, show_name, show_line, lineno, 58, 0);
 }
 
 # --- Pattern intake -----------------------------------------------------
@@ -631,8 +776,17 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
     var show_lineno = load64(opts + 56);
     var quiet_mode  = load64(opts + 64);
     var only_match  = load64(opts + 72);   # -o
+    var before_ctx  = load64(opts + 80);   # -B
+    var after_ctx   = load64(opts + 88);   # -A
+    var ctx_active  = load64(opts + 96);   # any of -A/-B/-C supplied
+    var null_fname  = load64(opts + 104);  # -Z
 
     var read_buf = _gr_read_get();
+    # ⚠ Reset only the per-FILE half. `_gr_ctx_emitted` spans files so a `--`
+    # can separate the last group of one from the first of the next.
+    _gr_ctx_last = 0;
+    _gr_ring_clear();
+    var after_left: i64 = 0;
     var line_buf = _gr_line_get();
     var fold_buf = _gr_fold_get();
     var fold_active = load64(handles + 0);  # 0 here is a flag stored separately
@@ -716,7 +870,13 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                             loop = 0;
                         } elif (list_match == 1) {
                             k_write( 1, name, strlen(name));
-                            k_write( 1, &tb, 1);
+                            # ⚠ Under -Z the NUL REPLACES the terminator, it is
+                            # not added to it: GNU emits `f\0f2\0` with no
+                            # newline anywhere, which is what `xargs -0` wants.
+                            var lz[2];
+                            if (null_fname == 1) { store8(&lz, 0); }
+                            else { store8(&lz, term_byte); }
+                            k_write( 1, &lz, 1);
                             early_exit = 1;
                             done_chunk = 1;
                             loop = 0;
@@ -758,12 +918,48 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                                     else { more = 0; }
                                 }
                             }
+                        } elif (ctx_active == 1) {
+                            # Leading context first: the buffered lines are the
+                            # group's opening, so the `--` decision is made from
+                            # the OLDEST of them, not from the matching line.
+                            _gr_ctx_gap(_gr_ring_first_lineno(lineno), term_byte);
+                            var ri: i64 = 0;
+                            while (ri < _gr_ring_n) {
+                                var sp = _gr_ring + ((_gr_ring_head + ri) % _gr_ring_cap) * _GR_CTX_SLOT;
+                                _gr_emit_prefix2(name, show_name, show_lineno,
+                                                 load64(sp + 24), 45, null_fname);
+                                var sl = load64(sp + 16);
+                                if (sl > 0) { k_write( 1, load64(sp), sl); }
+                                k_write( 1, &tb, 1);
+                                ri = ri + 1;
+                            }
+                            _gr_ring_clear();
+                            _gr_emit_prefix2(name, show_name, show_lineno, lineno, 58, null_fname);
+                            if (line_len > 0) { k_write( 1, line_buf, line_len); }
+                            k_write( 1, &tb, 1);
+                            _gr_ctx_last = lineno;
+                            _gr_ctx_emitted = 1;
+                            after_left = after_ctx;
                         } else {
-                            _gr_emit_prefix(name, show_name, show_lineno, lineno);
+                            _gr_emit_prefix2(name, show_name, show_lineno, lineno, 58, null_fname);
                             if (line_len > 0) {
                                 k_write( 1, line_buf, line_len);
                             }
                             k_write( 1, &tb, 1);
+                        }
+                    } elif (ctx_active == 1) {
+                        # Not a match. Either it is trailing context for the
+                        # group just emitted, or it becomes leading context for
+                        # a group that may not arrive.
+                        if (after_left > 0) {
+                            _gr_emit_prefix2(name, show_name, show_lineno, lineno, 45, null_fname);
+                            if (line_len > 0) { k_write( 1, line_buf, line_len); }
+                            k_write( 1, &tb, 1);
+                            after_left = after_left - 1;
+                            _gr_ctx_last = lineno;
+                            _gr_ctx_emitted = 1;
+                        } else {
+                            _gr_ring_push(line_buf, line_len, lineno);
                         }
                     }
                     line_len = 0;
@@ -777,7 +973,13 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
             if (quiet_mode == 0) {
                 if (show_name == 1) {
                     k_write( 1, name, strlen(name));
-                    k_write( 1, ":", 1);
+                    # ⚠ Here the NUL replaces the ':' separator and the trailing
+                    # newline STAYS — unlike -l above, where it replaces the
+                    # terminator. GNU: `f\0 2 \n`.
+                    var cz[2];
+                    if (null_fname == 1) { store8(&cz, 0); }
+                    else { store8(&cz, 58); }
+                    k_write( 1, &cz, 1);
                 }
                 _gr_emit_dec(matches);
                 k_write( 1, &tb, 1);
@@ -787,7 +989,10 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
             if (any_match == 0) {
                 if (quiet_mode == 0) {
                     k_write( 1, name, strlen(name));
-                    k_write( 1, &tb, 1);
+                    var Lz[2];
+                    if (null_fname == 1) { store8(&Lz, 0); }
+                    else { store8(&Lz, term_byte); }
+                    k_write( 1, &Lz, 1);
                 }
             }
         }
@@ -1043,7 +1248,7 @@ fn cmd_grep(start: i64): i64 {
     if (list_nomatch == 1) { show_name = 1; }
 
     # Pack options into a 96-byte block to keep the helper signatures sane.
-    var opts = alloc(96);
+    var opts = alloc(128);
     store64(opts + 0,  invert);
     store64(opts + 8,  word_mode);
     store64(opts + 16, xline_mode);
@@ -1054,6 +1259,46 @@ fn cmd_grep(start: i64): i64 {
     store64(opts + 56, lineno_mode);
     store64(opts + 64, quiet_mode);
     store64(opts + 72, only_match);
+    # ⛔ `-C N` is shorthand for `-A N -B N`, and an EXPLICIT -A or -B wins over it
+    # — GNU resolves `-C 5 -A 1` to one line after and five before. Reading -C
+    # first and letting the specific flags overwrite gives that for free.
+    var ctx_active: i64 = 0;
+    var before_ctx: i64 = 0;
+    var after_ctx:  i64 = 0;
+    # ⚠ The spec default is (0 - 1), i.e. "not supplied" — distinct from an
+    # explicit 0, which still activates the `--` separator. A plain 0 default
+    # could not tell `grep -C 0` from `grep`.
+    var c_val = flags_get_int(_grep_spec, _gr_C_idx);
+    var b_val = flags_get_int(_grep_spec, _gr_B_idx);
+    var a_val = flags_get_int(_grep_spec, _gr_A_idx);
+    if (c_val >= 0) {
+        ctx_active = 1;
+        before_ctx = c_val;
+        after_ctx  = c_val;
+    }
+    if (b_val >= 0) {
+        ctx_active = 1;
+        before_ctx = b_val;
+    }
+    if (a_val >= 0) {
+        ctx_active = 1;
+        after_ctx = a_val;
+    }
+    if (before_ctx < 0) { before_ctx = 0; }
+    if (after_ctx  < 0) { after_ctx  = 0; }
+    # ⚠ Context is meaningless for the modes that do not emit lines, and GNU
+    # ignores it there rather than erroring. -o emits substrings, not lines.
+    if (count_mode == 1)  { ctx_active = 0; }
+    if (list_match == 1)  { ctx_active = 0; }
+    if (list_nomatch == 1){ ctx_active = 0; }
+    if (quiet_mode == 1)  { ctx_active = 0; }
+    if (only_match == 1)  { ctx_active = 0; }
+    if (ctx_active == 0)  { before_ctx = 0; after_ctx = 0; }
+    _gr_ring_init(before_ctx);
+    store64(opts + 80, before_ctx);
+    store64(opts + 88, after_ctx);
+    store64(opts + 96, ctx_active);
+    store64(opts + 104, flags_get_bool(_grep_spec, _gr_Z_idx));
     store64(opts + 80, fold_active);
 
     var any_match: i64 = 0;
