@@ -6,6 +6,81 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.3.8] - 2026-08-26 — the last two items; 1.3.x closes
+
+⭐ **The discoverability arc is complete.** Nine releases: `--help` (1.3.0), `--help=json` (1.3.1),
+`kriya --list` + a CI that can fail (1.3.2), the checks covering the tree (1.3.3), `--version` (1.3.4),
+the parity audit in three batches (1.3.5–1.3.6), every utility declaring its option table (1.3.7), and
+these two.
+
+### `df`'s tolerance is now evidence-based, not a name list
+
+Since 1.3.2, `smoke-df.sh` has carried `KNOWN_EXTRA_TYPES="devtmpfs"` — a hardcoded allowlist parked
+until a CI run could answer whether that release's duplicate-device filter had made it unnecessary.
+
+⛔ **Waiting on an observation nobody was going to write down is how an allowlist becomes permanent.**
+The question is now asked at runtime, on whatever host runs the suite.
+
+The open question was: when GNU hides `/dev` and kriya shows it, is dedup the explanation? kriya
+implements GNU's rule — one entry per `st_dev` — so an extra mount is now judged on evidence:
+
+- ⛔ if it **shares a device** with something kriya already listed, dedup should have removed it and did
+  not. **That is a kriya bug and it fails.**
+- ⚠ if its device is **unique**, no dedup rule could have hidden it, and this GNU is applying something
+  kriya does not implement. Tolerated, named, and printed with the device number.
+
+⚠ The type name is gone from the check entirely. **A filesystem type is not evidence of anything; a
+duplicate device number is.** Verified both branches — the runner's exact condition simulated (GNU
+shimmed to hide `/dev`) reports *"device 7 is unique — no dedup rule applies"*, and the failing branch
+confirmed against a synthetic device table.
+
+### ⛔ `src/cmd/` is linted in CI, and the earlier judgement was wrong
+
+1.3.3 enforced deferral tracking across the tree but left the 120-column rule reported-only, arguing
+that *"roughly half are single string literals"* and that marking them would be "48 edits that buy
+nothing".
+
+**That undercounted the wrappable half.** Of the 48 over-long lines, **19 were argument lists that
+simply wanted wrapping** — function signatures, call sites, an `if` body — and wrapping them was
+mechanical, verified by the compiler and 3,774 smoke cases. Only 29 genuinely cannot be split: each is
+one `help_operands(…)` or `k_write` diagnostic whose length *is* the text, and each is now marked
+`#skip-lint`.
+
+⚠ **The marker means "this line's length is one string literal".** A new over-long line that is code
+should be wrapped, not marked — and CI now enforces that, so both halves of `cyrlint` are live for
+every file in the tree.
+
+⭐ Verified the rule bites by inserting a deliberately long line: `warn line 6: line exceeds 120
+characters`, failing the step.
+
+### The arc, closed
+
+Worth recording what the nine releases actually produced, since a fair share of it was not the feature:
+
+- **The interface**: `--help`, `--help=json`, `kriya --list`, `--version`, and an option table on all
+  38 utilities — every form derived from **one declaration per utility**, with a lint that fails the
+  build if a fourth reader ever copies the data instead.
+- **Six real kriya bugs**, every one silent-wrong-output rather than a crash: `sort -k F` read as
+  `-k F,F`; `sort -k F1,F2` truncated; `find -exec`/`xargs` handing the child the wrong `argv[0]`;
+  `df` missing GNU's duplicate-device filter; `df` hiding `hugetlbfs` by name where GNU hides it by
+  zero-blocks; and 44 wrong `k_write` lengths, nine of which truncated a message and 35 of which read
+  one byte past the literal.
+- **A test suite that can now fail for the right reasons**: 1,012 cases at v1.1.10 that had never run
+  in CI, against 3,774 today that run on every pull request — plus four lints, an oracle-identity
+  check, and a verification matrix that runs the whole suite under a hostile environment, a deep
+  `$TMPDIR`, and simulated root.
+
+⛔ And the thing most worth keeping: **three of those six bugs were hidden by something that looked
+like evidence** — a comment claiming `-k F1,F2` was "verified byte-identical to GNU" (it named only
+the cases where the bug is invisible), a local coreutils version that basenamed `argv[0]`, and a
+`du`/`df` type list that matched GNU by coincidence on any ordinary host. A green test is not a
+finding. A test that could not have gone red is not a test.
+
+### Tests
+
+**3,774 smoke cases across 37 scripts**, 119 unit + 18 POSIX, fuzz green under poison, four lints clean,
+both targets build, and the whole suite green under all four hostile conditions.
+
 ## [1.3.7] - 2026-08-26 — every utility declares its option table
 
 The last consumer-facing gap in the 1.3.x arc. ⭐ **No utility renders

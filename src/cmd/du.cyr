@@ -417,7 +417,9 @@ fn cmd_du(start: i64): i64 {
                         }
                         if (nlen == 14) {
                             if (_seq_bytes_eq(tok + 2, "human-readable", 14) == 1) { _du_human = 1; handled = 1; }
-                            if (_seq_bytes_eq(tok + 2, "separate-dirs", 13) == 1) { _du_sep_dirs = 1; handled = 1; }  # 13 — no
+                            if (_seq_bytes_eq(tok + 2, "separate-dirs", 13) == 1) {
+                                _du_sep_dirs = 1; handled = 1;
+                            }# 13 — no
                         }
                         if (nlen == 13) {
                             if (_seq_bytes_eq(tok + 2, "separate-dirs", 13) == 1) { _du_sep_dirs = 1; handled = 1; }
@@ -539,7 +541,7 @@ fn du_help_declare(): i64 {
     help_begin("du", "Summarise disk usage of files and directories.",
                "du [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("Reports 1024-byte blocks by default. Hard links are counted once per path today; dedup is a named follow-up.");  # roadmap 1.6.0
+    help_operands("Reports 1024-byte blocks by default. Hard links are counted once per path today; dedup is a named follow-up.");  # roadmap 1.6.0  #skip-lint
     help_exit(1, "a path could not be read");
     help_example("du -sh .");
     help_example("du -a -d 1 /var");

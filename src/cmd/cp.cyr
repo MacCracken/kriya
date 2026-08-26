@@ -104,7 +104,7 @@ fn cp_help_declare(): i64 {
                "cp [OPTIONS] SOURCE... DEST");
     help_positional(2, HELP_POS_UNBOUNDED, "SOURCE,DEST");
     help_destructive(1);
-    help_operands("With one SOURCE, DEST is the new name or an existing directory. With several, DEST must be a directory. Directories need -R/-r. Existing destinations are refused without -f (ADR 0003, ADR 0004).");
+    help_operands("With one SOURCE, DEST is the new name or an existing directory. With several, DEST must be a directory. Directories need -R/-r. Existing destinations are refused without -f (ADR 0003, ADR 0004).");  #skip-lint
     help_exit(1, "a copy failed, or a destination existed without -f");
     help_example("cp notes.txt backup.txt");
     help_example("cp -r src/ dest/");
@@ -357,7 +357,8 @@ fn _cp_symlink_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_dis
 # so we must open with O_NOFOLLOW to close the TOCTOU window where the
 # entry could be swapped for a symlink between classify and open
 # (M8 mitigation, see CVE-2026-35359 in uutils-coreutils).
-fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, interactive, preserve, verbose, src_st, follow): i64 {
+fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, interactive, preserve,
+               verbose, src_st, follow): i64 {
     var src_open_flags: i64 = 0;
     if (follow == 0) { src_open_flags = 131072; }     # O_NOFOLLOW
     var src_fd = fs_openat(src_dirfd, src_name, src_open_flags, 0);
@@ -457,7 +458,8 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
 # source open omits O_NOFOLLOW so a symlink-to-directory is honored.
 # Under no-follow, the source open uses O_NOFOLLOW so a swapped-in
 # symlink fails ELOOP per ADR 0003.
-fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, policy, allow_follow, force, interactive, preserve, verbose, src_st): i64 {
+fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, policy, allow_follow, force,
+                      interactive, preserve, verbose, src_st): i64 {
     var src_fd: i64 = 0;
     if (allow_follow == 1) {
         # O_RDONLY | O_DIRECTORY = 65536. No NOFOLLOW: policy-driven follow.
@@ -554,7 +556,8 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
                                     # the dir open must also follow.
                                     rr = _cp_dir_descend_at(src_fd, name, child_src_disp,
                                                             dst_fd, name, child_dst_disp,
-                                                            policy, follow, force, interactive, preserve, verbose, &child_st);
+                                                            policy, follow, force, interactive,
+                                            preserve, verbose, &child_st);
                                 } else {
                                     if (fs_is_reg(&child_st) == 1) {
                                         rr = _cp_file_at(src_fd, name, child_src_disp,

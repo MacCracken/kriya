@@ -863,7 +863,8 @@ fn _f_eval(n, ctx): i64 {
         return _f_glob_match(pat, plen, name, strlen(name));
     }
     if (k == F_N_TYPE)   { return _f_eval_type_predicate(load64(n + 8), st); }
-    if (k == F_N_SIZE)   { return _f_eval_size_predicate(load64(n + 8), load64(n + 16), load64(n + 24), load64(st + 48)); }
+    if (k == F_N_SIZE)   { return _f_eval_size_predicate(load64(n + 8), load64(n + 16), load64(n + 24),
+        load64(st + 48)); }
     if (k == F_N_MTIME)  { return _f_eval_mtime_predicate(load64(n + 8), load64(n + 16), load64(st + 88)); }
     if (k == F_N_MMIN)   { return _f_eval_mmin_predicate (load64(n + 8), load64(n + 16), load64(st + 88)); }
     if (k == F_N_EMPTY)  { return _f_eval_empty_predicate(path, st); }
@@ -1136,7 +1137,7 @@ fn find_help_declare(): i64 {
                "find [STARTPATH...] [EXPRESSION]");
     help_positional(0, HELP_POS_UNBOUNDED, "STARTPATH,EXPRESSION");
     help_destructive(1);
-    help_operands("Predicates combine with ! , -a and -o; parentheses group. The default action is -print. Symlinks are not followed unless -L is given (ADR 0003).");
+    help_operands("Predicates combine with ! , -a and -o; parentheses group. The default action is -print. Symlinks are not followed unless -L is given (ADR 0003).");  #skip-lint
     help_exit(1, "an entry could not be read, or -exec reported failure");
     help_example("find . -name '*.log'");
     help_example("find /var -type f -size +1M");

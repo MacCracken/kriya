@@ -122,7 +122,7 @@ fn grep_help_declare(): i64 {
     help_begin("grep", "Search files for lines matching a pattern.",
                "grep [OPTIONS] PATTERN [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "PATTERN,FILE");
-    help_operands("PATTERN is an operand only when neither -e nor -f supplies it. BRE by default; -E for ERE, -F for fixed strings. ⚠ -r skips symlinks (ADR 0003). -P is rejected (ADR 0005).");
+    help_operands("PATTERN is an operand only when neither -e nor -f supplies it. BRE by default; -E for ERE, -F for fixed strings. ⚠ -r skips symlinks (ADR 0003). -P is rejected (ADR 0005).");  #skip-lint
     help_exit(0, "at least one line matched");
     help_exit(1, "no line matched");
     help_exit(2, "an error occurred");
@@ -862,7 +862,8 @@ fn _gr_walk_dir(parent_dirfd, dir_name, dir_path, handles, n_handles, opts, term
                         var r = fs_stat_entry(dir_fd, sub, name, &st, 0);
                         if (r == 0) {
                             if (fs_is_dir(&st) == 1) {
-                                if (_gr_walk_dir(dir_fd, name, sub, handles, n_handles, opts, term_byte, suppress) == 1) {
+                                if (_gr_walk_dir(dir_fd, name, sub, handles, n_handles,
+                         opts, term_byte, suppress) == 1) {
                                     found_any = 1;
                                 }
                             } elif (fs_is_reg(&st) == 1) {

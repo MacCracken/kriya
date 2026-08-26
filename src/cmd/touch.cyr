@@ -52,7 +52,7 @@ fn touch_help_declare(): i64 {
                "touch [OPTIONS] FILE...");
     help_positional(1, HELP_POS_UNBOUNDED, "FILE");
     help_destructive(1);
-    help_operands("With no time option the current time is used. ⚠ -r and -t are mutually exclusive; -t stamps are interpreted as UTC (ADR 0007).");
+    help_operands("With no time option the current time is used. ⚠ -r and -t are mutually exclusive; -t stamps are interpreted as UTC (ADR 0007).");  #skip-lint
     help_exit(1, "a file could not be created or stamped");
     help_example("touch newfile");
     help_example("touch -t 202601011200 f");

@@ -65,43 +65,27 @@ wrong. Expect more ADRs and more GNU-comparison work per item than 1.2.x needed.
 
 ---
 
-## 1.3.x — Discoverability
+## 1.3.x — Discoverability ✅ CLOSED at 1.3.8
 
-✅ **The consumer-facing part of this arc is complete.** `--help` (1.3.0), `--help=json` (1.3.1) and
-`kriya --list` (1.3.2) all ship, closing the last of the five items kriya owed agnoshi. What remains
-below is kriya-internal debt the arc surfaced.
+⭐ **Complete.** `--help` (1.3.0), `--help=json` (1.3.1), `kriya --list` + a CI that can fail (1.3.2),
+the checks covering the tree (1.3.3), `--version` (1.3.4), the parity audit in three batches
+(1.3.5–1.3.7 incl. option tables), and the last two items (1.3.8). All five items kriya owed agnoshi
+ship; the kriya side is unblocked and waiting only on agnoshi gaining interactive input.
 
-⭐ **All three forms are one declaration read three times.** Each utility's `<util>_help_declare()` in
-`src/cmd/` feeds the human page, the JSON schema and the top-level listing alike, and the dispatcher
-table in `src/main.cyr` drives both routing and enumeration. ⛔ **Do not add a fourth reader by
-copying the data** — `scripts/lint-help-schema.sh` exists to catch exactly that.
-
-The cold-start budget is met with room: **0.637 ms** per dispatch and **1.402 ms** for `kriya --list`
-against a 2 ms target (1.3.2, batch-timed). ⛔ **The pre-1.3.2 cold-start history is mismeasured** —
-the old harness timed kriya plus a whole `date` fork, so ~60% of those figures were `date`. Compare
-release to release with both binaries measured by the same tool, and name any reference binary
-`kriya` or the dispatcher rejects it on `argv[0]`.
-
-- **1.3.x — `df`: confirm the `/dev` mismatch is gone, then drop the tolerance.** 1.3.2 implemented
-  GNU's duplicate-device filter, which is the only GNU mechanism that can hide `/dev` where kriya
-  showed it (no GNU rule excludes `devtmpfs` by type). ⚠ **The next CI run settles it**: if
-  `smoke-df.sh` no longer prints its "additionally shows /dev" note, remove `devtmpfs` from
-  `KNOWN_EXTRA_TYPES` and let the assertion be strict again. If the note persists, the cause is
-  something else and worth finding. ⛔ Do not "fix" it by adding `devtmpfs` to kriya's skip list —
-  coreutils 9.11 here SHOWS it, so that trades a mismatch on the runner for one on this machine.
-  ⚠ Also still unimplemented from GNU's filter: the `type == "none"` dummy rule, and kriya's
-  unconditional `hugetlbfs` skip is stricter than GNU's (which hides it only via zero-blocks) — so a
-  host with hugepages reserved would see kriya OMIT a filesystem GNU shows.
-- **1.3.x — lint `src/cmd/` in CI.** ⛔ `cyrlint` takes ONE FILE and does not follow includes, so the
-  CI lint step covers `src/main.cyr` + `src/lib/` only. **The 38 utility files have never been
-  linted**: 45 over-long lines (cosmetic) and **59 untracked deferrals** (not cosmetic — 26 `follow-up`,
-  26 `deferred`, 4 `not yet`, 2 `TODO`, 1 `out of scope`, none cross-referenced to a roadmap or
-  CHANGELOG entry). ⭐ The deferral half is the valuable half and is the same bubble-up discipline the
-  1.2.x arc applied everywhere else; expect some to be already-shipped and closable, and some to be
-  real open work that has never been on this roadmap. ⚠ Also one substantive `note` to resolve:
-  `src/lib/fs.cyr:236` uses a raw `getdents` whose number and arity differ per target (agnos #29
-  3-arg, Linux 217 4-arg) — cyrlint suggests `io.cyr`'s `xgetdents` for agnos-bound directory code.
-
+⛔ **Carry these forward, they are not arc-specific:**
+- **One declaration per utility, three readers.** `<util>_help_declare()` in `src/cmd/` feeds the human
+  page, the JSON schema and `kriya --list`; the dispatcher table in `src/main.cyr` drives both routing
+  and enumeration. `scripts/lint-help-schema.sh` fails the build if a fourth reader copies the data
+  instead of deriving it.
+- **A spec the parser does not consult is a second source of truth.** `find` carried one for five
+  releases — built, never read, never called. The seven hand-rolled utilities now declare specs their
+  own walks use as the acceptance gate.
+- **Cold start: report the release-over-release delta, never an absolute.** The pre-1.3.2 history is
+  mismeasured (it timed kriya plus a whole `date` fork). Name any reference binary `kriya` or the
+  dispatcher rejects it on `argv[0]`.
+- **A green test is not a finding.** Three of the arc's six bugs hid behind something that looked like
+  evidence: a comment naming only the cases where the bug is invisible, a local GNU version, and a
+  type list that matched by coincidence.
 ---
 
 ## 1.4.x — Pattern & text parity

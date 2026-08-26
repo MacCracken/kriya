@@ -317,7 +317,8 @@ fn _uq_run(in_fd, out_fd, skip_f, skip_s, cw, ic, show_c, show_d, show_u, term_b
                         var key_off = _uq_key_window(cur_buf, cur_len, skip_f, skip_s, cw, &klen_box);
                         var klen = load64(&klen_box);
                         if (count > 0) {
-                            var equal = _uq_keys_equal(prev_buf + prev_key_off, prev_key_len, cur_buf + key_off, klen, ic);
+                            var equal = _uq_keys_equal(prev_buf + prev_key_off, prev_key_len, cur_buf + key_off, klen,
+                                                       ic);
                             if (equal == 1) {
                                 count = count + 1;
                             } else {

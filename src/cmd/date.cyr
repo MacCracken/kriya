@@ -284,7 +284,8 @@ fn _date_render_spec(buf, pos, c, parts, wkday, epoch): i64 {
     if (c == 90) { return _date_wstr(buf, pos, "UTC"); }                                    # %Z
     if (c == 122) { return _date_wstr(buf, pos, "+0000"); }                                 # %z
     if (c == 115) { return _date_wint(buf, pos, epoch); }                                   # %s
-    if (c == 78) { return _date_wstr(buf, pos, "000000000"); }                              # %N (no ns sampling at v0.7.0)
+    if (c == 78) { return _date_wstr(buf, pos,
+        "000000000"); }                              # %N (no ns sampling at v0.7.0)
     if (c == 84) {                                                                           # %T = %H:%M:%S
         var p = _date_w2(buf, pos, load64(parts + 24));
         store8(buf + p, 58); p = p + 1;
@@ -446,7 +447,7 @@ fn cmd_date(start: i64): i64 {
                         i = i + 1;
                         continue;
                     }
-                    k_write( 2, "kriya date: error: unknown long option (only --utc/--universal accepted at v0.7.0)\n", 83);
+                    k_write( 2, "kriya date: error: unknown long option (only --utc/--universal accepted at v0.7.0)\n", 83);  #skip-lint
                     return EXIT_USAGE;
                 }
                 # Short option(s): only `-u` accepted at v0.7.0.
@@ -465,7 +466,7 @@ fn cmd_date(start: i64): i64 {
                     }
                 }
                 if (ok == 0) {
-                    k_write( 2, "kriya date: error: unknown short option (only -u accepted at v0.7.0; -d/-r/-R/-I deferred)\n", 91);  # roadmap 1.8.3 (-d) and 1.8.4 (-r/-R/-I)
+                    k_write( 2, "kriya date: error: unknown short option (only -u accepted at v0.7.0; -d/-r/-R/-I deferred)\n", 91);  # roadmap 1.8.3 (-d) and 1.8.4 (-r/-R/-I)  #skip-lint
                     return EXIT_USAGE;
                 }
                 i = i + 1;
@@ -490,7 +491,7 @@ fn date_help_declare(): i64 {
     help_begin("date", "Print the current date and time.",
                "date [OPTIONS] [+FORMAT]");
     help_positional(0, 1, "+FORMAT");
-    help_operands("UTC only until tzfile parsing lands (ADR 0007); -u is accepted as a no-op. Specifiers kriya cannot render are refused rather than echoed back.");
+    help_operands("UTC only until tzfile parsing lands (ADR 0007); -u is accepted as a no-op. Specifiers kriya cannot render are refused rather than echoed back.");  #skip-lint
     help_example("date");
     help_example("date '+%Y-%m-%d'");
     help_example("date -u '+%H:%M:%S'");

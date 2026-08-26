@@ -75,7 +75,7 @@ fn rm_help_declare(): i64 {
                "rm [OPTIONS] FILE...");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_destructive(1);
-    help_operands("With -f, zero operands is a silent success (POSIX). ⚠ rm never follows symlinks and no flag opts in (ADR 0003). It refuses `/` with no escape hatch (ADR 0004), refuses a `.`/`..` final component, and refuses a symlink operand carrying a trailing slash (ADR 0010).");
+    help_operands("With -f, zero operands is a silent success (POSIX). ⚠ rm never follows symlinks and no flag opts in (ADR 0003). It refuses `/` with no escape hatch (ADR 0004), refuses a `.`/`..` final component, and refuses a symlink operand carrying a trailing slash (ADR 0010).");  #skip-lint
     help_exit(1, "a removal failed, or an operand was refused");
     help_exit(2, "usage error, or a protected path was named");
     help_example("rm stale.log");

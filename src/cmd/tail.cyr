@@ -68,7 +68,7 @@ fn tail_help_declare(): i64 {
     help_begin("tail", "Print the last part of files.",
                "tail [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("Defaults to 10 lines. ⚠ -f follows a single file by polling its path; multi-file follow is not supported.");
+    help_operands("Defaults to 10 lines. ⚠ -f follows a single file by polling its path; multi-file follow is not supported.");  #skip-lint
     help_exit(1, "a file could not be read");
     help_example("tail -n 50 app.log");
     help_example("tail -f app.log");
@@ -414,7 +414,7 @@ fn cmd_tail(start: i64): i64 {
     # switching). First ship rejects it cleanly; single-file -f works.
     if (follow == 1) {
         if (npos > 1) {
-            k_write( 2, "kriya tail: error: multi-file --follow not yet supported (single file only)\n", 76);  # roadmap 1.8.2
+            k_write( 2, "kriya tail: error: multi-file --follow not yet supported (single file only)\n", 76);  # roadmap 1.8.2  #skip-lint
             return EXIT_USAGE;
         }
     }

@@ -71,7 +71,7 @@ fn cut_help_declare(): i64 {
     help_begin("cut", "Print selected parts of each line.",
                "cut OPTIONS [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("Exactly one of -b, -c or -f selects what LIST means. ⚠ -c is byte-based today; multi-byte support is a named follow-up.");  # roadmap 1.4.2
+    help_operands("Exactly one of -b, -c or -f selects what LIST means. ⚠ -c is byte-based today; multi-byte support is a named follow-up.");  # roadmap 1.4.2  #skip-lint
     help_exit(1, "a file could not be read");
     help_example("cut -d: -f1 /etc/passwd");
     help_example("cut -c 1-10 file");
@@ -363,7 +363,8 @@ fn _cut_run(in_fd, mode, ranges, complement, delim, out_delim, out_delim_len, on
             if (n == 0) {
                 if (line_len > 0) {
                     if (mode == 1) {
-                        _cut_emit_fields(line_buf, line_len, ranges, complement, delim, out_delim, out_delim_len, only_delim, term_byte);
+                        _cut_emit_fields(line_buf, line_len, ranges, complement, delim, out_delim, out_delim_len,
+                                         only_delim, term_byte);
                     } else {
                         _cut_emit_bytes(line_buf, line_len, ranges, complement, term_byte);
                     }
@@ -375,7 +376,8 @@ fn _cut_run(in_fd, mode, ranges, complement, delim, out_delim, out_delim_len, on
                     var b = load8(read_buf + i);
                     if (b == term_byte) {
                         if (mode == 1) {
-                            _cut_emit_fields(line_buf, line_len, ranges, complement, delim, out_delim, out_delim_len, only_delim, term_byte);
+                            _cut_emit_fields(line_buf, line_len, ranges, complement, delim, out_delim, out_delim_len,
+                                             only_delim, term_byte);
                         } else {
                             _cut_emit_bytes(line_buf, line_len, ranges, complement, term_byte);
                         }

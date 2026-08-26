@@ -95,7 +95,7 @@ fn sort_help_declare(): i64 {
                "sort [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_destructive(1);
-    help_operands("⚠ Sorts in memory with a 256 MiB cap; an external-sort fallback is a named follow-up.");  # roadmap 1.8.2
+    help_operands("⚠ Sorts in memory with a 256 MiB cap; an external-sort fallback is a named follow-up.");  # roadmap 1.8.2  #skip-lint
     help_exit(1, "-c found the input unsorted, or a file could not be read");
     help_example("sort names.txt");
     help_example("sort -n -r nums");
@@ -469,10 +469,12 @@ fn _so_cmp_bytes(buf, a_off, a_len, b_off, b_len, fold): i64 {
 
 fn _so_compare(buf, a_rec, b_rec, numeric, reverse, fold, ignore_blanks, has_key, key_field, has_delim, delim): i64 {
     var a_len_box[8];
-    var a_off = _so_key_window(buf, _so_rec_off(a_rec), _so_rec_len(a_rec), ignore_blanks, has_key, key_field, has_delim, delim, &a_len_box);
+    var a_off = _so_key_window(buf, _so_rec_off(a_rec), _so_rec_len(a_rec), ignore_blanks, has_key, key_field,
+                               has_delim, delim, &a_len_box);
     var a_len = load64(&a_len_box);
     var b_len_box[8];
-    var b_off = _so_key_window(buf, _so_rec_off(b_rec), _so_rec_len(b_rec), ignore_blanks, has_key, key_field, has_delim, delim, &b_len_box);
+    var b_off = _so_key_window(buf, _so_rec_off(b_rec), _so_rec_len(b_rec), ignore_blanks, has_key, key_field,
+                               has_delim, delim, &b_len_box);
     var b_len = load64(&b_len_box);
 
     var r: i64 = 0;
@@ -539,7 +541,8 @@ fn _so_merge_sort(records, buf, numeric, reverse, fold, ignore_blanks, has_key, 
                     } else {
                         var a = load64(src + l * 8);
                         var b = load64(src + r * 8);
-                        var cmp = _so_compare(buf, a, b, numeric, reverse, fold, ignore_blanks, has_key, key_field, has_delim, delim);
+                        var cmp = _so_compare(buf, a, b, numeric, reverse, fold, ignore_blanks, has_key, key_field,
+                                              has_delim, delim);
                         if (cmp <= 0) { take_left = 1; }
                     }
                 }
@@ -753,7 +756,7 @@ fn cmd_sort(start: i64): i64 {
     }
 
     if (load64(&overflow_box) == 1) {
-        k_write( 2, "kriya sort: warning: input exceeds 256 MiB; external-sort fallback deferred — truncating\n", 91);  # roadmap 1.8.2
+        k_write( 2, "kriya sort: warning: input exceeds 256 MiB; external-sort fallback deferred — truncating\n", 91);  # roadmap 1.8.2  #skip-lint
     }
 
     var records = _so_build_records(buf, have, term_byte);
@@ -765,7 +768,8 @@ fn cmd_sort(start: i64): i64 {
         while (i < nrec) {
             var a = vec_get(records, i - 1);
             var b = vec_get(records, i);
-            var cmp = _so_compare(buf, a, b, numeric, reverse, fold, ignore_blanks, has_key, key_field, has_delim, delim);
+            var cmp = _so_compare(buf, a, b, numeric, reverse, fold, ignore_blanks, has_key, key_field, has_delim,
+                                  delim);
             if (cmp > 0) {
                 if (check_quiet == 1) { return EXIT_FAILURE; }
                 k_write( 2, "kriya sort: disorder at line ", 29);
@@ -826,7 +830,8 @@ fn cmd_sort(start: i64): i64 {
         var emit: i64 = 1;
         if (unique == 1) {
             if (prev_rec != 0) {
-                var cmp = _so_compare(buf, prev_rec, rec, numeric, 0, fold, ignore_blanks, has_key, key_field, has_delim, delim);
+                var cmp = _so_compare(buf, prev_rec, rec, numeric, 0, fold, ignore_blanks, has_key, key_field,
+                                      has_delim, delim);
                 # Note: reverse=0 here so we test equality, not order.
                 if (cmp == 0) { emit = 0; }
             }

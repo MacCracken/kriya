@@ -57,7 +57,7 @@ fn readlink_help_declare(): i64 {
     help_begin("readlink", "Print the target of a symbolic link.",
                "readlink [OPTIONS] FILE...");
     help_positional(1, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("Without -f the raw link text is printed and a non-symlink is an error. -f/-e/-m canonicalise, with increasing tolerance for missing components.");
+    help_operands("Without -f the raw link text is printed and a non-symlink is an error. -f/-e/-m canonicalise, with increasing tolerance for missing components.");  #skip-lint
     help_exit(1, "not a symlink, or the path could not be resolved");
     help_example("readlink /usr/bin/awk");
     help_example("readlink -f ./link");

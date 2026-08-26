@@ -67,7 +67,7 @@ fn printf_help_declare(): i64 {
     help_begin("printf", "Format and print arguments.",
                "printf FORMAT [ARGUMENT...]");
     help_positional(1, HELP_POS_UNBOUNDED, "FORMAT,ARGUMENT");
-    help_operands("The FORMAT is reused until the arguments are exhausted. ⚠ Floating-point conversions are not implemented and fail rather than printing the conversion letter.");
+    help_operands("The FORMAT is reused until the arguments are exhausted. ⚠ Floating-point conversions are not implemented and fail rather than printing the conversion letter.");  #skip-lint
     help_exit(1, "an invalid conversion or escape was found");
     help_example("printf '%s=%d\\n' a 1");
     help_example("printf '%-10s|\\n' left");

@@ -9,14 +9,16 @@
 # discipline the 1.2.x arc applied everywhere else, unenforced in the one
 # directory where most of the code lives.
 #
-# ⚠ THIS CHECKS DEFERRALS ONLY, ON PURPOSE. cyrlint also warns on lines over 120
-# characters, and `src/cmd/` has 45 of those — but **every one is a code line,
-# and roughly half are single string literals** (`help_operands("…")`, long
-# `k_write` diagnostics) that cannot be split without rewriting user-facing help
-# text. Silencing them with `#skip-lint` would be 45 edits that buy nothing and
-# make the linter's own signal weaker. The line-length rule is reported here and
-# not enforced; the deferral rule is enforced. Enforcing the half that carries
-# meaning beats enforcing neither while waiting to agree about the other.
+# ⭐ AS OF 1.3.8 BOTH RULES ARE ENFORCED. This checked deferrals only while
+# `src/cmd/` still carried 48 over-long lines. Nineteen of those were argument
+# lists that simply wanted wrapping — the earlier judgement that "roughly half
+# are single string literals" undercounted the wrappable half, and wrapping them
+# turned out to be mechanical and verified by the compiler plus 3,774 smoke
+# cases. The 29 that genuinely cannot be split are marked `#skip-lint`, each one
+# a single `help_operands(…)` or `k_write` diagnostic whose length IS the text.
+#
+# ⚠ The marker is for a line whose length comes from ONE string literal. A new
+# over-long line that is code should be WRAPPED, not marked.
 
 set -e
 
@@ -33,16 +35,17 @@ for f in src/main.cyr src/lib/*.cyr src/cmd/*.cyr; do
     [ -n "$n" ] || n=0
     [ -n "$w" ] || w=0
     long_total=$((long_total + w))
+    if [ "$w" -gt 0 ]; then
+        fail=$((fail + w))
+        printf '%s: %s line-length warning(s)\n' "$f" "$w" >&2
+        printf '%s\n' "$out" | grep 'warn line' | sed 's/^/    /' >&2
+    fi
     if [ "$n" -gt 0 ]; then
         fail=$((fail + n))
         printf '%s: %s untracked deferral(s)\n' "$f" "$n" >&2
         printf '%s\n' "$out" | grep 'deferral line' | sed 's/^/    /' >&2
     fi
 done
-
-if [ "$long_total" -gt 0 ]; then
-    printf 'note: %s line-length warning(s) across the tree — reported, not enforced (see this script'"'"'s header)\n' "$long_total"
-fi
 
 # ⛔ A CROSS-REFERENCE THAT POINTS AT NOTHING IS WORSE THAN NONE — it satisfies
 # the linter while telling a reader to go look somewhere that will not answer
@@ -67,4 +70,4 @@ if [ "$fail" -gt 0 ]; then
     exit 1
 fi
 
-echo "lint-deferrals: OK — every deferral in the tree is tracked"
+echo "lint-deferrals: OK — every deferral tracked, every line within 120 columns"

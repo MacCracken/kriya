@@ -85,7 +85,7 @@ fn stat_help_declare(): i64 {
     help_begin("stat", "Print file metadata.",
                "stat [OPTIONS] FILE...");
     help_positional(1, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("⚠ Times render in UTC with a +0000 offset until tzfile support lands (ADR 0007). Specifiers kriya cannot render are refused by name rather than echoed back.");
+    help_operands("⚠ Times render in UTC with a +0000 offset until tzfile support lands (ADR 0007). Specifiers kriya cannot render are refused by name rather than echoed back.");  #skip-lint
     help_exit(1, "a file could not be stat'd, or the format asked for something unimplemented");
     help_example("stat file.txt");
     help_example("stat -c '%s %y' file.txt");
@@ -472,7 +472,7 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
 
 # Default multi-line format (epoch times — `%x`/`%y`/`%z` await chrono).
 fn _st_default_format(): i64 {
-    return "  File: %n\n  Size: %s\tBlocks: %b\tIO Block: %o\t%F\nDevice: %dh/%Dh\tInode: %i\tLinks: %h\nAccess: (%a/%A)  Uid: %u  Gid: %g\nAccess: %X\nModify: %Y\nChange: %Z\n";
+    return "  File: %n\n  Size: %s\tBlocks: %b\tIO Block: %o\t%F\nDevice: %dh/%Dh\tInode: %i\tLinks: %h\nAccess: (%a/%A)  Uid: %u  Gid: %g\nAccess: %X\nModify: %Y\nChange: %Z\n";  #skip-lint
 }
 
 # Terse format (GNU stat -t style — single line, space-separated).

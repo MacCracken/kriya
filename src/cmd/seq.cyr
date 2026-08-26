@@ -271,7 +271,7 @@ fn cmd_seq(start: i64): i64 {
                     # --format / --format=VAL  (deferred) (roadmap 1.8.0)
                     if (name_len == 6) {
                         if (_seq_bytes_eq(tok + 2, "format", 6) == 1) {
-                            k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 85);  # roadmap 1.8.0
+                            k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 85);  # roadmap 1.8.0  #skip-lint
                             return EXIT_USAGE;
                         }
                     }
@@ -323,7 +323,7 @@ fn cmd_seq(start: i64): i64 {
                                 loop = 0;
                             } else {
                                 if (ch == 102) {      # -f
-                                    k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 85);  # roadmap 1.8.0
+                                    k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 85);  # roadmap 1.8.0  #skip-lint
                                     return EXIT_USAGE;
                                 }
                                 k_write( 2, "kriya seq: error: unknown option\n", 33);

@@ -75,15 +75,25 @@ expect_exit() {
 #      the pseudo list. Allowed only for types named below, and the type is
 #      printed, so a NEW divergence still fails loudly and is diagnosable from
 #      the CI log alone rather than needing another round-trip.
-# ⚠ AUDITED AND DELIBERATELY LEFT. This hardcoded allowlist stands in for GNU's
-# dummy-filesystem rule, which is a compile-time list in gnulib and therefore
-# version-dependent — the audit is right that it can go stale. It stays until
-# the next CI run answers the question 1.3.2 opened: kriya now implements GNU's
-# duplicate-device filter, which is the only GNU mechanism that can hide /dev
-# where kriya shows it. If the "additionally shows /dev" note below stops
-# appearing, this allowlist is unnecessary and should be deleted outright
-# rather than maintained (roadmap 1.3.x).
-KNOWN_EXTRA_TYPES="devtmpfs"
+# ⭐ THE TOLERANCE IS NOW EVIDENCE-BASED, NOT A NAME LIST. It used to be a
+# hardcoded `KNOWN_EXTRA_TYPES="devtmpfs"`, parked until a CI run could answer
+# whether 1.3.2's duplicate-device filter had removed the need for it. Waiting on
+# an observation nobody was going to write down is how an allowlist becomes
+# permanent, so the question is asked at runtime instead, on whatever host runs.
+#
+# The open question was: when GNU hides `/dev` and kriya shows it, is dedup the
+# explanation? kriya implements GNU's rule — one entry per `st_dev` — so:
+#   ⛔ if the extra mount SHARES a device with something kriya already listed,
+#      dedup should have removed it and did not. That is a kriya bug, and it
+#      fails here.
+#   ⚠ if its device is UNIQUE, no dedup rule could have hidden it, and this GNU
+#      is applying something kriya does not have. Tolerated, named, and printed.
+#
+# ⚠ The name list is gone. A filesystem TYPE is not evidence of anything; a
+# duplicate device number is.
+dev_of_mount() {
+    stat -c %d "$1" 2>/dev/null || echo ""
+}
 
 fstype_of() {
     awk -v mp="$1" '$2 == mp { print $3; exit }' /proc/self/mounts
@@ -107,20 +117,34 @@ mount_set_check() {
         printf "FAIL %s: kriya OMITS filesystems GNU shows: %s\n" "$name" "$missing" >&2
     fi
 
+    # Device numbers of everything kriya listed, so an extra can be checked for
+    # a duplicate-device explanation.
+    : > "$WORK/k.devs"
+    while read -r m; do
+        d=$(dev_of_mount "$m")
+        [ -n "$d" ] && echo "$d $m" >> "$WORK/k.devs"
+    done < "$WORK/k.set"
+
     bad=""
     for mp in $extra; do
         ft=$(fstype_of "$mp")
-        case " $KNOWN_EXTRA_TYPES " in
-            *" $ft "*) ;;
-            *) bad="$bad $mp($ft)" ;;
-        esac
+        d=$(dev_of_mount "$mp")
+        # Does any OTHER listed mount share this device? If so kriya's dedup
+        # should have collapsed them and did not.
+        dup=""
+        if [ -n "$d" ]; then
+            dup=$(awk -v d="$d" -v me="$mp" '$1 == d && $2 != me { print $2; exit }' "$WORK/k.devs")
+        fi
+        if [ -n "$dup" ]; then
+            bad="$bad $mp($ft, duplicates $dup — dedup should have hidden it)"
+        else
+            printf "note: %s: kriya additionally shows %s (%s, device %s is unique — no dedup rule applies;\n" \
+                "$name" "$mp" "$ft" "${d:-?}"
+            printf "      this GNU hides it by a rule kriya does not implement)\n"
+        fi
     done
     if [ -z "$bad" ]; then
         PASS=$((PASS + 1))
-        if [ -n "$extra" ]; then
-            printf "note: %s: kriya additionally shows %s (known pseudo-FS difference vs this GNU)\n" \
-                "$name" "$(echo "$extra" | tr '\n' ' ')"
-        fi
     else
         FAIL=$((FAIL + 1))
         printf "FAIL %s: kriya shows unexpected extra filesystems:%s\n" "$name" "$bad" >&2

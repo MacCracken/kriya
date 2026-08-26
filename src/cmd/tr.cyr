@@ -419,7 +419,8 @@ fn _tr_parse_set(s, slen, seq, mem): i64 {
 # Builds the 256-byte tables once from the parsed sets, then streams
 # the input.
 
-fn _tr_run(in_fd, set1_seq, set1_seq_len, set1_mem, set2_seq, set2_seq_len, set2_mem, has_set2, del_mode, sq_mode, comp_mode, trunc_mode): i64 {
+fn _tr_run(in_fd, set1_seq, set1_seq_len, set1_mem, set2_seq, set2_seq_len, set2_mem, has_set2, del_mode, sq_mode,
+           comp_mode, trunc_mode): i64 {
     # Build translation map[256] when in translate mode.
     var xmap: i64 = 0;
     if (del_mode == 0) {
@@ -658,7 +659,8 @@ fn cmd_tr(start: i64): i64 {
         }
     }
 
-    var r = _tr_run(0, set1_seq, s1_seq_len, set1_mem, set2_seq, s2_seq_len, set2_mem, has_set2, del_mode, sq_mode, comp_mode, trunc_mode);
+    var r = _tr_run(0, set1_seq, s1_seq_len, set1_mem, set2_seq, s2_seq_len, set2_mem, has_set2, del_mode, sq_mode,
+                    comp_mode, trunc_mode);
     if (r != 0) {
         _tr_report("(stdin)", 0 - r);
         return EXIT_FAILURE;

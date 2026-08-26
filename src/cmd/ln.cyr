@@ -48,7 +48,8 @@ fn _ln_init_spec(): i64 {
     _ln_s_idx = flags_add_bool(s, 115, "symbolic",       0, "create a symbolic link");
     _ln_f_idx = flags_add_bool(s, 102, "force",          0, "remove existing destination first");
     _ln_P_idx = flags_add_bool(s, 80,  "physical",       0, "hard-link the symlink itself, not its target");
-    _ln_n_idx = flags_add_bool(s, 110, "no-dereference", 0, "treat symlink-to-directory destination as a name to replace");
+    _ln_n_idx = flags_add_bool(s, 110, "no-dereference", 0,
+                               "treat symlink-to-directory destination as a name to replace");
     _ln_v_idx = flags_add_bool(s, 118, "verbose",        0, "print each link as it is created");
     _ln_spec = s;
     ln_help_declare();
@@ -63,7 +64,7 @@ fn ln_help_declare(): i64 {
                "ln [OPTIONS] TARGET [LINKNAME]");
     help_positional(1, HELP_POS_UNBOUNDED, "TARGET,LINKNAME");
     help_destructive(1);
-    help_operands("Without -s a hard link is made. ⚠ Under -f the new link is created under a temporary name and renamed over the destination, so the destination is never lost when the link cannot be made.");
+    help_operands("Without -s a hard link is made. ⚠ Under -f the new link is created under a temporary name and renamed over the destination, so the destination is never lost when the link cannot be made.");  #skip-lint
     help_exit(1, "the link could not be created");
     help_example("ln -s /usr/share/doc docs");
     help_example("ln -f a.txt b.txt");

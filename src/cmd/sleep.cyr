@@ -45,7 +45,7 @@ fn sleep_help_declare(): i64 {
                "sleep DURATION");
     help_positional(1, 1, "DURATION");
     help_no_options();
-    help_operands("DURATION is a non-negative number with an optional s/m/h/d suffix. One operand only; GNU sums several, POSIX specifies one.");
+    help_operands("DURATION is a non-negative number with an optional s/m/h/d suffix. One operand only; GNU sums several, POSIX specifies one.");  #skip-lint
     help_example("sleep 5");
     help_example("sleep 0.25");
     help_example("sleep 2m");

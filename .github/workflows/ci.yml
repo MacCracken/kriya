@@ -78,8 +78,10 @@ jobs:
         # linted and carried 56 untracked deferrals — and fails on any deferral
         # that does not name a roadmap or CHANGELOG entry, plus any roadmap
         # reference that points at an entry which does not exist.
-        # ⚠ Deferrals only, on purpose: the line-length rule is reported and not
-        # enforced. See the script header for why.
+        # ⭐ Both rules now: deferral tracking AND the 120-column limit. The
+        # limit was reported-only until 1.3.8, when the 19 wrappable lines in
+        # src/cmd/ turned out to be exactly that — wrappable — and the 29 that
+        # are one long string literal got marked.
         run: sh scripts/lint-deferrals.sh
 
       - name: Lint the introspection interface

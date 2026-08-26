@@ -56,7 +56,7 @@ fn realpath_help_declare(): i64 {
     help_begin("realpath", "Resolve a path to its canonical absolute form.",
                "realpath [OPTIONS] PATH...");
     help_positional(1, HELP_POS_UNBOUNDED, "PATH");
-    help_operands("Symlinks are followed and `.`/`..` resolved. -e requires every component to exist, -m allows a missing tail.");
+    help_operands("Symlinks are followed and `.`/`..` resolved. -e requires every component to exist, -m allows a missing tail.");  #skip-lint
     help_exit(1, "a path could not be resolved");
     help_example("realpath ./src/../README.md");
     help_example("realpath -m /no/such/path");
