@@ -105,9 +105,11 @@ else
 fi
 
 # --- SIGPIPE regression guard -----------------------------------------
-# The producer must be KILLED by SIGPIPE (128+13=141), not report a write
-# error. If this ever flips to 1, the sticky-flag change has started
-# swallowing EPIPE and `kriya yes | head` diverged from GNU.
+# The producer must do whatever GNU does. ⚠ At the DEFAULT SIGPIPE disposition
+# that is death by signal (128+13=141) and a flip to 1 would mean the sticky flag
+# had started swallowing EPIPE. But when the parent IGNORES SIGPIPE the write
+# returns EPIPE, nothing is killed, and GNU exits 1 as well — so the test asserts
+# parity with GNU and checks the absolute only when GNU shows 141.
 # Getting the PRODUCER's status out of a pipeline, in POSIX sh. Process
 # substitution (`> >(...)`) is a bashism and every other smoke script here runs
 # under /bin/sh, which is dash on the CI runner; a plain pipeline reports only
@@ -124,13 +126,41 @@ run_producer() {
     { st=0; timeout 10 "$@" 2>/dev/null || st=$?; echo "$st" > "$WORK/rc"; } | head -1 > /dev/null
 }
 
-run_producer "$BIN" yes
-rc=$(cat "$WORK/rc" 2>/dev/null || echo MISSING)
-expect_eq "yes into closed pipe dies on SIGPIPE" "141" "$rc"
-
+# ⛔ GNU FIRST — it is both the oracle AND the probe for this environment's
+# SIGPIPE disposition. 141 is a property of the ENVIRONMENT, not of `yes`: if the
+# parent has SIGPIPE at SIG_IGN, write() returns EPIPE instead of the kernel
+# killing the writer, and GNU `yes` exits 1 there too. SIG_IGN survives execve
+# (only installed handlers reset to SIG_DFL) and POSIX forbids a non-interactive
+# shell from resetting a signal ignored at entry — so `trap - PIPE` does NOT
+# undo it. This script asserted a hardcoded 141 and went red on a CI runner whose
+# parent process ignores SIGPIPE, while kriya was matching GNU exactly.
+#
+# Verified both ways on the dev box: SIGPIPE default -> GNU 141, kriya 141;
+# SIGPIPE ignored -> GNU 1, kriya 1. Parity in both; the absolute only in one.
 run_producer yes
 gnu_rc=$(cat "$WORK/rc" 2>/dev/null || echo MISSING)
-expect_eq "...same as GNU" "$gnu_rc" "$rc"
+
+run_producer "$BIN" yes
+rc=$(cat "$WORK/rc" 2>/dev/null || echo MISSING)
+
+# The invariant that holds in ANY signal environment: kriya does what GNU does.
+expect_eq "yes into closed pipe matches GNU" "$gnu_rc" "$rc"
+
+# ...and never the silent lie the sticky flag exists to prevent.
+if [ "$rc" = "0" ]; then
+    FAIL=$((FAIL + 1)); printf "FAIL yes into closed pipe exited 0\n" >&2
+else
+    PASS=$((PASS + 1))
+fi
+
+# The strong form, only where the signal is actually deliverable. Skipping
+# honestly beats asserting an absolute the environment controls — the same
+# idiom this script already uses for an absent /dev/full.
+if [ "$gnu_rc" = "141" ]; then
+    expect_eq "yes into closed pipe dies on SIGPIPE" "141" "$rc"
+else
+    echo "skip: parent ignores SIGPIPE (GNU yes exited $gnu_rc) — signal-death path not exercised"
+fi
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

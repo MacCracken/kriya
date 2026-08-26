@@ -106,8 +106,15 @@ fn k_read(fd, buf, n): i64 {
 # when the applet itself returned success. An applet that already detected the failure and returned
 # nonzero (`cp`, `mv`, `tee` on their destination fds) keeps its own exit code and message.
 #
-# ⚠ EPIPE does not reach here. kriya leaves SIGPIPE at its default disposition, so `kriya yes | head`
-# is killed by the signal (exit 141, matching GNU) before `write` ever returns -EPIPE.
+# ⚠ EPIPE reaches here only when the PARENT has SIGPIPE at SIG_IGN. kriya never touches the
+# disposition, so at the default `kriya yes | head` is killed by the signal (141, matching GNU) and
+# `write` never returns -EPIPE. But SIG_IGN survives execve — only installed handlers reset to
+# SIG_DFL — and POSIX forbids a non-interactive shell from resetting a signal ignored at entry, so a
+# parent that ignores SIGPIPE propagates it to everything it runs. ⭐ In that environment the write
+# DOES return -EPIPE, this net exits 1 with "write error: broken pipe", and **GNU exits 1 there too**
+# — so it is still parity, not divergence. An earlier version of this comment said EPIPE could not
+# reach here at all, which is what made a hardcoded `141` in scripts/smoke-write-errors.sh look safe;
+# that assertion went red on a CI runner whose parent ignores SIGPIPE.
 var _K_WRITE_BAD:   i64 = 0;    # 1 once any write has failed
 var _K_WRITE_ERRNO: i64 = 0;    # errno of the FIRST failure; 0 = short write with no errno
 

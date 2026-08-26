@@ -99,6 +99,22 @@ release to release with both binaries measured by the same tool, and name any re
   order-sensitive assignment/`-u` interleave). ⛔ Do **not** solve it by declaring a documentation-only
   spec beside the real parser — that reintroduces exactly the second source of truth 1.3.0 and 1.3.1
   were built to avoid. Either the parser moves onto the spec or the utility stays `null`.
+- **1.3.x — `df`: confirm the `/dev` mismatch is gone, then drop the tolerance.** 1.3.2 implemented
+  GNU's duplicate-device filter, which is the only GNU mechanism that can hide `/dev` where kriya
+  showed it (no GNU rule excludes `devtmpfs` by type). ⚠ **The next CI run settles it**: if
+  `smoke-df.sh` no longer prints its "additionally shows /dev" note, remove `devtmpfs` from
+  `KNOWN_EXTRA_TYPES` and let the assertion be strict again. If the note persists, the cause is
+  something else and worth finding. ⛔ Do not "fix" it by adding `devtmpfs` to kriya's skip list —
+  coreutils 9.11 here SHOWS it, so that trades a mismatch on the runner for one on this machine.
+  ⚠ Also still unimplemented from GNU's filter: the `type == "none"` dummy rule, and kriya's
+  unconditional `hugetlbfs` skip is stricter than GNU's (which hides it only via zero-blocks) — so a
+  host with hugepages reserved would see kriya OMIT a filesystem GNU shows.
+- **1.3.x — audit the remaining GNU-parity assertions for version sensitivity.** ⚠ Two of the three
+  first-run CI failures were *the local GNU's version differing from the runner's*, and one of those
+  was masking a real kriya bug for two releases (coreutils 9.11 basenames `argv[0]`; 9.4 does not).
+  The smoke suite compares against whatever GNU is on PATH, so **an assertion can be green here and
+  wrong everywhere else**. Worth a sweep for assertions that pin an absolute where they could pin
+  parity, or that depend on behaviour known to have changed across coreutils/findutils releases.
 - **1.3.x — lint `src/cmd/` in CI.** ⛔ `cyrlint` takes ONE FILE and does not follow includes, so the
   CI lint step covers `src/main.cyr` + `src/lib/` only. **The 38 utility files have never been
   linted**: 45 over-long lines (cosmetic) and **59 untracked deferrals** (not cosmetic — 26 `follow-up`,

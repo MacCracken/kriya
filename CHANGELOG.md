@@ -104,10 +104,95 @@ each — and subtracting a control batch of the same loop with no spawn. 1.3.1 a
 the corrected tool: **0.635 ms → 0.637 ms.** ⚠ The pre-1.3.2 figures in `state.md` are **not**
 comparable to these and are labelled as such.
 
+### Fixed — three failures the new CI step immediately caught
+
+⭐ **Turning the smoke suite on in CI paid for itself on the first run.** All three failures were
+invisible on the dev box, and one was a real defect that had shipped two releases earlier.
+
+⛔ **`find -exec` and `xargs` handed the child the wrong `argv[0]` — a genuine bug.** Both PATH-resolve
+the command and then wrote the resolved path back into `args[0]`, so the child saw
+`argv[0] = /usr/bin/rm` where `execvp` gives it `rm`. GNU tools print `argv[0]` as their error prefix,
+so every diagnostic from an `-exec`'d program named itself by absolute path:
+
+```
+/usr/bin/rm: cannot remove 'x': Permission denied     (kriya)
+rm: cannot remove 'x': Permission denied              (GNU)
+```
+
+⚠ **The dev box hid this for two releases**: coreutils **9.11 basenames `argv[0]` before printing**, so
+it said `rm:` either way. The runner's 9.4 does not. **A GNU-parity test can pass because of the local
+GNU's version rather than because kriya is right.**
+
+The resolution itself is correct and stays — a bare name must not be left for the kernel to resolve
+against the current directory, which in the `find /shared -exec` shape is attacker-writable. What was
+wrong is that **the exec target and `argv[0]` are not the same thing.** New `k_spawn_as(exec_path,
+args, env)` separates them; `k_spawn` is now a wrapper passing `args[0]` as both. ⚠ `env` already did
+this correctly and was the model. ⚠ agnos keeps the old behaviour: stdlib `exec_vec` takes only the
+vector and uses element 0 as both, so the two cannot be separated there — running the right binary
+wins over the error prefix. Verified with a purpose-built probe that prints its own `argv[0]`: kriya
+and GNU now agree for `find -exec`, `xargs` and `env`.
+
+⚠ **`smoke-write-errors.sh` asserted a hardcoded `141` for `yes` into a closed pipe.** **141 is a
+property of the environment, not of `yes`.** If the parent holds SIGPIPE at `SIG_IGN`, `write` returns
+EPIPE instead of the kernel killing the writer — and **GNU `yes` exits 1 there too**. `SIG_IGN`
+survives `execve` (only installed handlers reset to `SIG_DFL`), and POSIX forbids a non-interactive
+shell from resetting a signal ignored at entry, so `trap - PIPE` does not undo it. Measured both ways
+here: SIGPIPE default → GNU 141, kriya 141; SIGPIPE ignored → GNU 1, kriya 1. **Parity in both.** The
+test now asserts parity with GNU plus "never 0", and checks the absolute only where GNU itself shows
+141, skipping honestly otherwise. ⛔ The comment in `src/lib/sys.cyr` claiming *"EPIPE does not reach
+here"* was unconditionally false and is what made the hardcoded absolute look safe; corrected.
+
+⛔ **`df` was missing GNU's duplicate-device filter entirely — a second real bug, found while
+investigating the third failure.** GNU's `filter_mount_list` stats every mount point, groups by
+`st_dev`, and keeps one entry per device. kriya had no equivalent, so **any second mount of the same
+filesystem showed twice**:
+
+```
+mount --bind /home /tmp/bindtgt
+GNU df   -> /tmp/bindtgt absent
+kriya df -> /tmp/bindtgt present     (same st_dev as /)
+```
+
+That is not exotic — bind mounts, Docker overlays and btrfs subvolume mounts all hit it, and CI
+runners are full of them. ⚠ Invisible on a dev box that happens to have none, which is why five
+releases of `df` shipped without it.
+
+⭐ **It is also the only GNU filter that can explain the reported symptom.** No GNU rule excludes
+`devtmpfs` by *type* — its dummy list has never contained it — so on a host where GNU hides `/dev`
+and kriya shows it, dedup is the one mechanism GNU has that kriya lacked. Implemented with GNU's
+observable tie-break: shortest mount point wins, earliest line breaks a length tie. ⚠ Default-listing
+only, like the pseudo-FS filter — `-a` still shows every duplicate, and naming a path explicitly is a
+request for *that* filesystem.
+
+Verified in an unprivileged mount namespace against three bind mounts: kriya's default set and its
+`-a` set are now **byte-identical to GNU's**, and pinned by four new assertions that skip honestly
+where a namespace is unavailable.
+
+⚠ **`smoke-df.sh` also asserted exact mount-set equality with GNU**, which is fragile independent of
+the bug above: kriya's skip list is fixed type names plus "zero blocks", GNU's is a different
+algorithm whose dummy list has changed across releases. The two directions are not equally serious and
+the test now says so: ⛔ **kriya omitting a filesystem GNU shows is always a failure** — that is the
+one a user notices — while an extra virtual filesystem is allowed only for named types, with the type
+printed so a new divergence still fails loudly. Verified by shimming `df` three ways: the runner's
+exact condition passes with a note, an omission fails, an extra real filesystem fails.
+
+⚠ Whether kriya should *also* hide `devtmpfs` by type is left open, and is now probably moot — the
+two GNU versions to hand disagree, so there is no oracle to copy, and dedup likely covers the runner
+case. The next CI run settles it: if the "additionally shows /dev" note is absent, it does.
+
 ### Tests
 
-**3,547 smoke cases across 37 scripts** (up from 3,030 across 36), 119 unit + 18 POSIX, fuzz green
+**3,553 smoke cases across 37 scripts** (up from 3,030 across 36), 119 unit + 18 POSIX, fuzz green
 under poison, lint and schema-lint clean, both targets build.
+
+⚠ Re-run end-to-end under **simulated runner conditions** — SIGPIPE ignored in the parent and a GNU
+`df` shimmed to hide `/dev` — all 37 scripts green (3,552 cases; one fewer because the SIGPIPE-death
+assertion correctly skips itself).
+
+⚠ The bind-mount check asserts **only the duplicate's fate**, in kriya and in GNU, under each flag. An
+earlier version diffed the whole mount set inside the namespace and so re-ran the main assertion
+there, inheriting every unrelated GNU-version difference — it went red the moment the surrounding
+environment's GNU disagreed about something else. A check should assert what it is about.
 
 - `scripts/smoke-list.sh` — new, 517 cases. Every entry's fields and types; ⭐ **every listed utility
   is invoked to confirm it actually dispatches** — a name in the table that does not route is worse
@@ -117,7 +202,7 @@ under poison, lint and schema-lint clean, both targets build.
   option, and a symlink invocation never sees them at all); argument handling; 80-column wrapping;
   and `> /dev/full` exiting 1.
 
-Binary 995,280 → 1,000,256 bytes (+4,976, +0.5%).
+Binary 995,280 → 1,004,360 bytes (+9,080, +0.9%).
 
 ## [1.3.1] - 2026-08-25 — `--help=json`, the machine form
 

@@ -415,13 +415,17 @@ fn _xa_exec_one(args, trace_mode): i64 {
         k_write( 2, ": command not found\n", 20);
         return 127;
     }
-    vec_set(args, 0, resolved);
+    # ⛔ DO NOT write `resolved` back into args[0]. It is the EXEC TARGET, not
+    # argv[0] — `execvp` resolves the name to decide what to run and hands the
+    # child argv[0] exactly as written. Overwriting made every child report
+    # itself by absolute path (`/usr/bin/rm:` where GNU says `rm:`); see
+    # `k_spawn_as` in src/lib/spawn.cyr.
     var env = _xa_env_get();
     # ⛔ `k_spawn`, NOT stdlib `exec_env`. That one dup2s /dev/null onto fd 2, so
     # the child's diagnostics vanished, AND it collapses every non-exit outcome to
     # -1, so a signalled child was indistinguishable from a failed fork. POSIX
     # requires xargs to tell five outcomes apart; -1 cannot express them.
-    var r = k_spawn(args, env);
+    var r = k_spawn_as(resolved, args, env);
 
     # POSIX exit-status ladder. ⚠ Each rung used to be wrong or unreachable:
     # a signalled child reported 127 (should be 125) and a non-executable one

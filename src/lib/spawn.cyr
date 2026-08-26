@@ -59,21 +59,64 @@ fn k_spawn_exec_errno(r): i64 { return r - K_SPAWN_EXECFAIL; }
 
 # Run `args` (vec of cstr; args[0] is the path to exec) with `env` (vec of cstr),
 # INHERITING fds 0, 1 and 2 untouched. Blocks until the child is reaped.
-fn k_spawn(args, env): i64 {
+# Spawn `args` with `env`, executing `exec_path` rather than `args[0]`.
+#
+# ⛔ THE EXEC TARGET AND argv[0] ARE NOT THE SAME THING. `execvp` resolves the
+# command name against PATH to decide WHAT to run, but hands the child argv[0]
+# EXACTLY as written. kriya resolves for a real reason — a bare name must not be
+# left for the kernel to resolve against the current directory, which in the
+# `find /shared -exec` shape is attacker-writable — but overwriting args[0] with
+# the resolved path made every -exec'd program report itself by absolute path:
+#
+#     /usr/bin/rm: cannot remove 'x': Permission denied     (kriya)
+#     rm: cannot remove 'x': Permission denied              (GNU)
+#
+# ⚠ That divergence was invisible on the dev box for two releases: coreutils
+# 9.11 basenames argv[0] before printing, so it printed `rm:` either way. The
+# runner's 9.4 does not, which is what finally showed it. A passing GNU-parity
+# test can be passing because of the local GNU's version, not because kriya is
+# right.
+fn k_spawn_as(exec_path, args, env): i64 {
     var argc = vec_len(args);
     if (argc < 1) { return K_SPAWN_FORKFAIL; }
 
     #ifdef CYRIUS_TARGET_AGNOS
-    # No fork, no argv, no fd control — `execwait` is the whole surface. The
-    # stdlib wrapper returns the child's exit code, or -1 when the spawn failed.
+    # ⚠ agnos divergence, and it is the stdlib's shape, not a choice here:
+    # `exec_vec` takes only the vector and uses element 0 as BOTH the exec
+    # target and argv[0], so the two cannot be separated. The resolved path
+    # wins (running the right binary matters more than the error prefix); the
+    # caller's vector is restored so a looping caller like `xargs` is unaffected.
+    var saved = vec_get(args, 0);
+    vec_set(args, 0, exec_path);
     var ar = exec_vec(args);
+    vec_set(args, 0, saved);
     if (ar < 0) { return K_SPAWN_FORKFAIL; }
     if (ar > 255) { return 255; }
     return ar;
     #endif
 
     #ifndef CYRIUS_TARGET_AGNOS
-    var cmd = vec_get(args, 0);
+    return _k_spawn_linux(exec_path, args, env);
+    #endif
+}
+
+fn k_spawn(args, env): i64 {
+    var argc = vec_len(args);
+    if (argc < 1) { return K_SPAWN_FORKFAIL; }
+    return k_spawn_as(vec_get(args, 0), args, env);
+}
+
+# Linux arm of `k_spawn_as`. ⚠ The body stays inside `#ifndef CYRIUS_TARGET_AGNOS`
+# — it uses fork/pipe/fcntl/waitpid, none of which agnos provides with these
+# signatures. On agnos it compiles to the fall-through return and is never
+# called, because `k_spawn_as` returns from its own agnos arm first.
+fn _k_spawn_linux(exec_path, args, env): i64 {
+    #ifndef CYRIUS_TARGET_AGNOS
+    var argc = vec_len(args);
+    if (argc < 1) { return K_SPAWN_FORKFAIL; }
+
+    # ⭐ The exec target, separate from argv[0] — see `k_spawn_as`.
+    var cmd = exec_path;
     var argv = alloc((argc + 1) * 8);
     var ai: i64 = 0;
     while (ai < argc) {
@@ -140,6 +183,6 @@ fn k_spawn(args, env): i64 {
     if (exec_errno > 0) { return K_SPAWN_EXECFAIL + exec_errno; }
     if (WIFSIGNALED(st) == 1) { return K_SPAWN_SIGNAL_BASE + WTERMSIG(st); }
     if (WIFEXITED(st) == 1)   { return WEXITSTATUS(st); }
-    return K_SPAWN_FORKFAIL;
     #endif
+    return K_SPAWN_FORKFAIL;
 }

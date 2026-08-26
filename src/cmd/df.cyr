@@ -127,8 +127,89 @@ fn _df_skip_to_next_field(src): i64 {
     return p;
 }
 
+# Upper bound on mount-table lines the duplicate filter will consider. A line
+# beyond it is simply never suppressed — showing a duplicate beats dropping a
+# real filesystem when the table is pathologically large.
+enum DfLimits {
+    _DF_MAX_MOUNTS = 512;
+}
+
 # Pseudo-FS membership check. Returns 1 if `fs_type` is in our skip
 # list. Direct string compare against each known name.
+# Mark mount-table lines that duplicate a filesystem already listed elsewhere,
+# the way GNU's `filter_mount_list` does. Writes 1/0 per line into `suppress`
+# and returns the number of lines examined.
+#
+# Eligibility mirrors the default listing: a line that the pseudo-FS filter
+# already drops must not suppress a real one, and a mount point that cannot be
+# stat'd is not a candidate either way.
+fn _df_mark_duplicates(mbuf, mused, suppress): i64 {
+    var dev  = alloc(_DF_MAX_MOUNTS * 8);
+    var mlen = alloc(_DF_MAX_MOUNTS * 8);
+    var elig = alloc(_DF_MAX_MOUNTS * 8);
+    var n: i64 = 0;
+    var line_start: i64 = 0;
+    var li: i64 = 0;
+    while (li < mused) {
+        if (load8(mbuf + li) == 10) {
+            if (n < _DF_MAX_MOUNTS) {
+                store64(suppress + n * 8, 0);
+                store64(elig + n * 8, 0);
+                store64(dev + n * 8, 0);
+                store64(mlen + n * 8, 0);
+                var p = line_start;
+                var d1 = alloc(1024);
+                var m1 = alloc(1024);
+                var f1 = alloc(64);
+                _df_decode_field(mbuf + p, d1);
+                p = p + _df_skip_to_next_field(mbuf + p);
+                _df_decode_field(mbuf + p, m1);
+                p = p + _df_skip_to_next_field(mbuf + p);
+                _df_decode_field(mbuf + p, f1);
+                if (_df_is_pseudo_fs(f1) == 0) {
+                    # ⚠ 144 bytes: a function-local `var X[N]` is N BYTES, and
+                    # struct stat is 144 on x86_64 (roadmap M15a).
+                    var st[144];
+                    if (k_stat(m1, &st) == 0) {
+                        store64(dev + n * 8, load64(&st + FS_STAT_DEV));
+                        store64(mlen + n * 8, strlen(m1));
+                        store64(elig + n * 8, 1);
+                    }
+                }
+                n = n + 1;
+            }
+            line_start = li + 1;
+        }
+        li = li + 1;
+    }
+
+    var i: i64 = 0;
+    while (i < n) {
+        if (load64(elig + i * 8) == 1) {
+            var lose: i64 = 0;
+            var j: i64 = 0;
+            while (j < n) {
+                if (load64(elig + j * 8) == 1) {
+                    if (j != i) {
+                        if (load64(dev + j * 8) == load64(dev + i * 8)) {
+                            var lj = load64(mlen + j * 8);
+                            var lo = load64(mlen + i * 8);
+                            if (lj < lo) { lose = 1; }
+                            elif (lj == lo) {
+                                if (j < i) { lose = 1; }
+                            }
+                        }
+                    }
+                }
+                j = j + 1;
+            }
+            if (lose == 1) { store64(suppress + i * 8, 1); }
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
 fn _df_is_pseudo_fs(fs_type): i64 {
     var t = fs_type;
     var l = strlen(t);
@@ -593,11 +674,39 @@ fn cmd_df(start: i64): i64 {
         if (n_targets == 0) { return EXIT_FAILURE; }
     }
 
+    # ⛔ GNU HIDES DUPLICATE FILESYSTEMS AND kriya DID NOT. `filter_mount_list` in
+    # coreutils' df.c stats every mount point, groups by st_dev, and keeps one
+    # entry per device. kriya had no equivalent, so a bind mount, a Docker
+    # overlay, or any second mount of the same filesystem appeared twice:
+    #
+    #   mount --bind /home /tmp/bindtgt
+    #   GNU df   -> /tmp/bindtgt absent
+    #   kriya df -> /tmp/bindtgt present   (same st_dev as /)
+    #
+    # ⚠ This is the most likely mechanism behind the CI mount-set mismatch: no
+    # GNU rule excludes `devtmpfs` by TYPE — its dummy list has never contained
+    # it — so on a host where GNU hides /dev and kriya shows it, dedup is the
+    # only filter GNU has that kriya lacked.
+    #
+    # Tie-break follows GNU's observable outcome: shortest mount point wins,
+    # earliest line breaks a length tie. That keeps `/` over `/tmp/bindtgt`.
+    #
+    # ⚠ Default-listing only, like the pseudo-FS filter above it: naming a path
+    # explicitly is a request for THAT filesystem.
+    var suppress = alloc(_DF_MAX_MOUNTS * 8);
+    var n_lines: i64 = 0;
+    if (n_operands == 0) {
+        if (_df_all == 0) {
+            n_lines = _df_mark_duplicates(mbuf, mused, suppress);
+        }
+    }
+
     _df_emit_header();
 
-    # Walk lines.
+    # Walk lines. `line_no` indexes the same lines `_df_mark_duplicates` numbered.
     var line_start: i64 = 0;
     var li: i64 = 0;
+    var line_no: i64 = 0;
     while (li < mused) {
         if (load8(mbuf + li) == 10) {
             # Line is mbuf[line_start..li]. Parse 3 fields: dev, mp, fs_type.
@@ -613,6 +722,13 @@ fn cmd_df(start: i64): i64 {
 
             # Filter.
             var keep: i64 = 1;
+            if (n_operands == 0) {
+                if (_df_all == 0) {
+                    if (line_no < n_lines) {
+                        if (load64(suppress + line_no * 8) == 1) { keep = 0; }
+                    }
+                }
+            }
             # The pseudo-FS filter is a convenience for the no-operand listing only. Naming a
             # path explicitly is an unambiguous request for THAT filesystem, so an operand
             # bypasses the filter — otherwise `df /dev` would print a header and nothing.
@@ -651,6 +767,7 @@ fn cmd_df(start: i64): i64 {
                 }
             }
             line_start = li + 1;
+            line_no = line_no + 1;
         }
         li = li + 1;
     }
