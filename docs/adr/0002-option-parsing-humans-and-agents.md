@@ -22,7 +22,12 @@ POSIX gives a floor: short flags, `--` terminator, exit 2 on usage error. GNU ad
 
 ### Hard rules (No-Gos)
 
-1. **No prefix matching.** `--ver` does not match `--version`. Long names are spelled in full or the parse fails with exit 2. (GNU getopt-long permits abbreviation; we reject it: silent drift across releases.)
+1. **No prefix matching — of names OR of their values.** `--ver` does not match `--version`.
+   ⚠ Extended explicitly at 1.4.3: an option's **VALUE** is matched in full too. GNU's `argmatch`
+   accepts any unambiguous prefix (`uniq --group=sep`, `--group=b`), and kriya does not — a prefix
+   that is unambiguous today becomes ambiguous the day a method is added, which is the same
+   silent-drift argument that rules out prefix names. ⛔ An **empty** value (`--group=`) is an error
+   rather than the default, as it is in GNU: the caller wrote `=` and meant something. Long names are spelled in full or the parse fails with exit 2. (GNU getopt-long permits abbreviation; we reject it: silent drift across releases.)
 2. **No libc-style `getopt` reordering.** `kriya cp src -r dst` is parsed left-to-right with `-r` as a flag and `src`/`dst` as positionals — flags can interleave with positionals — but the relative order of positionals is preserved as written. No silent re-shuffle.
 3. **No optional flag values.** `--color` with no value is a boolean; `--color=auto` carries a value. A flag is either a boolean or it requires a value — never both. (Ambiguity here is the single biggest source of agent miscalls.)
 4. **No interactive prompts when stdin is not a tty.** Destructive `-i` (interactive) on a pipe is a usage error, not a hang. Detected via `isatty(STDIN_FILENO)` before any prompt.

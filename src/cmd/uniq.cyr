@@ -30,9 +30,14 @@
 # it is the input file (stdin reads if no operand or operand `-`). With
 # two operands the second is the output file (truncated, mode 0666).
 #
-# Deferred (named follow-ups): (roadmap 1.4.3)
-#   --all-repeated[=METHOD]  emit every repeated line, optionally grouped.
-#   --group[=METHOD]         emit groups of adjacent equal lines with separators.
+# ⚠ NOTHING IS DEFERRED HERE ANY MORE. This header used to introduce a list
+# of pending items; both entries below are now a SHIPPED feature and a settled
+# NON-GOAL. A stale "Deferred" heading over closed items reads as an
+# admission of gaps that do not exist.
+#   ⚠ --all-repeated[=METHOD] / -D and --group[=METHOD] SHIPPED at 1.4.3 —
+#   see the notes on `_uq_group_line`. They emit EVERY line of a group, not the
+#   representative N times, which matters because -f/-s/-w compare a WINDOW and
+#   lines in one group can differ outside it.
 #   ⛔ Multi-byte case folding for -i is NOT a gap — GNU does not do it either.
 #   Measured under both LC_ALL=C.UTF-8 and LC_ALL=C: `uniq -i` on `café` /
 #   `cafÉ` reports TWO lines, i.e. no non-ASCII folding. kriya already matches;
@@ -47,6 +52,9 @@ var _uq_f_idx  = 0;
 var _uq_s_idx  = 0;
 var _uq_w_idx  = 0;
 var _uq_z_idx  = 0;
+var _uq_D_idx  = 0;
+var _uq_g_idx  = 0;
+var _uq_A_idx  = 0;
 
 var _uq_read_buf = 0;
 var _UQ_READ_SZ  = 65536;
@@ -62,6 +70,9 @@ fn _uq_init_spec(): i64 {
     _uq_f_idx = flags_add_str(s,  102, "skip-fields",      0, "skip N blank-separated fields");
     _uq_s_idx = flags_add_str(s,  115, "skip-chars",       0, "skip N chars (after -f)");
     _uq_w_idx = flags_add_str(s,  119, "check-chars",      0, "compare at most N chars");
+    _uq_D_idx = flags_add_bool(s, 68,  "",                 0, "print all lines of each duplicate group");
+    _uq_g_idx = flags_add_bool(s, 0,   "group",            0, "all lines, groups separated (separate|prepend|append|both)");  #skip-lint
+    _uq_A_idx = flags_add_bool(s, 0,   "all-repeated",     0, "all lines of duplicate groups (none|prepend|separate)");
     _uq_z_idx = flags_add_bool(s, 122, "zero-terminated",  0, "NUL-separated lines");
     _uq_spec = s;
     uniq_help_declare();
@@ -76,7 +87,7 @@ fn uniq_help_declare(): i64 {
                "uniq [OPTIONS] [INPUT [OUTPUT]]");
     help_positional(0, 2, "INPUT,OUTPUT");
     help_destructive(1);
-    help_operands("⚠ Only ADJACENT duplicates are considered — sort the input first if that is not already true.");
+    help_operands("⚠ Only ADJACENT duplicates are considered — sort the input first if that is not already true. ⚠ --group and --all-repeated print every line of a group; their METHOD vocabularies differ (--group: separate|prepend|append|both; --all-repeated: none|prepend|separate). --group is mutually exclusive with -c/-d/-D/-u. ⛔ With -D, -u prints only the LATER lines of each repeat group and -d is a no-op, matching GNU.");  #skip-lint
     help_exit(1, "input or output could not be handled");
     help_example("sort f | uniq");
     help_example("uniq -c log");
@@ -222,9 +233,164 @@ fn _uq_keys_equal(a, alen, b, blen, case_fold): i64 {
 
 # Emit a previously-buffered group. `show_d`/`show_u` decide whether
 # duplicates / uniques pass the filter; `show_c` prepends the count.
+# --- --group / --all-repeated ------------------------------------------
+#
+# ⭐ THESE EMIT EVERY LINE OF A GROUP, NOT THE REPRESENTATIVE N TIMES. With
+# `-f`/`-s`/`-w` the comparison key is a WINDOW, so lines in one group can
+# differ outside it — measured against GNU: `uniq --group -f 1` on
+# `x a / y a / z b` prints `x a` and `y a`, both of them, not `x a` twice.
+#
+# ⭐ O(1) MEMORY, NOT O(GROUP). `--group` prints each line as it arrives, since
+# every line is emitted and only the SEPARATOR needs to know a group changed.
+# `--all-repeated` must know whether a group has more than one line before
+# printing its first, so it holds exactly ONE line and streams the rest. A group
+# of a million identical lines costs one line of buffer either way.
+enum UqGroup {
+    UQ_G_OFF      = 0,
+    UQ_G_GROUP    = 1,
+    UQ_G_ALLREP   = 2,
+    # Separator placement. GNU spells these as METHOD words; the values are
+    # shared because --group and --all-repeated accept overlapping sets.
+    UQ_M_SEPARATE = 0,
+    UQ_M_PREPEND  = 1,
+    UQ_M_APPEND   = 2,
+    UQ_M_BOTH     = 3,
+    UQ_M_NONE     = 4,
+}
+var _uq_gmode   = 0;
+var _uq_gmethod = 0;
+var _uq_gstarted = 0;   # has any group been emitted yet?
+var _uq_held     = 0;   # buffer holding a group's first line (--all-repeated)
+var _uq_held_len = 0;
+var _uq_has_held = 0;
+# ⛔ `-D -u` PRINTS ONLY THE LATER LINES of each repeat group — the first is
+# suppressed — and `-D -d` is a no-op. Measured against GNU and order-
+# independent (`-u -D` behaves the same). It reads oddly until you see
+# coreutils' internal flags: `-u` clears "output first repeated" while `-D`
+# sets "output later repeated", so the two combine to mean "the repeats after
+# the first". ⚠ Unique groups are never printed under -D whatever -u says.
+var _uq_g_skipfirst = 0;
+
+# Parse a METHOD word. `for_group` selects which vocabulary applies: --group
+# takes separate|prepend|append|both (default separate) and --all-repeated takes
+# none|prepend|separate (default none). ⚠ The two sets OVERLAP but are not the
+# same — `--group=none` and `--all-repeated=append` are both errors in GNU, and
+# rejecting by vocabulary rather than by a shared list is what keeps that true.
+# Returns -1 after reporting an invalid value.
+fn _uq_parse_method(arg, for_group): i64 {
+    # A BARE option (no `=`) takes the default method.
+    if (arg == 0) {
+        if (for_group == 1) { return UQ_M_SEPARATE; }
+        return UQ_M_NONE;
+    }
+    # ⛔ `--group=` WITH AN EMPTY VALUE IS AN ERROR, not the default. GNU calls
+    # it "ambiguous argument ''" and refuses; treating it as a bare `--group`
+    # would accept an invocation GNU rejects, which is the wrong direction for a
+    # tool to be permissive in — the caller wrote `=` and meant something.
+    if (load8(arg) == 0) {
+        if (for_group == 1) {
+            k_write( 2, "kriya uniq: error: empty argument for --group (want separate|prepend|append|both)\n", 82);  #skip-lint
+        } else {
+            k_write( 2, "kriya uniq: error: empty argument for --all-repeated (want none|prepend|separate)\n", 82);  #skip-lint
+        }
+        return 0 - 1;
+    }
+    # ⚠ EXACT MATCH ONLY — no prefix acceptance. GNU's argmatch takes any
+    # unambiguous prefix (`--group=sep`, `--group=b`), which ADR 0002 rejects for
+    # long NAMES ("`--ver` does not match `--version`… silent drift across
+    # releases") and the same reasoning applies to their VALUES: a prefix that is
+    # unambiguous today becomes ambiguous the day a method is added. Deliberate
+    # divergence, recorded in ADR 0002.
+    if (for_group == 1) {
+        if (streq(arg, "separate") == 1) { return UQ_M_SEPARATE; }
+        if (streq(arg, "prepend") == 1)  { return UQ_M_PREPEND; }
+        if (streq(arg, "append") == 1)   { return UQ_M_APPEND; }
+        if (streq(arg, "both") == 1)     { return UQ_M_BOTH; }
+        k_write( 2, "kriya uniq: error: invalid argument for --group (want separate|prepend|append|both)\n", 84);
+        return 0 - 1;
+    }
+    if (streq(arg, "none") == 1)     { return UQ_M_NONE; }
+    if (streq(arg, "prepend") == 1)  { return UQ_M_PREPEND; }
+    if (streq(arg, "separate") == 1) { return UQ_M_SEPARATE; }
+    k_write( 2, "kriya uniq: error: invalid argument for --all-repeated (want none|prepend|separate)\n", 84);
+    return 0 - 1;
+}
+
+fn _uq_sep(out_fd, term_byte): i64 {
+    var tb[2];
+    store8(&tb, term_byte);
+    k_write( out_fd, &tb, 1);
+    return 0;
+}
+
+fn _uq_gline(out_fd, line, len, term_byte): i64 {
+    if (len > 0) { k_write( out_fd, line, len); }
+    var tb[2];
+    store8(&tb, term_byte);
+    k_write( out_fd, &tb, 1);
+    return 0;
+}
+
+# Called once per input line. `new_group` is 1 when this line starts a group.
+fn _uq_group_line(out_fd, line, len, new_group, term_byte): i64 {
+    if (_uq_gmode == UQ_G_GROUP) {
+        if (new_group == 1) {
+            # ⚠ A separator goes BEFORE this group when the method prepends, or
+            # between groups when it separates — and "between" means "not before
+            # the first", which is what `_uq_gstarted` tracks.
+            if (_uq_gmethod == UQ_M_PREPEND) { _uq_sep(out_fd, term_byte); }
+            elif (_uq_gmethod == UQ_M_BOTH)  { _uq_sep(out_fd, term_byte); }
+            elif (_uq_gstarted == 1)         { _uq_sep(out_fd, term_byte); }
+            _uq_gstarted = 1;
+        }
+        return _uq_gline(out_fd, line, len, term_byte);
+    }
+    if (_uq_gmode == UQ_G_ALLREP) {
+        if (new_group == 1) {
+            # Hold it: whether this group repeats is still unknown.  #skip-lint
+            if (_uq_held == 0) { _uq_held = alloc(_UQ_LINE_SZ); }
+            if (len > 0) { memcpy(_uq_held, line, len); }
+            _uq_held_len = len;
+            _uq_has_held = 1;
+            return 0;
+        }
+        if (_uq_has_held == 1) {
+            # Second line of the group: the held first line is now known to be
+            # part of a repeat, so flush it behind whatever separator applies.
+            if (_uq_gmethod == UQ_M_PREPEND) { _uq_sep(out_fd, term_byte); }
+            elif (_uq_gmethod == UQ_M_SEPARATE) {
+                if (_uq_gstarted == 1) { _uq_sep(out_fd, term_byte); }
+            }
+            _uq_gstarted = 1;
+            if (_uq_g_skipfirst == 0) {
+                _uq_gline(out_fd, _uq_held, _uq_held_len, term_byte);
+            }
+            _uq_has_held = 0;
+        }
+        return _uq_gline(out_fd, line, len, term_byte);
+    }
+    return 0;
+}
+
+# End of input: an append-style separator is owed, and any held singleton is
+# discarded (a group of one is not a repeat).
+fn _uq_group_finish(out_fd, term_byte): i64 {
+    _uq_has_held = 0;
+    if (_uq_gmode == UQ_G_GROUP) {
+        if (_uq_gstarted == 1) {
+            if (_uq_gmethod == UQ_M_APPEND) { _uq_sep(out_fd, term_byte); }
+            elif (_uq_gmethod == UQ_M_BOTH) { _uq_sep(out_fd, term_byte); }
+        }
+    }
+    return 0;
+}
+
 fn _uq_emit_group(out_fd, prev, prev_len, count, show_c, show_d, show_u, term_byte): i64 {
     var is_dup: i64 = 0;
     if (count > 1) { is_dup = 1; }
+    # ⚠ In --group / --all-repeated mode every line was already emitted by
+    # `_uq_group_line`; this representative-per-group path must stay silent.
+    if (_uq_gmode != UQ_G_OFF) { return 0; }
     var emit: i64 = 1;
     if (show_d == 1) {
         if (is_dup == 0) { emit = 0; }
@@ -285,6 +451,11 @@ fn _uq_run(in_fd, out_fd, skip_f, skip_s, cw, ic, show_c, show_d, show_u, term_b
                     if (count > 0) {
                         equal = _uq_keys_equal(prev_buf + prev_key_off, prev_key_len, cur_buf + key_off, klen, ic);
                     }
+                    var ng1: i64 = 1;
+                    if (count > 0) {
+                        if (equal == 1) { ng1 = 0; }
+                    }
+                    _uq_group_line(out_fd, cur_buf, cur_len, ng1, term_byte);
                     if (count > 0) {
                         if (equal == 1) {
                             count = count + 1;
@@ -319,12 +490,16 @@ fn _uq_run(in_fd, out_fd, skip_f, skip_s, cw, ic, show_c, show_d, show_u, term_b
                         var klen_box[8];
                         var key_off = _uq_key_window(cur_buf, cur_len, skip_f, skip_s, cw, &klen_box);
                         var klen = load64(&klen_box);
+                        var ng2: i64 = 1;
                         if (count > 0) {
                             var equal = _uq_keys_equal(prev_buf + prev_key_off, prev_key_len, cur_buf + key_off, klen,
                                                        ic);
+                            ng2 = 0;
                             if (equal == 1) {
+                                _uq_group_line(out_fd, cur_buf, cur_len, 0, term_byte);
                                 count = count + 1;
                             } else {
+                                _uq_group_line(out_fd, cur_buf, cur_len, 1, term_byte);
                                 _uq_emit_group(out_fd, prev_buf, prev_len, count, show_c, show_d, show_u, term_byte);
                                 memcpy(prev_buf, cur_buf, cur_len);
                                 prev_len = cur_len;
@@ -333,6 +508,7 @@ fn _uq_run(in_fd, out_fd, skip_f, skip_s, cw, ic, show_c, show_d, show_u, term_b
                                 count = 1;
                             }
                         } else {
+                            _uq_group_line(out_fd, cur_buf, cur_len, 1, term_byte);
                             memcpy(prev_buf, cur_buf, cur_len);
                             prev_len = cur_len;
                             prev_key_off = key_off;
@@ -361,7 +537,10 @@ fn _uq_run(in_fd, out_fd, skip_f, skip_s, cw, ic, show_c, show_d, show_u, term_b
 
 fn cmd_uniq(start: i64): i64 {
     _uq_init_spec();
-    if (kriya_args_parse(_uq_spec, start) != 0) {
+    # ⚠ TWO optional-value longs — the first utility to need more than one, which is
+    # why `kriya_args_parse_optval` grew a registry at 1.4.3. Both `--group` and
+    # `--all-repeated` are legal bare AND with `=METHOD`.
+    if (kriya_args_parse_optval2(_uq_spec, start, 0, "group", "all-repeated") != 0) {
         k_write( 2, "kriya uniq: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
         return EXIT_USAGE;
     }
@@ -456,7 +635,43 @@ fn cmd_uniq(start: i64): i64 {
         out_opened = 1;
     }
 
+    # ⛔ --group is mutually exclusive with -c/-d/-D/-u, and --all-repeated with
+    # -c specifically. GNU's wording, verified: "--group is mutually exclusive
+    # with -c/-d/-D/-u" and "printing all duplicated lines and repeat counts is
+    # meaningless". ⚠ `--all-repeated -d` and `-u` are ACCEPTED by GNU, so they
+    # are not rejected here either.
+    var g_arg = kriya_long_value_for("group");
+    var a_arg = kriya_long_value_for("all-repeated");
+    var d_flag = flags_get_bool(_uq_spec, _uq_D_idx);
+    var has_g = flags_get_bool(_uq_spec, _uq_g_idx);
+    var has_a = flags_get_bool(_uq_spec, _uq_A_idx);
+    if (d_flag == 1) { has_a = 1; }
+    if (has_g == 1) {
+        var conflict: i64 = 0;
+        if (show_c == 1) { conflict = 1; }
+        if (show_d == 1) { conflict = 1; }
+        if (show_u == 1) { conflict = 1; }
+        if (has_a == 1)  { conflict = 1; }
+        if (conflict == 1) {
+            k_write( 2, "kriya uniq: error: --group is mutually exclusive with -c/-d/-D/-u\n", 66);
+            return EXIT_USAGE;
+        }
+        _uq_gmode = UQ_G_GROUP;
+        _uq_gmethod = _uq_parse_method(g_arg, 1);
+        if (_uq_gmethod < 0) { return EXIT_USAGE; }
+    } elif (has_a == 1) {
+        if (show_c == 1) {
+            k_write( 2, "kriya uniq: error: printing all duplicated lines and repeat counts is meaningless\n", 82);
+            return EXIT_USAGE;
+        }
+        _uq_gmode = UQ_G_ALLREP;
+        if (show_u == 1) { _uq_g_skipfirst = 1; }
+        _uq_gmethod = _uq_parse_method(a_arg, 0);
+        if (_uq_gmethod < 0) { return EXIT_USAGE; }
+    }
+
     var r = _uq_run(in_fd, out_fd, skip_f, skip_s, cw, ic, show_c, show_d, show_u, term_byte);
+    _uq_group_finish(out_fd, term_byte);
     if (r != 0) {
         _uq_report("(read)", 0 - r);
         any_failed = 1;

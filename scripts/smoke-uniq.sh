@@ -109,6 +109,101 @@ expect_eq "-z 0 newlines" "0" "$nl"
 expect_exit "missing"     1 "$BIN" uniq ghost
 expect_exit "too many"    2 "$BIN" uniq a b c
 
+# --- ⭐ --group / --all-repeated / -D ------------------------------------
+#
+# ⭐ These emit EVERY line of a group, not the representative N times. With
+# `-f`/`-s`/`-w` the comparison key is a WINDOW, so lines in one group can
+# differ outside it — `--group -f 1` on `x a / y a / z b` must print both
+# `x a` AND `y a`. A test using identical lines could not tell the two
+# implementations apart, so the fixture below has a group whose members differ.
+printf 'a\na\nb\nc\nc\nc\nd\n' > grp.txt
+printf 'x a\ny a\nz b\n'          > grpf.txt
+printf 'A\na\nb\n'                > grpi.txt
+
+g_same() {
+    label=$1; shift
+    grc=0; g=$(uniq "$@" 2>&1) || grc=$?
+    krc=0; k=$("$BIN" uniq "$@" 2>&1) || krc=$?
+    expect_eq "group: $label" "$g" "$k"
+    expect_eq "group: $label (exit)" "$grc" "$krc"
+}
+g_same "--group bare"          --group grp.txt
+g_same "--group=separate"      --group=separate grp.txt
+g_same "--group=prepend"       --group=prepend grp.txt
+g_same "--group=append"        --group=append grp.txt
+g_same "--group=both"          --group=both grp.txt
+g_same "--all-repeated bare"   --all-repeated grp.txt
+g_same "--all-repeated=none"   --all-repeated=none grp.txt
+g_same "--all-repeated=prepend" --all-repeated=prepend grp.txt
+g_same "--all-repeated=separate" --all-repeated=separate grp.txt
+g_same "-D short form"         -D grp.txt
+# ⭐ The discriminating case: members of one group that are not byte-identical.
+g_same "--group -f 1 keeps both" --group -f 1 grpf.txt
+g_same "--group -i"            --group -i grpi.txt
+g_same "-D -i"                 -D -i grpi.txt
+
+# ⛔ Conflicts. GNU: "--group is mutually exclusive with -c/-d/-D/-u", and
+# --all-repeated with -c is "meaningless". ⚠ `--all-repeated -d` and `-u` ARE
+# accepted by GNU, so they must not be rejected here either.
+for combo in "--group -c" "--group -d" "--group -u"; do
+    rc=0; "$BIN" uniq $combo grp.txt >/dev/null 2>&1 || rc=$?
+    expect_eq "group: $combo is refused" "2" "$rc"
+done
+rc=0; "$BIN" uniq --all-repeated -c grp.txt >/dev/null 2>&1 || rc=$?
+expect_eq "group: --all-repeated -c is refused" "2" "$rc"
+g_same "--all-repeated -d allowed" --all-repeated -d grp.txt
+g_same "--all-repeated -u allowed" --all-repeated -u grp.txt
+
+# ⛔ The two METHOD vocabularies OVERLAP but differ: --group takes
+# separate|prepend|append|both, --all-repeated takes none|prepend|separate.
+# `--group=none` and `--all-repeated=append` are errors in GNU, and rejecting by
+# vocabulary rather than a shared list is what keeps that true.
+for bad in "--group=none" "--group=bogus" "--all-repeated=append" "--all-repeated=both"; do
+    rc=0; "$BIN" uniq "$bad" grp.txt >/dev/null 2>&1 || rc=$?
+    expect_eq "group: $bad is refused" "2" "$rc"
+    grc=0; uniq "$bad" grp.txt >/dev/null 2>&1 || grc=$?
+    if [ "$grc" -ne 0 ]; then PASS=$((PASS + 1)); else
+        FAIL=$((FAIL + 1)); echo "FAIL group: GNU should also refuse $bad" >&2
+    fi
+done
+
+# ⚠ Separator placement is pinned at the boundaries, where leading/trailing
+# rules actually show. A multi-group fixture cannot distinguish "before every
+# group" from "between groups" for the FIRST group — a single-line input can.
+printf 'a\n'     > g1.txt
+printf ''        > g0.txt
+printf 'a\nb\n'  > gu.txt
+b_same() {
+    label=$1; f=$2; shift 2
+    g=$(uniq "$@" "$f" 2>&1 | od -An -c) || true
+    k=$("$BIN" uniq "$@" "$f" 2>&1 | od -An -c) || true
+    expect_eq "group edge: $label" "$g" "$k"
+}
+for m in separate prepend append both; do
+    b_same "one line --group=$m"  g1.txt --group=$m
+    b_same "empty in --group=$m"  g0.txt --group=$m
+done
+b_same "all-unique --all-repeated=prepend"  gu.txt --all-repeated=prepend
+b_same "all-unique --all-repeated=separate" gu.txt --all-repeated=separate
+b_same "--all-repeated=separate -u"         grp.txt --all-repeated=separate -u
+
+# ⛔ An EMPTY method value is an error, not the default — GNU calls it
+# "ambiguous argument ''". ⚠ And kriya does NOT accept GNU's unambiguous-prefix
+# forms (`--group=sep`): ADR 0002 rules out prefix matching for names and, since
+# 1.4.3, for their values too. Both directions pinned so neither drifts.
+for bad in "--group=" "--all-repeated="; do
+    rc=0; "$BIN" uniq "$bad" grp.txt >/dev/null 2>&1 || rc=$?
+    expect_eq "group edge: $bad is refused" "2" "$rc"
+    grc=0; uniq "$bad" grp.txt >/dev/null 2>&1 || grc=$?
+    if [ "$grc" -ne 0 ]; then PASS=$((PASS + 1)); else
+        FAIL=$((FAIL + 1)); echo "FAIL group edge: GNU should also refuse $bad" >&2
+    fi
+done
+for pfx in "--group=sep" "--group=b" "--all-repeated=n"; do
+    rc=0; "$BIN" uniq "$pfx" grp.txt >/dev/null 2>&1 || rc=$?
+    expect_eq "group edge: $pfx refused (no prefix matching, ADR 0002)" "2" "$rc"
+done
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

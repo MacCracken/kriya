@@ -6,6 +6,88 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.4.3] - 2026-08-26 — `uniq` line grouping
+
+⚠ **Scoped down from the roadmap entry.** That entry paired `uniq --group` with `nl` section
+delimiters and `echo -e`. `nl`'s sections are a release of their own — three styles across
+header/body/footer, delimiter detection, and regex-based numbering whose dialect needs the same
+scrutiny `find -regex` got — so they and `echo -e` move to 1.4.4 rather than being rushed alongside.
+
+### Added — `--group[=METHOD]`, `--all-repeated[=METHOD]`, `-D`
+
+⭐ **These emit every line of a group, not the representative N times.** With `-f`/`-s`/`-w` the
+comparison key is a *window*, so lines in one group can differ outside it — measured against GNU,
+`uniq --group -f 1` on `x a` / `y a` / `z b` prints **both** `x a` and `y a`. ⚠ A fixture of identical
+lines cannot tell the two implementations apart, so the one in the suite deliberately has a group
+whose members differ.
+
+⭐ **O(1) memory, not O(group).** `--group` prints each line as it arrives, since every line is emitted
+and only the *separator* needs to know a group changed. `--all-repeated` must know whether a group
+repeats before printing its first line, so it holds exactly **one** line and streams the rest. A group
+of a million identical lines costs one line of buffer either way.
+
+⛔ **The two METHOD vocabularies overlap but are not the same** — `--group` takes
+`separate|prepend|append|both`, `--all-repeated` takes `none|prepend|separate`. `--group=none` and
+`--all-repeated=append` are both errors in GNU, and rejecting by *vocabulary* rather than against a
+shared list is what keeps that true.
+
+⛔ **With `-D`, `-u` prints only the LATER lines of each repeat group and `-d` is a no-op.** Measured,
+and order-independent — `-u -D` behaves the same. It reads oddly until you see coreutils' internal
+flags: `-u` clears "output first repeated" while `-D` sets "output later repeated", so together they
+mean "the repeats after the first". ⚠ Unique groups are never printed under `-D` whatever `-u` says.
+A first implementation had this wrong and the smoke comparison caught it.
+
+`--group` is refused with `-c`/`-d`/`-D`/`-u`, and `--all-repeated` with `-c`; ⚠ but `--all-repeated -d`
+and `-u` **are** accepted by GNU, so they are not rejected here either.
+
+### Fixed — ⛔ the optional-value mechanism held exactly one option
+
+`src/lib/args.cyr` supported one optional-value long per utility, with a note ending *"One slot is
+enough — no utility has two."* **`uniq` has two.** Both `--group` and `--all-repeated` are legal bare
+*and* with `=METHOD`, and the parser has no way to express that for a second name — registering either
+as a string would make the bare form swallow the next operand, which is exactly what happened:
+`uniq --group -f 1` consumed `-f` as `--group`'s value.
+
+The slot is now a small registry, and ⛔ **each name keeps its own captured value** — sharing one value
+slot across two registered names would hand `--group`'s argument to `--all-repeated` whenever both
+appeared, silently. `cp --preserve`, `sort --check` and `tail --follow` are unchanged and still pass.
+
+⚠ **A variable-name collision I introduced there is worth recording**: the rewrite path already used
+`oi` as the *expansion output cursor*, and I reused the name for the registry index. The result was a
+silently corrupted argv where `--group=separate` behaved as plain `uniq` — every bare form worked, so
+only the `=METHOD` cases exposed it.
+
+### Two deliberate divergences from GNU, both recorded in ADR 0002
+
+⚠ **kriya does not accept prefix forms of a METHOD value.** GNU's `argmatch` takes any unambiguous
+prefix — `uniq --group=sep`, `--group=b` — and kriya requires the word in full. ADR 0002 already ruled
+out prefix matching for long *names* (*"`--ver` does not match `--version`… silent drift across
+releases"*), and the same argument applies to their values: a prefix that is unambiguous today becomes
+ambiguous the day a method is added. The ADR now says so explicitly rather than leaving it inferred.
+
+⛔ **An empty value (`--group=`) is an error, not the default.** A first implementation treated it as a
+bare `--group`, which **accepted an invocation GNU refuses** — the wrong direction for a tool to be
+permissive in, since the caller wrote `=` and meant something. GNU calls it *"ambiguous argument ''"*;
+kriya now refuses it too.
+
+### Tests
+
+**4,002 smoke cases across 37 scripts** (up from 3,932), 143 unit + 18 POSIX, fuzz green under poison,
+four lints clean, both targets build.
+
+`smoke-uniq.sh` gains 88 cases: every method for both options compared against GNU including exit
+status, the discriminating `-f 1` group whose members differ, all four `-D` combinations, the conflict
+matrix, and each cross-vocabulary method (`--group=none`, `--all-repeated=append`) asserted as an error
+**in both implementations** — so the test fails if GNU ever starts accepting one.
+
+⚠ **Separator placement is pinned at the boundaries.** A multi-group fixture cannot tell "before every
+group" from "between groups" for the *first* group — a **single-line** input can, and an **empty** one
+catches a stray separator with nothing to separate. Both are in the suite for all four methods, along
+with an all-unique input under `--all-repeated`, where a `prepend` method must emit nothing at all.
+
+⭐ The `k_write` length lint caught two more of my own off-by-ones (`uniq.cyr:282,288`). Third release
+running.
+
 ## [1.4.2] - 2026-08-26 — multibyte text: `cut -c`, and `tr`'s missing set syntax
 
 ⚠ **This release is smaller than the roadmap entry that prompted it, and deliberately so.** The entry

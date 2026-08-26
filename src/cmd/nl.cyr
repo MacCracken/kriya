@@ -6,7 +6,7 @@
 # Flags:
 #   -b TYPE   body numbering: `a` number all, `t` number non-empty
 #             only (default), `n` number none. Regex form `p REGEX`
-#             deferred (waits on `lib/niyama.cyr` regex engine). (roadmap 1.4.3)
+#             deferred (waits on `lib/niyama.cyr` regex engine). (roadmap 1.4.4)
 #   -i N      number increment (default 1).
 #   -n FMT    number format: `ln` left-justified, `rn` right-justified
 #             unpadded (default), `rz` right-justified zero-padded.
@@ -16,7 +16,7 @@
 #
 # Single-section model: kriya `nl` treats the entire input as one
 # body section. Header/footer parsing via the `-d`-controlled section
-# delimiter (default `\:`) is deferred — most consumers want simple (roadmap 1.4.3)
+# delimiter (default `\:`) is deferred — most consumers want simple (roadmap 1.4.4)
 # line numbering. When a real consumer asks, the work is local: add
 # `-h`/`-f`/`-d` and a delimiter-line classifier in front of the body
 # emitter.

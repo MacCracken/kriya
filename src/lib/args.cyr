@@ -33,9 +33,77 @@ var _kriya_argv_n    = 0;
 var _kriya_expanded   = 0;
 var _kriya_expanded_n = 0;
 
-var _kriya_optval_want = 0;    # long name allowed to carry "=VALUE", or 0
-var _kriya_optval_val  = 0;    # the captured value, or 0
+# ⚠ ONE SLOT WAS NOT ENOUGH. The note above used to end "no utility has two" —
+# `uniq` has two (`--group` and `--all-repeated`), so the single slot became a
+# small registry at 1.4.3. ⛔ Each name keeps its OWN captured value: sharing one
+# value slot across two registered names would hand `--group`'s argument to
+# `--all-repeated` whenever both appeared, silently.
+enum KriyaOptval {
+    KRIYA_OPTVAL_MAX = 4,
+}
+var _kriya_optval_names = 0;   # cstr array, KRIYA_OPTVAL_MAX slots
+var _kriya_optval_vals  = 0;   # captured values, parallel
+var _kriya_optval_n     = 0;
+var _kriya_optval_want = 0;    # first registered name — kept for kriya_long_value()
+var _kriya_optval_val  = 0;    # its captured value, or 0
 var _kriya_optval_bad  = 0;    # 1 once a bool long was given an argument
+
+fn _kriya_optval_reset(): i64 {
+    if (_kriya_optval_names == 0) {
+        _kriya_optval_names = alloc(KRIYA_OPTVAL_MAX * 8);
+        _kriya_optval_vals  = alloc(KRIYA_OPTVAL_MAX * 8);
+    }
+    var i: i64 = 0;
+    while (i < KRIYA_OPTVAL_MAX) {
+        store64(_kriya_optval_names + i * 8, 0);
+        store64(_kriya_optval_vals + i * 8, 0);
+        i = i + 1;
+    }
+    _kriya_optval_n = 0;
+    _kriya_optval_want = 0;
+    _kriya_optval_val = 0;
+    return 0;
+}
+
+fn _kriya_optval_register(name): i64 {
+    if (name == 0) { return 0; }
+    if (_kriya_optval_n >= KRIYA_OPTVAL_MAX) { return 0; }
+    store64(_kriya_optval_names + _kriya_optval_n * 8, name);
+    _kriya_optval_n = _kriya_optval_n + 1;
+    if (_kriya_optval_want == 0) { _kriya_optval_want = name; }
+    return 0;
+}
+
+# Index of the registered name matching `tok+2` for `nlen` bytes, or -1.
+fn _kriya_optval_find(tok, nlen): i64 {
+    var i: i64 = 0;
+    while (i < _kriya_optval_n) {
+        var nm = load64(_kriya_optval_names + i * 8);
+        if (strlen(nm) == nlen) {
+            var q: i64 = 0;
+            var eqn: i64 = 1;
+            while (q < nlen) {
+                if (load8(nm + q) != load8(tok + 2 + q)) { eqn = 0; }
+                q = q + 1;
+            }
+            if (eqn == 1) { return i; }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# The value captured for a registered long, or 0 when absent or given bare.
+fn kriya_long_value_for(name): i64 {
+    var i: i64 = 0;
+    while (i < _kriya_optval_n) {
+        if (streq(load64(_kriya_optval_names + i * 8), name) == 1) {
+            return load64(_kriya_optval_vals + i * 8);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
 
 # The `=VALUE` captured for the long name passed to `kriya_args_parse_optval`,
 # or 0 when the option was absent or given bare.
@@ -157,20 +225,15 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
                                 var nlen = eq - 2;
                                 var lt = kriya_long_type(spec, tok + 2, nlen);
                                 if (lt == 0) {                       # FLAG_BOOL
+                                    # ⚠ `ovi`, NOT `oi` — `oi` is the EXPANSION OUTPUT
+                                    # CURSOR in the enclosing scope, and reusing the
+                                    # name here silently corrupted the rewritten argv.
+                                    var ovi = _kriya_optval_find(tok, nlen);
                                     var opted: i64 = 0;
-                                    if (_kriya_optval_want != 0) {
-                                        if (strlen(_kriya_optval_want) == nlen) {
-                                            var q: i64 = 0;
-                                            var eqn: i64 = 1;
-                                            while (q < nlen) {
-                                                if (load8(_kriya_optval_want + q) != load8(tok + 2 + q)) { eqn = 0; }
-                                                q = q + 1;
-                                            }
-                                            if (eqn == 1) { opted = 1; }
-                                        }
-                                    }
+                                    if (ovi >= 0) { opted = 1; }
                                     if (opted == 1) {
-                                        _kriya_optval_val = tok + eq + 1;
+                                        store64(_kriya_optval_vals + ovi * 8, tok + eq + 1);
+                                        if (ovi == 0) { _kriya_optval_val = tok + eq + 1; }
                                         var bare = alloc(nlen + 3);
                                         store8(bare, 45);
                                         store8(bare + 1, 45);
@@ -433,8 +496,17 @@ fn kriya_args_parse_obsnum(spec, start: i64, obs_num): i64 {
 # `sort --check=quiet` and `tail --follow=name`, the three places where GNU
 # defines an optional value that the stdlib parser cannot represent.
 fn kriya_args_parse_optval(spec, start: i64, obs_num, optval_long): i64 {
-    _kriya_optval_want = optval_long;
-    _kriya_optval_val  = 0;
+    _kriya_optval_reset();
+    _kriya_optval_register(optval_long);
+    return kriya_args_parse_range(spec, start, kriya_argv_count(), obs_num);
+}
+
+# Two optional-value longs. ⚠ `uniq` is the first utility to need more than one;
+# pass 0 for `b` if only one is wanted.
+fn kriya_args_parse_optval2(spec, start: i64, obs_num, a, b): i64 {
+    _kriya_optval_reset();
+    _kriya_optval_register(a);
+    _kriya_optval_register(b);
     return kriya_args_parse_range(spec, start, kriya_argv_count(), obs_num);
 }
 

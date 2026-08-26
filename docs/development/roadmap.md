@@ -111,9 +111,14 @@ kriya's dependency closure for niyama.
   SET1 is two bytes) and `uniq -i` does not fold non-ASCII. kriya matches both. Changing either would
   **diverge from GNU and silently alter existing scripts**, so it is sovereign design needing its own
   ADR — not a gap. ⚠ Do not re-add them to this arc as if they were unfinished.
-- **1.4.3 — Line-grouping and numbering.** `uniq --group` / `--all-repeated[=METHOD]`, `nl` section
-  delimiters (`-d`/`-h`/`-f`/`-l`/`-p`) and `-b p REGEX`. Plus `echo -e` / `-E` against an escape
-  table in `lib/str.cyr` — small, and it belongs with the other text work.
+- **1.4.4 — `nl` sections, and `echo -e`/`-E`.** ⚠ Split out of 1.4.3, where `uniq --group` shipped
+  alone. `nl` section delimiters (`-d`/`-h`/`-f`/`-l`/`-p`) and `-b pREGEX` are a release of their own:
+  three numbering styles across header/body/footer, delimiter-line detection, and a regex whose
+  DIALECT needs the same scrutiny `find -regex` got — GNU's `nl -b p` dialect must be measured, not
+  assumed, before a line of it is written. ⛔ `echo -e`/`-E` is small but has its own trap: POSIX
+  `echo` has no `-e` and prints operands literally, XSI says escapes are ALWAYS interpreted, and the
+  SHELL BUILTIN most scripts actually hit differs from `/usr/bin/echo` — so establish which one kriya
+  is matching before choosing. ⚠ `\c` is the escape with the surprising effect.
 - ⚠ Also here: the **BRE `-i` bracket-class quirk** in `grep`, catalogued in the M7 POSIX audit and
   never chased down.
 
