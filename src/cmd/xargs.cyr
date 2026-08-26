@@ -57,6 +57,14 @@ fn _xa_init_spec(): i64 {
     _xa_I_idx    = flags_add_str (s, 73,  "replace",            0, "replace REPLSTR in command args");
     _xa_s_idx    = flags_add_int (s, 115, "max-chars",          0, "max argv+envp byte size per exec");
     _xa_spec = s;
+    xargs_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `xargs`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn xargs_help_declare(): i64 {
     help_begin("xargs", "Build command lines from stdin and run them.",
                "xargs [OPTIONS] [COMMAND [ARG...]]");
     help_positional(0, HELP_POS_UNBOUNDED, "COMMAND,ARG");

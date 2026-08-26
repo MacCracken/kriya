@@ -76,6 +76,14 @@ fn _ls_init_spec(): i64 {
     _ls_R_idx = flags_add_bool(s, 82,  "recursive",       0, "descend into subdirectories");
     _ls_w_idx = flags_add_int(s, 119, "width",            0, "assume terminal width COLS (0 = auto)");
     _ls_spec = s;
+    ls_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `ls`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn ls_help_declare(): i64 {
     help_begin("ls", "List directory contents. With no operand, lists the current directory.",
                "ls [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");

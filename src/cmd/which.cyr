@@ -46,6 +46,14 @@ fn _wh_init_spec(): i64 {
     _wh_s_idx = flags_add_bool(s, 115, "silent", 0, "no output; rely on exit code");
     _wh_z_idx = flags_add_bool(s, 122, "zero",   0, "NUL-terminate each output");
     _wh_spec = s;
+    which_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `which`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn which_help_declare(): i64 {
     help_begin("which", "Locate a command on PATH.",
                "which [OPTIONS] NAME...");
     help_positional(1, HELP_POS_UNBOUNDED, "NAME");
@@ -148,7 +156,7 @@ fn _wh_has_slash(program): i64 {
 fn cmd_which(start: i64): i64 {
     _wh_init_spec();
     if (kriya_args_parse(_wh_spec, start) != 0) {
-        k_write( 2, "kriya which: error: bad option (see ADR 0002 for accepted syntax)\n", 67);
+        k_write( 2, "kriya which: error: bad option (see ADR 0002 for accepted syntax)\n", 66);
         return EXIT_USAGE;
     }
 

@@ -21,27 +21,68 @@ fi
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 
+# ⛔ THE OBVIOUS LOOP IS WRONG, AND WAS WRONG FOR TEN RELEASES.
+#
+#     t0=$(date +%s%N); "$BIN" true; t1=$(date +%s%N)
+#
+# The span from t0 to t1 contains the kriya exec AND the whole `date` process
+# that produces t1 — a fork+exec of GNU coreutils, measured here at ~0.57 ms
+# against kriya's ~0.43 ms. So the per-iteration form reported roughly 1.4 ms
+# for a 0.43 ms spawn: about 60% of every historical figure in state.md is
+# `date`, not kriya, and cross-machine comparisons mostly compared how fast
+# `date` forks there.
+#
+# ⭐ Fix: put the timestamps OUTSIDE a batch of N runs, so the two `date` forks
+# are amortised to ~2 µs each at N=300, and subtract a control batch that runs
+# the same loop with no kriya call — removing the shell's own per-iteration
+# cost. What is left is the spawn.
+
+batch() {   # batch <n> <cmd...>; echoes elapsed ns
+    _n=$1; shift
+    _t0=$(date +%s%N)
+    _i=0
+    while [ "$_i" -lt "$_n" ]; do
+        "$@" > /dev/null 2>&1
+        _i=$((_i + 1))
+    done
+    _t1=$(date +%s%N)
+    echo $((_t1 - _t0))
+}
+
+control() { # control <n>; the same loop with no spawn
+    _n=$1
+    _t0=$(date +%s%N)
+    _i=0
+    while [ "$_i" -lt "$_n" ]; do
+        _i=$((_i + 1))
+    done
+    _t1=$(date +%s%N)
+    echo $((_t1 - _t0))
+}
+
+# Warm the page cache; a first-touch exec is not what we are measuring.
 i=0
-while [ "$i" -lt "$RUNS" ]; do
-    # `time -f %e` is GNU; portable alternative: shell's builtin `time`
-    # output is human-formatted. We use `date +%s%N` deltas for ns
-    # granularity, which is portable across busybox/coreutils.
-    t0=$(date +%s%N)
-    "$BIN" true
-    t1=$(date +%s%N)
-    echo $((t1 - t0)) >> "$TMP"
-    i=$((i + 1))
-done
+while [ "$i" -lt 20 ]; do "$BIN" true > /dev/null 2>&1; i=$((i + 1)); done
 
-# Compute min, median, max from the collected ns values.
-sort -n "$TMP" > "$TMP.sorted"
-COUNT=$(wc -l < "$TMP.sorted")
-MIN=$(head -1 "$TMP.sorted")
-MAX=$(tail -1 "$TMP.sorted")
-MID=$(( (COUNT + 1) / 2 ))
-MEDIAN=$(sed -n "${MID}p" "$TMP.sorted")
+TOTAL=$(batch "$RUNS" "$BIN" true)
+CTRL=$(control "$RUNS")
+NET=$((TOTAL - CTRL))
+PER=$((NET / RUNS))
 
-printf "kriya true cold-start (%s runs):\n" "$RUNS"
-printf "  min:    %s ns  (%.3f ms)\n" "$MIN"    "$(echo "$MIN / 1000000"    | awk '{ printf "%.3f", $1 / 1000000 }')"
-printf "  median: %s ns  (%.3f ms)\n" "$MEDIAN" "$(echo "$MEDIAN / 1000000" | awk '{ printf "%.3f", $1 / 1000000 }')"
-printf "  max:    %s ns  (%.3f ms)\n" "$MAX"    "$(echo "$MAX / 1000000"    | awk '{ printf "%.3f", $1 / 1000000 }')"
+printf "kriya true cold-start (%s runs, batch-timed):\n" "$RUNS"
+printf "  per spawn:   %s ns  (%.3f ms)\n" "$PER" \
+    "$(echo "$PER" | awk '{ printf "%.3f", $1 / 1000000 }')"
+printf "  loop control: %s ns total (%s ns/iter, subtracted)\n" "$CTRL" "$((CTRL / RUNS))"
+
+# `kriya --list` enumerates all 38 utilities in ONE process. agnoshi reads it at
+# shell startup, so its cost is budgeted separately from a plain dispatch.
+LIST_TOTAL=$(batch "$RUNS" "$BIN" --list)
+LIST_PER=$(((LIST_TOTAL - CTRL) / RUNS))
+printf "  kriya --list: %s ns  (%.3f ms)  [+%.3f ms to enumerate 38]\n" "$LIST_PER" \
+    "$(echo "$LIST_PER" | awk '{ printf "%.3f", $1 / 1000000 }')" \
+    "$(echo "$LIST_PER $PER" | awk '{ printf "%.3f", ($1 - $2) / 1000000 }')"
+
+# ⚠ The pre-1.3.2 per-iteration figures in docs/development/state.md are NOT
+# comparable to these: they include one `date` fork each. Compare release to
+# release with both binaries measured by the same tool, never an absolute
+# against that history.

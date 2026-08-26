@@ -36,6 +36,14 @@ fn _mkdir_init_spec(): i64 {
     _mkdir_m_idx = flags_add_str(s,  109, "mode",    0, "set final-component mode (octal)");
     _mkdir_v_idx = flags_add_bool(s, 118, "verbose", 0, "print a line per created directory");
     _mkdir_spec = s;
+    mkdir_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `mkdir`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn mkdir_help_declare(): i64 {
     help_begin("mkdir", "Create directories.",
                "mkdir [OPTIONS] DIRECTORY...");
     help_positional(1, HELP_POS_UNBOUNDED, "DIRECTORY");
@@ -213,7 +221,7 @@ fn cmd_mkdir(start: i64): i64 {
 
     var npos = flags_positional_count(_mkdir_spec);
     if (npos < 1) {
-        k_write( 2, "kriya mkdir: error: missing operand (need at least one directory name)\n", 72);
+        k_write( 2, "kriya mkdir: error: missing operand (need at least one directory name)\n", 71);
         return EXIT_USAGE;
     }
 

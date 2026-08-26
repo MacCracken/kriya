@@ -77,6 +77,14 @@ fn _so_init_spec(): i64 {
     _so_z_idx = flags_add_bool(s, 122, "zero-terminated",      0, "NUL-separated lines");
     _so_s_idx = flags_add_bool(s, 115, "stable",               0, "stable sort (default)");
     _so_spec = s;
+    sort_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `sort`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn sort_help_declare(): i64 {
     help_begin("sort", "Sort lines of text.",
                "sort [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
@@ -658,7 +666,7 @@ fn cmd_sort(start: i64): i64 {
     }
 
     if (load64(&overflow_box) == 1) {
-        k_write( 2, "kriya sort: warning: input exceeds 256 MiB; external-sort fallback deferred — truncating\n", 90);
+        k_write( 2, "kriya sort: warning: input exceeds 256 MiB; external-sort fallback deferred — truncating\n", 91);
     }
 
     var records = _so_build_records(buf, have, term_byte);

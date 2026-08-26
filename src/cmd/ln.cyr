@@ -51,6 +51,14 @@ fn _ln_init_spec(): i64 {
     _ln_n_idx = flags_add_bool(s, 110, "no-dereference", 0, "treat symlink-to-directory destination as a name to replace");
     _ln_v_idx = flags_add_bool(s, 118, "verbose",        0, "print each link as it is created");
     _ln_spec = s;
+    ln_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `ln`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn ln_help_declare(): i64 {
     help_begin("ln", "Create hard links and symbolic links.",
                "ln [OPTIONS] TARGET [LINKNAME]");
     help_positional(1, HELP_POS_UNBOUNDED, "TARGET,LINKNAME");
@@ -313,7 +321,7 @@ fn cmd_ln(start: i64): i64 {
 
         if (dest_is_dir == 0) {
             if (npos != 2) {
-                k_write( 2, "kriya ln: error: with multiple sources, the last operand must be a directory\n", 76);
+                k_write( 2, "kriya ln: error: with multiple sources, the last operand must be a directory\n", 77);
                 return EXIT_USAGE;
             }
             var target = flags_positional(_ln_spec, 0);

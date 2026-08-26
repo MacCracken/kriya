@@ -52,3 +52,56 @@ jobs:
         run: |
           cyrius test tests/kriya.tcyr
           cyrius test tests/kriya-posix.tcyr
+
+      - name: Lint & vet
+        # `lint` fails on an untracked deferral or a warning; `vet` on an
+        # untrusted or missing dependency. Both were previously local-only,
+        # which meant "clean at the release cut" rather than "clean on every PR".
+        #
+        # ⚠ cyrlint takes ONE FILE and does not follow includes, so this covers
+        # `src/main.cyr` + `src/lib/` ONLY -- src/cmd/ is NOT linted here and a
+        # green check does not mean the tree is clean. Those 38 files currently
+        # carry 45 over-long lines and 59 untracked deferrals; bringing them in
+        # is its own release (see roadmap, 1.3.x).
+        run: |
+          set -e
+          for f in src/main.cyr src/lib/*.cyr; do
+            echo "--- $f"
+            cyrius lint "$f"
+          done
+          cyrius vet src/main.cyr
+
+      - name: Lint the introspection interface
+        # ⛔ The lint ADR 0002 promised. Checks that src/cmd/*.cyr, the
+        # dispatcher table and `kriya --list` name the SAME utilities; that
+        # every utility declares a complete `--help=json` document; and that
+        # every k_write literal length matches its literal. Without this step
+        # the check exists but nothing fails on it -- which is how an interface
+        # rots silently.
+        run: sh scripts/lint-help-schema.sh
+
+      - name: Smoke suite
+        # ~3.5k behavioural cases across 37 scripts, ~11s. These are the tests
+        # that actually compare kriya against GNU coreutils cell-by-cell; they
+        # were written from v0.2.0 onward and had never run in CI.
+        # ⚠ Runs every script and reports ALL failures rather than stopping at
+        # the first, so one broken utility does not mask another.
+        run: |
+          set -e
+          failed=""
+          for s in scripts/smoke-*.sh; do
+            echo "--- $s"
+            if ! sh "$s"; then failed="$failed $s"; fi
+          done
+          if [ -n "$failed" ]; then
+            echo "FAILED:$failed" >&2
+            exit 1
+          fi
+
+      - name: Fuzz (poisoned allocator)
+        # ⚠ `cyrius fuzz` -- NOT `cyrius test`. Only the fuzz verb sets
+        # CYRIUS_POISON=1, which turns on redzones and quarantine-on-free.
+        # Without poison an out-of-bounds READ lands in mapped memory and never
+        # faults, so a plain test run is silent about the failure class these
+        # harnesses exist to catch.
+        run: sh scripts/fuzz.sh

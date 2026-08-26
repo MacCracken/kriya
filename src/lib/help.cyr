@@ -612,6 +612,42 @@ fn help_render_json(spec): i64 {
     return 0;
 }
 
+# Emit the current help record as ONE entry of the `kriya --list` array, at the
+# indentation that document uses. ⭐ The record is whatever the utility's own
+# `<util>_help_declare()` just put there — the same declaration `--help` and
+# `--help=json` read, so a utility cannot describe itself differently to the
+# three of them.
+#
+# ⚠ Deliberately a SUBSET of `--help=json`: name, summary, synopsis,
+# destructive, exit codes. Options and operand bounds are per-utility detail a
+# consumer fetches lazily with `<util> --help=json` when it actually needs them;
+# putting them here would make the startup document forty times larger for data
+# most callers never read.
+fn help_list_entry(): i64 {
+    k_write( 1, "    { \"name\": ", 14);
+    _json_str(_help_name);
+    k_write( 1, ", \"summary\": ", 13);
+    _json_str(_help_summary);
+    k_write( 1, ",\n      \"synopsis\": ", 20);
+    _json_str(_help_synopsis);
+    k_write( 1, ", \"destructive\": ", 17);
+    _json_bool(_help_destructive);
+    k_write( 1, ",\n      \"exit_codes\": {", 23);
+    var i: i64 = 0;
+    while (i < _help_exit_n) {
+        if (i > 0) { k_write( 1, ",", 1); }
+        k_write( 1, " ", 1);
+        var nb[24];
+        var nl = fmt_int_buf(load64(_help_exit_code + i * 8), &nb);
+        _json_strn(&nb, nl);
+        k_write( 1, ": ", 2);
+        _json_str(load64(_help_exit_text + i * 8));
+        i = i + 1;
+    }
+    k_write( 1, " } }", 4);
+    return 0;
+}
+
 # Act on a `--help=FORMAT` token. Never returns when the format is known.
 fn help_format_dispatch(spec, tok): i64 {
     var fmt = tok + 7;             # past "--help="

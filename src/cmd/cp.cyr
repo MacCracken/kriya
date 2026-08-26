@@ -92,6 +92,14 @@ fn _cp_init_spec(): i64 {
     _cp_BIG_H_idx = flags_add_bool(s, 72,  "",            0, "follow command-line symlinks only (-R)");
     _cp_BIG_L_idx = flags_add_bool(s, 76,  "dereference", 0, "follow all symlinks (-R)");
     _cp_spec = s;
+    cp_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `cp`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn cp_help_declare(): i64 {
     help_begin("cp", "Copy files and directory trees.",
                "cp [OPTIONS] SOURCE... DEST");
     help_positional(2, HELP_POS_UNBOUNDED, "SOURCE,DEST");
@@ -252,7 +260,7 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
         if (force == 0) {
             if (interactive == 1) {
                 if (_cp_isatty(0) == 0) {
-                    k_write( 2, "kriya cp: error: -i requires stdin to be a terminal\n", 53);
+                    k_write( 2, "kriya cp: error: -i requires stdin to be a terminal\n", 52);
                     return 0 - 9999;
                 }
                 if (_cp_prompt(dst) == 0) { _cp_declined = 1; return 0; }
@@ -264,7 +272,7 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
     } else {
         if (interactive == 1) {
             if (_cp_isatty(0) == 0) {
-                k_write( 2, "kriya cp: error: -i requires stdin to be a terminal\n", 53);
+                k_write( 2, "kriya cp: error: -i requires stdin to be a terminal\n", 52);
                 return 0 - 9999;
             }
         }
@@ -738,7 +746,7 @@ fn cmd_cp(start: i64): i64 {
 
     var npos = flags_positional_count(_cp_spec);
     if (npos < 2) {
-        k_write( 2, "kriya cp: error: missing operand (need SRC and DST)\n", 53);
+        k_write( 2, "kriya cp: error: missing operand (need SRC and DST)\n", 52);
         return EXIT_USAGE;
     }
 
@@ -764,7 +772,7 @@ fn cmd_cp(start: i64): i64 {
     # invocation-wide, even before any operand classification.
     if (interactive == 1) {
         if (_cp_isatty(0) == 0) {
-            k_write( 2, "kriya cp: error: -i requires stdin to be a terminal\n", 53);
+            k_write( 2, "kriya cp: error: -i requires stdin to be a terminal\n", 52);
             return EXIT_USAGE;
         }
     }

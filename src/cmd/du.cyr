@@ -306,14 +306,7 @@ fn _du_walk(parent_dirfd, name, display, depth): i64 {
 var _du_any_failed: i64 = 0;
 
 fn cmd_du(start: i64): i64 {
-    help_begin("du", "Summarise disk usage of files and directories.",
-               "du [OPTIONS] [FILE...]");
-    help_positional(0, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("Reports 1024-byte blocks by default. Hard links are counted once per path today; dedup is a named follow-up.");
-    help_exit(1, "a path could not be read");
-    help_example("du -sh .");
-    help_example("du -a -d 1 /var");
-    help_example("du -b file.bin");
+    du_help_declare();
     help_if_requested(0, start);
     _du_summarize   = 0;
     _du_all         = 0;
@@ -494,4 +487,19 @@ fn cmd_du(start: i64): i64 {
     }
     if (_du_any_failed == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
+}
+
+# Help/introspection record for `du`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn du_help_declare(): i64 {
+    help_begin("du", "Summarise disk usage of files and directories.",
+               "du [OPTIONS] [FILE...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "FILE");
+    help_operands("Reports 1024-byte blocks by default. Hard links are counted once per path today; dedup is a named follow-up.");
+    help_exit(1, "a path could not be read");
+    help_example("du -sh .");
+    help_example("du -a -d 1 /var");
+    help_example("du -b file.bin");
+    return 0;
 }

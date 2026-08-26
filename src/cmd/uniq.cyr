@@ -61,6 +61,14 @@ fn _uq_init_spec(): i64 {
     _uq_w_idx = flags_add_str(s,  119, "check-chars",      0, "compare at most N chars");
     _uq_z_idx = flags_add_bool(s, 122, "zero-terminated",  0, "NUL-separated lines");
     _uq_spec = s;
+    uniq_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `uniq`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn uniq_help_declare(): i64 {
     help_begin("uniq", "Report or filter repeated adjacent lines.",
                "uniq [OPTIONS] [INPUT [OUTPUT]]");
     help_positional(0, 2, "INPUT,OUTPUT");
@@ -407,7 +415,7 @@ fn cmd_uniq(start: i64): i64 {
 
     var npos = flags_positional_count(_uq_spec);
     if (npos > 2) {
-        k_write( 2, "kriya uniq: error: at most two positional operands (INPUT [OUTPUT])\n", 67);
+        k_write( 2, "kriya uniq: error: at most two positional operands (INPUT [OUTPUT])\n", 68);
         return EXIT_USAGE;
     }
 

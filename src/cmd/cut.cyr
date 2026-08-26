@@ -60,6 +60,14 @@ fn _cut_init_spec(): i64 {
     _cut_od_idx   = flags_add_str(s,  0,   "output-delimiter", 0, "join output fields with this string");
     _cut_z_idx    = flags_add_bool(s, 122, "zero-terminated",  0, "NUL-separated lines");
     _cut_spec = s;
+    cut_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `cut`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn cut_help_declare(): i64 {
     help_begin("cut", "Print selected parts of each line.",
                "cut OPTIONS [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
@@ -378,7 +386,7 @@ fn _cut_run(in_fd, mode, ranges, complement, delim, out_delim, out_delim_len, on
                             line_len = line_len + 1;
                         } else {
                             if (truncated_warned == 0) {
-                                k_write( 2, "kriya cut: warning: line exceeds 64 KiB; truncating\n", 53);
+                                k_write( 2, "kriya cut: warning: line exceeds 64 KiB; truncating\n", 52);
                                 truncated_warned = 1;
                             }
                         }

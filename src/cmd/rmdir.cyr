@@ -40,6 +40,14 @@ fn _rmdir_init_spec(): i64 {
     _rmdir_v_idx      = flags_add_bool(s, 118, "verbose", 0, "print a line per removed directory");
     _rmdir_ignore_idx = flags_add_bool(s,   0, "ignore-fail-on-non-empty", 0, "ENOTEMPTY is not an error (use with -p)");
     _rmdir_spec = s;
+    rmdir_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `rmdir`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn rmdir_help_declare(): i64 {
     help_begin("rmdir", "Remove empty directories.",
                "rmdir [OPTIONS] DIRECTORY...");
     help_positional(1, HELP_POS_UNBOUNDED, "DIRECTORY");
@@ -156,7 +164,7 @@ fn cmd_rmdir(start: i64): i64 {
 
     var npos = flags_positional_count(_rmdir_spec);
     if (npos < 1) {
-        k_write( 2, "kriya rmdir: error: missing operand (need at least one directory name)\n", 72);
+        k_write( 2, "kriya rmdir: error: missing operand (need at least one directory name)\n", 71);
         return EXIT_USAGE;
     }
 

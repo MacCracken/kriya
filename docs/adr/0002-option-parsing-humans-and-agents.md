@@ -217,9 +217,13 @@ The first consumer (`src/lib/args.cyr`, used by `pwd` and any future flag-taking
   (`src/lib/help.cyr`), all 38 utilities.
 - ~~**`--help=json`** schema emission per Appendix A.~~ **Closed in 1.3.1**, all
   38 utilities, with the amendments recorded in Appendix A above.
-- **`kriya --list`** top-level utility enumeration. ⚠ Still open — and with it the
-  CI lint this ADR promises, which is what would make a non-conforming schema fail
-  the build rather than reach a consumer.
+- ~~**`kriya --list`** top-level utility enumeration.~~ **Closed in 1.3.2.** ⭐ Driven by the same
+  dispatcher table that routes `argv[0]`, so a utility cannot be reachable but unlisted.
+- ~~The CI lint this ADR promises (*"Missing entries fail CI"*).~~ **Closed in 1.3.2**:
+  `scripts/lint-help-schema.sh`, wired into `.github/workflows/ci.yml`. ⚠ CI previously ran neither
+  the lint nor the smoke suite, so this commitment needed the workflow fixed as well as the check
+  written. ⚠ Still scoped to `src/main.cyr` + `src/lib/` for `cyrlint` itself; `src/cmd/` is a
+  separate roadmap item.
 - **`--dry-run` cross-utility enforcement** (lands when the first destructive utility ships in M2).
 - **`isatty(0)` check for `-i` flags** (lands with M2 cp/mv/rm).
 

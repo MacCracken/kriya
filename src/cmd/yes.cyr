@@ -7,12 +7,7 @@
 # stays in L1.
 
 fn cmd_yes(start: i64): i64 {
-    help_begin("yes", "Print a string repeatedly until killed.",
-               "yes [STRING...]");
-    help_positional(0, HELP_POS_UNBOUNDED, "STRING");
-    help_no_options();
-    help_example("yes");
-    help_example("yes | head -3");
+    yes_help_declare();
     help_if_requested(0, start);
     var n = kriya_argv_count();
     var buf = alloc(8192);
@@ -47,4 +42,17 @@ fn cmd_yes(start: i64): i64 {
         if (w <= 0) { go = 0; }
     }
     return EXIT_SUCCESS;
+}
+
+# Help/introspection record for `yes`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn yes_help_declare(): i64 {
+    help_begin("yes", "Print a string repeatedly until killed.",
+               "yes [STRING...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "STRING");
+    help_no_options();
+    help_example("yes");
+    help_example("yes | head -3");
+    return 0;
 }

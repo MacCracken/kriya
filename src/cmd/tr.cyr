@@ -50,6 +50,14 @@ fn _tr_init_spec(): i64 {
     _tr_c_idx = flags_add_bool(s, 99,  "complement", 0, "use the complement of SET1");
     _tr_t_idx = flags_add_bool(s, 116, "truncate-set1", 0, "truncate SET1 to len(SET2)");
     _tr_spec = s;
+    tr_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `tr`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn tr_help_declare(): i64 {
     help_begin("tr", "Translate, squeeze or delete characters.",
                "tr [OPTIONS] SET1 [SET2]");
     help_positional(1, 2, "SET1,SET2");
@@ -598,12 +606,12 @@ fn cmd_tr(start: i64): i64 {
     if (del_mode == 1) {
         if (sq_mode == 0) {
             if (npos != 1) {
-                k_write( 2, "kriya tr: error: -d takes exactly one set (SET1)\n", 50);
+                k_write( 2, "kriya tr: error: -d takes exactly one set (SET1)\n", 49);
                 return EXIT_USAGE;
             }
         } else {
             if (npos != 2) {
-                k_write( 2, "kriya tr: error: -d -s takes two sets (SET1 delete, SET2 squeeze)\n", 67);
+                k_write( 2, "kriya tr: error: -d -s takes two sets (SET1 delete, SET2 squeeze)\n", 66);
                 return EXIT_USAGE;
             }
         }
@@ -617,7 +625,7 @@ fn cmd_tr(start: i64): i64 {
         } else {
             # Translate: requires exactly 2 sets.
             if (npos != 2) {
-                k_write( 2, "kriya tr: error: translate mode requires SET1 and SET2\n", 56);
+                k_write( 2, "kriya tr: error: translate mode requires SET1 and SET2\n", 55);
                 return EXIT_USAGE;
             }
         }

@@ -14,22 +14,15 @@
 # error. Named as a follow-up rather than assumed.
 
 fn cmd_sleep(start: i64): i64 {
-    help_begin("sleep", "Pause for a duration.",
-               "sleep DURATION");
-    help_positional(1, 1, "DURATION");
-    help_no_options();
-    help_operands("DURATION is a non-negative number with an optional s/m/h/d suffix. One operand only; GNU sums several, POSIX specifies one.");
-    help_example("sleep 5");
-    help_example("sleep 0.25");
-    help_example("sleep 2m");
+    sleep_help_declare();
     help_if_requested(0, start);
     var n = kriya_argv_count();
     if (start >= n) {
-        k_write( 2, "kriya sleep: error: expected 1 positional argument(s), got 0\n", 62);
+        k_write( 2, "kriya sleep: error: expected 1 positional argument(s), got 0\n", 61);
         return EXIT_USAGE;
     }
     if (start + 1 < n) {
-        k_write( 2, "kriya sleep: error: too many operands (POSIX sleep takes one integer)\n", 71);
+        k_write( 2, "kriya sleep: error: too many operands (POSIX sleep takes one integer)\n", 70);
         return EXIT_USAGE;
     }
     var arg = argv(start);
@@ -42,4 +35,19 @@ fn cmd_sleep(start: i64): i64 {
         sleep_ms(ms);
     }
     return EXIT_SUCCESS;
+}
+
+# Help/introspection record for `sleep`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn sleep_help_declare(): i64 {
+    help_begin("sleep", "Pause for a duration.",
+               "sleep DURATION");
+    help_positional(1, 1, "DURATION");
+    help_no_options();
+    help_operands("DURATION is a non-negative number with an optional s/m/h/d suffix. One operand only; GNU sums several, POSIX specifies one.");
+    help_example("sleep 5");
+    help_example("sleep 0.25");
+    help_example("sleep 2m");
+    return 0;
 }

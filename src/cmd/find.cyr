@@ -996,15 +996,7 @@ fn _f_walk(path, depth, max_depth): i64 {
 # --- Entry point ------------------------------------------------------
 
 fn cmd_find(start: i64): i64 {
-    help_begin("find", "Walk a file tree and evaluate predicates.",
-               "find [STARTPATH...] [EXPRESSION]");
-    help_positional(0, HELP_POS_UNBOUNDED, "STARTPATH,EXPRESSION");
-    help_destructive(1);
-    help_operands("Predicates combine with ! , -a and -o; parentheses group. The default action is -print. Symlinks are not followed unless -L is given (ADR 0003).");
-    help_exit(1, "an entry could not be read, or -exec reported failure");
-    help_example("find . -name '*.log'");
-    help_example("find /var -type f -size +1M");
-    help_example("find . -name '*.tmp' -exec rm {} ';'");
+    find_help_declare();
     help_if_requested(0, start);
     # find DOES NOT go through the standard flags parser — its expression
     # grammar uses tokens like `-type` / `-name` that would be rejected
@@ -1106,4 +1098,20 @@ fn cmd_find(start: i64): i64 {
 
     if (_f_any_failed == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
+}
+
+# Help/introspection record for `find`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn find_help_declare(): i64 {
+    help_begin("find", "Walk a file tree and evaluate predicates.",
+               "find [STARTPATH...] [EXPRESSION]");
+    help_positional(0, HELP_POS_UNBOUNDED, "STARTPATH,EXPRESSION");
+    help_destructive(1);
+    help_operands("Predicates combine with ! , -a and -o; parentheses group. The default action is -print. Symlinks are not followed unless -L is given (ADR 0003).");
+    help_exit(1, "an entry could not be read, or -exec reported failure");
+    help_example("find . -name '*.log'");
+    help_example("find /var -type f -size +1M");
+    help_example("find . -name '*.tmp' -exec rm {} ';'");
+    return 0;
 }

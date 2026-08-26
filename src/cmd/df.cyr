@@ -470,14 +470,7 @@ fn _df_load_mounts(): i64 {
 }
 
 fn cmd_df(start: i64): i64 {
-    help_begin("df", "Report filesystem disk space usage.",
-               "df [OPTIONS] [FILE...]");
-    help_positional(0, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("With no operand, every mounted filesystem is listed. An operand resolves to the filesystem CONTAINING it, by longest mountpoint prefix.");
-    help_exit(1, "an operand could not be resolved");
-    help_example("df");
-    help_example("df -h /home");
-    help_example("df /var/log/syslog");
+    df_help_declare();
     help_if_requested(0, start);
     # df is built entirely on statfs(2), which agnos does not provide
     # (K_HAVE_STATFS == 0). Refuse cleanly up front rather than walking a
@@ -663,4 +656,19 @@ fn cmd_df(start: i64): i64 {
     }
     if (_df_any_failed == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
+}
+
+# Help/introspection record for `df`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn df_help_declare(): i64 {
+    help_begin("df", "Report filesystem disk space usage.",
+               "df [OPTIONS] [FILE...]");
+    help_positional(0, HELP_POS_UNBOUNDED, "FILE");
+    help_operands("With no operand, every mounted filesystem is listed. An operand resolves to the filesystem CONTAINING it, by longest mountpoint prefix.");
+    help_exit(1, "an operand could not be resolved");
+    help_example("df");
+    help_example("df -h /home");
+    help_example("df /var/log/syslog");
+    return 0;
 }

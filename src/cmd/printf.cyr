@@ -53,6 +53,14 @@ fn _pf_init_spec(): i64 {
     if (_pf_spec != 0) { return 0; }
     var s = flags_new();
     _pf_spec = s;
+    printf_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `printf`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn printf_help_declare(): i64 {
     help_begin("printf", "Format and print arguments.",
                "printf FORMAT [ARGUMENT...]");
     help_positional(1, HELP_POS_UNBOUNDED, "FORMAT,ARGUMENT");

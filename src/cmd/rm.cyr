@@ -63,6 +63,14 @@ fn _rm_init_spec(): i64 {
     _rm_d_idx = flags_add_bool(s, 100, "dir",         0, "remove empty directories");
     _rm_v_idx = flags_add_bool(s, 118, "verbose",     0, "print each removal");
     _rm_spec = s;
+    rm_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `rm`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn rm_help_declare(): i64 {
     help_begin("rm", "Remove files and directory trees.",
                "rm [OPTIONS] FILE...");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
@@ -481,7 +489,7 @@ fn cmd_rm(start: i64): i64 {
     # usage error.
     if (interactive == 1) {
         if (_rm_isatty(0) == 0) {
-            k_write( 2, "kriya rm: error: -i requires stdin to be a terminal\n", 53);
+            k_write( 2, "kriya rm: error: -i requires stdin to be a terminal\n", 52);
             return EXIT_USAGE;
         }
     }

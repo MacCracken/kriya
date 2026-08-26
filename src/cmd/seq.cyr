@@ -172,13 +172,7 @@ fn _seq_write_int_w(buf, offset, v, width): i64 {
 }
 
 fn cmd_seq(start: i64): i64 {
-    help_begin("seq", "Print a sequence of numbers.",
-               "seq [OPTIONS] [FIRST [INCREMENT]] LAST");
-    help_positional(1, 3, "FIRST,INCREMENT,LAST");
-    help_operands("Integers only. A leading -N is read as a negative FIRST, not an option.");
-    help_example("seq 5");
-    help_example("seq 1 2 9");
-    help_example("seq -w 8 11");
+    seq_help_declare();
     help_if_requested(0, start);
     var n_argv = kriya_argv_count();
     var sep    = "\n";
@@ -260,7 +254,7 @@ fn cmd_seq(start: i64): i64 {
                     # --format / --format=VAL  (deferred)
                     if (name_len == 6) {
                         if (_seq_bytes_eq(tok + 2, "format", 6) == 1) {
-                            k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 86);
+                            k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 85);
                             return EXIT_USAGE;
                         }
                     }
@@ -312,7 +306,7 @@ fn cmd_seq(start: i64): i64 {
                                 loop = 0;
                             } else {
                                 if (ch == 102) {      # -f
-                                    k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 86);
+                                    k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 85);
                                     return EXIT_USAGE;
                                 }
                                 k_write( 2, "kriya seq: error: unknown option\n", 33);
@@ -448,4 +442,18 @@ fn cmd_seq(start: i64): i64 {
         k_write( 1, buf, blen);
     }
     return EXIT_SUCCESS;
+}
+
+# Help/introspection record for `seq`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn seq_help_declare(): i64 {
+    help_begin("seq", "Print a sequence of numbers.",
+               "seq [OPTIONS] [FIRST [INCREMENT]] LAST");
+    help_positional(1, 3, "FIRST,INCREMENT,LAST");
+    help_operands("Integers only. A leading -N is read as a negative FIRST, not an option.");
+    help_example("seq 5");
+    help_example("seq 1 2 9");
+    help_example("seq -w 8 11");
+    return 0;
 }

@@ -58,7 +58,7 @@ include "src/cmd/df.cyr"
 
 fn print_usage() {
     k_write( 2, "usage: kriya <utility> [args...]\n", 33);
-    k_write( 2, "       or invoke a symlink named after the utility (e.g. `true`, `false`).\n", 76);
+    k_write( 2, "       or invoke a symlink named after the utility (e.g. `true`, `false`).\n", 75);
     return 0;
 }
 
@@ -69,50 +69,175 @@ fn print_unknown(name) {
     return 0;
 }
 
-# Route `name` to the matching `cmd_*` function. `start` is the index
-# in argv() where the utility's own arguments begin (1 for symlink
-# form, 2 for `kriya <util>` form).
+# ⭐ ONE TABLE, TWO READERS. `dispatch` routes with it and `cmd_list` enumerates
+# with it, so a utility cannot be reachable but unlisted (or listed but
+# unreachable) — the drift a second hand-maintained enumeration would have
+# invited. Adding a utility is one row.
+#
+# Each row is (name, cmd_*, *_help_declare):
+#   +0  name         : cstr
+#   +8  cmd_fn       : &cmd_<util>, called as callptr(fn, start)
+#  +16  declare_fn   : &<util>_help_declare, populates the help record WITHOUT
+#                      running the utility — that is what makes `--list` possible
+#                      in one process instead of 38 execs.
+enum UtilTable {
+    UTIL_ENTRY_SIZE = 24;
+    UTIL_MAX        = 64;
+}
+
+var _util_tab   = 0;
+var _util_count = 0;
+
+fn _util_add(name, cmd_fn, declare_fn): i64 {
+    if (_util_count >= UTIL_MAX) { return 0; }
+    var e = _util_tab + _util_count * UTIL_ENTRY_SIZE;
+    store64(e,      name);
+    store64(e + 8,  cmd_fn);
+    store64(e + 16, declare_fn);
+    _util_count = _util_count + 1;
+    return 0;
+}
+
+fn util_table_init(): i64 {
+    if (_util_tab != 0) { return 0; }
+    _util_tab = alloc(UTIL_MAX * UTIL_ENTRY_SIZE);
+    _util_add("true",       &cmd_true,       &true_help_declare);
+    _util_add("false",      &cmd_false,      &false_help_declare);
+    _util_add("echo",       &cmd_echo,       &echo_help_declare);
+    _util_add("pwd",        &cmd_pwd,        &pwd_help_declare);
+    _util_add("yes",        &cmd_yes,        &yes_help_declare);
+    _util_add("sleep",      &cmd_sleep,      &sleep_help_declare);
+    _util_add("mkdir",      &cmd_mkdir,      &mkdir_help_declare);
+    _util_add("rmdir",      &cmd_rmdir,      &rmdir_help_declare);
+    _util_add("touch",      &cmd_touch,      &touch_help_declare);
+    _util_add("ln",         &cmd_ln,         &ln_help_declare);
+    _util_add("cp",         &cmd_cp,         &cp_help_declare);
+    _util_add("mv",         &cmd_mv,         &mv_help_declare);
+    _util_add("rm",         &cmd_rm,         &rm_help_declare);
+    _util_add("basename",   &cmd_basename,   &basename_help_declare);
+    _util_add("dirname",    &cmd_dirname,    &dirname_help_declare);
+    _util_add("realpath",   &cmd_realpath,   &realpath_help_declare);
+    _util_add("readlink",   &cmd_readlink,   &readlink_help_declare);
+    _util_add("which",      &cmd_which,      &which_help_declare);
+    _util_add("stat",       &cmd_stat,       &stat_help_declare);
+    _util_add("ls",         &cmd_ls,         &ls_help_declare);
+    _util_add("tee",        &cmd_tee,        &tee_help_declare);
+    _util_add("wc",         &cmd_wc,         &wc_help_declare);
+    _util_add("head",       &cmd_head,       &head_help_declare);
+    _util_add("tail",       &cmd_tail,       &tail_help_declare);
+    _util_add("nl",         &cmd_nl,         &nl_help_declare);
+    _util_add("uniq",       &cmd_uniq,       &uniq_help_declare);
+    _util_add("tr",         &cmd_tr,         &tr_help_declare);
+    _util_add("cut",        &cmd_cut,        &cut_help_declare);
+    _util_add("sort",       &cmd_sort,       &sort_help_declare);
+    _util_add("printf",     &cmd_printf,     &printf_help_declare);
+    _util_add("grep",       &cmd_grep,       &grep_help_declare);
+    _util_add("find",       &cmd_find,       &find_help_declare);
+    _util_add("xargs",      &cmd_xargs,      &xargs_help_declare);
+    _util_add("seq",        &cmd_seq,        &seq_help_declare);
+    _util_add("env",        &cmd_env,        &env_help_declare);
+    _util_add("date",       &cmd_date,       &date_help_declare);
+    _util_add("du",         &cmd_du,         &du_help_declare);
+    _util_add("df",         &cmd_df,         &df_help_declare);
+    return 0;
+}
+
+fn util_count(): i64 { return _util_count; }
+fn util_entry(i): i64 { return _util_tab + i * UTIL_ENTRY_SIZE; }
+
+# Route `name` to the matching `cmd_*` function. `start` is the index in argv()
+# where the utility's own arguments begin (1 for symlink form, 2 for
+# `kriya <util>` form).
 fn dispatch(name, start: i64): i64 {
-    if (streq(name, "true"))  { return cmd_true(start); }
-    if (streq(name, "false")) { return cmd_false(start); }
-    if (streq(name, "echo"))  { return cmd_echo(start); }
-    if (streq(name, "pwd"))   { return cmd_pwd(start); }
-    if (streq(name, "yes"))   { return cmd_yes(start); }
-    if (streq(name, "sleep")) { return cmd_sleep(start); }
-    if (streq(name, "mkdir")) { return cmd_mkdir(start); }
-    if (streq(name, "rmdir")) { return cmd_rmdir(start); }
-    if (streq(name, "touch")) { return cmd_touch(start); }
-    if (streq(name, "ln"))    { return cmd_ln(start); }
-    if (streq(name, "cp"))    { return cmd_cp(start); }
-    if (streq(name, "mv"))    { return cmd_mv(start); }
-    if (streq(name, "rm"))    { return cmd_rm(start); }
-    if (streq(name, "basename")) { return cmd_basename(start); }
-    if (streq(name, "dirname"))  { return cmd_dirname(start); }
-    if (streq(name, "realpath")) { return cmd_realpath(start); }
-    if (streq(name, "readlink")) { return cmd_readlink(start); }
-    if (streq(name, "which"))    { return cmd_which(start); }
-    if (streq(name, "stat"))     { return cmd_stat(start); }
-    if (streq(name, "ls"))       { return cmd_ls(start); }
-    if (streq(name, "tee"))      { return cmd_tee(start); }
-    if (streq(name, "wc"))       { return cmd_wc(start); }
-    if (streq(name, "head"))     { return cmd_head(start); }
-    if (streq(name, "tail"))     { return cmd_tail(start); }
-    if (streq(name, "nl"))       { return cmd_nl(start); }
-    if (streq(name, "uniq"))     { return cmd_uniq(start); }
-    if (streq(name, "tr"))       { return cmd_tr(start); }
-    if (streq(name, "cut"))      { return cmd_cut(start); }
-    if (streq(name, "sort"))     { return cmd_sort(start); }
-    if (streq(name, "printf"))   { return cmd_printf(start); }
-    if (streq(name, "grep"))     { return cmd_grep(start); }
-    if (streq(name, "find"))     { return cmd_find(start); }
-    if (streq(name, "xargs"))    { return cmd_xargs(start); }
-    if (streq(name, "seq"))      { return cmd_seq(start); }
-    if (streq(name, "env"))      { return cmd_env(start); }
-    if (streq(name, "date"))     { return cmd_date(start); }
-    if (streq(name, "du"))       { return cmd_du(start); }
-    if (streq(name, "df"))       { return cmd_df(start); }
+    util_table_init();
+    var i: i64 = 0;
+    while (i < _util_count) {
+        var e = util_entry(i);
+        if (streq(name, load64(e)) == 1) {
+            return callptr(load64(e + 8), start);
+        }
+        i = i + 1;
+    }
     print_unknown(name);
     return EXIT_USAGE;
+}
+
+# `kriya --list` — the whole utility table as one JSON document, per ADR 0002.
+#
+# ⭐ This is why `<util>_help_declare()` was split out of each `cmd_<util>`: the
+# record can be populated WITHOUT running the utility, so the enumeration costs
+# one process instead of thirty-eight execs. agnoshi reads this once at shell
+# startup to seed completion, and the cold-start budget is 2 ms.
+#
+# ⚠ Public interface, versioned by KRIYA_LIST_SCHEMA_VERSION in
+# `src/lib/args.cyr`, separately from the `--help=json` schema.
+fn cmd_list(): i64 {
+    util_table_init();
+    k_write( 1, "{\n  \"schema\": \"kriya-list/v", 27);
+    var vb[24];
+    var vl = fmt_int_buf(KRIYA_LIST_SCHEMA_VERSION, &vb);
+    k_write( 1, &vb, vl);
+    k_write( 1, "\",\n  \"count\": ", 14);
+    var cb[24];
+    var cl = fmt_int_buf(util_count(), &cb);
+    k_write( 1, &cb, cl);
+    k_write( 1, ",\n  \"utilities\": [\n", 19);
+    var i: i64 = 0;
+    while (i < util_count()) {
+        var e = util_entry(i);
+        var d = callptr(load64(e + 16));
+        help_list_entry();
+        if (i + 1 < util_count()) { k_write( 1, ",", 1); }
+        k_write( 1, "\n", 1);
+        i = i + 1;
+    }
+    k_write( 1, "  ]\n}\n", 6);
+    if (k_write_failed() == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
+}
+
+# `kriya --help` — the DISPATCHER's own page, distinct from `kriya <util> --help`.
+# ⚠ Without this, `kriya --help` answered "unknown utility: --help", which is a
+# poor first thing for a new caller (human or agent) to be told.
+fn cmd_kriya_help(): i64 {
+    util_table_init();
+    _help_head("NAME");
+    k_write( 1, "  kriya — coreutils-equivalent multi-tool for AGNOS.\n\n", 56);
+    _help_head("SYNOPSIS");
+    k_write( 1, "  kriya UTILITY [ARGS...]\n", 26);
+    k_write( 1, "  UTILITY [ARGS...]          via a symlink named after the utility\n\n", 68);
+    _help_head("DESCRIPTION");
+    _help_wrap("One binary, many utilities: argv[0] selects which one runs.", 2);
+    _help_wrap("A symlink named `cp` IS the `cp` command; `kriya cp` is the fallback.", 2);
+    k_write( 1, "\n", 1);
+    _help_head("OPTIONS");
+    k_write( 1, "  --list                     every utility as JSON: name, summary,\n", 67);
+    k_write( 1, "                             synopsis, destructive, exit codes\n", 63);
+    k_write( 1, "  --help                     this page\n\n", 40);
+    _help_head("UTILITIES");
+    var col: i64 = 0;
+    var i: i64 = 0;
+    while (i < util_count()) {
+        var nm = load64(util_entry(i));
+        var w = strlen(nm);
+        # ⚠ Wrap at HELP_WIDTH, counting the two-space indent and the trailing
+        # space, so a long name never pushes the line over.
+        if (col > 0) {
+            if (col + w + 1 > HELP_WIDTH - 2) {
+                k_write( 1, "\n", 1);
+                col = 0;
+            }
+        }
+        if (col == 0) { k_write( 1, "  ", 2); }
+        else { k_write( 1, " ", 1); col = col + 1; }
+        k_write( 1, nm, w);
+        col = col + w;
+        i = i + 1;
+    }
+    k_write( 1, "\n\n", 2);
+    _help_wrap("Per-utility help: `kriya UTILITY --help`, or `--help=json` for the machine form.", 2);
+    if (k_write_failed() == 1) { return EXIT_FAILURE; }
+    return EXIT_SUCCESS;
 }
 
 # Report a write failure recorded by `k_write` (see the sticky-state block in
@@ -149,6 +274,24 @@ fn main(): i64 {
         }
         name = argv(1);
         start = 2;
+
+        # ⚠ Dispatcher-level flags, recognised ONLY in the `kriya <...>` form.
+        # A symlink is a utility invocation and never gets here, so `--list`
+        # cannot shadow a utility name.
+        if (streq(name, "--list") == 1) {
+            if (argc() > 2) {
+                k_write( 2, "kriya: error: --list takes no arguments\n", 40);
+                return EXIT_USAGE;
+            }
+            return cmd_list();
+        }
+        if (streq(name, "--help") == 1) {
+            if (argc() > 2) {
+                k_write( 2, "kriya: error: --help takes no arguments (did you mean `kriya <util> --help`?)\n", 78);
+                return EXIT_USAGE;
+            }
+            return cmd_kriya_help();
+        }
     }
 
     var rc = dispatch(name, start);

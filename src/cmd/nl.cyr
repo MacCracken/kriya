@@ -53,6 +53,14 @@ fn _nl_init_spec(): i64 {
     _nl_v_idx = flags_add_str(s, 118, "starting-line-number", 0, "first line number (default 1)");
     _nl_w_idx = flags_add_str(s, 119, "number-width",     0, "column width (default 6)");
     _nl_spec = s;
+    nl_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `nl`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn nl_help_declare(): i64 {
     help_begin("nl", "Number lines of files.",
                "nl [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
@@ -258,7 +266,7 @@ fn cmd_nl(start: i64): i64 {
         if (load8(i_arg) != 0) {
             var v = kriya_parse_nonneg_int(i_arg);
             if (v < 0) {
-                k_write( 2, "kriya nl: error: --line-increment requires a non-negative integer\n", 65);
+                k_write( 2, "kriya nl: error: --line-increment requires a non-negative integer\n", 66);
                 return EXIT_USAGE;
             }
             increment = v;
@@ -275,24 +283,24 @@ fn cmd_nl(start: i64): i64 {
             var c1 = load8(n_arg + 1);
             var c2 = load8(n_arg + 2);
             if (c2 != 0) {
-                k_write( 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
+                k_write( 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 55);
                 return EXIT_USAGE;
             }
             if (c0 == 108) {
                 if (c1 == 110) { fmt = 1; }   # ln
                 else {
-                    k_write( 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
+                    k_write( 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 55);
                     return EXIT_USAGE;
                 }
             } else { if (c0 == 114) {
                 if (c1 == 110)      { fmt = 0; }  # rn
                 else { if (c1 == 122) { fmt = 2; }  # rz
                 else {
-                    k_write( 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
+                    k_write( 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 55);
                     return EXIT_USAGE;
                 } }
             } else {
-                k_write( 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 56);
+                k_write( 2, "kriya nl: error: --number-format must be ln, rn, or rz\n", 55);
                 return EXIT_USAGE;
             } }
         }
@@ -315,7 +323,7 @@ fn cmd_nl(start: i64): i64 {
         if (load8(v_arg) != 0) {
             var v = kriya_parse_nonneg_int(v_arg);
             if (v < 0) {
-                k_write( 2, "kriya nl: error: --starting-line-number requires a non-negative integer\n", 71);
+                k_write( 2, "kriya nl: error: --starting-line-number requires a non-negative integer\n", 72);
                 return EXIT_USAGE;
             }
             start_num = v;
@@ -329,7 +337,7 @@ fn cmd_nl(start: i64): i64 {
         if (load8(w_arg) != 0) {
             var v = kriya_parse_nonneg_int(w_arg);
             if (v < 0) {
-                k_write( 2, "kriya nl: error: --number-width requires a non-negative integer\n", 63);
+                k_write( 2, "kriya nl: error: --number-width requires a non-negative integer\n", 64);
                 return EXIT_USAGE;
             }
             width = v;

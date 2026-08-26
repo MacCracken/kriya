@@ -31,6 +31,14 @@ fn _bn_init_spec(): i64 {
     _bn_s_idx = flags_add_str(s,  115, "suffix",   0, "suffix to strip (implies -a)");
     _bn_z_idx = flags_add_bool(s, 122, "zero",     0, "NUL-terminate each output");
     _bn_spec = s;
+    basename_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `basename`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn basename_help_declare(): i64 {
     help_begin("basename", "Strip directory and optional suffix from a path.",
                "basename NAME [SUFFIX]");
     help_positional(1, 2, "NAME,SUFFIX");
@@ -111,7 +119,7 @@ fn cmd_basename(start: i64): i64 {
     } else {
         # POSIX single-pair: basename PATH [SUFFIX]
         if (npos > 2) {
-            k_write( 2, "kriya basename: error: too many operands (POSIX: basename PATH [SUFFIX]; use -a for multiple paths)\n", 99);
+            k_write( 2, "kriya basename: error: too many operands (POSIX: basename PATH [SUFFIX]; use -a for multiple paths)\n", 100);
             return EXIT_USAGE;
         }
         var p = flags_positional(_bn_spec, 0);

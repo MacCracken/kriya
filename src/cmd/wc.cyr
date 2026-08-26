@@ -46,6 +46,14 @@ fn _wc_init_spec(): i64 {
     _wc_m_idx = flags_add_bool(s, 109, "chars",            0, "count UTF-8 codepoints");
     _wc_L_idx = flags_add_bool(s, 76,  "max-line-length", 0, "longest line length in chars");
     _wc_spec = s;
+    wc_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `wc`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn wc_help_declare(): i64 {
     help_begin("wc", "Count lines, words, bytes and characters.",
                "wc [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");

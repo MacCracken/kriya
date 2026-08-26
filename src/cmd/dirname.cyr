@@ -26,6 +26,14 @@ fn _dn_init_spec(): i64 {
     var s = flags_new();
     _dn_z_idx = flags_add_bool(s, 122, "zero", 0, "NUL-terminate each output");
     _dn_spec = s;
+    dirname_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `dirname`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn dirname_help_declare(): i64 {
     help_begin("dirname", "Strip the last component from a path.",
                "dirname NAME...");
     help_positional(1, HELP_POS_UNBOUNDED, "NAME");

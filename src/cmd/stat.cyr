@@ -74,6 +74,14 @@ fn _st_init_spec(): i64 {
     _st_L_idx  = flags_add_bool(s, 76,  "dereference", 0, "follow symlinks");
     _st_t_idx  = flags_add_bool(s, 116, "terse",       0, "one-line space-separated form");
     _st_spec = s;
+    stat_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `stat`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn stat_help_declare(): i64 {
     help_begin("stat", "Print file metadata.",
                "stat [OPTIONS] FILE...");
     help_positional(1, HELP_POS_UNBOUNDED, "FILE");

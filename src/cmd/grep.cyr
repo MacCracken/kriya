@@ -110,6 +110,14 @@ fn _gr_init_spec(): i64 {
     _gr_e_idx = flags_add_str(s,  101, "regexp",            0, "pattern (overrides positional[0])");
     _gr_f_idx = flags_add_str(s,  102, "file",              0, "read patterns from file, one per line");
     _grep_spec = s;
+    grep_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `grep`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn grep_help_declare(): i64 {
     help_begin("grep", "Search files for lines matching a pattern.",
                "grep [OPTIONS] PATTERN [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "PATTERN,FILE");
@@ -675,7 +683,7 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                                 line_len = line_len + 1;
                             } else {
                                 if (truncated_warned == 0) {
-                                    k_write( 2, "kriya grep: warning: line exceeds 64 KiB; truncating\n", 54);
+                                    k_write( 2, "kriya grep: warning: line exceeds 64 KiB; truncating\n", 53);
                                     truncated_warned = 1;
                                 }
                             }
@@ -896,7 +904,7 @@ fn cmd_grep(start: i64): i64 {
 
     # -P is rejected per ADR 0005.
     if (flags_get_bool(_grep_spec, _gr_P_idx) == 1) {
-        k_write( 2, "kriya grep: -P (PCRE) is not supported; use -E for extended regex\n", 67);
+        k_write( 2, "kriya grep: -P (PCRE) is not supported; use -E for extended regex\n", 66);
         return EXIT_USAGE;
     }
 
@@ -904,7 +912,7 @@ fn cmd_grep(start: i64): i64 {
     var want_E = flags_get_bool(_grep_spec, _gr_E_idx);
     var want_F = flags_get_bool(_grep_spec, _gr_F_idx);
     if (want_E + want_F > 1) {
-        k_write( 2, "kriya grep: error: -E and -F are mutually exclusive\n", 53);
+        k_write( 2, "kriya grep: error: -E and -F are mutually exclusive\n", 52);
         return EXIT_USAGE;
     }
     var engine: i64 = GR_ENG_BRE;

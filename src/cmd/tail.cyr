@@ -57,6 +57,14 @@ fn _tail_init_spec(): i64 {
     _tail_v_idx = flags_add_bool(s, 118, "verbose", 0, "always emit filename headers");
     _tail_f_idx = flags_add_bool(s, 102, "follow",  0, "output new lines as the file grows");
     _tail_spec = s;
+    tail_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `tail`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn tail_help_declare(): i64 {
     help_begin("tail", "Print the last part of files.",
                "tail [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");

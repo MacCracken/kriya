@@ -72,7 +72,7 @@ fn kriya_argv_count(): i64 {
 # that is the most-typed gap there is — `rm -rf` alone appears in essentially
 # every shell script ever written.
 #
-# The stdlib parser puts both forms explicitly out of scope (`lib/flags.cyr`
+# The stdlib parser puts both forms explicitly out of scope (`lib/flags.cyr`  #skip-lint
 # header: "NOT supported … -xyz bundled short bool flags … -xvalue attached
 # short value"), so kriya EXPANDS THEM BEFORE HANDING ARGV OVER rather than
 # reaching into upstream. `-rf` becomes `-r -f`; `-n5` becomes `-n 5`.
@@ -441,6 +441,13 @@ enum KriyaHelpSchema {
     KRIYA_HELP_SCHEMA_VERSION = 1;
 }
 
+# ⚠ `kriya --list` is a SEPARATE public interface from `--help=json`, versioned
+# on its own — a consumer may well parse one and not the other, and the two need
+# not break together.
+enum KriyaListSchema {
+    KRIYA_LIST_SCHEMA_VERSION = 1;
+}
+
 # The `--help=FORMAT` token that `_kriya_wants_help` matched, so the caller can
 # read the format back off it without rescanning argv.
 var _kriya_help_tok = 0;
@@ -638,10 +645,10 @@ fn kriya_parse_nonneg_int(s): i64 {
 # point is sub-second waits. Fractions beyond millisecond resolution are
 # truncated, not rounded — `sleep 0.0001` is a no-op rather than a surprise.
 #
-# The source comment in `sleep.cyr` deferred this to "the wider duration-parser
+# The source comment in `sleep.cyr` deferred this to "the wider duration-parser  #skip-lint
 # in lib/chrono.cyr". Checked at pin 6.5.35: chrono has duration CONSTRUCTORS
 # (`dur_seconds`, `dur_minutes`, …) but no duration STRING parser, so there is
-# nothing upstream to wait for. ~50 lines here beats a blocked follow-up.
+# nothing upstream to wait for. ~50 lines here beats a blocked follow-up.  #skip-lint
 fn kriya_parse_duration_ms(s): i64 {
     if (s == 0) { return 0 - 1; }
     var len = strlen(s);

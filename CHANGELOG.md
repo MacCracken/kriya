@@ -6,6 +6,119 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.3.2] - 2026-08-25 — `kriya --list`, and a CI that can actually fail
+
+Closes the **1.3.x discoverability arc** and the last of the five items kriya owed agnoshi. Also the
+release where the test suite started running in CI — it never had.
+
+### Added — `kriya --list`
+
+The whole utility table as one JSON document: `name`, `summary`, `synopsis`, `destructive`,
+`exit_codes` per utility. ⚠ A public interface, versioned by `KRIYA_LIST_SCHEMA_VERSION` in
+`src/lib/args.cyr` **separately from** the `--help=json` schema — a consumer may parse one and not the
+other, and the two need not break together.
+
+⭐ **One table, two readers.** The 38-branch `streq` chain in `dispatch()` is now a table of
+`(name, &cmd_<util>, &<util>_help_declare)` walked by both the dispatcher and `--list`, so **a utility
+cannot be reachable but unlisted, or listed but unreachable.** Adding a utility is one row. Cyrius'
+`callptr` makes the indirect call; verified on both targets. ⚠ Dispatch cost is unchanged — measured
+at the first table row (`true`) and the last (`df`): **+0.0% and −0.9%**.
+
+⭐ **Enumerating 38 utilities costs one process, not 38.** Each utility's help record was declared
+inside `cmd_<util>`, so reading it meant running the utility. Those declarations are now
+`<util>_help_declare()`, callable without executing anything: **`kriya --list` is 1.402 ms** against
+~17 ms for 38 execs, and it is what agnoshi runs at shell startup.
+
+`kriya --help` also answers now, with the dispatcher's own page and the utility list. It previously
+said *"unknown utility: --help"*, which is a poor first thing to tell a new caller.
+
+### Fixed — ⛔ 44 wrong `k_write` lengths, 39 of them pre-existing
+
+kriya passes explicit byte lengths to `k_write` rather than calling `strlen` — an intentional choice on
+the cold-start path. **44 of 509 hand-counted lengths were wrong.**
+
+- **9 truncated** the message, usually eating the trailing newline, so the error ran into whatever
+  came next. `kriya basename a b c` ended mid-sentence at `for multiple paths)` with no newline.
+- **35 read past the end of the literal.** ⚠ Bounded: every one overshot by exactly **one byte**,
+  landing on the literal's own NUL terminator — so this put a stray NUL in the error stream, **not a
+  leak of adjacent `.rodata`.** `kriya sleep` emitted `got 0\n\0`.
+
+All 44 corrected, and the check is now a lint rather than a habit — see below. ⚠ The explicit-length
+convention stays; the answer to a hand-counting hazard is a machine that counts, not 509 `strlen`
+calls on the startup path.
+
+### Added — the CI lint ADR 0002 promised
+
+`scripts/lint-help-schema.sh`, four checks:
+
+1. **`src/cmd/*.cyr`, the dispatcher table and `kriya --list` name the same 38 utilities.** A file
+   without a table row is how a utility silently goes missing from the interface.
+2. Every utility declares a complete `--help=json` document — all fields present and typed,
+   `positional` never null.
+3. `--list` and `--help=json` agree on summary, synopsis, destructive and exit codes. ⚠ Currently
+   unfalsifiable by construction — both read one record — so this is a **guard against a future second
+   source of truth**, not an active detector. Kept for exactly that reason.
+4. Every `k_write(fd, "literal", N)` has N equal to the literal's byte length.
+
+⛔ **A lint that cannot fail is worthless**, so each class was verified by breaking it: a wrong length,
+a deleted table row, a missing `help_positional`. All three were caught with the right message.
+
+### Fixed — CI never ran the tests that matter
+
+⛔ **CI built both targets and ran the two `.tcyr` suites. That was all.** No lint, no vet, no smoke
+scripts, no fuzz. **3,547 behavioural cases written since v0.2.0 — the ones that compare kriya against
+GNU coreutils cell-by-cell — had never run on a pull request**, only at release cuts on this machine.
+So "a non-conforming schema fails CI" was not achievable no matter how good the lint was.
+
+CI now runs lint, vet, the schema lint, all 37 smoke scripts and the poisoned-allocator fuzz. **Total
+added cost: 13 seconds.**
+
+⚠ **`cyrlint` takes one file and does not follow includes.** The lint step covers `src/main.cyr` and
+`src/lib/` only — `src/cmd/` is **not** linted and a green check does not mean the tree is clean.
+Those 38 files carry **45 over-long lines and 59 untracked deferrals**; the deferral half is the
+valuable one and is its own release (roadmap, 1.3.x). Three false positives in `args.cyr` — prose
+*explaining* that work was **not** deferred — are marked `#skip-lint`.
+
+⚠ Verified by replaying every CI step from a clean tree with no vendored `lib/`. GitHub Actions itself
+cannot be run locally; the workflow file is the only part of this release not directly verified.
+
+### Fixed — ⛔ `bench-coldstart.sh` has overstated cold start by ~3× since v0.2.0
+
+The loop was the obvious one:
+
+```sh
+t0=$(date +%s%N); "$BIN" true; t1=$(date +%s%N)
+```
+
+**The span from `t0` to `t1` contains the whole `date` process that produces `t1`** — a fork+exec of
+GNU coreutils, measured here at **0.570 ms** against kriya's **0.428 ms**. So roughly **60% of every
+cold-start figure in this project's history is `date`, not kriya**, and cross-machine comparisons
+largely compared how fast `date` forks there.
+
+⚠ **This also corrects 1.3.1's release note.** That note blamed a reading ~180 µs above the v1.0.0
+baseline on the box being loaded. It reproduced at load average **0.48**, which falsifies that
+explanation. The real answer is that the metric was never a clean measure of kriya's spawn cost.
+
+Fixed by timing a **batch** of N runs between two timestamps — amortising the two `date` forks to ~2 µs
+each — and subtracting a control batch of the same loop with no spawn. 1.3.1 and 1.3.2 measured with
+the corrected tool: **0.635 ms → 0.637 ms.** ⚠ The pre-1.3.2 figures in `state.md` are **not**
+comparable to these and are labelled as such.
+
+### Tests
+
+**3,547 smoke cases across 37 scripts** (up from 3,030 across 36), 119 unit + 18 POSIX, fuzz green
+under poison, lint and schema-lint clean, both targets build.
+
+- `scripts/smoke-list.sh` — new, 517 cases. Every entry's fields and types; ⭐ **every listed utility
+  is invoked to confirm it actually dispatches** — a name in the table that does not route is worse
+  than a missing one, because a completer would offer it; `--list` agreeing with `--help=json`
+  field-by-field for all 38; the destructive set pinned by name; `kriya --help`'s UTILITIES section
+  matching `--list`; ⛔ **dispatcher flags not leaking into utilities** (`ls --list` is ls's bad
+  option, and a symlink invocation never sees them at all); argument handling; 80-column wrapping;
+  and `> /dev/full` exiting 1.
+
+Binary 995,280 → 1,000,256 bytes (+4,976, +0.5%).
+
 ## [1.3.1] - 2026-08-25 — `--help=json`, the machine form
 
 Second of the **1.3.x discoverability arc**, and the ADR-0002 commitment that has been open since

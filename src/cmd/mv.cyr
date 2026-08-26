@@ -60,6 +60,14 @@ fn _mv_init_spec(): i64 {
     _mv_n_idx = flags_add_bool(s, 110, "no-clobber",  0, "refuse to overwrite existing dest");
     _mv_v_idx = flags_add_bool(s, 118, "verbose",     0, "print each rename");
     _mv_spec = s;
+    mv_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `mv`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn mv_help_declare(): i64 {
     help_begin("mv", "Move or rename files and directories.",
                "mv [OPTIONS] SOURCE... DEST");
     help_positional(2, HELP_POS_UNBOUNDED, "SOURCE,DEST");
@@ -292,7 +300,7 @@ fn _mv_one(src, dst, force, interactive, no_clobber, verbose): i64 {
         if (force == 0) {
             if (interactive == 1) {
                 if (_mv_isatty(0) == 0) {
-                    k_write( 2, "kriya mv: error: -i requires stdin to be a terminal\n", 53);
+                    k_write( 2, "kriya mv: error: -i requires stdin to be a terminal\n", 52);
                     return 0 - 9999;
                 }
                 if (_mv_prompt(dst) == 0) { return 0; }
@@ -301,7 +309,7 @@ fn _mv_one(src, dst, force, interactive, no_clobber, verbose): i64 {
     } else {
         if (interactive == 1) {
             if (_mv_isatty(0) == 0) {
-                k_write( 2, "kriya mv: error: -i requires stdin to be a terminal\n", 53);
+                k_write( 2, "kriya mv: error: -i requires stdin to be a terminal\n", 52);
                 return 0 - 9999;
             }
         }
@@ -335,7 +343,7 @@ fn cmd_mv(start: i64): i64 {
 
     var npos = flags_positional_count(_mv_spec);
     if (npos < 2) {
-        k_write( 2, "kriya mv: error: missing operand (need SRC and DST)\n", 53);
+        k_write( 2, "kriya mv: error: missing operand (need SRC and DST)\n", 52);
         return EXIT_USAGE;
     }
 
@@ -354,7 +362,7 @@ fn cmd_mv(start: i64): i64 {
     # would have triggered a prompt.
     if (interactive == 1) {
         if (_mv_isatty(0) == 0) {
-            k_write( 2, "kriya mv: error: -i requires stdin to be a terminal\n", 53);
+            k_write( 2, "kriya mv: error: -i requires stdin to be a terminal\n", 52);
             return EXIT_USAGE;
         }
     }

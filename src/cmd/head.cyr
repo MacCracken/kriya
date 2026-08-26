@@ -43,6 +43,14 @@ fn _head_init_spec(): i64 {
     _head_q_idx = flags_add_bool(s, 113, "quiet",   0, "suppress filename headers");
     _head_v_idx = flags_add_bool(s, 118, "verbose", 0, "always emit filename headers");
     _head_spec = s;
+    head_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `head`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn head_help_declare(): i64 {
     help_begin("head", "Print the first part of files.",
                "head [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");

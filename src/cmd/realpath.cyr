@@ -45,6 +45,14 @@ fn _rp_init_spec(): i64 {
     _rp_q_idx = flags_add_bool(s, 113, "quiet",   0, "suppress error messages");
     _rp_z_idx = flags_add_bool(s, 122, "zero",    0, "NUL-terminate each output");
     _rp_spec = s;
+    realpath_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `realpath`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn realpath_help_declare(): i64 {
     help_begin("realpath", "Resolve a path to its canonical absolute form.",
                "realpath [OPTIONS] PATH...");
     help_positional(1, HELP_POS_UNBOUNDED, "PATH");

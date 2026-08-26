@@ -41,6 +41,14 @@ fn _touch_init_spec(): i64 {
     _touch_r_idx = flags_add_str (s, 114, "reference",         0, "use this file's times instead of now");
     _touch_t_idx = flags_add_str (s, 116, "",                  0, "use [[CC]YY]MMDDhhmm[.ss] instead of now");
     _touch_spec = s;
+    touch_help_declare();
+    return 0;
+}
+
+# Help/introspection record for `touch`. ⭐ Split out so `kriya --list` can
+# populate it WITHOUT running the utility — one declaration feeding `--help`,
+# `--help=json` and `--list` alike.
+fn touch_help_declare(): i64 {
     help_begin("touch", "Create files, or update their timestamps.",
                "touch [OPTIONS] FILE...");
     help_positional(1, HELP_POS_UNBOUNDED, "FILE");
@@ -306,7 +314,7 @@ fn cmd_touch(start: i64): i64 {
 
     var npos = flags_positional_count(_touch_spec);
     if (npos < 1) {
-        k_write( 2, "kriya touch: error: missing operand (need at least one file name)\n", 67);
+        k_write( 2, "kriya touch: error: missing operand (need at least one file name)\n", 66);
         return EXIT_USAGE;
     }
 
@@ -340,7 +348,7 @@ fn cmd_touch(start: i64): i64 {
     } elif (stamp != 0) {
         var sbox[8];
         if (_touch_parse_stamp(stamp, &sbox) != 0) {
-            k_write( 2, "kriya touch: error: -t expects [[CC]YY]MMDDhhmm[.ss]\n", 54);
+            k_write( 2, "kriya touch: error: -t expects [[CC]YY]MMDDhhmm[.ss]\n", 53);
             return EXIT_USAGE;
         }
         explicit_sec = load64(&sbox);
