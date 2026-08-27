@@ -30,11 +30,10 @@
 # on agnos, else $COLUMNS / -w, falling back to 80. Off a tty with no width
 # hint it degrades to one-per-line (script-safe, like GNU ls piped).
 #
-# Deferred (each a named follow-up): (roadmap 1.5.0 / 1.5.1)
-#   `-t` / `-S`           alternate sort keys (mtime / size). Trivial
-#                         once a comparator-by-flag indirection lands.
-#   `--color=auto/always/never`  ANSI colouring; needs tty detection +
-#                         a per-type colour table.
+# ⭐ `-t` / `-S` shipped at 1.5.1 (and the insertion sort became a merge sort in
+# the same pass), `--color` at 1.5.2 and quoting at 1.5.3. What is left is small
+# and listed under roadmap 1.5.4 — the `-d`-with-no-operand bug, TAB column
+# padding, the `no=` prefix position, and the remaining `--quoting-style` styles.
 #
 # ⭐ Owner/group NAMES shipped at 1.5.0 on `src/lib/userdb.cyr`, and `-n` with
 # them — it forces numeric regardless, and in GNU it also IMPLIES `-l`.
@@ -664,7 +663,7 @@ fn _ls_color_load(): i64 {
                     var ki = _ls_ckey_index(load8(key), load8(key + 1));
                     # ⚠ An unknown two-letter key is IGNORED rather than fatal.
                     # GNU prints a diagnostic and disables colour entirely; kriya
-                    # ignores the item and colours the rest (roadmap 1.5.3).
+                    # ignores the item and colours the rest (roadmap 1.5.4).
                     if (ki >= 0) {
                         if (load8(key + 2) == 0) { store64(_ls_ckey + ki * 8, val); }
                     }

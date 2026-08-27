@@ -152,12 +152,22 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0; M4 closed at v0.5
 
 - Dispatcher: `kriya` (output in `build/kriya` after `cyrius build`)
 - Per-utility commands: symlinks → `kriya` (`cp` → `kriya`, `mv` → `kriya`, etc.)
-- Size: host **1,029,200 bytes**, agnos **1,025,008 bytes** (v1.4.3, unstripped; `CYRIUS_DCE=1` would drop ~175 KB of unreachable stdlib). ⚠ +65 KB since v1.1.11, essentially all of it the per-utility help prose and the three renderers added across 1.3.0–1.3.2.
+- Size: host **1,080,848 bytes**, agnos **1,076,656 bytes** (v1.5.3, unstripped; `CYRIUS_DCE=1` would drop ~176 KB of unreachable stdlib). ⚠ +51 KB across the 1.5.x arc — three new shared modules (`userdb`, `env`, `quote`) plus `ls`'s colour and sort machinery.
 
 ## Tests
 
+⭐ **Current totals, refreshed every release** — the one line to check first:
+**322 unit + 18 POSIX + 4,418 smoke across 39 scripts**; fuzz green under poison; four lints clean;
+both targets build; `vet` 54 deps. ⚠ Verified under five matrix conditions (baseline, hostile env,
+`en_US.UTF-8`, deep `$TMPDIR`, simulated root) and inside the `ubuntu:24.04` container as a non-root
+user — see the version entry above for the per-condition counts.
+
+⛔ **The per-script counts below drift**, because each release updates the totals in its version
+entry rather than every line here. Trust the totals; treat a per-script number as the release that
+last touched it.
+
 - `tests/kriya-posix.tcyr` — POSIX-blessed assertion harness (18/18 passing — fork+execve+pipe-capture helper for `build/kriya`; one starter case per pillar utility: `true`/`false`/`echo`/`pwd`/`wc`/`grep`/`cp`/`ls`/`seq`/`env`/`date`/`find`/`xargs`. Population is incremental).
-- `tests/kriya.tcyr` — primary unit suite (119/119 passing — exit codes, cmd routes, path primitives, errmsg table, integer parser, octal-mode parser, and **the ADR-0004 root guard**: 21 assertions pinning every spelling of `/` that `is_protected_path` must refuse, plus the names it must not, plus `fs_path_absolute` and `path_is_under` component-boundary cases. ⚠ The predicate is the only safe test surface — exercising the guard end-to-end means running `rm` against `/` and finding out).
+- `tests/kriya.tcyr` — primary unit suite (322/322 passing — exit codes, cmd routes, path primitives, errmsg table, integer parser, octal-mode parser, and **the ADR-0004 root guard**: 21 assertions pinning every spelling of `/` that `is_protected_path` must refuse, plus the names it must not, plus `fs_path_absolute` and `path_is_under` component-boundary cases. ⚠ The predicate is the only safe test surface — exercising the guard end-to-end means running `rm` against `/` and finding out).
 - `tests/kriya.bcyr` — in-process hot-path bench (stdlib `lib/bench.cyr`). Steady-state numbers (Cyrius 5.11.59, x86_64):
   - `dispatch/path_basename_ptr` — 65ns
   - `dispatch/streq_hit` / `_miss` — 34ns / 31ns
@@ -267,6 +277,19 @@ round of test work then serves the whole batch.
 **The 1.2.x correctness arc is closed** — 1.2.0 option handling, 1.2.1 accepts-and-lies, 1.2.2 the
 spawn helper, 1.2.3 walk safety, 1.2.4 destructive-verb semantics, 1.2.5 the chrono batch, 1.2.6 the
 last three P-1 defects. **All ten M17 defects are fixed and the bucket is retired.**
+
+⭐ **Four arcs are now closed**: 1.2.x correctness, **1.3.x discoverability** (`--help`,
+`--help=json`, `kriya --list`, `--version`, and a CI that can fail), **1.4.x pattern & text parity**
+(grep context, shared glob, multibyte `cut`, `uniq --group`, `nl` sections, `echo -e`, the `-i`
+bracket quirk) and **1.5.x identity & listing** (passwd/group, `ls` sort keys, `--color`, quoting).
+Each closed section in `roadmap.md` keeps only its NON-GOALS, its still-open leftovers and its
+carry-forward lessons — the account of what shipped lives in `CHANGELOG.md` and in the version
+entries above.
+
+⚠ **The next arc is 1.6.x (file-op completeness)**, gated on an inode-set helper in `src/lib/fs.cyr`
+and an fd-anchored xattr API. ⛔ Nothing blocks it: the arcs are independent by construction and can
+be resequenced by consumer demand. **1.5.4** is a small optional cleanup pass over the `ls`/`stat`
+output leftovers if a consumer asks for them first.
 
 ⚠ Everything below is **new capability rather than defect repair** — a different kind of risk. These
 change what kriya *does*, not what it gets wrong, so expect more ADRs and more GNU-comparison work per

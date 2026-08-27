@@ -42,12 +42,9 @@
 #
 # ⚠ %x / %y / %z LEFT this list at v1.2.5 — they render today (see CHANGELOG).
 #
-# Deferred (separate follow-ups, named — roadmap 1.5.0 / 1.5.2):
-#   %U / %G       — user / group name lookup. Waits on a passwd/group
-#                   parser (forthcoming with the user/group utility set).
-#   %N            — quoted name + symlink target rendering. Trivial
-#                   once we own a quoting helper; deferred for symmetry (roadmap 1.5.2)
-#                   with the upcoming `ls` quoting story.
+# ⭐ %U / %G shipped at 1.5.0 on `src/lib/userdb.cyr`, and %N at 1.5.3 on
+# `src/lib/quote.cyr`. %w waits on statx(2) (roadmap 1.5.4); `_st_is_deferred_spec`
+# below is the single list of specifiers kriya knows about and does not render.
 #   %w / %W       — birth time. Needs `statx(2)` not `stat(2)`.
 #
 # Symlink policy: stat is purely informational. Default is lstat
@@ -312,7 +309,7 @@ fn _st_emit_spec(c, st, name): i64 {
         k_write( 1, name, strlen(name));
         return 0;
     }
-    # %U / %G — the owner and group NAMES (roadmap 1.5.0). ⚠ GNU prints the
+    # %U / %G — the owner and group NAMES. ⚠ GNU prints the
     # literal string `UNKNOWN` when the id has no entry, NOT the number and not
     # an empty field; `%u` is the specifier that gives the number. Measured
     # against coreutils 9.4 and 9.11 on a file owned by an unmapped uid.
@@ -429,9 +426,8 @@ fn _st_emit_spec(c, st, name): i64 {
 
 # Specifiers GNU defines and kriya does not yet render, as opposed to ones that  #skip-lint
 # are simply not specifiers. ⚠ The list keeps shrinking and the comment has to
-# shrink with it: %x/%y/%z left at v1.2.5 and %U/%G at 1.5.0, when
-# `src/lib/userdb.cyr` landed. %N still waits on a quoting helper
-# (roadmap 1.5.2) and %w on statx(2).
+# shrink with it: %x/%y/%z left at v1.2.5, %U/%G at 1.5.0 (`src/lib/userdb.cyr`)
+# and %N at 1.5.3 (`src/lib/quote.cyr`). Only %w is left, on statx(2).
 fn _st_is_deferred_spec(c): i64 {  #skip-lint
     if (c == 119) { return 1; }   # w
     return 0;

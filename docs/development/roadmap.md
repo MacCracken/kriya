@@ -47,9 +47,9 @@ Two rules hold across the arcs, both learned the hard way:
 
 | Arc | Theme | Enabler | Gate |
 |---|---|---|---|
-| **1.3.x** | Discoverability | spec-renderer atop `flags.cyr` | ready; **consumer waiting** (agnoshi) |
+| **1.3.x** | Discoverability | spec-renderer atop `flags.cyr` | ✅ closed at 1.3.8; **consumer waiting** (agnoshi) |
 | **1.4.x** | Pattern & text parity | repeatable-option collector, UTF-8 decoder | ✅ closed at 1.4.5 |
-| **1.5.x** | Identity & listing | passwd/group parser, comparator indirection | ready |
+| **1.5.x** | Identity & listing | passwd/group parser, comparator indirection | ✅ closed at 1.5.3 |
 | **1.6.x** | File-op completeness | inode-set helper, xattr API | ready |
 | **1.7.x** | Traversal, exec & FS reporting | spawn helper ✅, ARG_MAX chunking | ready |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | ready |
@@ -129,58 +129,69 @@ kriya's dependency closure for niyama.
 
 ---
 
-## 1.5.x — Identity & listing
+## 1.5.x — Identity & listing ✅ CLOSED at 1.5.3
 
-**Enablers:** a passwd/group parser (new `src/lib/` module) and a comparator-by-flag indirection in
-`ls`.
+⭐ **Complete.** The passwd/group parser (1.5.0), `ls` sort keys (1.5.1), `ls --color` (1.5.2) and
+the quoting helper (1.5.3). Three new shared modules — `src/lib/userdb.cyr`, `src/lib/env.cyr`,
+`src/lib/quote.cyr` — and `ls` gained `-n`, `-t`, `-S`, `--color` and `--quoting-style`.
 
-- ✅ **1.5.0 — passwd/group parser** (shipped). `src/lib/userdb.cyr`; `ls -l` names + `-n`,
-  `stat %U`/`%G`, and `find -user`/`-group`/`-uid`/`-gid`/`-nouser`/`-nogroup`. ⚠ **What it does NOT
-  do, and will not**: users who exist only in LDAP / SSSD / systemd-homed have no line in
-  `/etc/passwd` and resolve to numeric ids. Closing that means NSS, which means dynamic linking —
-  a **No-Go** for a static tool, not a deferral. Do not re-open it as unfinished work.
-- ✅ **1.5.1 — `ls` sort keys** (shipped). `-t` and `-S`, descending with a name tie-break,
-  nanosecond precision, rightmost-of-`-t`/`-S` wins. ⭐ The insertion sort became a merge sort in
-  the same pass: 8,000 entries went 0.755 s → 0.022 s (GNU 0.004 s).
-- ✅ **1.5.2 — `ls --color`** (shipped). `--color=WHEN` with `LS_COLORS`, GNU's compiled-in defaults,
-  extension patterns, the full type precedence, and tty detection for `=auto`. ⭐ Enabled by
-  `src/lib/env.cyr`, which removed an 8 KB cliff in kriya's environment lookup that was also
-  silently breaking **PATH** in `which`/`xargs`/`find`.
-  - ⚠ **One measured gap remains**: `no=` (the "normal" key) positions its prefix at the START OF
-    THE LINE — before the `-l` columns and before the `-i` inode — where kriya emits it before the
-    NAME. 140 of 2,500 pathological comparisons; **zero** on realistic input, because a real
-    `dircolors -b` never emits `no=`. Closing it means moving the prefix from the name to the line.
-  - ⛔ **1.5.1's note here claimed "there is NO per-type table to ship". That was half wrong.** With
-    `LS_COLORS` unset there are no escapes at all — but set it to any valid key and GNU loads a
-    compiled-in default table and overlays the variable. Both halves are needed. Left recorded
-    because the wrong half was written down with as much confidence as the right one.
-- ⛔ **Two pre-existing `ls` divergences found while measuring 1.5.1**, both confirmed against the
-  1.4.4 binary and neither caused by it:
-  - **`ls -d` with no operand lists the directory's CONTENTS**; GNU lists `.`. Small and clearly
-    wrong; it needs a test that would have caught it, not just the fix.
-  - **Multi-column padding uses spaces where GNU uses a TAB.** ⚠ Column POSITIONS are identical, so
-    only a byte-exact tty comparison sees it — which is why every piped smoke comparison passed.
-    Pairs with the colour work above, since GNU's own rule switches on whether colour is active.
-- ✅ **1.5.3 — Quoting** (shipped). `src/lib/quote.cyr`; `stat %N`, `ls` tty quoting with the `-l`
-  alignment rule, and `pwd`. ⚠ The `pwd` half was BIGGER than this entry said — "needs only a
-  stat-compare" missed that kriya's DEFAULT was logical where GNU's is physical, and that `-L`
-  validated nothing beyond a leading `/`, so `PWD=/etc kriya pwd` printed `/etc`.
-  - ⚠ **Residual quoting divergence, measured at 0.17%** over a 3,000-name hostile fuzz: names
-    combining a `'` with escaped bytes in particular positions, where GNU emits a leading empty `''`
-    kriya does not. ⛔ In at least one of those GNU's own output does not round-trip (`'\t'` reads
-    as backslash-t). Worth revisiting only if a consumer hits it.
-  - ⚠ **UTF-8 locales**: kriya is byte-oriented and escapes every high byte, matching GNU under
-    `LC_ALL=C`; GNU under a UTF-8 locale renders valid multi-byte bare. More verbose, never wrong.
-    Changing it would mean decoding UTF-8 in the quoter — the `cut`/`wc` precedent exists.
-  - ⚠ **`--quoting-style` accepts only `literal`, `shell-escape` and `shell-escape-always`** — the
-    three kriya's helper implements. `shell`, `c`, `escape`, `locale` and `clocale` are REFUSED by
-    name. Adding them is a small, well-bounded follow-up if a consumer asks.
-  - ⚠ **`QUOTING_STYLE` is read by GNU and NOT by kriya.** GNU lets it override the tty/pipe default
-    in both directions. kriya declines it for the reason ADR 0011 gave for `echo`; the smoke oracle
-    unsets it so the tests measure the code rather than the shell. Revisit only with an ADR.
-  - ⛔ **STILL OPEN from 1.5.1: multi-column padding uses spaces where GNU uses a TAB.** Column
-    POSITIONS are identical, so only a byte-exact tty comparison sees it. Now the LAST known `ls`
-    output divergence on a terminal.
+⛔ **NON-GOALS, settled by measurement. Do not re-open these as unfinished work:**
+- **Users who exist only in LDAP / SSSD / systemd-homed.** They have no line in `/etc/passwd` and
+  resolve to numeric ids. Closing that means NSS, which means dynamic linking — a **No-Go** for a
+  static tool, not a deferral.
+- **UTF-8-locale quoting.** kriya is byte-oriented and escapes every high byte, matching GNU under
+  `LC_ALL=C`; GNU under a UTF-8 locale renders valid multi-byte bare. More verbose, never wrong —
+  the escaped form round-trips identically. Changing it means decoding UTF-8 in the quoter (the
+  `cut`/`wc` precedent exists) and wants an ADR.
+- **`QUOTING_STYLE`.** GNU lets it override the tty/pipe default in both directions; kriya declines
+  it for the reason [ADR 0011](../adr/0011-echo-matches-the-non-xsi-binary-not-the-shell-builtin.md)
+  gave for `echo`. Revisit only with an ADR.
+
+- **1.5.4 — `ls` / `stat` output fidelity** (the leftovers, roughly in priority order). Small,
+  well-bounded, and none of it blocks another arc:
+  - **`ls -d` with no operand lists the directory's CONTENTS**; GNU lists `.`. Pre-existing (confirmed
+    against the 1.4.4 binary), small and clearly wrong. ⚠ It needs a test that would have caught it,
+    not just the fix.
+  - ⛔ **Multi-column padding uses spaces where GNU uses a TAB** — the LAST known `ls` output
+    divergence on a terminal. Column POSITIONS are identical, so only a byte-exact tty comparison sees
+    it, which is why every piped smoke comparison passed. ⚠ GNU's own rule switches on whether colour
+    is active, so the two interact.
+  - **`no=` positions its colour prefix at the START OF THE LINE** — before the `-l` columns and before
+    the `-i` inode — where kriya emits it before the NAME. 140 of 2,500 pathological comparisons and
+    **zero** on realistic input, because a real `dircolors -b` never emits `no=`. Closing it means
+    moving the prefix from the name to the line.
+  - **A 0.17% quoting residual** over a 3,000-name hostile fuzz: names combining a `'` with escaped
+    bytes in particular positions, where GNU emits a leading empty `''` kriya does not. ⛔ In at least
+    one of those GNU's own output does not round-trip (`'\t'` reads as backslash-t). Worth revisiting
+    only if a consumer hits it.
+  - **An unknown two-letter `LS_COLORS` key is IGNORED where GNU errors.** GNU prints
+    `ls: unrecognized prefix: 'zz'` and disables colour ENTIRELY; kriya skips the item and colours the
+    rest. ⚠ Decide which is right before changing it — refusing the whole variable because one key is
+    unknown is arguably worse for a user whose `dircolors` is newer than their `ls`.
+  - **`stat %w`** — file BIRTH time, the last specifier kriya knows about and does not render. Needs
+    `statx(2)`, which is a raw syscall on this target (**M11**'s at-family sweep is the natural place
+    to add it). ⚠ Not every filesystem records it; GNU prints `-` when it is unavailable.
+  - **`--quoting-style` accepts only the three styles kriya implements** — `literal`, `shell-escape`,
+    `shell-escape-always`. `shell`, `c`, `escape`, `locale` and `clocale` are REFUSED by name. Adding
+    them is small and well-bounded.
+
+⛔ **Carry these forward, they are not arc-specific:**
+- **If kriya does not read an environment variable, the ORACLE must not either** — or the test
+  measures the shell rather than the code. Cost three separate repairs: `BLOCK_SIZE` for `du`/`df`,
+  `POSIXLY_CORRECT` for `echo` and `pwd`, `QUOTING_STYLE` for `ls`/`stat`. ⚠ `POSIXLY_CORRECT` also
+  stops GNU permuting options after operands, which is not obvious from its name.
+- **A test that cannot go red is not a test, and it is worth PROVING with a mutant.** All of `ls`'s
+  quoted output once sat behind a pty; on a host without `script(1)` the block skipped and an `ls`
+  that never quoted scored 21 passed / 0 failed. `--quoting-style` exists to move the algorithm onto
+  the pipe path.
+- **A fuzz only covers the path it reaches.** A 3,000-name `stat %N` fuzz found zero defects in
+  `ls`'s bare-character set — because `%N` ALWAYS quotes, so the function deciding whether to quote
+  was never called. Six bytes were wrong, including `=`, where an unquoted `a=b` pasted into a shell
+  is an assignment.
+- **Confidence is not correctness.** "There is NO per-type colour table to ship" was written down
+  with as much certainty as the rules that were right, and was half wrong: with `LS_COLORS` unset
+  there are no escapes at all, but set it to any valid key and GNU loads a compiled-in default table
+  and overlays the variable.
 
 ---
 
