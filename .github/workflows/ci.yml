@@ -53,6 +53,20 @@ jobs:
           cyrius test tests/kriya.tcyr
           cyrius test tests/kriya-posix.tcyr
 
+      - name: Bench
+        # ⛔ Not a timing gate — a COMPILE gate. `tests/kriya.bcyr` declares its
+        # OWN include subset, separate from the two `.tcyr` files above, and
+        # nothing in CI ever compiled it: at 1.6.0 it turned out not to have
+        # built since v1.3.0, when `args.cyr` began routing `--help` through
+        # `help.cyr` and left the bench short of `src/version_str.cyr` and
+        # `src/lib/help.cyr`. Five releases, never red, because the Test step
+        # names its two `.tcyr` files and stops there.
+        # ⚠ `cyrius bench` exits non-zero on a compile error — that is the whole
+        # signal wanted. The per-benchmark timings it prints are informational
+        # and NOTHING asserts them: a hosted runner's numbers are not comparable
+        # to a dev box's, so a timing gate here would flake rather than catch.
+        run: cyrius bench tests/kriya.bcyr
+
       - name: Lint & vet
         # `lint` fails on an untracked deferral or a warning; `vet` on an
         # untrusted or missing dependency. Both were previously local-only,
