@@ -783,7 +783,67 @@ fn main() {
     assert_eq(fs_dirstack_has(dstk, 7, 5299), 1, "so did the newest");
     assert_eq(fs_dirstack_has(dstk, 7, 5300), 0, "one past the range is absent");
 
+    # ⭐ The `flistxattr` buffer walk, which is the one part of the xattr copy
+    # that can be tested without a filesystem: the kernel returns NUL-terminated
+    # names laid END TO END, not an array and not one string, and mis-walking it
+    # would read attribute names that are really fragments of the previous one.
+    test_group("fs_xattr_list_next — the NUL-separated name walk");
+    # "user.a\0user.bb\0" — two names, 15 bytes.
+    var xl = alloc(32);
+    memcpy(xl, "user.a", 6);  store8(xl + 6, 0);
+    memcpy(xl + 7, "user.bb", 7); store8(xl + 14, 0);
+    assert_eq(fs_xattr_list_next(xl, 15, 0), 7, "the first name ends at 7");
+    assert_eq(streq(xl, "user.a"), 1, "...and reads as user.a in place");
+    assert_eq(fs_xattr_list_next(xl, 15, 7), 15, "the second ends AT the length");
+    assert_eq(streq(xl + 7, "user.bb"), 1, "...and reads as user.bb in place");
+    # ⚠ A return equal to `len` is the "that was the last one" signal, not an
+    # error — a caller looping `while (pos < len)` stops there. Only a buffer
+    # with NO terminator is malformed.
+    var xm = alloc(8);
+    memcpy(xm, "abc", 3);
+    assert_eq(fs_xattr_list_next(xm, 3, 0), 0 - 1, "an unterminated buffer is -1");
+    # A single name, and the degenerate empty-name case the kernel cannot
+    # actually produce but the walk must not spin on.
+    var xs = alloc(8);
+    memcpy(xs, "u.x", 3); store8(xs + 3, 0);
+    assert_eq(fs_xattr_list_next(xs, 4, 0), 4, "a single name ends at the length");
+    var xz = alloc(4);
+    store8(xz, 0);
+    assert_eq(fs_xattr_list_next(xz, 1, 0), 1, "a bare NUL advances rather than spinning");
+
+    test_group("the set-id clearing mask is the one GNU actually uses");
+    # ⛔ 511 = 0o777, NOT 0o1777. The sticky bit is cleared along with setuid and
+    # setgid — measured, not assumed: a root-owned 1777 directory copied with
+    # `cp -pR` comes back 777 under GNU and 1777 under `cp --preserve=mode -R`.
+    # POSIX names only setuid and setgid; GNU takes the third as well.
+    assert_eq(4077 & 511, 493, "0o7755 becomes 0o755 — all three id bits go");
+    assert_eq(2541 & 511, 493, "0o4755 becomes 0o755");
+    assert_eq(1517 & 511, 493, "0o2755 becomes 0o755");
+    assert_eq(1005 & 511, 493, "0o1755 becomes 0o755 — the STICKY bit goes too");
+    assert_eq(1023 & 511, 511, "0o1777 becomes 0o777 — the case measured against GNU");
+    assert_eq(493  & 511, 493, "0o755 is untouched");
+    assert_eq(511  & 511, 511, "0o777 is untouched");
+
+    test_group("errmsg — the two errnos above the contiguous block");
+    # ⚠ `cp --preserve=xattr` is the first caller to produce an errno above 40,
+    # and both of its came out as an EMPTY reason before they were named.
+    assert_eq(errmsg_is_known(61), 1, "ENODATA is known");
+    assert_eq(streq(errmsg_for(61), "no data available"), 1, "...and reads as GNU's does");
+    assert_eq(errmsg_is_known(95), 1, "EOPNOTSUPP is known");
+    assert_eq(streq(errmsg_for(95), "operation not supported"), 1, "...and reads as GNU's does");
+    # ⛔ The gaps around them stay UNKNOWN. Widening the range instead of naming
+    # the two would print "unknown error" for 41..60 and 62..94, where the
+    # numeric fallback is the honest answer.
+    assert_eq(errmsg_is_known(41), 0, "41 is not in the table");
+    assert_eq(errmsg_is_known(60), 0, "60 is not in the table");
+    assert_eq(errmsg_is_known(62), 0, "62 is not in the table");
+    assert_eq(errmsg_is_known(94), 0, "94 is not in the table");
+    assert_eq(errmsg_is_known(96), 0, "96 is not in the table");
+    assert_eq(errmsg_is_known(40), 1, "the top of the contiguous block still is");
+
     return assert_summary();
+
+
 
 
 }

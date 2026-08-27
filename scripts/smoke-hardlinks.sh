@@ -218,9 +218,15 @@ expect_eq "order-independent: links"    "1" "$(inodes c6b/f c6b/g)"
 expect_eq "order-independent: time"     "$CUM_T" "$(stat -c %Y c6b/f)"
 
 # --- attributes kriya does not preserve are still refused BY NAME ----
+# ⛔ `ownership` and `xattr` FLIPPED FROM REFUSED TO IMPLEMENTED AT v1.6.1 —
+# their own coverage lives in scripts/smoke-ownership-xattr.sh. `all` and
+# `context` stay refusals: `all` implies the SELinux `context`, and a
+# `--preserve=all` that quietly skipped the security label would be the same lie
+# in a more dangerous place.
+expect_exit "--preserve=ownership accepted" 0 "$BIN" cp --preserve=ownership attr/src attr/own
+expect_exit "--preserve=xattr accepted"     0 "$BIN" cp --preserve=xattr attr/src attr/xa
 expect_exit "--preserve=all refused"        2 "$BIN" cp --preserve=all attr/src attr/all
-expect_exit "--preserve=ownership refused"  2 "$BIN" cp --preserve=ownership attr/src attr/own
-expect_exit "--preserve=xattr refused"      2 "$BIN" cp --preserve=xattr attr/src attr/xa
+expect_exit "--preserve=context refused"    2 "$BIN" cp --preserve=context attr/src attr/ctx
 expect_eq "a refused attribute copies nothing" "no" \
           "$([ -e attr/all ] && echo yes || echo no)"
 
@@ -540,8 +546,8 @@ expect_eq "-l is advertised in --help" "1" \
           "$("$BIN" du --help 2>&1 | grep -c -- '--count-links')"
 expect_eq "-l is advertised in --help=json" "1" \
           "$("$BIN" du --help=json 2>&1 | grep -c '"count-links"')"
-expect_eq "cp --help names the links attribute" "1" \
-          "$("$BIN" cp --help=json 2>&1 | grep -c -- '=links for hard links')"
+expect_eq "cp --help names the extra attributes" "1" \
+          "$("$BIN" cp --help=json 2>&1 | grep -c -- '=links, =xattr for more')"
 
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$((PASS + FAIL))"
 [ "$FAIL" -eq 0 ]

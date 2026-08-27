@@ -50,7 +50,7 @@ Two rules hold across the arcs, both learned the hard way:
 | **1.3.x** | Discoverability | spec-renderer atop `flags.cyr` | ✅ closed at 1.3.8; **consumer waiting** (agnoshi) |
 | **1.4.x** | Pattern & text parity | repeatable-option collector, UTF-8 decoder | ✅ closed at 1.4.5 |
 | **1.5.x** | Identity & listing | passwd/group parser, comparator indirection | ✅ closed at 1.5.3 |
-| **1.6.x** | File-op completeness | inode-set helper ✅, xattr API | in progress — 1.6.0 shipped |
+| **1.6.x** | File-op completeness | inode-set helper ✅, xattr API ✅ | in progress — 1.6.0, 1.6.1 shipped |
 | **1.7.x** | Traversal, exec & FS reporting | spawn helper ✅, ARG_MAX chunking | ready |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | ready |
 | **1.9.x** | Performance | niyama literal fast path (upstream, partial) | partly gated |
@@ -197,8 +197,9 @@ the quoting helper (1.5.3). Three new shared modules — `src/lib/userdb.cyr`, `
 
 ## 1.6.x — File-op completeness
 
-**Enablers:** an inode-set helper in `src/lib/fs.cyr` and an fd-anchored xattr API. ⚠ The M8 security
-audit names the safe xattr pattern — follow it rather than reinventing.
+**Enablers:** an inode-set helper in `src/lib/fs.cyr` ✅ (1.6.0) and an fd-anchored xattr API ✅
+(1.6.1). ⚠ The M8 security audit named the safe xattr pattern in advance and it was followed rather
+than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path.
 
 - **1.6.0 — Hard-link awareness.** ✅ **SHIPPED at 1.6.0.** `fs_inoset_*` in `src/lib/fs.cyr` serves
   both callers; `cp --preserve=links` does what it says after five releases of refusing to, and `du`
@@ -251,13 +252,96 @@ audit names the safe xattr pattern — follow it rather than reinventing.
     release's `Fixed` sections came from an adversarial review pass or the fuzz, not from the tests
     written alongside the feature. A suite written by the same pass that wrote the code tests what
     the author already thought of.
-- **1.6.1 — Ownership and xattrs.** `cp`/`mv` xattr preservation, and `mv` cross-FS UID/GID
-  preservation (which rides with `cp --preserve=ownership`). ⚠ Both extend `--preserve=`'s accepted
-  attribute list, which v1.2.1 deliberately made a closed set — widen it there, not by loosening the
-  check.
+- **1.6.1 — Ownership and xattrs.** ✅ **SHIPPED at 1.6.1.** `--preserve=ownership` and
+  `--preserve=xattr` implemented, `-p` gains ownership to match GNU, every metadata restore moved
+  onto the OPEN DESCRIPTOR, and cross-filesystem `mv` carries all four attributes. Closes **M8 audit
+  rows 35350, 35351 and 35354**. See [ADR 0013](../adr/0013-ownership-and-extended-attributes.md).
+  ⚠ **Still open, none blocking:**
+  - **`--preserve=context` and `--preserve=all`** stay refused by name. `all` implies the SELinux
+    context, and kriya is not SELinux-aware. Closing it means either an SELinux story or a documented
+    decision that `all` means "all of what kriya carries" — ⛔ the second reading is the
+    accepts-and-lies shape in its most dangerous spot, so it needs an ADR either way.
+  - ⛔ **The destination DIRECTORY is created at the source's full mode**, so under a permissive
+    umask it is world-writable for the whole recursive copy. GNU withholds the group and other WRITE
+    bits on every directory it creates and adds them back **unconditionally** at the end; kriya has
+    no unconditional restore — a directory's mode is only touched when `--preserve=mode` is set — so
+    withholding today would drop the bits permanently on a plain `cp -R`. ⚠ The file half of this
+    IS closed at 1.6.1 (set-id bits withheld at create, restored by the `--preserve=mode` fchmod that
+    is guaranteed to run); the directory half needs the unconditional restore first. Naturally
+    **1.6.2**, beside the ACL work.
+  - ⚠ **A cross-filesystem `mv` diagnostic says `kriya cp:`.** The cross-filesystem path routes
+    through `cp`'s copy functions, so every error they raise carries `cp`'s prefix during an `mv`.
+    Pre-existing and cosmetic — GNU says `mv:` — but it is now more visible, because the xattr
+    warning is the first diagnostic a SUCCESSFUL `mv` prints. Needs a program-name global in
+    `cp.cyr`, which touches every diagnostic in that file.
+  - ⚠ **The xattr scratch buffers grow to the largest attribute seen in a walk and are never
+    released** — the bump-allocator bargain the rest of `src/lib/fs.cyr` already takes, but worth
+    naming beside `du`'s allocation problem in 1.7.3.
+  - ⛔ **POSIX ACLs are not preserved, and the gap is wider than "an attribute is missing."** GNU
+    carries a POSIX ACL as part of **MODE** preservation — its own `copy_acl`, a separate path from
+    the xattr copy — so `cp -p` and `cp --preserve=mode` both carry it while `--preserve=xattr` does
+    not. ⚠ kriya's xattr path deliberately EXCLUDES `system.*` (see ADR 0013: copying
+    `system.posix_acl_access` silently changes the destination's effective permissions), which is
+    right for that path and leaves nothing carrying the ACL at all.
+    ⛔ **The consequence is a silent over-grant, not just a missing feature**: the source's `st_mode`
+    group bits ARE the ACL mask, so copying the mode literally gives the destination's own group the
+    MASK's permissions where GNU gives it the group entry's. Measured on a 0640 file with
+    `g:<grp>:rwx` — GNU's copy is `group::r-- group:<grp>:rwx mask::rwx`, kriya's is `group::rwx`,
+    and **both report st_mode 0640**, which is exactly why nothing noticed. Asserted in
+    `scripts/smoke-ownership-xattr.sh` as kriya's own answer, and counted separately by the fuzz
+    (880 of 3,240 comparisons) rather than hidden. ⚠ Closing it means an ACL path with the mode↔mask
+    interaction handled, which is a feature and wants its own ADR — naturally **1.6.2** beside the
+    other `cp` stragglers.
+
+  ⛔ **Carry forward:**
+  - ⛔ *An adversarial review pass is worth more than the tests written beside the feature, again.*
+    **Fifteen** real defects and none refuted — thirteen fixed in the release, two filed above —
+    of which the 76-case suite could see exactly none: attributes written before the
+    chown that strips `security.capability`; `system.posix_acl_access` copied, silently granting
+    access; a cross-filesystem `mv` onto a filesystem without xattr support failing the restore and
+    leaving the file in BOTH places; an empty reason on the only two errnos this path produces; and
+    three narrower races in the size protocol. ⛔ And the worst of them was **data loss**: a
+    cross-filesystem `mv` merged into a non-empty destination directory, overwrote same-named files,
+    exited 0 and removed the source — while the SAME command on one filesystem refused, because
+    `rename()` gave that arm the guard for free. ⚠ **Second release running** that the review found
+    more than the suite did, and by a wider margin.
+  - ⛔ *A cold-start number means nothing without the previous binary measured beside it.* One run of
+    1.6.1 read 0.599 ms against a recorded 1.6.0 of 0.599 — and building 1.6.0 and re-measuring both
+    in the same minute gave 0.884 and 0.899, indistinguishable. **Build the previous release and
+    measure the pair**; an absolute figure compared against a number from another day is comparing
+    machine states.
+  - ⛔ *A guard the kernel gives one code path for free is a guard the other path does not have.*
+    `mv`'s same-filesystem arm inherits `ENOTEMPTY` from `rename()`; its cross-filesystem arm is a
+    `cp -R -f` plus an `rm -r` and inherits nothing. **Where one arm is implemented by a syscall and
+    the other by hand, list what the syscall was enforcing.**
+  - ⛔ *Widening a fuzz's fixtures finds what the fixtures never contained.* Adding ACLs found the
+    ACL gap in one run; adding setuid/setgid/sticky modes found a plain-`cp` divergence older than
+    the release. **The corpus is the coverage.**
+  - ⛔ *A test whose fixture the caller OWNS cannot see a rule about failing to own it.* The
+    sticky-bit case passed against a mask that kept sticky and against the mask that does not,
+    because a chown of your own file to yourself always succeeds. ⚠ **Third release running** that a
+    green assertion was measuring nothing — 1.5.3's fuzz never reached the function under test,
+    1.6.0's mtime comparison used a fixture created seconds earlier, and this one used a fixture
+    whose ownership could not fail. **The fixture has to be able to produce the wrong answer.**
+  - ⭐ *`unshare -Ur` is a real privilege fixture and it is already in the tree.* `smoke-df.sh` used
+    it for mount namespaces; ownership needs the user-namespace half. It makes the
+    ownership-SUCCEEDS path testable on an unprivileged runner, which is the half that no amount of
+    care with `id` shims can reach.
+  - ⚠ *The "simulated root" release condition shims `id` to answer 0 and cannot make a chown
+    succeed.* Guarding a privileged assertion on `[ "$(id -u)" = 0 ]` would skip it in exactly the
+    condition whose name suggests it should run.
+  - ⭐ *Widening a fuzz's fixtures finds bugs older than the release.* Generating setuid, setgid and
+    sticky modes to test the new drop rule immediately surfaced a plain-`cp` divergence that predated
+    it — the kernel clears setuid and setgid on `open(O_CREAT)` and keeps sticky, and nothing had
+    ever copied a sticky regular file in a test.
 - **1.6.2 — `ln` and the stragglers.** `ln -r` (relative symlink), `-T`/`-t` (target-dir
   disambiguation), `-b`/`--backup`; `touch -h` (symlink-aware utimensat); `cp -R` of char/block
   device nodes, currently rejected per the M8 audit decision; `mv` multi-file `--follow`.
+  ⚠ **Plus `cp -a` and `cp -d`**, deferred here from 1.6.0. `-d` is
+  `--no-dereference --preserve=links` and both halves now exist. `-a` is `-dR --preserve=all`, so it
+  inherits the `all`/`context` decision above — and ⚠ **`-a` also carries GNU's quieter diagnostics**
+  (measured: an unsettable xattr under `-a` is silent and exits 0, where the explicit
+  `--preserve=xattr` reports and exits 1), which is a second behaviour and not just a flag alias.
 - **1.6.3 — `realpath` flags, and the `sleep` operand decision.** `realpath -s`/`--strip`/
   `--no-symlinks` (text-only canonicalization), `--relative-to=DIR`, `--relative-base=DIR`, and the
   `-L`/`-P` pair (POSIX `cd -L` semantics vs the current physical default). ⚠ Also settle `sleep`:

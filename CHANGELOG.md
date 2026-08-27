@@ -6,6 +6,296 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.1] - 2026-08-27 — ownership, extended attributes, and the bit nobody expects
+
+### Added — `cp --preserve=ownership`, and `-p` finally means what GNU's means
+
+⛔ **kriya's `-p` WAS mode + timestamps. GNU's has always been mode + ownership + timestamps.** The
+two are indistinguishable until a fixture's group differs from the caller's, which is why six
+releases went by without it showing: `cp -p` on a file chgrp'd to a secondary group keeps that group
+under GNU and lost it under kriya. `-p` is now `mode | ownership | timestamps`, and the migration for
+anyone who wanted the old meaning is `--preserve=mode,timestamps`.
+
+⚠ **A FAILED OWNERSHIP PRESERVATION IS SILENT, and that is GNU's behaviour rather than laziness.**
+Measured: `cp --preserve=ownership /etc/hostname out` as a normal user exits **0**, prints nothing,
+and produces a copy owned by the caller. GNU only complains when it had the privilege to succeed and
+still failed. An implementation that reported an error here would be noisier than the oracle on an
+everyday command.
+
+⚠ On `EPERM` the chown is retried as `fchown(fd, -1, gid)` — group only — so a caller who cannot
+become the owner still keeps the group when it is one of theirs. ⛔ It does **not** count as
+ownership preserved; see the clearing rule below. The retry is reasoned from GNU's source and
+confirmed by an independent syscall trace (`fchown(4, 100000, 1000) = -EPERM`, then
+`fchown(4, -1, 1000) = 0`, then `fchmod`) rather than by a fixture — constructing one needs a file
+owned by someone else whose group the tester is in, which needs root to create.
+
+### Added — `cp --preserve=xattr`, fd-anchored because the audit said so in advance
+
+⭐ **`fgetxattr`/`fsetxattr` between the two open descriptors, never a path.** The M8 security audit
+(row 35354, mirroring uutils CVE-2026-35354) wrote the requirement down before the feature existed:
+a path-based restore re-resolves every component per call, so a destination substituted between the
+write and the restore receives the attributes. The three copy paths were restructured to keep both
+descriptors open across the restore rather than the other way round.
+
+⚠ **VALUES ARE BYTES.** An attribute may hold an EMPTY value — which must still be *set*, with size
+0 — or embedded NUL bytes. Both round-trip through GNU and both are asserted; nothing in the copy
+reaches for `strlen` on a value. ⚠ The kernel's size protocol is used in both halves: `size == 0`
+returns the byte count the answer needs, and a short buffer answers `-ERANGE` rather than truncating.
+
+⚠ A source on a filesystem with **no** xattr support answers `ENOTSUP` to the listing, and that is
+"nothing to copy", not a failure — otherwise `cp --preserve=xattr` over an ordinary tree would report
+an error on every file.
+
+Failures are reported and exit non-zero: `setting attribute 'user.big' for 'DEST': no space left on
+device`. ⚠ GNU's own message names the attribute where the filename should be (`for 'user.big'`) —
+a formatting bug in libattr's error path, not a rule worth copying. ⚠ GNU is *silent* about the same
+failure under `-a`; kriya has no `-a` yet (roadmap 1.6.2), so only the reporting form exists.
+
+### Fixed — ⛔ the set-id bits, and the third one nobody expects
+
+**When ownership was REQUESTED and could not be fully set, the destination's set-id bits come off.**
+Otherwise `cp -p /usr/bin/passwd ./mine` yields a setuid binary owned by the copying user, made out
+of one that was not. Measured against GNU:
+
+| source `/usr/bin/passwd` (root-owned 4755) | destination mode |
+|---|---|
+| `cp -p` | **755** — ownership requested, chown failed, bits dropped |
+| `cp --preserve=mode,ownership` | **755** |
+| `cp --preserve=mode` | **4755** — ownership never requested, nothing to compensate for |
+
+⛔ **THE STICKY BIT GOES TOO.** POSIX names only setuid and setgid; GNU takes S_ISVTX as well, so the
+mask is 0o777 and not 0o1777. Measured: `cp -pR /var/spool/mail out` — a root-owned 1777 directory —
+yields **777** under GNU, while `cp --preserve=mode -R` of the same source yields **1777**.
+
+⚠ **The first implementation kept sticky, and the test written beside it could not see the
+difference**: it used a sticky file the caller *owned*, where the chown succeeds and nothing is
+dropped at all. It passed against both masks. An independent syscall-level derivation caught it —
+see **How the defects above were found**.
+
+### Fixed — ⛔ cross-filesystem `mv` silently downgraded a file's group and lost its attributes
+
+M8 audit rows 35351 and 35354, measured as live divergences before this release: a file in a
+secondary group carrying a `user.*` attribute, moved across a filesystem boundary, arrived with the
+caller's group and no attributes under kriya and with both intact under GNU. A move is supposed to
+look like a rename, so `mv` now carries mode, ownership, timestamps **and** extended attributes.
+
+### Fixed — ⛔ a plain `cp` carried the sticky bit, and that is older than this release
+
+Found by the differential fuzz, which started generating sticky fixtures only because the new drop
+rule needed them: the kernel clears setuid and setgid on an unprivileged `open(O_CREAT)` but **keeps
+S_ISVTX**, so a plain `cp` of a 1755 file produced a 1755 destination where GNU produces 755. The
+destination file's creation mode is now masked to 0o777 whenever mode is not being preserved.
+⚠ Directories are different, and measured: `cp -R` of a 1777 directory keeps the sticky bit under GNU
+too, so only the file path masks.
+
+### Changed — every metadata restore now runs on the open descriptor
+
+`_cp_restore_fd` applies **ownership → xattrs → mode → times**, in that order, between the copy loop
+and the closes. It replaces three separate path-based restores that ran *after* both descriptors were
+closed.
+
+⛔ **The order is the security property, not tidiness.** Ownership before mode, because the reverse
+leaves a window in which a file already carrying set-id bits changes owner (audit row 35350). Times
+last, so nothing above moves the mtime.
+
+⛔ **And ownership before the XATTRS, which is not obvious and cost a defect.** A chown sets
+`ATTR_KILL_PRIV` on every non-directory, so the kernel strips `security.capability` — attributes
+written *before* the chown are destroyed *by* it. The first version wrote them first, reasoning that
+setting an attribute needs write access. Measured: a file carrying `security.capability` kept it
+under GNU and lost it under kriya. ⭐ **A chown that would change nothing is now skipped**, which is
+the other half — the strip happens even when the ids are identical, so an unconditional "preserve"
+call destroyed a capability it had been asked to keep.
+
+⭐ Directories take the same path: all four calls work on an `O_RDONLY|O_DIRECTORY` descriptor,
+because the kernel checks them against the inode's permissions rather than the descriptor's open
+mode. The restore still runs after every child is written — it simply runs before the close now.
+
+⚠ **Symlinks are the one exception, by argument.** A symlink has no descriptor to hold, so
+`fchownat`/`utimensat` with `AT_SYMLINK_NOFOLLOW` resolve one component against a directory the walk
+already has open — the same shape as the `symlinkat` that made the link. Symlinks now carry their own
+ownership *and* timestamps under `-p`; they carried neither before. No mode (meaningless on Linux)
+and no xattrs (the kernel refuses `user.*` on a symlink outright — measured, EPERM even as the owner).
+
+### Added — `src/lib/sys.cyr` and `src/lib/fs.cyr` grow the primitives
+
+`k_fchown`, `k_fchownat`, `k_fchmod`, `k_flistxattr`, `k_fgetxattr`, `k_fsetxattr`, behind two new
+capability flags (`K_HAVE_CHOWN`, `K_HAVE_XATTR`) that are 0 on agnos — which has no ownership model
+and no extended attributes — and `fs_xattr_copy` plus the pure `fs_xattr_list_next` walker.
+
+⚠ `flistxattr` returns NUL-terminated names laid END TO END, not an array and not one string;
+mis-walking it would read attribute names that are fragments of the previous one. The walk is a pure
+function so it can be tested against a synthetic buffer, and its tests are written to fail on an
+off-by-one in either direction.
+
+⭐ Every syscall number and argument order was verified against the running kernel before anything was
+built on it — including the `-ERANGE` and `-ENODATA` returns, and that `utimensat(fd, NULL, …)` really
+is `futimens`.
+
+### Fixed — ⛔ `system.posix_acl_access` was copied, silently granting access
+
+**A POSIX ACL is stored AS an extended attribute**, so a walk that copies every name copies the ACL —
+and setting it **changes the destination's effective permissions**. Measured: a 0600 file with
+`g:docker:rwx` came out **0670 with the ACL** under kriya and **0650 with none** under GNU, which
+excludes the namespace through libattr's `/etc/xattr.conf`. The whole `system.` namespace is now
+skipped. ⚠ `security.*` is deliberately **not** excluded — GNU carries `security.capability`.
+
+### Fixed — ⛔ a cross-filesystem `mv` onto a filesystem without xattr support left the file in BOTH places
+
+The restore failed, `_mv_cross_fs` returned before the unlink, and a move did not move.
+
+⚠ GNU has **three** behaviours here where kriya had one, and the third was found only after a review
+pass questioned the second. GNU picks its error handler on whether the attribute set was named:
+
+| | reports? | exits |
+|---|---|---|
+| `cp --preserve=xattr`, any failure | yes | **1** |
+| `mv`, ENOTSUP (no xattr support at all) | **no** | 0 |
+| `mv`, any other failure | **yes** | 0 |
+
+So a `mv` that merely could not *fit* an attribute warns and still moves the file, while a `mv` onto a
+filesystem that has no attributes at all says nothing. "Carry xattrs", "report a failure" and "fail
+on a failure" are three separate decisions, and kriya now makes all three the way the oracle does.
+
+### Fixed — ⛔ a cross-filesystem `mv` MERGED into a non-empty destination directory and destroyed data
+
+`mv tree DEST/` where `DEST/tree` already held files: kriya copied the source over it with `-f`,
+overwrote same-named files, exited **0** and removed the source. The pre-existing data was gone.
+⛔ Worse on failure — the ADR-0009 rollback then recursively deleted `DEST/tree`, a destination this
+`mv` had not created.
+
+⚠ **The same command on ONE filesystem already refused.** The same-filesystem arm gets the guard free
+from `rename()`, which answers `ENOTEMPTY`; the cross-filesystem arm had none, so `mv` disagreed with
+itself depending on which device the operands were on — and the disagreement is what turned a
+divergence into data loss. Measured: GNU exits 1 with `unable to remove target: Directory not empty`
+and leaves both trees intact. ⚠ An **empty** destination directory is still replaced, which is what
+`rename()` allows on one filesystem and what GNU does across two.
+
+### Fixed — ⛔ a set-id destination existed, fully privileged, before a byte was written
+
+`cp -p` of a set-user-ID source created the destination **at the source's full mode** and only dropped
+the bits at the end — so for the whole duration of the copy a set-user-ID file owned by the copying
+user sat in a directory someone else might reach. The set-id bits are now withheld at create time and
+put back by the restore, which `--preserve=mode` guarantees will run.
+
+⚠ **Directories are not masked**, and that is measured rather than an oversight: `cp -R` of a 1777
+directory keeps the sticky bit under GNU, and a directory's mode is only restored when
+`--preserve=mode` is set, so masking there would drop the bit permanently on a plain recursive copy.
+GNU withholds the group and other *write* bits on directories instead and adds them back
+unconditionally at the end; kriya has no unconditional restore, so ⛔ **the directory half of this
+window is still open** — under a permissive umask a destination directory is world-writable for the
+duration of a recursive copy. Filed for 1.6.2 with the ACL work, because both want the same
+unconditional-restore machinery.
+
+### Fixed — ⛔ an ownership failure was never reported, even when kriya had the privilege to succeed
+
+`cp -p` returned success on a copy whose owner it had silently changed. ⚠ GNU draws the line at
+`geteuid() == 0`, not at whether the call could have worked: an unprivileged `cp -p` of a root-owned
+file is an everyday command that cannot preserve ownership, and saying so every time would be noise —
+but a root-run backup needs to hear it. kriya now reports `failed to preserve ownership for 'DEST'`
+and exits 1 in exactly that case, matching GNU's wording and status.
+
+⭐ **Reachable on an unprivileged runner**: inside `unshare -Ur` the caller is uid 0 while a
+root-owned file outside appears as the unmapped 65534, so the chown fails `EINVAL` with full
+`CAP_CHOWN` in hand.
+
+### Fixed — ⛔ a cross-filesystem `mv` of a SYMLINK dropped the link's own ownership and timestamps
+
+A third path again: the symlink arm recreates the link with `readlink` + `symlink` rather than going
+through `cp`, so it never gained the metadata `cp` learned to carry. A symlink moved across a
+filesystem boundary arrived owned by the caller and stamped now — the exact surface M8 audit row
+35351 names, one operand type over. Measured against GNU, which keeps both.
+
+### Fixed — three narrower defects in the xattr size protocol
+
+⛔ **The value re-fetch passed the probed size rather than the buffer capacity**, so an attribute that
+grew between the probe and the fetch produced an unconditional `-ERANGE` even though the room to hold
+it was already allocated. ⛔ **`ENODATA` was exempted at the probe and treated as a hard failure one
+syscall later** — the same vanished-attribute race, counted both ways. ⛔ **The list sentinel could
+write one byte past its buffer** when the name list grew by exactly the slack available.
+
+### Fixed — ⛔ the diagnostic's reason was empty on the only two errnos this path produces
+
+`errmsg.cyr` covers 1..40 and `cp --preserve=xattr` produces `ENODATA` (61) and `EOPNOTSUPP` (95) —
+so the one failure worth reporting printed `…: ` and a newline. Both errnos are now in the table, per
+that module's own stated rule that higher numbers land when a utility needs them, and the call site
+gained the numeric fallback its header always promised.
+
+### ⚠ Scope — POSIX ACLs are not preserved, and the gap is wider than "an attribute is missing"
+
+⛔ **GNU carries a POSIX ACL as part of MODE preservation** — its own `copy_acl`, a separate path from
+the xattr copy — so `cp -p` and `cp --preserve=mode` both carry it while `--preserve=xattr` does not.
+kriya has no ACL path, and the `system.*` exclusion above (right for the xattr path) leaves nothing
+carrying it.
+
+⚠ **The consequence is a silent over-grant, not merely a missing feature.** The source's `st_mode`
+group bits ARE the ACL mask, so copying the mode literally gives the destination's own group the
+*mask's* permissions where GNU gives it the *group entry's*. Measured on a 0640 file with
+`g:<grp>:rwx`: GNU's copy is `group::r-- group:<grp>:rwx mask::rwx`, kriya's is `group::rwx` — and
+**both report `st_mode` 0640**, which is exactly why nothing noticed until a fuzz fixture grew an ACL.
+Asserted as kriya's own answer in the smoke suite and counted separately by the fuzz (880 of 3,240
+comparisons) rather than hidden. Filed for 1.6.2 with the other `cp` stragglers.
+
+### ⭐ How the defects above were found
+
+⚠ **Not by the smoke suite**, which was green at 76/76 while the sticky bit was wrong. Two passes:
+
+- **An empirical derivation of GNU's behaviour**, run independently of the implementation. `strace` is
+  not installed on this machine, so it wrote a `ptrace`-based tracer in C to get the syscall sequence —
+  which is what produced the group-only-retry evidence and, in the same matrix, the 1755 → 755 row that
+  showed the sticky bit being cleared.
+- ⭐ **A differential fuzz over the whole `--preserve=` matrix** — 18 flag combinations × recursive and
+  non-recursive, over random trees carrying setuid, setgid and sticky modes, secondary-group
+  ownership, past timestamps, empty/binary/long extended attributes, POSIX ACLs, hard-link groups,
+  symlinks and symlinks to ancestors — comparing owner, group, mode, mtime, the full attribute set and
+  the hard-link partition of every destination path. **0 divergences in 3,240 comparisons**, with
+  880 of them classified as the documented ACL gap rather than dropped from the corpus.
+- ⛔ **An adversarial review pass, one agent per lens, each finding verified by reproduction before
+  being believed.** ⭐ **Fifteen defects, zero refuted: thirteen fixed here, two filed** — including
+  the data loss above, the `security.capability` ordering, the ACL copy, and every one in the `Fixed`
+  sections that the fuzz did not find. The two filed are the POSIX ACL gap and the directory
+  create-mode window, both named in **Scope** above with what closing them needs. ⚠ **Second release
+  running** that the review found more than the tests written beside the feature did, and by a wider
+  margin than the first.
+
+⛔ **The harness was wrong first, again.** Its initial run reported 0.06% divergence, all of it the
+same shape: an unpreserved mtime is "now", the two implementations run seconds apart, and the pair
+straddles a second boundary. Normalising a recent mtime to a sentinel took it to zero without a line
+of kriya changing. ⚠ Second release running that the fuzz needed a fix before its rate could be
+believed.
+
+### ⭐ Verified in the ubuntu:24.04 container again, which had lapsed
+
+⚠ The container condition — the full smoke suite inside `ubuntu:24.04` as a NON-ROOT user, against
+coreutils **9.4** rather than this box's 9.11 — was last performed at 1.5.3 and skipped for 1.6.0.
+It ran for this release: **4,593 cases across 41 scripts, zero failures.**
+
+⭐ **It is also what proved the new script's probes work**, which is the reason it mattered more than
+usual here: the container has no secondary group for the test user, no usable user namespace, no
+`/var/spool/mail`, and an overlayfs that refuses an oversized attribute. All four cases **skipped with
+a line saying exactly what was left unverified** — 53 passed, 0 failed, 4 skipped — rather than
+aborting the script under `set -e` or, worse, passing vacuously.
+
+### Release totals
+
+**4,671 smoke cases across 41 scripts** (up from 4,561/40) — the new `smoke-ownership-xattr.sh`
+carries **109**, and it probes for everything it needs rather than assuming: a secondary group, `user.*`
+xattr support on the actual filesystem, a user namespace, a second filesystem, and a root-owned setuid
+binary. ⭐ `unshare -Ur` is what makes the ownership-SUCCEEDS path testable on an unprivileged runner.
+
+**391 unit** (up from 367 — the xattr name walk, the clearing mask and the two errnos), 18 POSIX; fuzz green under
+poison; four lints clean; both targets build; `vet` reports **54 deps** (no new dependency — both new
+syscall families are raw wrappers in `src/lib/sys.cyr`).
+
+Binary 1,093,928 → **1,102,432** bytes (+8,504) on host, 1,089,736 → **1,098,232** (+8,496) on agnos.
+
+⚠ **Cold-start is flat, and the way to know that is to measure both.** Five runs of each binary
+back to back on the same box give a median of **0.884 ms for 1.6.0 and 0.899 ms for 1.6.1** —
+indistinguishable, with the samples interleaving. ⛔ An earlier single run of this release read
+0.599 ms and was very nearly written down as an improvement; it was one sample on a quiet moment, and
+the previous release reads the same way under the same conditions. **A cold-start number is only
+meaningful against the previous binary measured in the same minute**, which is what this project's
+"flat from vX" phrasing has always meant and what a single absolute figure quietly stops proving.
+
 ## [1.6.0] - 2026-08-26 — hard links, and three walks that could not come back
 
 ### Added — `src/lib/fs.cyr` gains a `(st_dev, st_ino)` set, and two utilities share it

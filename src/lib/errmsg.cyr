@@ -11,9 +11,11 @@
 # stderr framing works. This module owns only the table.
 #
 # Coverage: POSIX errnos 1..40 (Linux numbering — these are stable
-# across libc-free callers since the kernel ABI fixes them). Higher
-# numbers (EWOULDBLOCK, network errnos, etc.) land when a utility
-# actually needs them.
+# across libc-free callers since the kernel ABI fixes them), plus 61
+# (ENODATA) and 95 (EOPNOTSUPP), which `cp --preserve=xattr` produces
+# and nothing else does. Higher numbers land when a utility actually
+# needs them — that is the rule, and those two are what it looks like
+# in practice.
 
 fn errmsg_for(errno): i64 {
     if (errno == 1)  { return "operation not permitted"; }
@@ -56,6 +58,13 @@ fn errmsg_for(errno): i64 {
     if (errno == 38) { return "function not implemented"; }
     if (errno == 39) { return "directory not empty"; }
     if (errno == 40) { return "too many levels of symbolic links"; }
+    # ⚠ Above the 1..40 block, and here because a utility ACTUALLY NEEDS THEM —
+    # which is the rule this module's header states. `cp --preserve=xattr` produces
+    # exactly these two and no others: ENODATA when an attribute is not there, and
+    # EOPNOTSUPP when the filesystem has no extended-attribute support at all. Both
+    # came out as an EMPTY reason before, on the one failure worth reporting.
+    if (errno == 61) { return "no data available"; }
+    if (errno == 95) { return "operation not supported"; }
     return "unknown error";
 }
 
@@ -63,6 +72,12 @@ fn errmsg_for(errno): i64 {
 # caller pick between the named message and a "errno NNN" fallback.
 fn errmsg_is_known(errno): i64 {
     if (errno < 1)  { return 0; }
+    # ⚠ The two above the contiguous block are named individually rather than by
+    # widening the range: 41..60 and 62..94 are NOT in the table, and answering
+    # "known" for them would print "unknown error" where the numeric fallback is
+    # the honest answer.
+    if (errno == 61) { return 1; }
+    if (errno == 95) { return 1; }
     if (errno > 40) { return 0; }
     return 1;
 }

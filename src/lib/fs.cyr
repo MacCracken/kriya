@@ -1100,3 +1100,260 @@ fn fs_dirstack_depth(st): i64 {
     if (st == 0) { return 0; }
     return load64(st + FS_DSTK_N);
 }
+
+# --- extended-attribute copy ----------------------------------------
+#
+# Copy every extended attribute from one OPEN DESCRIPTOR to another.
+#
+# ⛔ FD-ANCHORED, AND THAT IS A REQUIREMENT RATHER THAN A PREFERENCE. The M8
+# security audit (`docs/audit/2026-05-18-security.md`, row 35354, mirroring
+# uutils CVE-2026-35354) names the pattern to follow: a path-based restore
+# re-resolves every component on every call, so a destination substituted
+# between the write and the restore receives the attributes instead. `cp` holds
+# both descriptors at the moment it needs them, so there is no reason to reach
+# for a path — and the callers were restructured to keep them open rather than
+# the other way round.
+#
+# ⚠ THE KERNEL'S SIZE PROTOCOL IS EASY TO GET WRONG and both halves are used
+# here: a `size` of 0 returns the byte count the answer NEEDS without writing
+# anything, and a buffer that is too small answers -ERANGE (-34) rather than
+# truncating. Verified against the running kernel along with -ENODATA (-61) for
+# a name that is not present.
+#
+# ⚠ `flistxattr` returns NUL-TERMINATED names laid END TO END — not an array,
+# and not one string. The length is the total byte count and the caller walks it.
+#
+# ⚠ VALUES ARE BYTES. An attribute may hold an EMPTY value — which must still be
+# SET, with size 0 — or embedded NUL bytes. Both round-trip through GNU
+# (measured), so nothing here may reach for `strlen` on a value.
+
+enum FsXattr {
+    FS_XR_COPIED = 0;     # attributes successfully set on the destination
+    FS_XR_FAILED = 8;     # attributes that could not be set
+    FS_XR_ERRNO  = 16;    # errno of the FIRST failure
+    # ⚠ A POINTER INTO THE SHARED LIST BUFFER, not a copy. It stays valid until
+    # the NEXT `fs_xattr_copy` call regrows or overwrites that buffer — which is
+    # long enough for the caller to print a diagnostic and no longer. Anything
+    # that needs to outlive one call must copy the bytes.
+    FS_XR_NAME   = 24;    # pointer to the NAME of the first failure
+    FS_XR_SZ     = 32;
+    FS_XR_ENOTSUP = 95;   # EOPNOTSUPP — the filesystem has no xattr support
+    FS_XR_ENODATA = 61;   # the attribute is not there (or vanished mid-walk)
+}
+
+# Scratch buffers, grown on demand and reused across every file in a walk.
+# ⚠ Pointers from `alloc`, never module-scope `var X[N]` — at module scope that
+# form is N×8 bytes rather than N, which is roadmap M15a and the most expensive
+# rule in this codebase.
+var _fs_xa_list = 0;
+var _fs_xa_list_cap = 0;
+var _fs_xa_val = 0;
+var _fs_xa_val_cap = 0;
+
+fn _fs_xa_list_buf(need): i64 {
+    if (_fs_xa_list_cap >= need) { return _fs_xa_list; }
+    var cap = _fs_grow_cap(1024, need);
+    var b = alloc(cap);
+    if (b == 0) { return 0; }
+    _fs_xa_list = b;
+    _fs_xa_list_cap = cap;
+    return b;
+}
+
+fn _fs_xa_val_buf(need): i64 {
+    if (_fs_xa_val_cap >= need) { return _fs_xa_val; }
+    var cap = _fs_grow_cap(1024, need);
+    var b = alloc(cap);
+    if (b == 0) { return 0; }
+    _fs_xa_val = b;
+    _fs_xa_val_cap = cap;
+    return b;
+}
+
+# Offset of the name AFTER the one starting at `pos`, or -1 when the buffer is
+# malformed (no terminator before the end). A return equal to `len` means the
+# name at `pos` was the last one. ⭐ Pure, so the walk is unit-testable against a
+# synthetic buffer without touching a filesystem.
+fn fs_xattr_list_next(list, len, pos): i64 {
+    var i = pos;
+    while (i < len) {
+        if (load8(list + i) == 0) { return i + 1; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# 1 when `name` is in the `system.` namespace, which a plain xattr copy must not
+# touch — see the call site for the measurement.
+fn _fs_xa_is_system(name): i64 {
+    var lit = "system.";
+    var i: i64 = 0;
+    while (i < 7) {
+        if (load8(name + i) != load8(lit + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Copy src_fd's attributes onto dst_fd, filling the `FsXattr` record at `out`.
+# Returns 0 when every attribute was copied (including when there were none),
+# the FAILED count when some could not be set, and -1 when the source could not
+# be listed at all.
+fn fs_xattr_copy(src_fd, dst_fd, out): i64 {
+    store64(out + FS_XR_COPIED, 0);
+    store64(out + FS_XR_FAILED, 0);
+    store64(out + FS_XR_ERRNO,  0);
+    store64(out + FS_XR_NAME,   0);
+    if (K_HAVE_XATTR == 0) { return 0; }
+
+    var need = k_flistxattr(src_fd, 0, 0);
+    if (need < 0) {
+        var e0 = 0 - need;
+        # ⚠ A source on a filesystem WITHOUT xattr support answers -ENOTSUP, and
+        # that is "there is nothing to copy" rather than a failure — GNU is
+        # silent there too, and a `cp --preserve=xattr` onto a plain ext4 tree
+        # would otherwise report an error on every single file.
+        if (e0 == FS_XR_ENOTSUP) { return 0; }
+        if (e0 == FS_XR_ENODATA) { return 0; }
+        store64(out + FS_XR_ERRNO, e0);
+        return 0 - 1;
+    }
+    if (need == 0) { return 0; }
+
+    # ⚠ `need + 2`, not `need + 1`. The kernel may return exactly the count it was
+    # given when the list GREW between the probe and the read, and the sentinel
+    # below then writes at index `got` — one past a buffer sized `need + 1` whose
+    # capacity happened to land exactly there. Two bytes of slack costs nothing
+    # and removes the case.
+    var list = _fs_xa_list_buf(need + 2);
+    if (list == 0) { store64(out + FS_XR_ERRNO, 12); return 0 - 1; }
+    var got = k_flistxattr(src_fd, list, need + 1);
+    if (got < 0) {
+        var e1 = 0 - got;
+        # A list that grew past the probe answers -ERANGE; a source that lost its
+        # xattr support answers -ENOTSUP. Neither is worth failing a copy over.
+        if (e1 == FS_XR_ENOTSUP) { return 0; }
+        if (e1 == FS_XR_ENODATA) { return 0; }
+        store64(out + FS_XR_ERRNO, e1);
+        return 0 - 1;
+    }
+    store8(list + got, 0);
+
+    var pos: i64 = 0;
+    var done: i64 = 0;
+    while (done == 0) {
+        if (pos >= got) {
+            done = 1;
+        } else {
+            var name = list + pos;
+            var nxt = fs_xattr_list_next(list, got, pos);
+            if (nxt < 0) {
+                done = 1;                      # malformed: stop rather than run off
+            } else {
+                # ⛔ `system.*` IS EXCLUDED, and that is a security rule rather
+                # than a tidiness one. `system.posix_acl_access` IS an extended
+                # attribute, so a walk that copies everything copies the ACL —
+                # and setting it CHANGES THE DESTINATION'S EFFECTIVE PERMISSIONS.
+                # Measured: a 0600 file with `g:docker:rwx` copied with
+                # `--preserve=xattr` came out 0670 with the ACL intact under
+                # kriya and 0650 with no ACL under GNU, which excludes the
+                # namespace through libattr's `/etc/xattr.conf`. ⚠ `security.*`
+                # is NOT excluded — GNU carries `security.capability`, measured.
+                var skip_ns: i64 = 0;
+                if (_fs_xa_is_system(name) == 1) { skip_ns = 1; }
+                var vneed: i64 = 0;
+                if (skip_ns == 1) { vneed = 0 - 61; }
+                else { vneed = k_fgetxattr(src_fd, name, 0, 0); }
+                if (vneed < 0) {
+                    # ⚠ An attribute that VANISHED between the list and the get is
+                    # not a failure to report — the source is a live filesystem.
+                    if ((0 - vneed) != FS_XR_ENODATA) {
+                        store64(out + FS_XR_FAILED, load64(out + FS_XR_FAILED) + 1);
+                        if (load64(out + FS_XR_ERRNO) == 0) {
+                            store64(out + FS_XR_ERRNO, 0 - vneed);
+                            store64(out + FS_XR_NAME, name);
+                        }
+                    }
+                } else {
+                    # ⚠ `vneed + 1`, so an EMPTY value still has a valid pointer to
+                    # hand the kernel; the SIZE passed stays 0, which is what makes
+                    # the empty attribute round-trip.
+                    var val = _fs_xa_val_buf(vneed + 1);
+                    if (val == 0) {
+                        store64(out + FS_XR_FAILED, load64(out + FS_XR_FAILED) + 1);
+                        if (load64(out + FS_XR_ERRNO) == 0) {
+                            store64(out + FS_XR_ERRNO, 12);
+                            store64(out + FS_XR_NAME, name);
+                        }
+                    } else {
+                        # ⚠ THE CAPACITY, NOT THE PROBED SIZE. The buffer is at
+                        # least `vneed + 1` and usually far larger (it only ever
+                        # grows), so handing the kernel the probe's answer turns
+                        # any growth in the window into an unconditional -ERANGE
+                        # where the room to hold it was already there.
+                        var vgot: i64 = 0;
+                        if (vneed > 0) { vgot = k_fgetxattr(src_fd, name, val, _fs_xa_val_cap); }
+                        if (vgot < 0) {
+                            # ⚠ The SAME vanished-attribute race the probe above
+                            # exempts, one syscall later. It was a failure here and
+                            # an exemption there, which made a concurrent
+                            # `removexattr` on the source fail the copy.
+                            if ((0 - vgot) != FS_XR_ENODATA) {
+                                store64(out + FS_XR_FAILED, load64(out + FS_XR_FAILED) + 1);
+                                if (load64(out + FS_XR_ERRNO) == 0) {
+                                    store64(out + FS_XR_ERRNO, 0 - vgot);
+                                    store64(out + FS_XR_NAME, name);
+                                }
+                            }
+                        } else {
+                            var sr = k_fsetxattr(dst_fd, name, val, vgot, 0);
+                            if (sr != 0) {
+                                store64(out + FS_XR_FAILED, load64(out + FS_XR_FAILED) + 1);
+                                if (load64(out + FS_XR_ERRNO) == 0) {
+                                    store64(out + FS_XR_ERRNO, 0 - sr);
+                                    store64(out + FS_XR_NAME, name);
+                                }
+                            } else {
+                                store64(out + FS_XR_COPIED, load64(out + FS_XR_COPIED) + 1);
+                            }
+                        }
+                    }
+                }
+                pos = nxt;
+            }
+        }
+    }
+    return load64(out + FS_XR_FAILED);
+}
+
+# 1 when `path` is an empty directory, 0 when it holds anything, and a negative
+# errno when it could not be read.
+#
+# ⚠ `.` and `..` are entries too — the dotdot filter is the whole subtlety, and
+# `fs_dent_is_dotdot` above already answers it for both.
+fn fs_dir_is_empty(path): i64 {
+    var fd = fs_openat(fs_at_fdcwd(), path, 65536, 0);      # O_RDONLY|O_DIRECTORY
+    if (fd < 0) { return fd; }
+    var buf = alloc(4096);
+    var empty: i64 = 1;
+    var loop:  i64 = 1;
+    while (loop == 1) {
+        var nb = fs_getdents64(fd, buf, 4096);
+        if (nb < 0) {
+            if ((0 - nb) != 4) { loop = 0; }                # not EINTR: stop
+        } else {
+            if (nb == 0) { loop = 0; }
+            else {
+                var off: i64 = 0;
+                while (off < nb) {
+                    var ent = buf + off;
+                    if (fs_dent_is_dotdot(ent) == 0) { empty = 0; }
+                    off = off + fs_dent_reclen(ent);
+                }
+                if (empty == 0) { loop = 0; }
+            }
+        }
+    }
+    fs_close(fd);
+    return empty;
+}

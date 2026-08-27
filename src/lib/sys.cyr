@@ -35,6 +35,8 @@ enum KSysCap {
     K_HAVE_CHMOD    = 0;   # no chmod
     K_HAVE_UTIMES   = 0;   # no utimensat
     K_HAVE_ATFAMILY = 0;   # no *at(); fs.cyr uses abspath emulation
+    K_HAVE_CHOWN    = 0;   # no ownership model at all
+    K_HAVE_XATTR    = 0;   # no extended attributes
 }
 #endif
 #ifndef CYRIUS_TARGET_AGNOS
@@ -48,6 +50,8 @@ enum KSysCap {
     K_HAVE_CHMOD    = 1;
     K_HAVE_UTIMES   = 1;
     K_HAVE_ATFAMILY = 1;
+    K_HAVE_CHOWN    = 1;
+    K_HAVE_XATTR    = 1;
 }
 #endif
 
@@ -511,5 +515,101 @@ fn k_utimensat(dirfd, path, times, flags): i64 {
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     return syscall(280, dirfd, path, times, flags);        # linux utimensat #280
+    #endif
+}
+
+# --- ownership ------------------------------------------------------
+#
+# ⛔ THE FD FORMS ARE THE POINT, not a convenience. The M8 security audit
+# (`docs/audit/2026-05-18-security.md`, row 35354) requires that anything
+# restoring metadata onto a file cp just wrote acts on the OPEN DESCRIPTOR
+# rather than re-resolving the path — a path-based restore re-walks every
+# component and can land on a file substituted between the write and the
+# restore. `cp` holds both descriptors at the moment it needs them, so
+# there is no reason to reach for a path here.
+#
+# ⚠ agnos has no ownership model at all: no uid, no gid, no chown. These
+# return -ENOSYS there and the callers gate on `K_HAVE_CHOWN`.
+
+# The EFFECTIVE uid. ⚠ Used for exactly one decision: whether a failed ownership
+# preservation is worth reporting. GNU is silent for an unprivileged caller —
+# `cp -p` of a root-owned file is an everyday command and cannot succeed — and
+# complains when it HAD the privilege and still failed, which is the case a
+# root-run backup needs to hear about.
+fn k_geteuid(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;                                              # no uid model; treat as unprivileged-equivalent
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(107);                                   # linux geteuid #107
+    #endif
+}
+
+fn k_fchown(fd, uid, gid): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;                                         # no ownership on agnos
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(93, fd, uid, gid);                      # linux fchown #93
+    #endif
+}
+
+# fchownat with AT_SYMLINK_NOFOLLOW is how a SYMLINK's own ownership is set —
+# there is no fd to hold for a symlink, so this is the one ownership call that
+# must take a path. ⚠ `flags` is the caller's: 256 (AT_SYMLINK_NOFOLLOW) for a
+# symlink, 0 to follow.
+fn k_fchownat(dirfd, path, uid, gid, flags): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;                                         # no ownership on agnos
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(260, dirfd, path, uid, gid, flags);     # linux fchownat #260
+    #endif
+}
+
+fn k_fchmod(fd, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;                                         # no mode bits on agnos
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(91, fd, mode);                          # linux fchmod #91
+    #endif
+}
+
+# --- extended attributes --------------------------------------------
+#
+# All three fd-anchored, for the reason above. ⚠ The size protocol is the
+# kernel's and it is easy to get wrong: passing `size == 0` returns the number
+# of bytes the answer NEEDS without writing anything, and passing a buffer too
+# small returns -ERANGE (-34) rather than truncating. Both callers below probe
+# with 0 first.
+#
+# ⚠ `flistxattr` returns a buffer of NUL-TERMINATED names laid end to end, not
+# an array — the length is the total byte count, and the caller walks it.
+
+fn k_flistxattr(fd, list, size): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;                                         # no xattrs on agnos
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(196, fd, list, size);                   # linux flistxattr #196
+    #endif
+}
+
+fn k_fgetxattr(fd, name, value, size): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(193, fd, name, value, size);            # linux fgetxattr #193
+    #endif
+}
+
+fn k_fsetxattr(fd, name, value, size, flags): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(190, fd, name, value, size, flags);     # linux fsetxattr #190
     #endif
 }

@@ -181,6 +181,13 @@ fn _mv_cross_fs(src, dst, src_st, verbose): i64 {
             _mv_report(dst, 0 - sr);
             return sr;
         }
+        # ⛔ THE LINK'S OWN OWNERSHIP AND TIMESTAMPS TRAVEL WITH IT. This arm
+        # recreates the symlink directly rather than going through `cp`, so it
+        # also missed the metadata `cp` learned to carry at v1.6.1 — a
+        # cross-filesystem move of a symlink arrived owned by the caller and
+        # stamped now, which is the exact surface M8 audit row 35351 names.
+        # Measured against GNU, which keeps both.
+        _cp_symlink_meta(0 - 100, dst, src_st, CP_PRES_MV);
         # Unlink the source symlink.
         var ur = k_unlink(src);
         if (ur != 0) {
@@ -207,7 +214,32 @@ fn _mv_cross_fs(src, dst, src_st, verbose): i64 {
         # final rmdir fails after the contents are gone, `mv ro/tree /other/moved`
         # left `ro/tree` empty AND deleted the destination — both files gone from
         # the filesystem. GNU keeps the destination and reports the removal error.
-        var cr = _cp_recursive_one(src, dst, 0, 1, 0, CP_PRES_P, 0);
+        # ⛔ A NON-EMPTY DESTINATION DIRECTORY IS REFUSED, and it was not — which
+        # made `mv` DESTROY DATA and disagree with itself depending on which
+        # filesystem the operands were on. The same-filesystem arm gets this free
+        # from `rename()`, which answers ENOTEMPTY; the cross-filesystem arm went
+        # straight to `cp -R -f`, MERGED the source over whatever was there,
+        # overwrote same-named files, exited 0 and removed the source.
+        #
+        # ⚠ Worse on failure: the ADR-0009 rollback below then recursively
+        # deletes `dst` — a destination this `mv` did not create — so a copy that
+        # failed halfway took the user's pre-existing tree with it.
+        #
+        # Measured: `mv tree DEST/` with `DEST/tree/shared.txt` already there gave
+        # `FROM-SOURCE` and exit 0 under kriya, against GNU's exit 1 and
+        # `unable to remove target: Directory not empty` with both trees intact.
+        # ⚠ An EMPTY destination directory is still replaced — that is what
+        # `rename()` allows on one filesystem, and what GNU does across two.
+        var dst_probe[144];
+        if (fs_lstat_at(0 - 100, dst, &dst_probe) == 0) {
+            if (fs_is_dir(&dst_probe) == 1) {
+                if (fs_dir_is_empty(dst) == 0) {
+                    _mv_report(dst, 39);                     # ENOTEMPTY
+                    return 0 - 39;
+                }
+            }
+        }
+        var cr = _cp_recursive_one(src, dst, 0, 1, 0, CP_PRES_MV, 0);
         if (cr != 0) {
             _rm_dir_at(0 - 100, dst, dst, 1, 0, 0);   # copy failed: source intact
             return cr;
@@ -237,10 +269,14 @@ fn _mv_cross_fs(src, dst, src_st, verbose): i64 {
     # opens both, copies bytes, preserves mode and times when asked).
     # We always pass preserve=1 for mv since the move should retain
     # the file's identity/metadata.
-    # ⚠ CP_PRES_P, not a bare 1. `preserve` became a CpPreserve bitmask at
-    # v1.6.0 and 1 alone now means "mode only" — which would silently drop the
-    # mtime a move is supposed to carry across a filesystem boundary.
-    var r = _cp_one(src, dst, 1, 0, CP_PRES_P, 0);  # force=1, interactive=0, verbose=0
+    # ⚠ CP_PRES_MV, not a bare 1 and not CP_PRES_P. `preserve` became a
+    # CpPreserve bitmask at v1.6.0, and at v1.6.1 a cross-filesystem move carries
+    # EVERYTHING a rename would have kept — mode, ownership, timestamps and
+    # extended attributes. ⛔ Dropping the last two was M8 audit rows 35351 and
+    # 35354, measured live against GNU: `mv` a group-owned file with a `user.*`
+    # attribute across a filesystem boundary and GNU kept both while kriya kept
+    # neither.
+    var r = _cp_one(src, dst, 1, 0, CP_PRES_MV, 0);  # force=1, interactive=0, verbose=0
     if (r != 0) { return r; }
 
     var ur = k_unlink(src);
