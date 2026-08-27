@@ -50,7 +50,7 @@ Two rules hold across the arcs, both learned the hard way:
 | **1.3.x** | Discoverability | spec-renderer atop `flags.cyr` | ✅ closed at 1.3.8; **consumer waiting** (agnoshi) |
 | **1.4.x** | Pattern & text parity | repeatable-option collector, UTF-8 decoder | ✅ closed at 1.4.5 |
 | **1.5.x** | Identity & listing | passwd/group parser, comparator indirection | ✅ closed at 1.5.3 |
-| **1.6.x** | File-op completeness | inode-set helper, xattr API | ready |
+| **1.6.x** | File-op completeness | inode-set helper ✅, xattr API | in progress — 1.6.0 shipped |
 | **1.7.x** | Traversal, exec & FS reporting | spawn helper ✅, ARG_MAX chunking | ready |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | ready |
 | **1.9.x** | Performance | niyama literal fast path (upstream, partial) | partly gated |
@@ -200,9 +200,57 @@ the quoting helper (1.5.3). Three new shared modules — `src/lib/userdb.cyr`, `
 **Enablers:** an inode-set helper in `src/lib/fs.cyr` and an fd-anchored xattr API. ⚠ The M8 security
 audit names the safe xattr pattern — follow it rather than reinventing.
 
-- **1.6.0 — Hard-link awareness.** The inode-set helper serves two callers: `cp --preserve=links`
-  (which v1.2.1 made refuse **by name** rather than silently ignore) and `du` hardlink dedup. Same
-  surface, one implementation.
+- **1.6.0 — Hard-link awareness.** ✅ **SHIPPED at 1.6.0.** `fs_inoset_*` in `src/lib/fs.cyr` serves
+  both callers; `cp --preserve=links` does what it says after five releases of refusing to, and `du`
+  dedupes by default with `-l`/`--count-links` to opt out. See
+  [ADR 0012](../adr/0012-hard-link-awareness.md). ⚠ **Three things came out of it that are still
+  open**, none blocking:
+  - ⛔ **`du` tracks a NARROWER set than GNU, and the residual is one measured shape**: an operand
+    naming a single-link file that an *earlier* operand's walk already counted — `du DIR DIR/file`
+    lists it where GNU omits it. Closing it needs a **sparse inode structure**: GNU's set costs about
+    one bit per counted file (200,000 files measured at 20 KB), kriya's hash costs 32 bytes per entry
+    (~6 MB for the same set). ⚠ The same structure would also cut `du -L`'s peak, where kriya tracks
+    everything and measured **39 MB against GNU's 10 MB** on a 200,000-file tree. Filed under 1.7.3
+    with the rest of `du`.
+  - **`cp -a` and `cp -d`** — the aliases that imply `--preserve=links`. `-d` is
+    `--no-dereference --preserve=links` and is nearly free now that both halves exist; `-a` is
+    `-dR --preserve=all` and therefore waits on 1.6.1's ownership/xattr work. Naturally 1.6.2.
+  - ⚠ **`--preserve=` records only ONE value per invocation**, so `--preserve=mode --preserve=links`
+    keeps the last rather than the union. Repeating the option is not a shape GNU users reach for
+    (`--preserve=mode,links` is), and fixing it means a repeatable optional-value collector in
+    `src/lib/args.cyr` — the 1.4.x enabler, pointed at a different option.
+
+  - ⚠ **`cp`'s hard link re-resolves both paths from the cwd**, so a destination tree deeper than
+    PATH_MAX can be COPIED by the dirfd-anchored walk and then fail to be LINKED. GNU has the same
+    limitation (it calls `link()` with full paths too), so this is parity rather than a regression —
+    but the walk around it is fd-anchored precisely so that depth is not a limit, and the link path
+    is now the one place that is not.
+
+  ⛔ **Carry forward, and every one of these cost something:**
+  - *A link count of 1 proves "cannot be reached twice" only while you are not dereferencing.* Both
+    utilities needed the same widening — `cp` under `-L`/`-H`, `du` under `-L` — and both would have
+    looked correct in every test that did not involve a symlink.
+  - ⭐ *Checking a set is not the same decision as filling it.* A lookup measured at **16 ns** against
+    a ~1 µs `stat`, so `du` consults the set for every entry while inserting only some. That
+    asymmetry closed half the divergences for nothing, and it only became visible once the two
+    decisions were separated in the code.
+  - ⛔ *A visited-set is not cycle detection.* It stops the recursion and it silently drops
+    legitimate second paths — and it survives review, because the crash it was written to fix does
+    stop. The test that catches it is the one asserting a POPPED directory reads as absent.
+  - ⛔ *A test whose fixture was created seconds ago cannot detect a missing timestamp.* Both mtimes
+    are the current second. The `-p --preserve=links` case passed green while the feature dropped
+    mode and timestamps entirely. **Stamp the fixture in the past, and pick a mode the umask bites.**
+    ⚠ This is the second release running where a green assertion was measuring nothing — 1.5.3's was
+    an `ls` quoting fuzz that never reached the function deciding whether to quote.
+  - ⛔ *A differential fuzz harness is code, and it is wrong first.* With both implementations'
+    destinations beside the source, a `..` symlink made each walk into the OTHER's output; the first
+    run "found" kriya runaways that were kriya faithfully copying a giant tree GNU had just written.
+    Isolating source and destinations took the reported cp divergence rate from 2.08% to 0.00%
+    without a line of kriya changing. **Explain every divergence before believing the rate.**
+  - ⛔ *The smoke suite was green at 86/86 while `cp` was deleting files.* Everything in this
+    release's `Fixed` sections came from an adversarial review pass or the fuzz, not from the tests
+    written alongside the feature. A suite written by the same pass that wrote the code tests what
+    the author already thought of.
 - **1.6.1 — Ownership and xattrs.** `cp`/`mv` xattr preservation, and `mv` cross-FS UID/GID
   preservation (which rides with `cp --preserve=ownership`). ⚠ Both extend `--preserve=`'s accepted
   attribute list, which v1.2.1 deliberately made a closed set — widen it there, not by loosening the
@@ -245,6 +293,14 @@ audit names the safe xattr pattern — follow it rather than reinventing.
 - **1.7.3 — Usage reporting.** `du -x` (one-filesystem), `--exclude`/`--exclude-from`, `--inodes`,
   `-0`, POSIXLY_CORRECT 512-byte blocks; `df -t TYPE` (POSIX-required) and the stat-based
   "filesystem containing FILE" operand walk; `env -S` split-string and `-C DIR`.
+  ⚠ **Plus the sparse inode structure 1.6.0 deferred here**, which is what closes `du`'s last dedup
+  divergence and cuts `du -L`'s memory. GNU's device-inode set costs about **one bit per counted
+  file** — 200,000 files measured at 20 KB, `/usr`'s 204,110 at 36 KB — where `fs_inoset_*` is a
+  32-byte-per-entry hash. ⛔ `du` is also carrying a pre-existing, UNRELATED allocation problem that
+  the same pass should measure: `_du_walk` bump-allocates a 4 KiB `getdents64` buffer per directory
+  and a joined path per entry and frees neither, which is why `kriya du -s /usr` peaks at **68 MB
+  against GNU's 7.7 MB** with the dedup switched off entirely. ⚠ That is the bigger number of the two
+  and it predates 1.6.0.
 
 ---
 
@@ -477,6 +533,21 @@ Standing, low-drama: no negative literals (write `(0 - N)`), no mixed `&&`/`||` 
 `var x = 42;` takes the static-init fast path while `var x = f();` consumes one of the 4,096
 initialized-globals slots.
 
+**M15h — `>>` is an ARITHMETIC shift, so one multiply into the sign bit poisons every mask below it.**
+Opened at v1.6.0, writing the `(st_dev, st_ino)` hash. The shape is `h = a * K; idx = (h >> S) & MASK`
+— which reads as "take some middle bits" and, the moment `a * K` overflows into bit 63, produces a
+NEGATIVE `h` whose masked index addresses off the FRONT of the array rather than into it.
+- *Detection*: for every `>>` in `src/`, ask whether the left operand can have bit 63 set. Two sources
+  do it: an unsigned kernel value read with `load64` (`st_dev`, `st_ino`, `st_size` on a sparse file),
+  and any multiply whose operands are not individually bounded. Size the multipliers so the running
+  sum cannot pass 2^62, or mask the operand down before multiplying.
+- *Note*: `& MASK` does not save you — masking a negative gives a positive, so the bug surfaces as a
+  wrong bucket (harmless) right up until the shift count and mask happen to keep the sign bit, and then
+  it is an out-of-bounds load. It will never fail a test that uses small inode numbers.
+- *Status at v1.6.0*: `_fs_inoset_hash` is sized so the widest input (a 32-bit half of `st_ino`) cannot
+  push the sum past 2^56, and `tests/kriya.tcyr` pins it non-negative at four extremes including
+  `st_ino = 2^63 - 1`. No other `>>` in `src/` takes an unbounded left operand.
+
 ---
 
 ## Enabler map
@@ -494,6 +565,7 @@ What actually gates the arcs. Ship the enabler and everything under it becomes s
 | Shared glob matcher | lift `_f_glob_match` into `src/lib/` | `grep --include/--exclude`, `find -name` reuse | 1.4.x |
 | passwd/group parser | new `src/lib/` module | `ls -l` names, `stat %U/%G`, `find -user/-group` | 1.5.x |
 | Quoting helper | `src/lib/` | `stat %N`, `ls` quoting | 1.5.x |
+| `(st_dev, st_ino)` set | `src/lib/fs.cyr` (as `fs_inoset_*`) | `cp --preserve=links`, `du` dedup, `du -L` cycle detection | ✅ 1.6.0 |
 | Comparator-by-flag indirection | `src/cmd/ls.cyr` | `ls -t`, `-S`, `--color` table | 1.5.x |
 | Inode-set helper | `src/lib/fs.cyr` | `cp --preserve=links`, `du` hardlink dedup | 1.6.x |
 | fd-anchored xattr API | `src/lib/fs.cyr` | `cp`/`mv` xattr preservation | 1.6.x |

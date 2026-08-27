@@ -6,6 +6,251 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.0] - 2026-08-26 — hard links, and three walks that could not come back
+
+### Added — `src/lib/fs.cyr` gains a `(st_dev, st_ino)` set, and two utilities share it
+
+⭐ **One helper, two callers.** `cp --preserve=links` needs to know which destination it already
+wrote for an inode; `du` needs to know whether it has already counted one. Same question, one
+open-addressed hash — `fs_inoset_new` / `_find` / `_add` / `_data` / `_count`, plus `fs_nlink` /
+`fs_dev` / `fs_ino` accessors on a 144-byte stat buffer. See
+[ADR 0012](docs/adr/0012-hard-link-awareness.md).
+
+⚠ **A repeat insert keeps the FIRST payload.** Not an implementation detail: it is what makes the
+destination `cp` links to, and the name `du` charges the bytes to, the one the walk reached first.
+
+⛔ **Every intermediate in the hash has to stay positive.** Cyrius `>>` is an ARITHMETIC shift, so
+one multiply overflowing into the sign bit poisons the mask below it and the index comes back
+negative — a load off the FRONT of the slot array rather than a wrong-but-harmless bucket. The
+multipliers are sized so the widest input (a 32-bit half of `st_ino`) cannot push the running sum
+past 2^56, and four assertions pin it at the extremes the kernel can actually produce. Filed as
+**M15h** on the standing codegen watchlist, because the shape is not specific to this hash.
+
+### Added — `src/lib/fs.cyr` also gains a walk-ancestor STACK, which is not the same thing
+
+⛔ **A SET OF EVERY DIRECTORY EVER VISITED ALSO STOPS A SYMLINK LOOP, AND IT IS WRONG.** Two
+symlinks pointing at one directory are not a loop. Measured: `du -alL` over `real/`, `link1 -> real`
+and `link2 -> real` counts **12 blocks** under GNU; the visited-set answered **4**, silently dropping
+two of the three paths — and `-l`, whose entire job is to stop deduplicating, could not turn it off.
+Only membership of the **current path** means "descending here would not terminate".
+
+`fs_dirstack_*` is that stack: push on descend, pop on unwind, linear scan because tree depth is tens
+and a hash costs more to maintain across push/pop than it saves. ⚠ Its unit tests are written to fail
+if it is ever "simplified" back into a set — a pushed-and-popped directory must read as absent.
+
+### Added — `cp --preserve=links`, refused by name since v1.2.1
+
+Two source names sharing an inode become two names for **one** destination file. Verified against GNU
+on five shapes: two names in one directory, names in different subtrees of one tree, separate
+command-line operands (recursive and not), hard-linked **symlinks**, and `-L` folding a file plus two
+symlinks to it into a single three-name group.
+
+⛔ **WHICH INODES ARE TRACKED FOLLOWS THE SYMLINK POLICY, NOT THE LINK COUNT.** `st_nlink > 1` proves
+"cannot be reached twice" only while you are not dereferencing. Measured: `cp -RL --preserve=links`
+over a directory holding one file and two symlinks to it produces one inode with three names — and
+all three entries report `st_nlink == 1`. So the gate is `follow || st_nlink > 1`, where `follow` is
+the `_cp_should_follow(policy, top_level)` the caller already computed. Non-recursive `cp`
+dereferences unconditionally (POSIX) and passes `follow = 1`. GNU's gate is
+`1 < st_nlink || command-line-arg-with--H || -L`; this is the same rule reached from kriya's own
+policy enum.
+
+⚠ **The master destination is remembered as a PATH, not a dirfd.** The recursion is fd-anchored and
+closes each directory fd as it unwinds (ADR 0003), so the fd-shaped identifier does not survive the
+walk — and holding one open per hard-link group would exhaust `RLIMIT_NOFILE` on a tree with a few
+thousand groups. Both sides of the `linkat` go through `AT_FDCWD` because `fs_linkat` on agnos routes
+to the path-based `k_link`, which returns `-ENOSYS` the moment either dirfd is real.
+
+⛔ **A FAILED LINK IS A FAILED COPY.** `cannot create hard link 'X' to 'Y': <errno>`, and the operand
+fails. It does **not** quietly fall back to an independent copy — that is exactly the accepts-and-lies
+shape v1.2.1 went through `cp` to remove, and GNU errors here too.
+
+### Added — `du` deduplicates by `(st_dev, st_ino)`, and `-l` / `--count-links` turns it off
+
+⭐ **On this machine's `/usr` — 204,110 files, 2,917 of them hard-linked — kriya and GNU now agree to
+the byte, in both directions**: `20676544` with the dedup and `20724132` with `-l`, against GNU's
+`20676544` and `20724132`. The dedup is worth 47,588 KiB, or 0.23% — small enough to have been
+invisible and large enough to have been wrong.
+
+⛔ **A REPEAT PRINTS NO LINE AT ALL, not a zero line.** Under `-a`, the second and third names of a
+hard-linked file are absent from the output entirely. Measured; the distinction is invisible until
+you diff.
+
+⚠ **This changes `du`'s default output** for any tree containing a hard link — see **Breaking**.
+
+### Fixed — ⛔ `cp -f a/f b/f dst/` overwrote its own first copy, and with `--preserve=links` it DELETED it
+
+Both operands resolve to `dst/f`. kriya copied `a/f`, then silently overwrote it with `b/f` and
+exited 0, where GNU refuses the second operand with `will not overwrite just-created`. That was a
+divergence for as long as `cp` has existed here — and `--preserve=links` turned one spelling of it
+into **data loss**: with both operands on one inode, the link path unlinked `dst/f` and then tried to
+link it to itself, leaving *nothing at all* where a pre-existing file had been.
+
+⭐ The guard is a set of every non-directory destination the invocation created, and it is
+**unconditional** rather than part of `--preserve=links` — a guard that protects one option's users
+and not the others leaves `cp` inconsistent with itself. ⚠ Directories are deliberately not recorded:
+`cp -R a b dst/` is supposed to MERGE two trees that share a subdirectory name, and GNU merges them.
+
+⭐ The same guard closes a subtler shape the link map had opened: the map stores a destination PATH,
+and a later operand could legitimately overwrite that path under `-f`, leaving the entry pointing at
+another file's bytes — after which a third operand sharing the first's inode linked to the **wrong
+content** and exited 0. Refusing the overwrite that makes the entry stale removes the possibility
+rather than patching the symptom.
+
+### Fixed — ⛔ `cp -RL` and `du -L` over a symlink cycle both DUMPED CORE
+
+Three commands to reproduce either: a directory, a file in it, and `ln -s .. dir/up`. Nothing
+remembered which directories the walk had entered, so both recursed until the stack died — and `cp`
+wrote a real directory at every level on the way down, leaving the half-built tree on disk. GNU
+answers the same tree in milliseconds. ⚠ `cp`'s existing in-tree guard could not see it: that one is a
+textual `path_is_under` prefix test, and this cycle is made of a symlink.
+
+Both now match GNU byte for byte — `cannot copy cyclic symbolic link 'dir/up'` and exit 1 for `cp`;
+for `du`, a silent skip and exit 0, with `-l` or without it.
+
+### Fixed — ⛔ `cp -RL` also copied its own destination into itself, and GNU does not close this one
+
+The other half of the runaway: a symlink that escapes the source tree into a directory which
+**contains** the destination. ⚠ **GNU wrote a 1,536-entry `dst/up/dst/up/…` tree and stopped only
+when the path exceeded the filesystem's limit, exiting 0.** kriya wrote **11,635 entries and dumped
+core**. kriya now records the destination root's `(st_dev, st_ino)` per operand and refuses to
+descend into it — 3 entries on that input, the real content and nothing else. A deliberate deviation
+from the oracle (ADR 0012), in the direction the in-tree guard already takes.
+
+### Fixed — ⛔ `--preserve=mode` also preserved timestamps, and `--preserve=timestamps` also preserved the mode
+
+`preserve` was a single bit meaning "mode AND timestamps", so both attributes were accepted and
+neither did what it said. It is now a bitmask, which is also what makes `links` expressible at all.
+Measured against GNU with a mode of `0777` under umask `022` — the fixture matters, because at `0741`
+the umask does not bite and an unpreserved destination comes out `0741` anyway:
+
+| Form | mode | mtime |
+|---|---|---|
+| `-p`, bare `--preserve` | `777` | preserved |
+| `--preserve=mode` | `777` | **now** |
+| `--preserve=timestamps` | `755` | preserved |
+| `--preserve=links` | `755` | **now** |
+| no preserve flag | `755` | now |
+
+⚠ **The forms are CUMULATIVE**, matching GNU: `-p --preserve=links` is all three. ⛔ And that took two
+attempts. The first wrote the bare-form bits inside one arm of an `if` and the OR inside the other,
+so the list always replaced `-p` rather than accumulating — and `cp -p --preserve=links` silently
+dropped mode and timestamps. ⚠ **The smoke case meant to catch it passed anyway**, because it compared
+the copy's mtime against a fixture created seconds earlier: both were the current second, so the
+assertion held whether or not anything was preserved. Its replacement stamps the fixture in 2020.
+⛔ The flag table cannot answer "was a BARE `-p` given" on its own — `-p`, `--preserve` and
+`--preserve=LIST` all set the same bool — so `cp` now walks argv once to ask.
+
+`ownership`, `xattr`, `context` and `all` are still refused **by name** with exit 2 — widening the
+accepted set is 1.6.1's work, not a loosening of the check. ⚠ **`mv` rides on this path** and now
+passes `CP_PRES_P` rather than a literal `1`, which would mean "mode only" and silently drop the
+mtime a cross-filesystem move is supposed to carry.
+
+### Fixed — three older `du` defects found beside the code being changed
+
+⛔ **`du *` in a directory of more than 512 entries smashed the heap.** A fixed 512-slot operand array
+with no bound check, reachable from a glob. Sized to argv now, so the store cannot overrun by
+construction.
+
+⛔ **`du -cS` reported a total that no line in its own output added up to** — 4 where GNU said 12.
+`-S` strips subdirectories out of a directory's own line, and the grand total was summing those
+stripped values instead of the tree. The walk now carries two running totals: what the line shows,
+and what the subtree actually is.
+
+⛔ **A child whose stat failed was dropped in silence, and `du` exited 0** over a tree it could not
+read. ⚠ `-L` makes it easy to reach — a broken symlink answers ENOENT and a self-referential one
+ELOOP, where the default `-P` lstat succeeds on both. Both are now named on stderr with exit 1, as
+GNU does.
+
+### Fixed — ⛔ `cyrius bench tests/kriya.bcyr` had not compiled since v1.3.0, and nothing noticed
+
+Two missing includes: `true.cyr`/`false.cyr` read `HELP_POS_UNBOUNDED` and call `help_begin`, and
+`args.cyr` has intercepted `--help` through `help.cyr` since v1.3.0. ⚠ CI runs `cyrius test` and never
+`cyrius bench`, which is how a benchmark suite rots for five releases without a red build. The M15e
+include trap, for the fourth time. The bench gained `fs/inoset_insert` and `fs/inoset_lookup_miss`.
+
+### Changed — a dead `du` long-option branch
+
+An `nlen == 14` block compared `"separate-dirs"` at length **13** and could never fire (the correct
+`nlen == 13` block sits three lines below it, and carried the comment `# 13 — no`). Removed; every
+long option `du` accepts is now asserted in the smoke suite.
+
+### Breaking — `du` deduplicates by default
+
+`kriya du` over a tree containing hard links now reports fewer bytes than it did at 1.5.3, because it
+stops counting one file once per name. This matches GNU, and it changes the default output of every
+such run.
+
+**Migration**: add `-l` (or `--count-links`) to restore the pre-1.6.0 accounting exactly. A script
+that parses `du` totals across the upgrade will see them move; one that compares kriya against GNU
+will see them stop moving.
+
+### ⚠ Scope — `du` tracks a narrower set than GNU, and here is the measurement that decided it
+
+GNU's device-inode set holds **every file it counts** and costs about **one bit per file**: 200,000
+files added 20 KB to peak RSS, and `/usr`'s 204,110 added 36 KB. That is a sparse structure.
+`fs_inoset_*` is a 32-byte-per-entry hash — the same set would be ~6 MB live plus ~6 MB abandoned by
+the doubling, against a `du -s /` that could plausibly walk ten times as many files. So kriya inserts
+only what it must: every command-line operand, every directory, every non-directory with
+`st_nlink > 1`, and — under `-L`, where a link count of 1 stops proving anything — everything.
+
+⭐ **But the set is CONSULTED for every entry, including the ones that are never inserted.** A lookup
+is one probe into a table the walk is already carrying, benchmarked at **16 ns** against roughly a
+microsecond for the `stat` that precedes it. Checking costs nothing, and it closed half the
+reachable-twice shapes for free.
+
+⚠ **The residual is one shape, and it is asserted rather than hidden**: an operand naming a
+*single-link, non-directory* file that an *earlier* operand's walk already counted. `du DIR DIR/file`
+lists the file where GNU omits it; `du DIR/file DIR` matches GNU exactly, and the directory spelling
+is closed. `scripts/smoke-hardlinks.sh` pins kriya's own answer for that case, so the day the sparse
+structure lands (roadmap 1.7.3) the assertion flips to a GNU comparison and says so out loud.
+
+⚠ Under `-L`, where kriya does track everything, peak RSS on a 200,000-file tree is **39 MB against
+GNU's 10 MB**. ⛔ And the larger number in the same measurement is not from this release at all:
+`kriya du -s /usr` peaks at **68 MB against GNU's 7.7 MB** with the dedup switched off entirely,
+because `_du_walk` bump-allocates a 4 KiB `getdents64` buffer per directory and a joined path per
+entry and frees neither. Filed with the sparse structure; both are `du` memory, one pass.
+
+### ⭐ How the defects above were found
+
+⚠ **Not by the smoke suite, which was green at 86/86 while `cp` was deleting files.** Two passes
+found everything in the `Fixed` sections:
+
+- **An adversarial review** over the diff, one agent per lens (memory safety, `cp` correctness, `du`
+  correctness), each finding independently verified by reproduction before being believed. It caught
+  the data-loss path, the non-cumulative `-p`, the visited-set-versus-ancestor-stack error, and the
+  three older `du` defects.
+- ⭐ **A differential fuzz against GNU** over randomly generated trees — hard-link groups, symlinks to
+  files, to directories, dangling, hard-linked symlinks, and symlinks to ancestors — comparing `du`
+  across a 20-flag matrix and one-, two- and reversed-operand forms, and comparing `cp`'s destination
+  by **inode PARTITION** rather than by name, since which name holds the real copy is readdir-order
+  dependent. It found both `-L` runaways.
+
+⭐ **After the fixes: 0 divergences in 22,200 `du` comparisons and 0 in 2,220 `cp` comparisons**,
+across two runs at different seeds. ⚠ The one documented `du` shape is classified separately and hit
+1,870 times — a residual that is *counted*, not one that is quietly absent from the corpus.
+
+⛔ **The fuzz harness needed fixing before it could be believed, twice.** With both destinations
+beside the source, a `..` symlink made each implementation walk into the *other's* output — so the
+first run "found" kriya runaways that were kriya faithfully copying a giant tree GNU had just written
+next to it. Isolating source and destinations in separate parents took the cp divergence rate from
+2.08% to 0.00% without a line of kriya changing.
+
+### Release totals
+
+**4,561 smoke cases across 40 scripts** (up from 4,418/39) — the new `smoke-hardlinks.sh` carries
+**138** of them, and `smoke-option-forms.sh` flipped its `--preserve=links` case from "refused" to
+"accepted". **367 unit** (up from 322 — the inode set, the ancestor stack), 18 POSIX; fuzz green under
+poison; four lints clean; both targets build; `vet` reports **54 deps** (no new module — the roadmap
+put the helper in `src/lib/fs.cyr` and that is where it went).
+
+Binary 1,080,848 → **1,093,928** bytes (+13,080) on host, 1,076,656 → **1,089,736** (+13,080) on
+agnos. Cold-start median **0.673 ms**, well under the 2 ms v1.0 target.
+
+⭐ **Bench**: `fs/inoset_lookup_miss` **16 ns** — the per-entry cost every `du` walk now pays, against
+roughly a microsecond for the `stat` in front of it. `fs/inoset_insert` 286 ns amortised over a
+million distinct keys, the spikes being the rehashes. End to end that is **26 ms against 25 ms** for
+`du -s` over a 200,000-file tree with the dedup on and off — 4%, on a walk that is syscall-bound.
+
 ## [1.5.3] - 2026-08-26 — quoting, and `pwd` stops trusting `$PWD`
 
 ### Added — `src/lib/quote.cyr`, shared by `ls` and `stat %N`

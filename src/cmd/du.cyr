@@ -16,6 +16,8 @@
 #   -d N / --max-depth=N   only print entries at depth <= N (counting
 #                          operand at depth 0)
 #   -S / --separate-dirs   do not include subdirectories in dir totals
+#   -l / --count-links     count a hard-linked file once per NAME rather
+#                          than once per file (turns the dedup off)
 #
 # Size accounting:
 #   Default unit is the allocated 1024-byte block. The kernel reports
@@ -28,11 +30,32 @@
 # links contribute their own name-target byte count and are NOT
 # descended. `-L` switches to stat (follow) at every level.
 #
-# Hardlink dedup: GNU du dedupes by (st_dev, st_ino) so a hardlinked
-# file is counted once per tree. kriya du at v0.7.0 does NOT dedupe —
-# hardlinks are counted at each name they appear under. Tracked as a
-# follow-up against the future inode-set helper that `cp --preserve=links` (roadmap 1.6.0)
-# also needs.
+# Hardlink dedup (v1.6.0): a file reached under two names is counted
+# ONCE. `-l`/`--count-links` turns that off and restores the pre-1.6.0
+# behaviour. A repeat contributes no bytes and prints no line at all —
+# not a zero line, no line — which is what GNU does.
+#
+# ⚠ WHAT GETS TRACKED is narrower than GNU's, deliberately, and the gap
+# is measured rather than assumed:
+#   - always: every command-line operand, and every non-directory whose
+#     `st_nlink > 1`;
+#   - under -L: everything, because dereferencing makes a link count of 1
+#     stop proving "cannot be reached twice".
+# GNU tracks EVERY file it counts even under -P, using a sparse inode
+# structure that costs about one bit per file (measured: 200,000 files
+# cost GNU 20 KB, and the same set in a 32-byte-per-entry hash would cost
+# 6 MB). kriya's `fs_inoset_*` is that hash, so tracking everything under
+# -P would trade a 300x memory regression for one measured shape. That
+# shape: an operand naming a SINGLE-LINK file that an EARLIER operand's
+# walk already counted — `du DIR DIR/f` lists the file where GNU omits
+# it. ⚠ The reverse order matches GNU exactly, because the operand goes
+# into the set at depth 0 and the walk consults it. (roadmap 1.7.3)
+#
+# ⛔ CYCLE DETECTION UNDER -L IS NOT PART OF THE DEDUP AND SURVIVES -l.
+# `du -L` over a symlink pointing at an ancestor recursed until the stack
+# died — a core dump, reproducible in three commands — because nothing
+# remembered which directories the walk had already entered. GNU answers
+# the same tree in milliseconds with `-l` or without it.
 #
 # -x (one-filesystem), --exclude/--exclude-from, --inodes, and -0
 # NUL-terminated output are deferred. (roadmap 1.7.3)
@@ -47,6 +70,23 @@ var _du_max_depth:   i64 = 0;
 var _du_have_depth:  i64 = 0;
 var _du_sep_dirs:    i64 = 0;
 var _du_grand:       i64 = 0;
+var _du_count_links: i64 = 0;
+
+# The (dev, ino) sets. ⚠ Bare-literal init: a `var x = fs_inoset_new();` at
+# module scope would be a non-literal initializer and cost one of the 4,096
+# `gvar_toks` slots. They are built in `cmd_du` instead, once per invocation.
+#   `_du_seen` — the dedup, disabled by -l.
+#   `_du_path` — the directories the walk is currently INSIDE, which is cycle
+#                detection and is NOT disabled by -l.
+#
+# ⛔ `_du_path` IS A STACK, NOT A SET, AND THE DIFFERENCE IS THE WHOLE POINT. A
+# set of every directory ever entered also stops a symlink loop — and it is
+# wrong: two symlinks pointing at one directory are not a loop, and GNU's
+# `du -alL` counts that directory through BOTH of them (measured: 12 blocks
+# across `real`, `link1` and `link2`, where the set answered 4). Only membership
+# of the CURRENT PATH means "descending here would not terminate".
+var _du_seen:        i64 = 0;
+var _du_path:        i64 = 0;
 
 # Round-up division: (a + b - 1) / b.
 fn _du_div_ceil(a, b): i64 {
@@ -154,6 +194,46 @@ fn _du_emit(size, path): i64 {
     return 0;
 }
 
+# 1 when this entry has already been accounted for and must contribute
+# nothing — no bytes to any total, and no line of output.
+#
+# ⭐ ONE FUNCTION FOR TWO JOBS THAT LOOK ALIKE AND ARE NOT. The first half is
+# cycle detection and runs under -L whatever the dedup flags say; the second is
+# the hardlink dedup and is what `-l` switches off. Folding them into one flag
+# would make `du -lL` over a symlink loop crash again.
+fn _du_seen_skip(st, depth): i64 {
+    var is_dir = fs_is_dir(st);
+    if (_du_follow == 1) {
+        if (is_dir == 1) {
+            if (fs_dirstack_has(_du_path, fs_dev(st), fs_ino(st)) == 1) { return 1; }
+        }
+    }
+    if (_du_count_links == 1) { return 0; }
+    # ⭐ CHECK ALWAYS, INSERT NARROWLY. A lookup is one probe into a table this
+    # walk is already carrying, so every entry gets asked whether it has been
+    # counted — including the ones the insert rule below would not have
+    # recorded. That asymmetry is free and it closes half the reachable-twice
+    # shapes: `du FILE DIR` where FILE lives inside DIR now matches GNU, because
+    # the operand went in at depth 0 and the walk consults the table.
+    if (fs_inoset_find(_du_seen, fs_dev(st), fs_ino(st)) != 0) { return 1; }
+    var track: i64 = 0;
+    if (depth == 0)      { track = 1; }     # a command-line operand
+    if (_du_follow == 1) { track = 1; }     # -L: link count proves nothing
+    # ⚠ DIRECTORIES ARE TRACKED TOO, and the first draft of this rule excluded
+    # them — `if (is_dir == 0)` guarded the nlink test, which reads as "a link
+    # count over 1 only means something for files" and is true, but it left
+    # directories out of the table altogether. `du DIR DIR/sub` then walked and
+    # charged `sub` twice, and `-c` reported a total no line in the output added
+    # up to. There are far fewer directories than files, so the memory argument
+    # that keeps single-link FILES out does not apply to them.
+    if (is_dir == 1) { track = 1; }
+    if (is_dir == 0) {
+        if (fs_nlink(st) > 1) { track = 1; }
+    }
+    if (track == 1) { fs_inoset_add(_du_seen, fs_dev(st), fs_ino(st), 0); }
+    return 0;
+}
+
 # Recursively walk `name` rooted at `parent_dirfd`. `depth` is operand-
 # relative (0 for the operand itself). `display` is the user-visible
 # path used in output. Returns total size of this subtree (including
@@ -179,6 +259,10 @@ fn _du_walk(parent_dirfd, name, display, depth): i64 {
         _du_any_failed = 1;
         return 0;
     }
+    # ⚠ Before ANY accounting: a repeat contributes nothing, and for a directory
+    # under -L that also means the walk does not descend into it a second time.
+    if (_du_seen_skip(&st, depth) == 1) { return 0; }
+
     var self_size = _du_size(&st);
 
     # Non-directory: report as appropriate.
@@ -219,12 +303,35 @@ fn _du_walk(parent_dirfd, name, display, depth): i64 {
         return self_size;
     }
 
-    var subtree: i64 = self_size;
+    # ⚠ Ancestor bookkeeping, and ONLY under -L: without a symlink there is no
+    # way back up, so a -P walk cannot cycle and need not pay the scan.
+    # ⛔ A push that FAILS means the ancestor is unrecorded, which is exactly the
+    # state the unbounded recursion needs — so refuse to descend instead.
+    var pushed: i64 = 0;
+    if (_du_follow == 1) {
+        if (fs_dirstack_push(_du_path, fs_dev(&st), fs_ino(&st)) != 0) {
+            k_write( 2, "kriya du: cannot track directory depth: out of memory\n", 54);
+            _du_any_failed = 1;
+            fs_close(dir_fd);
+            return self_size;
+        }
+        pushed = 1;
+    }
+
+    # ⛔ TWO RUNNING TOTALS, NOT ONE, AND `-S` IS WHY. `printed` is this
+    # directory's LINE — which `-S` strips subdirectories out of — while `full`
+    # is the true subtree size the parent and the `-c` grand total need. One
+    # variable served both, so `du -cS` reported a total that no line in its own
+    # output added up to: 4 where GNU said 12, because each operand contributed
+    # only its own blocks plus its direct files. Pre-existing; found while
+    # measuring the dedup.
+    var self_blocks: i64 = self_size;
     # In -b/--apparent-size mode, directories don't contribute their
     # own st_size — only file content bytes count toward apparent size.
     # (Matches GNU's --apparent-size dir handling.)
-    if (_du_bytes == 1) { subtree = 0; }
-    var children_only: i64 = 0;
+    if (_du_bytes == 1) { self_blocks = 0; }
+    var printed: i64 = self_blocks;
+    var full:    i64 = self_blocks;
     var ent_buf = alloc(4096);
     var loop: i64 = 1;
     while (loop == 1) {
@@ -253,28 +360,54 @@ fn _du_walk(parent_dirfd, name, display, depth): i64 {
                         } else {
                             csr = fs_stat_entry(dir_fd, child_disp, ename, &cst, 0);
                         }
+                        if (csr != 0) {
+                            # ⛔ THIS ARM DID NOT EXIST. A child whose stat failed
+                            # was dropped in silence and `du` exited 0 over a tree
+                            # it could not fully read — and `-L` makes it easy to
+                            # reach, since a broken symlink answers ENOENT and a
+                            # self-referential one answers ELOOP where the default
+                            # `-P` lstat succeeds on both. GNU diagnoses and exits 1.
+                            k_write( 2, "kriya du: cannot access '", 25);
+                            k_write( 2, child_disp, strlen(child_disp));
+                            k_write( 2, "': ", 3);
+                            if (errmsg_is_known(0 - csr) == 1) {
+                                var cm = errmsg_for(0 - csr);
+                                k_write( 2, cm, strlen(cm));
+                            }
+                            k_write( 2, "\n", 1);
+                            _du_any_failed = 1;
+                        }
                         if (csr == 0) {
                             if (fs_is_dir(&cst) == 1) {
-                                var child_size = _du_walk(dir_fd, ename, child_disp, depth + 1);
+                                # ⚠ `_du_walk` returns the FULL subtree total, never
+                                # the `-S`-stripped one — that distinction is the
+                                # whole reason the two totals are separate.
+                                var child_full = _du_walk(dir_fd, ename, child_disp, depth + 1);
+                                full = full + child_full;
                                 if (_du_sep_dirs == 0) {
-                                    subtree = subtree + child_size;
+                                    printed = printed + child_full;
                                 }
-                                children_only = children_only + child_size;
                             } else {
-                                var sz = _du_size(&cst);
-                                subtree = subtree + sz;
-                                children_only = children_only + sz;
-                                # Emit per-file lines under -a.
-                                var depth_ok: i64 = 1;
-                                if (_du_have_depth == 1) {
-                                    if (depth + 1 > _du_max_depth) { depth_ok = 0; }
+                                # ⚠ The dedup gates the BYTES and the `-a` LINE
+                                # together. A second hardlink name printing `0`
+                                # would be a different output from GNU's, which
+                                # omits the line entirely.
+                                if (_du_seen_skip(&cst, depth + 1) == 0) {
+                                    var sz = _du_size(&cst);
+                                    printed = printed + sz;
+                                    full    = full + sz;
+                                    # Emit per-file lines under -a.
+                                    var depth_ok: i64 = 1;
+                                    if (_du_have_depth == 1) {
+                                        if (depth + 1 > _du_max_depth) { depth_ok = 0; }
+                                    }
+                                    if (_du_summarize == 1) { depth_ok = 0; }
+                                    if (_du_all == 1) {
+                                        if (depth_ok == 1) { _du_emit(sz, child_disp); }
+                                    }
+                                    # _du_grand is operand-level only — children
+                                    # fold into the top-level subtree below.
                                 }
-                                if (_du_summarize == 1) { depth_ok = 0; }
-                                if (_du_all == 1) {
-                                    if (depth_ok == 1) { _du_emit(sz, child_disp); }
-                                }
-                                # _du_grand is operand-level only — children
-                                # fold into the top-level subtree below.
                             }
                         }
                     }
@@ -284,6 +417,7 @@ fn _du_walk(parent_dirfd, name, display, depth): i64 {
         }
     }
     fs_close(dir_fd);
+    if (pushed == 1) { fs_dirstack_pop(_du_path); }
 
     # Decide whether to print this directory line.
     var print_dir: i64 = 1;
@@ -293,14 +427,15 @@ fn _du_walk(parent_dirfd, name, display, depth): i64 {
     if (_du_have_depth == 1) {
         if (depth > _du_max_depth) { print_dir = 0; }
     }
-    if (print_dir == 1) { _du_emit(subtree, display); }
+    if (print_dir == 1) { _du_emit(printed, display); }
 
     # Grand-total accumulates the OPERAND-level subtree only (matches
-    # GNU's -c semantics — sum of what the user named).
+    # GNU's -c semantics — sum of what the user named). ⚠ `full`, not
+    # `printed`: GNU's `-c` total equals the whole tree even under `-S`.
     if (depth == 0) {
-        _du_grand = _du_grand + subtree;
+        _du_grand = _du_grand + full;
     }
-    return subtree;
+    return full;
 }
 
 var _du_any_failed: i64 = 0;
@@ -331,6 +466,7 @@ fn _du_init_spec(): i64 {
     flags_add_bool(s, 76,  "dereference",    0, "follow symbolic links");
     flags_add_bool(s, 80,  "no-dereference", 0, "do not follow symlinks (default, ADR 0003)");
     flags_add_bool(s, 83,  "separate-dirs",  0, "do not include subdirectories in directory totals");
+    flags_add_bool(s, 108, "count-links",    0, "count sizes many times if hard linked");
     flags_add_int(s,  100, "max-depth",      0, "only print entries at depth <= N");
     _du_spec = s;
     return 0;
@@ -351,9 +487,25 @@ fn cmd_du(start: i64): i64 {
     _du_sep_dirs    = 0;
     _du_grand       = 0;
     _du_any_failed  = 0;
+    _du_count_links = 0;
+    # ⚠ Built here, not memoized like `_du_spec`: one set per invocation, shared
+    # across every operand, so a hard link is deduped ACROSS operands the way GNU
+    # does — and so a second in-process `cmd_du` would not inherit the first's.
+    _du_seen        = fs_inoset_new();
+    _du_path        = fs_dirstack_new();
 
     var n_argv = kriya_argv_count();
-    var operands_buf = alloc(512 * 8);
+    # ⛔ THIS WAS A FIXED 512-SLOT ARRAY WITH NO BOUND CHECK, and `du *` in a
+    # directory of more than 512 entries walked straight off the end of it —
+    # a heap smash from a glob, not from anything exotic. Sized to argv, which
+    # is the only real bound, so the store below cannot overrun by construction.
+    var operands_cap = n_argv - start;
+    if (operands_cap < 1) { operands_cap = 1; }
+    var operands_buf = alloc(operands_cap * 8);
+    if (operands_buf == 0) {
+        k_write( 2, "kriya du: out of memory\n", 24);
+        return EXIT_FAILURE;
+    }
     var n_operands: i64 = 0;
     var no_more_opts: i64 = 0;
 
@@ -417,15 +569,13 @@ fn cmd_du(start: i64): i64 {
                         }
                         if (nlen == 14) {
                             if (_seq_bytes_eq(tok + 2, "human-readable", 14) == 1) { _du_human = 1; handled = 1; }
-                            if (_seq_bytes_eq(tok + 2, "separate-dirs", 13) == 1) {
-                                _du_sep_dirs = 1; handled = 1;
-                            }# 13 — no
                         }
                         if (nlen == 13) {
                             if (_seq_bytes_eq(tok + 2, "separate-dirs", 13) == 1) { _du_sep_dirs = 1; handled = 1; }
                         }
                         if (nlen == 11) {
                             if (_seq_bytes_eq(tok + 2, "dereference", 11) == 1) { _du_follow = 1; handled = 1; }
+                            if (_seq_bytes_eq(tok + 2, "count-links", 11) == 1) { _du_count_links = 1; handled = 1; }
                         }
                         if (nlen == 14) {
                             if (_seq_bytes_eq(tok + 2, "no-dereference", 14) == 1) { _du_follow = 0; handled = 1; }
@@ -470,6 +620,8 @@ fn cmd_du(start: i64): i64 {
                                 _du_follow = 0; p = p + 1;
                             } else { if (c == 83) {        # -S
                                 _du_sep_dirs = 1; p = p + 1;
+                            } else { if (c == 108) {       # -l
+                                _du_count_links = 1; p = p + 1;
                             } else { if (c == 100) {       # -d N
                                 var dval: i64 = 0;
                                 if (p + 1 < tlen) {
@@ -492,7 +644,7 @@ fn cmd_du(start: i64): i64 {
                             } else {
                                 k_write( 2, "kriya du: error: unknown short option\n", 38);
                                 return EXIT_USAGE;
-                            } } } } } } } } } }
+                            } } } } } } } } } } }
                         }
                     }
                     if (consumed_next == 1) { i = i + 2; } else { i = i + 1; }
@@ -541,10 +693,11 @@ fn du_help_declare(): i64 {
     help_begin("du", "Summarise disk usage of files and directories.",
                "du [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("Reports 1024-byte blocks by default. Hard links are counted once per path today; dedup is a named follow-up.");  # roadmap 1.6.0  #skip-lint
+    help_operands("Reports 1024-byte blocks by default. A file reached under several names is counted once; -l counts it every time.");  #skip-lint
     help_exit(1, "a path could not be read");
     help_example("du -sh .");
     help_example("du -a -d 1 /var");
     help_example("du -b file.bin");
+    help_example("du -sl /var/cache");
     return 0;
 }

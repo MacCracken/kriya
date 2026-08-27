@@ -41,11 +41,18 @@
 # Root protection (ADR 0004): cp is non-destructive of unnamed data;
 # the protected_paths check is rm-only.
 #
-# Hard-link preservation across same-inode source entries: GNU cp
-# preserves them with `--preserve=links`. M2 cp does not preserve
-# them by default and does not yet take that flag. Multiple paths (roadmap 1.6.0)
-# to the same inode become independent copies in the destination tree.
-# Deferred follow-up. (roadmap 1.6.0)
+# Hard-link preservation (`--preserve=links`, v1.6.0):
+#   Two source names that share an inode become two names for ONE
+#   destination file instead of two independent copies. The first name
+#   the walk reaches is copied; every later name is `linkat`'d to it.
+#   The map from (st_dev, st_ino) to that first destination path is
+#   `fs_inoset_*` in `src/lib/fs.cyr` — the same helper `du` dedupes with.
+#
+#   ⚠ WHICH INODES ARE TRACKED FOLLOWS THE SYMLINK POLICY, not the link
+#   count alone. `st_nlink > 1` is only a sound "cannot be reached twice"
+#   filter while we are NOT dereferencing: under -L two distinct symlinks
+#   stat to one inode whose link count is 1, and GNU links those together.
+#   `_cp_links_track` widens exactly where `_cp_should_follow` does.
 #
 # Each top-level (SRC, DST) pair is attempted independently. Exit
 # EXIT_FAILURE if any failed.
@@ -69,6 +76,79 @@ var _cp_declined = 0;
 var _cp_buf   = 0;
 var _CP_BUFSZ = 65536;
 
+# `--preserve=` attributes, as bits in the `preserve` argument threaded through
+# every copy function.
+#
+# ⛔ `-p` USED TO BE ONE BIT MEANING "mode AND timestamps", so `--preserve=mode`
+# silently preserved timestamps too and `--preserve=timestamps` silently
+# preserved the mode. Both were accepted, neither did what it said. Splitting
+# them is what makes `links` expressible at all, and it fixes that on the way.
+#
+# ⚠ `mv` passes this positionally (`src/cmd/mv.cyr`) and must pass MODE|TIMES,
+# not 1 — a bare 1 now means "mode only" and would drop the mtime a move keeps.
+enum CpPreserve {
+    CP_PRES_MODE  = 1;
+    CP_PRES_TIMES = 2;
+    CP_PRES_LINKS = 4;
+    CP_PRES_P     = 3;      # what `-p` and a bare `--preserve` select
+}
+
+# (st_dev, st_ino) -> the first destination path written for that inode.
+# 0 when `--preserve=links` is off, which is also the "do not track" signal
+# every call site reads. One map per `cmd_cp` invocation, so hard links are
+# preserved ACROSS command-line operands the way GNU does — `cp
+# --preserve=links a b dir/` makes `dir/b` a link to `dir/a`.
+var _cp_links = 0;
+
+# Set when the map could not record an inode. ⚠ Everywhere else in this file an
+# allocation failure crashes, which is LOUD; here it would be QUIET — the copy
+# succeeds, the entry is simply not remembered, and a later name silently
+# becomes an independent copy of a file the user asked to stay linked. That is
+# the one shape worth spending four lines on.
+var _cp_link_track_failed = 0;
+
+# (st_dev, st_ino) of every non-directory destination THIS invocation created.
+#
+# ⛔ WITHOUT IT, A SECOND OPERAND SILENTLY CLOBBERS THE FIRST'S DESTINATION.
+# `cp -f a/f b/f dst/` resolves both to `dst/f`: kriya copied `a/f`, then
+# overwrote it with `b/f` and exited 0, where GNU refuses the second with
+# `will not overwrite just-created`. That was a divergence for as long as cp has
+# existed here, and `--preserve=links` turned one spelling of it into DATA LOSS —
+# with both operands on one inode the link path unlinked `dst/f` and then tried
+# to link it to itself, leaving nothing at all.
+#
+# ⚠ Directories are deliberately NOT recorded: `cp -R a b dst/` is supposed to
+# MERGE two trees that share a subdirectory name, and GNU merges them.
+var _cp_created = 0;
+
+# The directories the recursive walk is currently INSIDE, for `-L`.
+#
+# ⛔ WITHOUT IT `cp -RL` OVER A SYMLINK TO AN ANCESTOR NEVER TERMINATES. Three
+# commands to reproduce — a directory, a file in it, `ln -s .. dir/up` — and cp
+# descends `dir/up/dir/up/dir/...` writing a real directory at every level until
+# the stack dies, leaving the half-built tree on disk. It is the same failure the
+# in-tree `cp -r dir dir/backup` guard above already refuses (12,188 directories
+# before a core dump), reached through a symlink instead of a prefix, and the
+# textual `path_is_under` check cannot see it. GNU reports
+# `cannot copy cyclic symbolic link` and copies the rest.
+var _cp_path = 0;
+
+# (st_dev, st_ino) of the destination directory the current operand is building.
+#
+# ⛔ THE OTHER HALF OF THE `-L` RUNAWAY, AND GNU DOES NOT CLOSE IT EITHER. A
+# symlink that escapes the source tree into a directory which CONTAINS the
+# destination — `ln -s .. t/up`, then `cp -RL t dst` — walks back down into
+# `dst` and copies it into itself, forever. Measured: GNU produced a 1,536-entry
+# `dst/up/dst/up/dst/…` tree and stopped only when the path exceeded
+# NAME_MAX/PATH_MAX, exiting 0; kriya wrote 11,635 entries and DUMPED CORE.
+#
+# ⚠ Refusing to descend into the destination is a deliberate deviation from the
+# oracle, in the direction the in-tree `cp -r dir dir/backup` guard above already
+# takes — see ADR 0012. The textual `path_is_under` check cannot see this one,
+# because the destination is not under the source by NAME, only by traversal.
+var _cp_dst_root_dev = 0;
+var _cp_dst_root_ino = 0;
+
 # Symlink policy enum encoded as small integers.
 #   POLICY_P = 0: preserve everywhere (default with -R).
 #   POLICY_H = 1: follow command-line operands, preserve in-walk.
@@ -84,7 +164,7 @@ fn _cp_init_spec(): i64 {
     var s = flags_new();
     _cp_f_idx     = flags_add_bool(s, 102, "force",       0, "overwrite existing destination");
     _cp_i_idx     = flags_add_bool(s, 105, "interactive", 0, "prompt before overwrite");
-    _cp_p_idx     = flags_add_bool(s, 112, "preserve",    0, "preserve mode and timestamps");
+    _cp_p_idx     = flags_add_bool(s, 112, "preserve",    0, "preserve mode and timestamps (=links for hard links)");
     _cp_v_idx     = flags_add_bool(s, 118, "verbose",     0, "print each copy");
     _cp_R_idx     = flags_add_bool(s, 82,  "recursive",   0, "copy directories recursively");
     _cp_r_idx     = flags_add_bool(s, 114, "",            0, "alias for -R");
@@ -182,6 +262,80 @@ fn _cp_verbose(src_display, dst_display): i64 {
     return 0;
 }
 
+# Should this entry's inode take part in link preservation?
+#
+# ⭐ DELIBERATELY THE SAME SHAPE AS `_cp_should_follow` ABOVE, because it is the
+# same question one step on: a link count of 1 proves "cannot be reached twice"
+# only while we are not dereferencing. Measured — `cp -RL --preserve=links` over
+# a directory holding one file and two symlinks to it produces ONE inode with
+# three names, and every one of those three entries stats to `st_nlink == 1`.
+# GNU gates on `1 < st_nlink || command-line-arg-with--H || -L`; passing this the
+# `follow` its caller already computed from `_cp_should_follow` says the same
+# thing in one argument, because `follow` is 1 in exactly those two cases.
+fn _cp_links_track(follow, st): i64 {
+    if (_cp_links == 0) { return 0; }
+    if (follow == 1) { return 1; }
+    if (fs_nlink(st) > 1) { return 1; }
+    return 0;
+}
+
+# Create `dst` as a second name for the master destination already written for
+# this inode. Returns 0, or a negative errno after reporting.
+#
+# ⛔ BOTH DIRFDS ARE AT_FDCWD, not the walk's destination dirfd. Not a style
+# choice: `fs_linkat` on agnos routes to the path-based `k_link`, which has no
+# relative resolution and answers -ENOSYS the moment either side is a real fd.
+# The dirfd form would work here and fail mid-walk on the target kriya is for.
+#
+# ⚠ That re-resolves the master path from the cwd, so every intermediate
+# component is walked again — the hazard `fs.cyr`'s header names. It is narrower
+# here than for a descent: the path names a file THIS cp created moments ago,
+# and `flags = 0` (not AT_SYMLINK_FOLLOW) leaves the FINAL component
+# undereferenced, so a symlink swapped in at the master name would be linked as
+# the symlink rather than followed out of the tree.
+#
+# ⚠ A FAILED LINK IS A FAILED COPY, not a quiet fallback to an independent copy.
+# Degrading would be the accepts-and-lies shape v1.2.1 went through cp to
+# remove — `--preserve=links` exiting 0 having preserved nothing. GNU errors here
+# too (its `cannot create hard link` diagnostic is this one).
+fn _cp_link_master(master, dst_path, remove_first): i64 {
+    # ⚠ `link` refuses an existing destination, so an accepted overwrite has to
+    # unlink first. The regular-file callers pass "the destination existed AND
+    # the overwrite rules already passed" rather than `force` alone, so an `-i`
+    # prompt the user answered yes to is honoured; the symlink callers pass
+    # `force`, which is what the `symlinkat` right below them already does.
+    if (remove_first == 1) { fs_unlinkat(fs_at_fdcwd(), dst_path, 0); }
+    var r = fs_linkat(fs_at_fdcwd(), master, fs_at_fdcwd(), dst_path, 0);
+    if (r != 0) {
+        k_write( 2, "kriya cp: cannot create hard link '", 35);
+        k_write( 2, dst_path, strlen(dst_path));
+        k_write( 2, "' to '", 6);
+        k_write( 2, master, strlen(master));
+        k_write( 2, "': ", 3);
+        if (errmsg_is_known(0 - r) == 1) {
+            var m = errmsg_for(0 - r);
+            k_write( 2, m, strlen(m));
+        }
+        k_write( 2, "\n", 1);
+    }
+    return r;
+}
+
+# Remember `dst_path` as the master destination for this inode. Called only
+# after the copy SUCCEEDED — a destination that failed or was refused at an `-i`
+# prompt must not become the thing later names get linked to.
+fn _cp_links_record(st, dst_path): i64 {
+    if (_cp_links == 0) { return 0; }
+    if (fs_inoset_add(_cp_links, fs_dev(st), fs_ino(st), dst_path) < 0) {
+        k_write( 2, "kriya cp: --preserve=links: cannot track '", 42);
+        k_write( 2, dst_path, strlen(dst_path));
+        k_write( 2, "': out of memory\n", 17);
+        _cp_link_track_failed = 1;
+        return 0 - 1;
+    }
+    return 0;
+}
+
 # Read/write loop. Both fds are already open. Returns 0 on success,
 # negative errno on failure (and emits the error report).
 fn _cp_copy_loop(src_fd, dst_fd, src_display, dst_display): i64 {
@@ -229,6 +383,29 @@ fn _cp_copy_loop(src_fd, dst_fd, src_display, dst_display): i64 {
     return 0;
 }
 
+# 1 when `dst_st` names a file this same invocation created, in which case the
+# copy must be refused rather than performed. GNU's wording, verbatim.
+fn _cp_guard_created(dst_st, dst_display, src_display): i64 {
+    if (_cp_created == 0) { return 0; }
+    if (fs_inoset_find(_cp_created, fs_dev(dst_st), fs_ino(dst_st)) == 0) { return 0; }
+    k_write( 2, "kriya cp: will not overwrite just-created '", 43);
+    k_write( 2, dst_display, strlen(dst_display));
+    k_write( 2, "' with '", 8);
+    k_write( 2, src_display, strlen(src_display));
+    k_write( 2, "'\n", 2);
+    return 1;
+}
+
+# Record a destination this invocation created.
+#
+# ⚠ A hard link made by `_cp_link_master` needs NO record of its own: it shares
+# the master's inode, and the master is already in the set.
+fn _cp_created_record(dst_st): i64 {
+    if (_cp_created == 0) { return 0; }
+    fs_inoset_add(_cp_created, fs_dev(dst_st), fs_ino(dst_st), 0);
+    return 0;
+}
+
 # Single-file copy (path-based). Used by both the non-recursive and
 # the top-level recursive entry when the source is a regular file.
 # Source open is path-based (POSIX: follows symlinks).
@@ -246,6 +423,8 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
 
     var dst_stat[144];
     var dr = k_stat(dst, &dst_stat);
+    var dst_existed: i64 = 0;
+    if (dr == 0) { dst_existed = 1; }
     if (dr == 0) {
         if (load64(&src_stat + 0) == load64(&dst_stat + 0)) {
             if (load64(&src_stat + 8) == load64(&dst_stat + 8)) {
@@ -257,6 +436,9 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
                 return 0 - 17;
             }
         }
+        # ⚠ BEFORE the -f / -i decision, exactly as GNU orders it: a just-created
+        # destination is refused outright and never prompted for.
+        if (_cp_guard_created(&dst_stat, dst, src) == 1) { return 0 - 17; }
         if (force == 0) {
             if (interactive == 1) {
                 if (_cp_isatty(0) == 0) {
@@ -275,6 +457,19 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
                 k_write( 2, "kriya cp: error: -i requires stdin to be a terminal\n", 52);
                 return 0 - 9999;
             }
+        }
+    }
+
+    # ⭐ A NAME ALREADY COPIED UNDER THIS INODE BECOMES A LINK, NOT A SECOND COPY.
+    # This sits after the overwrite rules deliberately: `--preserve=links` decides
+    # HOW the destination is made, never WHETHER it may be made.
+    if (_cp_links != 0) {
+        var slot = fs_inoset_find(_cp_links, fs_dev(&src_stat), fs_ino(&src_stat));
+        if (slot != 0) {
+            var lr = _cp_link_master(fs_inoset_data(slot), dst, dst_existed);
+            if (lr != 0) { return lr; }
+            if (verbose == 1) { _cp_verbose(src, dst); }
+            return 0;
         }
     }
 
@@ -301,8 +496,10 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
         return r;
     }
 
-    if (preserve == 1) {
+    if ((preserve & CP_PRES_MODE) != 0) {
         sys_chmod(dst, perms);
+    }
+    if ((preserve & CP_PRES_TIMES) != 0) {
         var ts[32];
         store64(&ts + 0,  load64(&src_stat + 72));
         store64(&ts + 8,  load64(&src_stat + 80));
@@ -310,6 +507,20 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
         store64(&ts + 24, load64(&src_stat + 96));
         if (K_HAVE_UTIMES == 1) { fs_utimensat(0 - 100, dst, &ts, 0); }   # best-effort mtime preserve; no-op on agnos
     }
+
+    # ⚠ Recorded only now, after the copy succeeded. A destination that failed or
+    # that an `-i` prompt refused must never become the file later names link to.
+    # ⚠ `follow = 1`: this path is only ever reached for a COMMAND-LINE operand,
+    # and it opens the source with a path-based `k_stat`/`k_open` — it dereferences
+    # unconditionally, which is exactly POSIX's non-`-R` rule, so the link count is
+    # not a sound filter here.
+    if (_cp_links_track(1, &src_stat) == 1) { _cp_links_record(&src_stat, dst); }
+
+    # ⚠ One extra stat of a file we just wrote — page-cache warm, no path work
+    # the copy did not already do — to learn the identity a later operand's
+    # just-created check compares against.
+    var made_stat[144];
+    if (k_stat(dst, &made_stat) == 0) { _cp_created_record(&made_stat); }
 
     if (verbose == 1) { _cp_verbose(src, dst); }
     return 0;
@@ -329,7 +540,23 @@ fn _cp_should_follow(policy, top_level): i64 {
 
 # Copy a symlink: read its target text, recreate at the destination
 # under the same name. fd-based to keep TOCTOU windows tight.
-fn _cp_symlink_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, verbose): i64 {
+#
+# ⚠ SYMLINKS THEMSELVES GET HARD-LINKED under `--preserve=links`, and that is not
+# a corner nobody hits — `ln -s t s1; ln s1 s2` is two names for one symlink
+# inode, and GNU reproduces it as two names for one destination symlink inode
+# (measured: both destination names come back with `st_nlink 2`). `src_st` is
+# here for that: the caller has already stat'd the entry, and this needs its
+# (dev, ino) for the same map the regular-file path uses.
+fn _cp_symlink_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, verbose, src_st): i64 {
+    if (_cp_links != 0) {
+        var lslot = fs_inoset_find(_cp_links, fs_dev(src_st), fs_ino(src_st));
+        if (lslot != 0) {
+            var llr = _cp_link_master(fs_inoset_data(lslot), dst_display, force);
+            if (llr != 0) { return llr; }
+            if (verbose == 1) { _cp_verbose(src_display, dst_display); }
+            return 0;
+        }
+    }
     var link_buf = alloc(4096);
     var n = fs_readlinkat(src_dirfd, src_name, link_buf, 4095);
     if (n < 0) {
@@ -338,6 +565,12 @@ fn _cp_symlink_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_dis
     }
     store8(link_buf + n, 0);
 
+    # ⚠ This arm never probed the destination — it unlinked under `-f` and let
+    # `symlinkat` fail otherwise — so the just-created check needs its own stat.
+    var sdst_probe[144];
+    if (fs_fstatat(dst_dirfd, dst_name, &sdst_probe, 256) == 0) {
+        if (_cp_guard_created(&sdst_probe, dst_display, src_display) == 1) { return 0 - 17; }
+    }
     if (force == 1) { fs_unlinkat(dst_dirfd, dst_name, 0); }
 
     var r = fs_symlinkat(link_buf, dst_dirfd, dst_name);
@@ -345,6 +578,12 @@ fn _cp_symlink_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_dis
         _cp_report(dst_display, 0 - r);
         return r;
     }
+    # ⚠ follow = 0: this function is reached only when the policy did NOT follow
+    # (a followed symlink is classified as whatever it points at), so the link
+    # count is the whole gate here.
+    if (_cp_links_track(0, src_st) == 1) { _cp_links_record(src_st, dst_display); }
+    var smade[144];
+    if (fs_fstatat(dst_dirfd, dst_name, &smade, 256) == 0) { _cp_created_record(&smade); }
     if (verbose == 1) { _cp_verbose(src_display, dst_display); }
     return 0;
 }
@@ -376,7 +615,13 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
     # the one contradicting CLAUDE.md's "no silent file overwrites without -f".
     var dst_probe[144];
     var dpr = fs_fstatat(dst_dirfd, dst_name, &dst_probe, 256);   # AT_SYMLINK_NOFOLLOW
+    var dst_existed: i64 = 0;
+    if (dpr == 0) { dst_existed = 1; }
     if (dpr == 0) {
+        if (_cp_guard_created(&dst_probe, dst_display, src_display) == 1) {
+            fs_close(src_fd);
+            return 0 - 17;
+        }
         if (force == 0) {
             if (interactive == 1) {
                 if (_cp_prompt(dst_display) == 0) {
@@ -389,6 +634,25 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
                 _cp_report(dst_display, 17);     # EEXIST
                 return 0 - 17;
             }
+        }
+    }
+
+    # ⭐ A NAME WHOSE INODE IS ALREADY IN THE MAP BECOMES A LINK. Placed after the
+    # overwrite checks above and before the destination is opened, so the
+    # existing-destination rules decide WHETHER, and this decides HOW.
+    #
+    # ⚠ The destination side goes through `dst_display` and AT_FDCWD rather than
+    # (`dst_dirfd`, `dst_name`) — see `_cp_link_master`. The source fd opened
+    # above is closed on this path; it was opened before the probe and there is
+    # no ordering that avoids that without duplicating the probe.
+    if (_cp_links != 0) {
+        var lslot = fs_inoset_find(_cp_links, fs_dev(src_st), fs_ino(src_st));
+        if (lslot != 0) {
+            fs_close(src_fd);
+            var llr = _cp_link_master(fs_inoset_data(lslot), dst_display, dst_existed);
+            if (llr != 0) { return llr; }
+            if (verbose == 1) { _cp_verbose(src_display, dst_display); }
+            return 0;
         }
     }
 
@@ -433,8 +697,10 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
         return r;
     }
 
-    if (preserve == 1) {
+    if ((preserve & CP_PRES_MODE) != 0) {
         fs_fchmodat(dst_dirfd, dst_name, perms, 0);
+    }
+    if ((preserve & CP_PRES_TIMES) != 0) {
         var ts[32];
         store64(&ts + 0,  load64(src_st + 72));
         store64(&ts + 8,  load64(src_st + 80));
@@ -442,6 +708,13 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
         store64(&ts + 24, load64(src_st + 96));
         fs_utimensat(dst_dirfd, dst_name, &ts, 0);
     }
+
+    # `follow` is the caller's `_cp_should_follow(policy, 0)` — 1 only under -L,
+    # which is exactly where a link count of 1 stops being a sound filter.
+    if (_cp_links_track(follow, src_st) == 1) { _cp_links_record(src_st, dst_display); }
+
+    var made_st[144];
+    if (fs_fstatat(dst_dirfd, dst_name, &made_st, 0) == 0) { _cp_created_record(&made_st); }
 
     if (verbose == 1) { _cp_verbose(src_display, dst_display); }
     return 0;
@@ -505,6 +778,33 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
         return dst_fd;
     }
 
+    # ⚠ `_cp_dir_top` zeroes this before each operand, and `_cp_dir_descend_at`
+    # is only ever entered through it — so the FIRST destination directory
+    # opened is the operand's destination root, and no separate stat of it is
+    # needed anywhere else.
+    if (_cp_dst_root_ino == 0) {
+        var droot[144];
+        if (fs_fstatat(dst_dirfd, dst_name, &droot, 0) == 0) {
+            _cp_dst_root_dev = fs_dev(&droot);
+            _cp_dst_root_ino = fs_ino(&droot);
+        }
+    }
+
+    # ⚠ Only under -L: without a followed symlink there is no way back up the
+    # tree, so -P and -H walks cannot cycle and need not pay the scan.
+    # ⛔ A push that FAILS leaves the ancestor unrecorded, which is precisely the
+    # state the runaway recursion needs — so stop rather than descend blind.
+    var pushed: i64 = 0;
+    if (policy == CP_POLICY_L) {
+        if (fs_dirstack_push(_cp_path, fs_dev(src_st), fs_ino(src_st)) != 0) {
+            k_write( 2, "kriya cp: cannot track directory depth: out of memory\n", 54);
+            fs_close(src_fd);
+            fs_close(dst_fd);
+            return 0 - 12;                 # ENOMEM
+        }
+        pushed = 1;
+    }
+
     var any_failed: i64 = 0;
     var ent_buf = alloc(4096);
     var loop: i64 = 1;
@@ -548,9 +848,37 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
                             if (fs_is_lnk(&child_st) == 1) {
                                 rr = _cp_symlink_at(src_fd, name, child_src_disp,
                                                     dst_fd, name, child_dst_disp,
-                                                    force, verbose);
+                                                    force, verbose, &child_st);
                             } else {
                                 if (fs_is_dir(&child_st) == 1) {
+                                    # ⛔ A DIRECTORY WE ARE ALREADY INSIDE IS A
+                                    # CYCLE, and only a followed symlink can
+                                    # produce one. GNU names the LINK, not the
+                                    # directory it resolves to, because the link
+                                    # is the thing the user can delete.
+                                    var cyclic: i64 = 0;
+                                    var is_dest: i64 = 0;
+                                    if (follow == 1) {
+                                        if (fs_dirstack_has(_cp_path, fs_dev(&child_st),
+                                                            fs_ino(&child_st)) == 1) { cyclic = 1; }
+                                        if (_cp_dst_root_ino != 0) {
+                                            if (fs_dev(&child_st) == _cp_dst_root_dev) {
+                                                if (fs_ino(&child_st) == _cp_dst_root_ino) { is_dest = 1; }
+                                            }
+                                        }
+                                    }
+                                    if (is_dest == 1) {
+                                        k_write( 2, "kriya cp: not descending into the destination '", 47);
+                                        k_write( 2, child_src_disp, strlen(child_src_disp));
+                                        k_write( 2, "'\n", 2);
+                                        rr = 0 - 22;              # EINVAL
+                                    } else {
+                                    if (cyclic == 1) {
+                                        k_write( 2, "kriya cp: cannot copy cyclic symbolic link '", 44);
+                                        k_write( 2, child_src_disp, strlen(child_src_disp));
+                                        k_write( 2, "'\n", 2);
+                                        rr = 0 - 40;              # ELOOP
+                                    } else {
                                     # `follow` carries the lstat-vs-stat decision
                                     # into the descend: if we stat'd to get here,
                                     # the dir open must also follow.
@@ -558,6 +886,8 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
                                                             dst_fd, name, child_dst_disp,
                                                             policy, follow, force, interactive,
                                             preserve, verbose, &child_st);
+                                    }
+                                    }
                                 } else {
                                     if (fs_is_reg(&child_st) == 1) {
                                         rr = _cp_file_at(src_fd, name, child_src_disp,
@@ -582,11 +912,14 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
 
     fs_close(src_fd);
     fs_close(dst_fd);
+    if (pushed == 1) { fs_dirstack_pop(_cp_path); }
 
     # Apply -p restoration after content is written so the directory's
     # mtime isn't bumped by the writes inside it.
-    if (preserve == 1) {
+    if ((preserve & CP_PRES_MODE) != 0) {
         fs_fchmodat(dst_dirfd, dst_name, perms, 0);
+    }
+    if ((preserve & CP_PRES_TIMES) != 0) {
         var ts[32];
         store64(&ts + 0,  load64(src_st + 72));
         store64(&ts + 8,  load64(src_st + 80));
@@ -604,6 +937,10 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
 # `allow_follow_top` flag carries the lstat-vs-stat decision that the
 # caller (`_cp_recursive_one`) already made.
 fn _cp_dir_top(src_path, dst_path, policy, allow_follow_top, force, interactive, preserve, verbose, src_st): i64 {
+    # Per operand: each has its own destination root, and the descent below
+    # records it the first time it opens a destination directory.
+    _cp_dst_root_dev = 0;
+    _cp_dst_root_ino = 0;
     return _cp_dir_descend_at(0 - 100, src_path, src_path,
                               0 - 100, dst_path, dst_path,
                               policy, allow_follow_top, force, interactive, preserve, verbose, src_st);
@@ -638,12 +975,32 @@ fn _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose): i
             return n;
         }
         store8(link_buf + n, 0);
+        # ⚠ The same hard-linked-symlink case `_cp_symlink_at` handles, one level
+        # up: `cp -R --preserve=links s1 s2 dir/` where s1 and s2 are two names
+        # for one symlink inode. This arm is the operand form and was a separate
+        # inlined copy of the symlink logic before the map existed.
+        if (_cp_links != 0) {
+            var tslot = fs_inoset_find(_cp_links, fs_dev(&st), fs_ino(&st));
+            if (tslot != 0) {
+                var tlr = _cp_link_master(fs_inoset_data(tslot), dst, force);
+                if (tlr != 0) { return tlr; }
+                if (verbose == 1) { _cp_verbose(src, dst); }
+                return 0;
+            }
+        }
+        var tdst_probe[144];
+        if (fs_lstat_at(0 - 100, dst, &tdst_probe) == 0) {
+            if (_cp_guard_created(&tdst_probe, dst, src) == 1) { return 0 - 17; }
+        }
         if (force == 1) { k_unlink(dst); }
         var lr = k_symlink(link_buf, dst);
         if (lr != 0) {
             _cp_report(dst, 0 - lr);
             return lr;
         }
+        if (_cp_links_track(0, &st) == 1) { _cp_links_record(&st, dst); }
+        var tmade[144];
+        if (fs_lstat_at(0 - 100, dst, &tmade) == 0) { _cp_created_record(&tmade); }
         if (verbose == 1) { _cp_verbose(src, dst); }
         return 0;
     }
@@ -685,18 +1042,21 @@ fn _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose): i
     return 0 - 22;
 }
 
-# Validate a `--preserve=` attribute list. Returns 0 when every attribute is one
-# kriya actually preserves, or -1 (after reporting) when it is not.
+# Parse a `--preserve=` attribute list into a `CpPreserve` bitmask, or -1
+# (after reporting) when it names an attribute kriya does not preserve.
 #
-# ⚠ Accepting an attribute kriya does not implement would be the exact bug this
-# release is about: `cp --preserve=links` exited 0 while making independent
-# copies of what the user asked to stay hard-linked. Naming the unimplemented
-# attribute is the honest answer until the inode-set helper lands (roadmap M12c).
-fn _cp_check_preserve_list(attrs): i64 {
+# ⚠ Accepting an attribute kriya does not implement is the bug v1.2.1 went
+# through cp to remove: `cp --preserve=links` exited 0 while making independent
+# copies of what the user asked to stay hard-linked. `links` now DOES what it
+# says; `ownership`, `xattr`, `context` and `all` are still refused BY NAME
+# rather than silently dropped, and widening the set is where they land
+# (roadmap 1.6.1) — not by loosening this check.
+fn _cp_parse_preserve_list(attrs): i64 {
     var len = strlen(attrs);
     var seg_start: i64 = 0;
     var i: i64 = 0;
     var bad: i64 = 0;
+    var bits: i64 = 0;
     while (i <= len) {
         var at_end: i64 = 0;
         if (i == len) { at_end = 1; }
@@ -705,16 +1065,28 @@ fn _cp_check_preserve_list(attrs): i64 {
             var slen = i - seg_start;
             var ok: i64 = 0;
             if (slen == 4) {
-                if (_cp_seg_eq(attrs + seg_start, "mode", 4) == 1) { ok = 1; }
+                if (_cp_seg_eq(attrs + seg_start, "mode", 4) == 1) {
+                    bits = bits | CP_PRES_MODE;
+                    ok = 1;
+                }
             }
             if (slen == 10) {
-                if (_cp_seg_eq(attrs + seg_start, "timestamps", 10) == 1) { ok = 1; }
+                if (_cp_seg_eq(attrs + seg_start, "timestamps", 10) == 1) {
+                    bits = bits | CP_PRES_TIMES;
+                    ok = 1;
+                }
+            }
+            if (slen == 5) {
+                if (_cp_seg_eq(attrs + seg_start, "links", 5) == 1) {
+                    bits = bits | CP_PRES_LINKS;
+                    ok = 1;
+                }
             }
             if (ok == 0) {
                 if (bad == 0) {
                     k_write( 2, "kriya cp: --preserve: '", 23);
                     k_write( 2, attrs + seg_start, slen);
-                    k_write( 2, "' is not preserved by kriya (supported: mode, timestamps)\n", 58);
+                    k_write( 2, "' is not preserved by kriya (supported: mode, timestamps, links)\n", 65);
                     bad = 1;
                 }
             }
@@ -723,7 +1095,7 @@ fn _cp_check_preserve_list(attrs): i64 {
         i = i + 1;
     }
     if (bad == 1) { return 0 - 1; }
-    return 0;
+    return bits;
 }
 
 fn _cp_seg_eq(p, lit, n): i64 {
@@ -733,6 +1105,49 @@ fn _cp_seg_eq(p, lit, n): i64 {
         i = i + 1;
     }
     return 1;
+}
+
+# Was a BARE `-p` / `--preserve` given, as distinct from `--preserve=LIST`?
+#
+# ⛔ THE FLAG TABLE CANNOT ANSWER THIS. `-p`, `--preserve` and `--preserve=LIST`
+# all set the same bool, and `kriya_long_value()` reports only the last `=VALUE`
+# seen — so `cp -p --preserve=links` and `cp --preserve=links` are
+# indistinguishable through the parser, while GNU treats the first as
+# mode+timestamps+links and the second as links alone. One argv walk settles it.
+#
+# ⚠ Any short cluster containing `p` counts, because cp has no value-taking
+# short option — there is no way for a `p` inside a cluster to be an option's
+# ARGUMENT rather than `-p` itself. `--` ends the scan, so a file literally
+# named `-p` after it is an operand and not a flag.
+fn _cp_bare_preserve_given(start: i64): i64 {
+    var n = kriya_argv_count();
+    var i = start;
+    var found:   i64 = 0;
+    var no_more: i64 = 0;
+    while (i < n) {
+        var tok = argv(i);
+        var tlen = strlen(tok);
+        if (no_more == 0) {
+            if (tlen >= 2) {
+                if (load8(tok) == 45) {                       # '-'
+                    if (load8(tok + 1) == 45) {               # '--'
+                        if (tlen == 2) { no_more = 1; }
+                        else {
+                            if (streq(tok, "--preserve") == 1) { found = 1; }
+                        }
+                    } else {
+                        var k: i64 = 1;
+                        while (k < tlen) {
+                            if (load8(tok + k) == 112) { found = 1; }   # 'p'
+                            k = k + 1;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return found;
 }
 
 fn cmd_cp(start: i64): i64 {
@@ -757,12 +1172,44 @@ fn cmd_cp(start: i64): i64 {
     if (flags_get_bool(_cp_spec, _cp_f_idx) == 1) { force = 1; }
     var interactive: i64 = 0;
     if (flags_get_bool(_cp_spec, _cp_i_idx) == 1) { interactive = 1; }
+    # `-p` and a bare `--preserve` are mode+timestamps; `--preserve=LIST` is
+    # exactly the listed attributes. ⚠ GNU's forms are CUMULATIVE — `-p
+    # --preserve=links` preserves all three — so the list ORs onto whatever the
+    # bare form already set rather than replacing it.
+    # ⛔ THE `-p` BITS HAVE TO BE SET BEFORE THE LIST IS OR'd ONTO THEM. Written
+    # the other way round — the bare-form assignment inside the `attrs == 0` arm
+    # and the OR inside the `else` — the OR is always `0 | bits`, so
+    # `cp -p --preserve=links` preserves links and silently drops mode and
+    # timestamps. ⚠ The smoke case that was supposed to catch it compared the
+    # copy's mtime against a fixture created seconds earlier, so both were the
+    # current second and it passed against a value that never had to be
+    # preserved. Its replacement stamps the fixture in 2020.
     var preserve: i64 = 0;
-    if (flags_get_bool(_cp_spec, _cp_p_idx) == 1) { preserve = 1; }
-    if (preserve == 1) {
+    if (flags_get_bool(_cp_spec, _cp_p_idx) == 1) {
+        # `-p`, `--preserve` and `--preserve=LIST` all set the same bool, and
+        # GNU treats the forms as CUMULATIVE. A bare form contributes
+        # mode+timestamps; a list contributes exactly what it names.
+        if (_cp_bare_preserve_given(start) == 1) { preserve = preserve | CP_PRES_P; }
         var attrs = kriya_long_value();
         if (attrs != 0) {
-            if (_cp_check_preserve_list(attrs) != 0) { return EXIT_USAGE; }
+            var bits = _cp_parse_preserve_list(attrs);
+            if (bits < 0) { return EXIT_USAGE; }
+            preserve = preserve | bits;
+        }
+    }
+    # One map for the whole invocation, so a hard link is preserved ACROSS
+    # operands and not merely within one tree.
+    _cp_links = 0;
+    _cp_link_track_failed = 0;
+    # ⚠ Unconditional, unlike the link map: the just-created guard is not part of
+    # `--preserve=links`, it is what `cp` should always have done.
+    _cp_created = fs_inoset_new();
+    _cp_path    = fs_dirstack_new();
+    if ((preserve & CP_PRES_LINKS) != 0) {
+        _cp_links = fs_inoset_new();
+        if (_cp_links == 0) {
+            k_write( 2, "kriya cp: --preserve=links: out of memory\n", 42);
+            return EXIT_FAILURE;
         }
     }
     var verbose: i64 = 0;
@@ -827,5 +1274,10 @@ fn cmd_cp(start: i64): i64 {
     if (any_failed == 1) { return EXIT_FAILURE; }
     # A refused prompt is exit 1, matching GNU.
     if (_cp_declined == 1) { return EXIT_FAILURE; }
+    # ⚠ Every copy may have succeeded and the result still be wrong: an inode the
+    # map could not record leaves later names as independent copies. The files on
+    # disk are intact, so nothing is rolled back — but the exit status has to say
+    # that `--preserve=links` did not fully hold.
+    if (_cp_link_track_failed == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
 }

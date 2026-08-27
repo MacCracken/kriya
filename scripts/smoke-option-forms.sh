@@ -175,10 +175,15 @@ echo pv > pv.txt
 expect_exit "cp --preserve=mode"            0 "$BIN" cp --preserve=mode pv.txt pv1
 expect_exit "cp --preserve=timestamps"      0 "$BIN" cp --preserve=timestamps pv.txt pv2
 expect_exit "cp --preserve=mode,timestamps" 0 "$BIN" cp --preserve=mode,timestamps pv.txt pv3
-expect_exit "cp --preserve=links refused"   2 "$BIN" cp --preserve=links pv.txt pv4
+# ⛔ `links` FLIPPED FROM REFUSED TO IMPLEMENTED AT v1.6.0. It was exit 2 for
+# five releases because refusing by name beats accepting and quietly making
+# independent copies; now it does the thing. `all` is still a refusal — it
+# implies ownership and xattrs, which kriya does not preserve (roadmap 1.6.1) —
+# so the "refused preserve copied nothing" check moved onto it.
+expect_exit "cp --preserve=links accepted"  0 "$BIN" cp --preserve=links pv.txt pv4
 expect_exit "cp --preserve=all refused"     2 "$BIN" cp --preserve=all pv.txt pv5
 expect_exit "cp --preserve bare"            0 "$BIN" cp --preserve pv.txt pv6
-expect_eq   "refused preserve copied nothing" "no" "$([ -e pv4 ] && echo yes || echo no)"
+expect_eq   "refused preserve copied nothing" "no" "$([ -e pv5 ] && echo yes || echo no)"
 
 printf 'b\na\n' > unsorted.txt
 expect_exit "sort --check=quiet exit 1"     1 "$BIN" sort --check=quiet unsorted.txt

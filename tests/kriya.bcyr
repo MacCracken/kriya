@@ -6,17 +6,41 @@
 #   - streq against the utility name (the dispatch comparison)
 #   - cmd_true / cmd_false (the cheapest full utility roundtrip)
 #   - path_normalize on a path that exercises `.`, `..` and dupes
+#   - fs_inoset insert/lookup, the per-entry cost `du`'s dedup and
+#     `cp --preserve=links` both pay on every file they touch
 #
 # These are the per-step costs that compose the dispatcher hot path.
 # True process-spawn cold-start needs `time ./build/kriya true`-style
 # external timing — covered by `scripts/bench-coldstart.sh`.
 
+# ⚠ M15e again, one layer down: `help.cyr` reads `_VERSION_KRIYA` for
+# `--version`, so the subset needs the generated version file too — the same
+# note `tests/kriya.tcyr` carries at its own line 6.
+include "src/version_str.cyr"
 include "src/lib/exit.cyr"
 include "src/lib/errmsg.cyr"
+# ⚠ M15e: `src/lib/fs.cyr` needs `sys.cyr`'s `k_*` wrappers in scope even
+# though this bench calls only the inode set — cyrius rejects REACHABLE
+# undefined symbols, and the reachable set is one edit away from including a
+# syscall wrapper. Included with the reference, not after the build breaks.
+include "src/lib/sys.cyr"
+include "src/lib/fs.cyr"
 include "src/lib/path.cyr"
 include "src/lib/args.cyr"
+# ⛔ M15e, AND IT HAD ALREADY FIRED: `cyrius bench tests/kriya.bcyr` did not
+# compile at pin 6.5.35 before this line existed. `true.cyr`/`false.cyr` call
+# `help_begin`/`help_positional` and read `HELP_POS_UNBOUNDED`, and `args.cyr`
+# has intercepted `--help` through `help.cyr` since v1.3.0 — so the bench subset
+# has been one include short since then. Nothing caught it because CI runs
+# `cyrius test`, never `cyrius bench`.
+include "src/lib/help.cyr"
 include "src/cmd/true.cyr"
 include "src/cmd/false.cyr"
+
+# The inode set under bench. ⚠ Built in `main` rather than here: a non-literal
+# initializer at module scope costs a `gvar_toks` slot.
+var _ino_set  = 0;
+var _ino_seq  = 0;
 
 var _grep_bench_bre   = 0;
 var _grep_bench_re2   = 0;
@@ -27,6 +51,21 @@ var _grep_bench_llen  = 43;
 
 fn bench_basename_ptr() {
     var r = path_basename_ptr("/usr/local/bin/cp");
+    return 0;
+}
+
+# The insert path: a fresh key every call, so this measures probe + store +
+# the amortised rehash rather than the already-present short-circuit.
+fn bench_inoset_insert() {
+    _ino_seq = _ino_seq + 1;
+    fs_inoset_add(_ino_set, 42, _ino_seq, 0);
+    return 0;
+}
+
+# The lookup path, which is what a walk over a tree with FEW hard links pays on
+# every single file: one hash, one probe, one miss.
+fn bench_inoset_miss() {
+    fs_inoset_find(_ino_set, 42, 0);
     return 0;
 }
 
@@ -132,6 +171,16 @@ fn main() {
     var b11 = bench_new("niyama/re2_search_class");
     bench_run_batch(b11, &bench_niyama_re2_search, 10000, 100);
     bench_report(b11);
+
+    _ino_set = fs_inoset_new();
+    _ino_seq = 0;
+    var b12 = bench_new("fs/inoset_insert");
+    bench_run_batch(b12, &bench_inoset_insert, 10000, 100);
+    bench_report(b12);
+
+    var b13 = bench_new("fs/inoset_lookup_miss");
+    bench_run_batch(b13, &bench_inoset_miss, 10000, 100);
+    bench_report(b13);
 
     return 0;
 }

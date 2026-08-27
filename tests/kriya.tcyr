@@ -683,7 +683,109 @@ fn main() {
     assert_eq(_t_udb_line(":x:7400:7400", UDB_PW_FIELDS, ue), 1, "an empty name still parses");
     assert_eq(streq(load64(ue + UDB_E_NAME), ""), 1, "...as the empty string");
 
+    # ⭐ The (dev, ino) set behind `cp --preserve=links` and `du`'s hardlink
+    # dedup — one table, two callers, so a bug here is a bug in both.
+    test_group("fs inode set — identity and payload");
+    var iset = fs_inoset_new();
+    assert_eq(fs_inoset_count(iset), 0, "a new set is empty");
+    assert_eq(fs_inoset_find(iset, 5, 100), 0, "an absent key finds nothing");
+    assert_eq(fs_inoset_add(iset, 5, 100, 777), 1, "the first insert is new");
+    assert_eq(fs_inoset_count(iset), 1, "...and counts");
+    assert_eq(fs_inoset_data(fs_inoset_find(iset, 5, 100)), 777, "the payload comes back");
+    # ⛔ A REPEAT INSERT KEEPS THE FIRST PAYLOAD. This is not an implementation
+    # detail: it is what makes the destination `cp` links to, and the name `du`
+    # charges the bytes to, the one the walk reached FIRST.
+    assert_eq(fs_inoset_add(iset, 5, 100, 888), 0, "a repeat insert is not new");
+    assert_eq(fs_inoset_count(iset), 1, "...and does not count twice");
+    assert_eq(fs_inoset_data(fs_inoset_find(iset, 5, 100)), 777, "...and keeps the FIRST payload");
+    # ⚠ The KEY IS THE PAIR. Same inode number on a different device is a
+    # different file — dedup keyed on `st_ino` alone would corrupt a `du` that
+    # crosses a mount point, which is the common case for `/` and `/home`.
+    assert_eq(fs_inoset_find(iset, 6, 100), 0, "same ino, other dev is absent");
+    assert_eq(fs_inoset_add(iset, 6, 100, 999), 1, "...and inserts as its own key");
+    assert_eq(fs_inoset_data(fs_inoset_find(iset, 6, 100)), 999, "...with its own payload");
+    assert_eq(fs_inoset_data(fs_inoset_find(iset, 5, 100)), 777, "...leaving the first alone");
+    assert_eq(fs_inoset_find(iset, 5, 101), 0, "same dev, other ino is absent");
+    # A payload of 0 is legitimate (`du` stores nothing), so presence has to be
+    # read off the SLOT and never off the payload.
+    assert_eq(fs_inoset_add(iset, 7, 1, 0), 1, "a zero payload inserts");
+    assert_eq(fs_inoset_find(iset, 7, 1) != 0, 1, "...and the slot is found");
+    assert_eq(fs_inoset_data(fs_inoset_find(iset, 7, 1)), 0, "...with payload zero");
+
+    test_group("fs inode set — growth and hashing");
+    # 600 keys through a table that starts at 64 slots: four doublings, every
+    # one of them a rehash that has to preserve payloads.
+    var gset = fs_inoset_new();
+    var gi: i64 = 0;
+    var gadd_ok: i64 = 1;
+    while (gi < 600) {
+        if (fs_inoset_add(gset, 42, 1000000 + gi, 5000 + gi) != 1) { gadd_ok = 0; }
+        gi = gi + 1;
+    }
+    assert_eq(gadd_ok, 1, "600 distinct keys all insert as new");
+    assert_eq(fs_inoset_count(gset), 600, "...and the count is exact");
+    var gj: i64 = 0;
+    var gfind_ok: i64 = 1;
+    while (gj < 600) {
+        if (fs_inoset_data(fs_inoset_find(gset, 42, 1000000 + gj)) != 5000 + gj) { gfind_ok = 0; }
+        gj = gj + 1;
+    }
+    assert_eq(gfind_ok, 1, "every payload survives four rehashes");
+    assert_eq(fs_inoset_find(gset, 42, 999999), 0, "one below the range is absent");
+    assert_eq(fs_inoset_find(gset, 42, 1000600), 0, "one above it is absent");
+    # ⛔ THE HASH MUST NEVER GO NEGATIVE. Cyrius `>>` is arithmetic, so an
+    # intermediate that overflows into the sign bit masks to a negative index
+    # and the probe loads off the FRONT of the slot array. These are the widest
+    # inputs the kernel can hand us.
+    assert_eq(_fs_inoset_hash(0, 0) >= 0, 1, "zeroes hash non-negative");
+    assert_eq(_fs_inoset_hash(4294967295, 4294967295) >= 0, 1, "32-bit maxima hash non-negative");
+    assert_eq(_fs_inoset_hash(4294967295, 9223372036854775807) >= 0, 1, "i64 max ino hashes non-negative");
+    assert_eq(_fs_inoset_hash(0, 9223372036854775806) >= 0, 1, "one below it too");
+
+    # ⭐ The walk-ancestor stack. ⛔ It is NOT a visited-set and the tests below
+    # are written to fail if someone "simplifies" it into one: a directory that
+    # was pushed and POPPED must read as absent, because leaving a walked
+    # sibling on the stack is what turns cycle detection into silent truncation.
+    test_group("fs dirstack — ancestors, not history");
+    var dstk = fs_dirstack_new();
+    assert_eq(fs_dirstack_depth(dstk), 0, "a new stack is empty");
+    assert_eq(fs_dirstack_has(dstk, 1, 10), 0, "nothing is an ancestor yet");
+    assert_eq(fs_dirstack_push(dstk, 1, 10), 0, "push the root");
+    assert_eq(fs_dirstack_depth(dstk), 1, "...depth 1");
+    assert_eq(fs_dirstack_has(dstk, 1, 10), 1, "...and it is an ancestor");
+    assert_eq(fs_dirstack_push(dstk, 1, 11), 0, "descend one level");
+    assert_eq(fs_dirstack_has(dstk, 1, 10), 1, "the root is still an ancestor");
+    assert_eq(fs_dirstack_has(dstk, 1, 11), 1, "so is the child");
+    assert_eq(fs_dirstack_has(dstk, 1, 12), 0, "an unvisited inode is not");
+    # ⛔ THE POP IS THE WHOLE DIFFERENCE FROM A SET.
+    fs_dirstack_pop(dstk);
+    assert_eq(fs_dirstack_depth(dstk), 1, "pop unwinds one level");
+    assert_eq(fs_dirstack_has(dstk, 1, 11), 0, "a POPPED directory is not an ancestor");
+    assert_eq(fs_dirstack_has(dstk, 1, 10), 1, "...while the root still is");
+    # The key is the PAIR here too — one mount's inode 10 is not another's.
+    assert_eq(fs_dirstack_has(dstk, 2, 10), 0, "same ino, other dev is not an ancestor");
+    fs_dirstack_pop(dstk);
+    assert_eq(fs_dirstack_depth(dstk), 0, "unwound to empty");
+    # ⚠ Popping an empty stack must not underflow into a negative depth — the
+    # error paths that skip a descent can otherwise pop more than they pushed.
+    fs_dirstack_pop(dstk);
+    assert_eq(fs_dirstack_depth(dstk), 0, "popping an empty stack is a no-op");
+    # Growth: 300 levels through a stack that starts at 64.
+    var di: i64 = 0;
+    var dpush_ok: i64 = 1;
+    while (di < 300) {
+        if (fs_dirstack_push(dstk, 7, 5000 + di) != 0) { dpush_ok = 0; }
+        di = di + 1;
+    }
+    assert_eq(dpush_ok, 1, "300 levels all push");
+    assert_eq(fs_dirstack_depth(dstk), 300, "...and the depth is exact");
+    assert_eq(fs_dirstack_has(dstk, 7, 5000), 1, "the deepest ancestor survived four grows");
+    assert_eq(fs_dirstack_has(dstk, 7, 5299), 1, "so did the newest");
+    assert_eq(fs_dirstack_has(dstk, 7, 5300), 0, "one past the range is absent");
+
     return assert_summary();
+
+
 }
 
 var exit_code = main();

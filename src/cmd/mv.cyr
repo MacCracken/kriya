@@ -207,7 +207,7 @@ fn _mv_cross_fs(src, dst, src_st, verbose): i64 {
         # final rmdir fails after the contents are gone, `mv ro/tree /other/moved`
         # left `ro/tree` empty AND deleted the destination — both files gone from
         # the filesystem. GNU keeps the destination and reports the removal error.
-        var cr = _cp_recursive_one(src, dst, 0, 1, 0, 1, 0);
+        var cr = _cp_recursive_one(src, dst, 0, 1, 0, CP_PRES_P, 0);
         if (cr != 0) {
             _rm_dir_at(0 - 100, dst, dst, 1, 0, 0);   # copy failed: source intact
             return cr;
@@ -237,7 +237,10 @@ fn _mv_cross_fs(src, dst, src_st, verbose): i64 {
     # opens both, copies bytes, preserves mode and times when asked).
     # We always pass preserve=1 for mv since the move should retain
     # the file's identity/metadata.
-    var r = _cp_one(src, dst, 1, 0, 1, 0);  # force=1, interactive=0, preserve=1, verbose=0
+    # ⚠ CP_PRES_P, not a bare 1. `preserve` became a CpPreserve bitmask at
+    # v1.6.0 and 1 alone now means "mode only" — which would silently drop the
+    # mtime a move is supposed to carry across a filesystem boundary.
+    var r = _cp_one(src, dst, 1, 0, CP_PRES_P, 0);  # force=1, interactive=0, verbose=0
     if (r != 0) { return r; }
 
     var ur = k_unlink(src);
