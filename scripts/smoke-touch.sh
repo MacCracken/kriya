@@ -104,8 +104,31 @@ if [ "$NA" -gt "$OA" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "
 if [ "$NM" -gt "$OM" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL -a -m did not advance mtime" >&2; fi
 
 # --- -c (--no-create) ---
-# Missing file: exit 1 (POSIX says still an error), file stays absent.
-expect_exit "touch -c missing"      1 "$BIN" touch -c gone
+# ⛔ THIS ASSERTION WAS WRONG, and so was the comment defending it: it said
+# "exit 1 (POSIX says still an error)". POSIX says the opposite —
+# "Do not create a specified file if it does not exist. Do not write any
+# diagnostic messages concerning this condition." — and GNU exits 0 in silence.
+# kriya exited 1 with a diagnostic, against both. Measured, then fixed.
+# ⚠ The differential below is the part that keeps it fixed: asserting a bare 0
+# would have been just as assertable as the bare 1 that was wrong for years.
+expect_exit "touch -c missing exits 0"   0 "$BIN" touch -c gone
+expect_eq "...as GNU does"               "$(touch -c gone2 2>/dev/null; echo $?)" \
+                                         "$("$BIN" touch -c gone3 2>/dev/null; echo $?)"
+expect_eq "...and says nothing"          "" "$("$BIN" touch -c gone4 2>&1)"
+expect_eq "...and creates nothing"       "no" "$([ -e gone ] && echo yes || echo no)"
+# ⚠ ONLY THE ABSENCE IS EXCUSED — the condition POSIX forgives is the missing
+# file, not a failure to set the times. ⛔ The first attempt at this case used a
+# missing file in a read-only directory, which is still ENOENT and so was
+# excused exactly as it should be: it asserted the opposite of what it meant and
+# failed. An UNSEARCHABLE directory gives EACCES on a file that does exist,
+# which is the distinction under test.
+mkdir -p nox && echo x > nox/f && chmod 000 nox
+expect_exit "touch -c does NOT excuse EACCES"  1 "$BIN" touch -c -t 202001010000 nox/f
+expect_eq "...as GNU does"                     "$(touch -c -t 202001010000 nox/f 2>/dev/null; echo $?)" \
+                                               "$("$BIN" touch -c -t 202001010000 nox/f 2>/dev/null; echo $?)"
+expect_eq "...and says so"                     "1" \
+                                               "$("$BIN" touch -c -t 202001010000 nox/f 2>&1 | grep -c 'permission denied')"
+chmod 700 nox
 expect_absent "gone not created"    gone
 
 # Existing file: -c works normally, bumps times.
@@ -180,6 +203,104 @@ expect_exit "-r with -t refused"  2 "$BIN" touch -r tref -t 202601011200 tz2
 "$BIN" touch -m -t 202101010000 tsel 2>/dev/null
 expect_eq "-m -t leaves atime alone" "2020-01-01" "$(TZ=UTC stat -c %x tsel | cut -c1-10)"
 expect_eq "-m -t sets mtime"         "2021-01-01" "$(TZ=UTC stat -c %y tsel | cut -c1-10)"
+
+# =====================================================================
+# -h / --no-dereference — stamp the LINK, not what it points at
+# =====================================================================
+
+# ⛔ SKIPPING THE CREATE STEP IS THE WHOLE POINT, not an optimisation. The create
+# is `open(O_WRONLY|O_CREAT)`, which FOLLOWS a symlink — so without the skip,
+# `touch -h danglinglink` would create the missing TARGET and then stamp it.
+rm -rf hh; mkdir hh; cd hh
+ln -s missing dang
+expect_exit "touch -h on a dangling link"   0 "$BIN" touch -h -t 202001010000 dang
+expect_eq "...stamps the LINK"              "1577836800" "$(stat -c %Y dang)"
+expect_eq "...and does NOT create the target" "no" "$([ -e missing ] && echo yes || echo no)"
+# ⚠ The control: WITHOUT -h the same command creates the target, which is the
+# behaviour -h exists to avoid.
+rm -f missing
+expect_exit "touch (no -h) on a dangling link" 0 "$BIN" touch dang
+expect_eq "...DOES create the target"        "yes" "$([ -e missing ] && echo yes || echo no)"
+rm -f missing
+
+# A link to an existing file: the link moves, the target does not.
+echo x > real
+ln -s real good
+BEFORE=$(stat -c %Y real)
+expect_exit "touch -h on a live link"       0 "$BIN" touch -h -t 201901010000 good
+expect_eq "...stamps the link"              "1546300800" "$(stat -c %Y good)"
+expect_eq "...and leaves the target alone"  "$BEFORE" "$(stat -c %Y real)"
+
+# ⚠ `-h` NEVER CREATES. GNU errors on a path that is not there at all, and stays
+# silent only when `-c` is also given — measured on both.
+expect_exit "touch -h on a missing path fails" 1 "$BIN" touch -h -t 202001010000 brandnew
+expect_eq "...and creates nothing"           "no" "$([ -e brandnew ] && echo yes || echo no)"
+expect_eq "...matching GNU's exit"           "$(touch -h -t 202001010000 gnew 2>/dev/null; echo $?)" \
+                                             "$("$BIN" touch -h -t 202001010000 knew 2>/dev/null; echo $?)"
+expect_exit "touch -h -c on a missing path"  0 "$BIN" touch -h -c brandnew2
+expect_eq "...and still creates nothing"     "no" "$([ -e brandnew2 ] && echo yes || echo no)"
+cd ..
+
+# ⛔ EVERY `-h` CASE ABOVE PASSES `-t`, so the plain form — the one that stamps
+# with "now" — was untested, and a mutant breaking only that path would have
+# gone unnoticed. ⚠ The fixture stamps the link and the target at DIFFERENT past
+# times, so "moved" and "did not move" are distinguishable; with both at "now"
+# the assertion holds whatever the code does.
+rm -rf hp; mkdir hp; cd hp
+echo x > f
+touch -t 201001010000 f
+ln -s f flink
+touch -h -t 200501010000 flink
+BL=$(stat -c %Y flink); BT=$(stat -c %Y f)
+expect_exit "plain touch -h (no -t)"        0 "$BIN" touch -h flink
+expect_eq "...moves the LINK"               "no"  "$([ "$(stat -c %Y flink)" = "$BL" ] && echo yes || echo no)"
+expect_eq "...and leaves the target alone"  "$BT" "$(stat -c %Y f)"
+# ...and the same for the -a / -m halves, which take a different code path.
+touch -h -t 200501010000 flink; touch -t 201001010000 f
+expect_exit "touch -h -m"                   0 "$BIN" touch -h -m flink
+expect_eq "...still leaves the target"      "$BT" "$(stat -c %Y f)"
+cd ..
+
+# ⛔ `-h` REACHES THE REFERENCE TOO. With `-h`, GNU reads the reference LINK's
+# own times rather than its target's — and that also makes a DANGLING reference
+# legal, which a plain `stat` cannot survive.
+rm -rf hr; mkdir hr; cd hr
+echo r > ref
+touch -t 201501010000 ref
+ln -s ref reflink
+touch -h -t 200001010000 reflink
+echo x > f; ln -s f flink
+expect_exit "touch -h -r on a symlink reference" 0 "$BIN" touch -h -r reflink flink
+expect_eq "...uses the LINK's own time"          "$(stat -c %Y reflink)" "$(stat -c %Y flink)"
+# ⚠ The GNU side gets its own link, stamped from the same reference — the first
+# version of this line built two links inside one command substitution and the
+# value came back empty, which compares nothing to something.
+ln -s f gflink
+touch -h -r reflink gflink
+expect_eq "...matching GNU"                      "$(stat -c %Y gflink)" "$(stat -c %Y flink)"
+ln -s nowhere dangref
+ln -s f flink4
+expect_exit "touch -h -r with a DANGLING reference" 0 "$BIN" touch -h -r dangref flink4
+expect_eq "...matching GNU's exit"               "$(ln -s f flink5; touch -h -r dangref flink5 2>/dev/null; echo $?)" "0"
+cd ..
+
+# ⛔ `-r` COPIES BOTH TIMES, and it copied the mtime into both. A single stamp
+# value gave the destination an ACCESS time it had never had. Pre-existing, in
+# the function this release edits.
+rm -rf ra; mkdir ra; cd ra
+echo r > ref
+touch -a -t 201101010000 ref
+touch -m -t 201202020000 ref
+echo x > f
+expect_exit "touch -r"                      0 "$BIN" touch -r ref f
+expect_eq "...copies the reference ATIME"   "$(stat -c %X ref)" "$(stat -c %X f)"
+expect_eq "...and the reference MTIME"      "$(stat -c %Y ref)" "$(stat -c %Y f)"
+expect_eq "...and the two really differ"    "no" \
+          "$([ "$(stat -c %X ref)" = "$(stat -c %Y ref)" ] && echo yes || echo no)"
+cd ..
+
+# The introspection interface knows about it.
+expect_eq "--help names --no-dereference"   "1" "$("$BIN" touch --help 2>&1 | grep -c -- '--no-dereference')"
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

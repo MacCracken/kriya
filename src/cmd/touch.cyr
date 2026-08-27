@@ -28,6 +28,7 @@ var _touch_spec = 0;
 var _touch_a_idx = 0;
 var _touch_m_idx = 0;
 var _touch_c_idx = 0;
+var _touch_h_idx = 0;
 var _touch_r_idx = 0;
 var _touch_t_idx = 0;
 
@@ -37,6 +38,7 @@ fn _touch_init_spec(): i64 {
     _touch_a_idx = flags_add_bool(s, 97,  "access-only",       0, "update access time only");
     _touch_m_idx = flags_add_bool(s, 109, "modification-only", 0, "update modification time only");
     _touch_c_idx = flags_add_bool(s, 99,  "no-create",         0, "do not create missing files");
+    _touch_h_idx = flags_add_bool(s, 104, "no-dereference",    0, "stamp the symlink itself, not what it points at");
     _touch_r_idx = flags_add_str (s, 114, "reference",         0, "use this file's times instead of now");
     _touch_t_idx = flags_add_str (s, 116, "",                  0, "use [[CC]YY]MMDDhhmm[.ss] instead of now");
     _touch_spec = s;
@@ -128,23 +130,33 @@ fn _touch_create(path, no_create): i64 {
 # ⚠ A flag rather than a sentinel value: a pre-1970 stamp is a NEGATIVE epoch, so
 # `explicit_sec >= 0` would have quietly meant "no explicit time" for 1969. The unselected side always gets
 # UTIME_OMIT so `-a`/`-m` still mean "only this one".
-fn _touch_update_times_at(path, update_atime, update_mtime, has_explicit, explicit_sec): i64 {
+fn _touch_update_times_at(path, update_atime, update_mtime, has_explicit, explicit_atime, explicit_mtime,
+                          nofollow): i64 {
+    # 256 = AT_SYMLINK_NOFOLLOW — the flag that makes `-h` stamp the LINK.
+    var atflags: i64 = 0;
+    if (nofollow == 1) { atflags = 256; }
     if (has_explicit == 1) {
         var te[32];
         # UTIME_OMIT = 1073741822 on the side we are not setting.
-        store64(&te + 0,  explicit_sec);
+        # ⛔ TWO VALUES, NOT ONE. `-r` copies the reference's ATIME into the
+        # atime and its MTIME into the mtime; a single `explicit_sec` put the
+        # mtime in both, so `touch -r ref f` gave `f` an access time it had never
+        # had. Measured against GNU on a reference stamped with different a/m.
+        store64(&te + 0,  explicit_atime);
         store64(&te + 8,  0);
-        store64(&te + 16, explicit_sec);
+        store64(&te + 16, explicit_mtime);
         store64(&te + 24, 0);
         if (update_atime == 0) { store64(&te + 8,  1073741822); }
         if (update_mtime == 0) { store64(&te + 24, 1073741822); }
         if (K_HAVE_UTIMES == 0) { return 0; }
-        return fs_utimensat(0 - 100, path, &te, 0);
+        return fs_utimensat(0 - 100, path, &te, atflags);
     }
-    return _touch_update_times(path, update_atime, update_mtime);
+    return _touch_update_times(path, update_atime, update_mtime, nofollow);
 }
 
-fn _touch_update_times(path, update_atime, update_mtime): i64 {
+fn _touch_update_times(path, update_atime, update_mtime, nofollow): i64 {
+    var atflags: i64 = 0;
+    if (nofollow == 1) { atflags = 256; }
     var times: i64 = 0;
     if (update_atime == 1) {
         if (update_mtime == 1) {
@@ -177,25 +189,45 @@ fn _touch_update_times(path, update_atime, update_mtime): i64 {
     # _touch_create via k_open(O_CREAT), so the timestamp-set is best-effort —
     # report success rather than failing the whole touch.
     if (K_HAVE_UTIMES == 0) { return 0; }
-    return fs_utimensat(0 - 100, path, times, 0);
+    return fs_utimensat(0 - 100, path, times, atflags);
 }
 
-fn _touch_one(path, update_atime, update_mtime, no_create, has_explicit, explicit_sec): i64 {
+fn _touch_one(path, update_atime, update_mtime, no_create, has_explicit, explicit_atime, explicit_mtime,
+              nofollow): i64 {
     if (strlen(path) == 0) {
         _touch_report(path, 2);
         return 0 - 2;
     }
-    var cr = _touch_create(path, no_create);
+    # ⛔ `-h` NEVER CREATES, and skipping the create is not an optimisation — it
+    # is the whole point. The create step is `open(O_WRONLY|O_CREAT)`, which
+    # FOLLOWS a symlink, so `touch -h danglinglink` would have created the
+    # missing TARGET and then stamped it. Measured: GNU stamps the link and
+    # leaves the target absent. ⚠ GNU also refuses to create for a path that is
+    # not a symlink at all — `touch -h brandnew` is `setting times of 'brandnew':
+    # No such file or directory`, exit 1, no file.
+    var skip_create: i64 = no_create;
+    if (nofollow == 1) { skip_create = 1; }
+    var cr = _touch_create(path, skip_create);
     if (cr != 0) {
         _touch_report(path, 0 - cr);
         return cr;
     }
-    var ur = _touch_update_times_at(path, update_atime, update_mtime, has_explicit, explicit_sec);
+    var ur = _touch_update_times_at(path, update_atime, update_mtime, has_explicit,
+                                    explicit_atime, explicit_mtime, nofollow);
     if (ur != 0) {
         var errno = 0 - ur;
-        # With --no-create, ENOENT is the expected outcome when the
-        # file is missing — POSIX says it's still an error (exit 1),
-        # GNU agrees.
+        # ⛔ WITH `-c`, A MISSING FILE IS NOT AN ERROR — and the comment that used
+        # to stand here said the opposite: "POSIX says it's still an error (exit
+        # 1), GNU agrees". Neither is true. POSIX: "Do not create a specified
+        # file if it does not exist. Do not write any diagnostic messages
+        # concerning this condition." Measured: `touch -c missing` is exit 0 and
+        # silent under GNU, and was exit 1 with a diagnostic here.
+        # ⚠ ONLY ENOENT. A `-c` on a file that exists but cannot be stamped —
+        # EACCES, EROFS — is still an error, because the condition `-c` excuses
+        # is the absence, not the failure.
+        if (no_create == 1) {
+            if (errno == 2) { return 0; }
+        }
         _touch_report(path, errno);
         return ur;
     }
@@ -323,13 +355,16 @@ fn cmd_touch(start: i64): i64 {
     if (flags_get_bool(_touch_spec, _touch_m_idx) == 1) { m_set = 1; }
     var no_create: i64 = 0;
     if (flags_get_bool(_touch_spec, _touch_c_idx) == 1) { no_create = 1; }
+    var nofollow: i64 = 0;
+    if (flags_get_bool(_touch_spec, _touch_h_idx) == 1) { nofollow = 1; }
 
     # -r REF / -t STAMP. ⚠ Mutually exclusive: GNU takes the last one given, but
     # silently picking a winner between two explicit time sources is exactly the
     # "accepts and lies" shape v1.2.1 swept out. Refuse instead.
     var ref_path = flags_get_str(_touch_spec, _touch_r_idx);
     var stamp    = flags_get_str(_touch_spec, _touch_t_idx);
-    var explicit_sec: i64 = 0;
+    var explicit_atime: i64 = 0;
+    var explicit_mtime: i64 = 0;
     var has_explicit: i64 = 0;
     if (ref_path != 0) {
         if (stamp != 0) {
@@ -337,12 +372,21 @@ fn cmd_touch(start: i64): i64 {
             return EXIT_USAGE;
         }
         var rst[144];
-        var rr = k_stat(ref_path, &rst);
+        # ⛔ `-h` REACHES THE REFERENCE TOO, and this was a plain `k_stat`. With
+        # `-h`, GNU reads the reference LINK's own times rather than its target's
+        # — measured: a symlink stamped in 2000 pointing at a file stamped in
+        # 2015 gives 2000 under `touch -h -r`, and 2015 without `-h`. ⚠ It also
+        # makes a DANGLING reference legal, which `stat` cannot survive: GNU
+        # exits 0 there and kriya exited 1.
+        var rr: i64 = 0;
+        if (nofollow == 1) { rr = k_lstat(ref_path, &rst); }
+        else { rr = k_stat(ref_path, &rst); }
         if (rr != 0) {
             _touch_report(ref_path, 0 - rr);
             return EXIT_FAILURE;
         }
-        explicit_sec = load64(&rst + 88);            # st_mtime
+        explicit_atime = load64(&rst + 72);          # st_atime
+        explicit_mtime = load64(&rst + 88);          # st_mtime
         has_explicit = 1;
     } elif (stamp != 0) {
         var sbox[8];
@@ -350,7 +394,9 @@ fn cmd_touch(start: i64): i64 {
             k_write( 2, "kriya touch: error: -t expects [[CC]YY]MMDDhhmm[.ss]\n", 53);
             return EXIT_USAGE;
         }
-        explicit_sec = load64(&sbox);
+        # ⚠ One stamp fills both sides — that IS `-t`'s meaning.
+        explicit_atime = load64(&sbox);
+        explicit_mtime = explicit_atime;
         has_explicit = 1;
     }
 
@@ -372,7 +418,8 @@ fn cmd_touch(start: i64): i64 {
     var i: i64 = 0;
     while (i < npos) {
         var p = flags_positional(_touch_spec, i);
-        var r = _touch_one(p, update_atime, update_mtime, no_create, has_explicit, explicit_sec);
+        var r = _touch_one(p, update_atime, update_mtime, no_create, has_explicit,
+                           explicit_atime, explicit_mtime, nofollow);
         if (r != 0) { any_failed = 1; }
         i = i + 1;
     }

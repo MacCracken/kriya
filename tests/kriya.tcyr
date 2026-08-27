@@ -841,7 +841,37 @@ fn main() {
     assert_eq(errmsg_is_known(96), 0, "96 is not in the table");
     assert_eq(errmsg_is_known(40), 1, "the top of the contiguous block still is");
 
+    # ⭐ The text half of `ln -r`. ⚠ PURE: both inputs are already absolute and
+    # canonical, because the resolution half lives in the caller — which is what
+    # makes every case below testable without a filesystem.
+    test_group("path_relative — the text half of ln -r");
+    assert_eq(streq(path_relative("/w", "/w/a/b/t"), "a/b/t"), 1, "down two");
+    assert_eq(streq(path_relative("/w/c/d", "/w/a/b/t"), "../../a/b/t"), 1, "up two then down");
+    assert_eq(streq(path_relative("/w/a/b", "/w/other"), "../../other"), 1, "up two");
+    assert_eq(streq(path_relative("/w", "/w/x"), "x"), 1, "one down");
+    assert_eq(streq(path_relative("/w/x/y", "/w"), "../.."), 1, "up only — no trailing slash");
+    assert_eq(streq(path_relative("/", "/x"), "x"), 1, "from the root");
+    assert_eq(streq(path_relative("/w/x", "/"), "../.."), 1, "to the root");
+    # ⚠ THE SAME DIRECTORY IS `.`, NOT THE EMPTY STRING — an empty symlink target
+    # is not a legal path.
+    assert_eq(streq(path_relative("/w/a", "/w/a"), "."), 1, "identical paths are .");
+    assert_eq(streq(path_relative("/", "/"), "."), 1, "root to root is .");
+    # ⛔ COMPONENT BOUNDARIES, NOT BYTES. A byte-wise common prefix would call
+    # `/usr/lib` and `/usr/libexec` common through `lib` and emit a path into the
+    # wrong directory — this is the case that decides the whole algorithm.
+    assert_eq(streq(path_relative("/usr/lib", "/usr/libexec/x"), "../libexec/x"), 1,
+              "lib and libexec are NOT a common prefix");
+    assert_eq(streq(path_relative("/usr/libexec", "/usr/lib/x"), "../lib/x"), 1, "...and back");
+    assert_eq(streq(path_relative("/a/bb", "/a/b/c"), "../b/c"), 1, "bb and b are distinct");
+    # Nothing in common but the root.
+    assert_eq(streq(path_relative("/a/b/c", "/x/y"), "../../../x/y"), 1, "disjoint trees");
+    # ⚠ A relative input is returned UNCHANGED rather than guessed at — the
+    # caller was supposed to canonicalise and did not.
+    assert_eq(streq(path_relative("w", "/w/x"), "/w/x"), 1, "a relative FROM is refused");
+    assert_eq(streq(path_relative("/w", "w/x"), "w/x"), 1, "a relative TO is refused");
+
     return assert_summary();
+
 
 
 

@@ -50,7 +50,7 @@ Two rules hold across the arcs, both learned the hard way:
 | **1.3.x** | Discoverability | spec-renderer atop `flags.cyr` | ✅ closed at 1.3.8; **consumer waiting** (agnoshi) |
 | **1.4.x** | Pattern & text parity | repeatable-option collector, UTF-8 decoder | ✅ closed at 1.4.5 |
 | **1.5.x** | Identity & listing | passwd/group parser, comparator indirection | ✅ closed at 1.5.3 |
-| **1.6.x** | File-op completeness | inode-set helper ✅, xattr API ✅ | in progress — 1.6.0, 1.6.1 shipped |
+| **1.6.x** | File-op completeness | inode-set helper ✅, xattr API ✅ | in progress — 1.6.0, 1.6.1, 1.6.2 shipped |
 | **1.7.x** | Traversal, exec & FS reporting | spawn helper ✅, ARG_MAX chunking | ready |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | ready |
 | **1.9.x** | Performance | niyama literal fast path (upstream, partial) | partly gated |
@@ -334,15 +334,91 @@ than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path
     sticky modes to test the new drop rule immediately surfaced a plain-`cp` divergence that predated
     it — the kernel clears setuid and setgid on `open(O_CREAT)` and keeps sticky, and nothing had
     ever copied a sticky regular file in a test.
-- **1.6.2 — `ln` and the stragglers.** `ln -r` (relative symlink), `-T`/`-t` (target-dir
-  disambiguation), `-b`/`--backup`; `touch -h` (symlink-aware utimensat); `cp -R` of char/block
-  device nodes, currently rejected per the M8 audit decision; `mv` multi-file `--follow`.
-  ⚠ **Plus `cp -a` and `cp -d`**, deferred here from 1.6.0. `-d` is
-  `--no-dereference --preserve=links` and both halves now exist. `-a` is `-dR --preserve=all`, so it
-  inherits the `all`/`context` decision above — and ⚠ **`-a` also carries GNU's quieter diagnostics**
-  (measured: an unsettable xattr under `-a` is silent and exits 0, where the explicit
-  `--preserve=xattr` reports and exits 1), which is a second behaviour and not just a flag alias.
-- **1.6.3 — `realpath` flags, and the `sleep` operand decision.** `realpath -s`/`--strip`/
+- **1.6.2 — `ln` and the stragglers.** ✅ **SHIPPED at 1.6.2** — `ln -r`/`--relative`,
+  `-T`/`--no-target-directory`, `-t DIR`/`--target-directory=DIR`, and `touch -h`. Plus two things
+  found while measuring: the dead `_ln_resolve_dest` (zero callers) removed, and ⛔ **`touch -c` on a
+  missing file, which exited 1 with a diagnostic against BOTH POSIX and GNU** — the comment
+  defending it asserted the opposite of what POSIX says.
+  ⭐ New shared helper: `path_relative` in `src/lib/path.cyr`, pure text, so the half of `-r` that is
+  an algorithm is unit-testable without a filesystem.
+
+  ⭐ **And one fix that landed outside `ln` entirely.** `FS_REALPATH_ALLOW_MISSING` tolerated only
+  ENOENT and, having tolerated it, stopped resolving — so `realpath -m` and `readlink -m` carried the
+  same two defects `ln -sr` did, and one change fixed all three. The traversal limit that goes with
+  it is now decided rather than incidental:
+  [ADR 0014](../adr/0014-symlink-traversal-limit-is-the-kernels.md) — the kernel's 40, uniformly.
+
+  ⚠ **The rest of this bullet moved out, because it is not one release.** Each of these is its own
+  enabler, and batching by enabler is this file's own rule:
+  - ⛔ **`-b`/`--backup` (+ `-S`/`--suffix`) is a SHARED enabler, not an `ln` flag.** `cp`, `mv` and
+    `ln` all take it in GNU, its behaviour is a five-value control matrix (`none`/`off`,
+    `numbered`/`t`, `existing`/`nil`, `simple`/`never`), and it is governed by two environment
+    variables — `VERSION_CONTROL` and `SIMPLE_BACKUP_SUFFIX`. ⚠ **That last part needs an ADR before
+    any code**: kriya has declined behaviour-changing environment variables three times
+    (`POSIXLY_CORRECT` for `echo` and `pwd`, `QUOTING_STYLE` for `ls`, ADR 0011's reasoning), and a
+    backup feature that ignores them is a different feature from GNU's. Naturally **1.6.5**.
+  - **`cp -a` and `cp -d`.** `-d` is `--no-dereference --preserve=links` and both halves exist.
+    `-a` is `-dR --preserve=all`, so it still waits on the `all`/`context` decision — and ⚠ `-a`
+    also carries GNU's quieter diagnostics (measured at 1.6.1: an unsettable xattr under `-a` is
+    silent and exits 0, where the explicit `--preserve=xattr` reports and exits 1), which is a second
+    behaviour and not a flag alias.
+  - **`cp -R` of char/block device nodes**, currently rejected per the M8 audit decision, and
+    **`mv` multi-file `--follow`**. Independent one-offs with no shared enabler.
+
+  ⛔ **Carry forward:**
+  - ⛔ *A differential fuzz harness is wrong before the code is — for the THIRD release running.*
+    This one's fixtures contain symlinks like `s3 -> ../..`, and several of them COMPOSE: a link
+    name built through three of them resolves OUT of the tree under test, so both implementations
+    wrote to one shared path, kriya (running first) created it, and GNU then reported `File exists`.
+    It read as a 2% kriya divergence. ⚠ **Nesting the trees deeper only moves the depth at which it
+    happens** — the sound fix is to notice the escape and not compare that case. 0/4,935 afterwards
+    across four seeds, with escapes counted and excluded.
+  - ⛔ *A generator that can only build WELL-FORMED fixtures is not a fuzzer for error paths.* This
+    harness ran 2,363 green comparisons over a real defect because it could not construct the two
+    shapes that trigger it: every symlink it built pointed at a directory that ALREADY EXISTED and
+    resolved — so a cycle could never form — and nothing was ever `chmod 000`. ELOOP and EACCES were
+    exactly the errno families the code mishandled. ⚠ **Randomness will not stumble into a
+    pathological shape the generator cannot express**; the shapes have to be added deliberately.
+    Adding mutual-cycle pairs and one unsearchable directory per tree turned it red on the first
+    40-case run.
+  - ⛔ *A fallback that returns the operand text changes the FRAME OF REFERENCE.* `ln -sr`'s fallback
+    returned what the user typed, which resolves against the CWD — but a symlink's stored text
+    resolves against the LINK's directory. Every link created outside the cwd pointed somewhere
+    else, at exit 0, with no diagnostic. ⚠ **A silent fallback in a path-rewriting utility is worse
+    than an error**, because the wrong answer is indistinguishable from the right one.
+  - ⭐ *Two review findings, one root cause, and it was not in the file under review.* Both `-r`
+    findings reduced to `FS_REALPATH_ALLOW_MISSING` tolerating only ENOENT and then stopping.
+    Fixing it also fixed `realpath -m` and `readlink -m`, which share the mode. **When two findings
+    in one feature look unrelated, check whether the shared helper is the defect.**
+  - ⛔ *Measure both implementations before calling a divergence a defect.* The fuzz reported `ln -sr`
+    disagreeing with GNU inside symlink cycles. Cycles of length 3/5/6/7/9/11/13/17/41 pin each
+    side's traversal count exactly — and the answer was that **GNU has no chain limit at all**, so
+    its `realpath` prints paths its own `cat` cannot open, while kriya matches the kernel's 40.
+    [ADR 0014](../adr/0014-symlink-traversal-limit-is-the-kernels.md). ⚠ **The fix for a divergence
+    you decide to keep is to count it apart in the oracle, never to loosen the comparison** — the
+    `cp` fuzz's POSIX-ACL counter is the precedent.
+  - ⛔ *A comment can be confidently wrong for years.* `touch -c`'s said "POSIX says it's still an
+    error (exit 1), GNU agrees"; POSIX says *"Do not write any diagnostic messages concerning this
+    condition"* and GNU exits 0 in silence. The smoke suite asserted the wrong answer beside it.
+    **A comment citing a standard is a claim to check, not a citation to trust.**
+  - ⚠ *Dead code hides in a build note.* `_ln_resolve_dest` had zero callers since it was written.
+    Cyrius reports unreachable functions as a NOTE with a count in the hundreds — nearly all stdlib
+    — so one more in the pile says nothing, and no lint will ever raise it.
+  - ⛔ *A helper's contract is a precondition somebody has to enforce.* `path_basename_ptr`'s header
+    says "caller must trim trailing slashes"; `cmd_ln` handed it raw operand text and had done so
+    since the multi-into-directory form existed, so `ln -s f/ dir/` failed where GNU succeeds.
+    **A documented precondition with no enforcement is a bug waiting for its first caller** — and it
+    had three.
+  - ⛔ *An adversarial review found ELEVEN more defects, and the tests written beside the feature
+    found none of them.* Six in the new flags, three in `touch` — two of those older than the
+    release — and two more from a third lens aimed only at `-r`, which reduced to one root cause in
+    `fs_realpath`. ⚠ **Third release running.** ⭐ The lens aimed at ONE flag found the deepest
+    defect: a narrow reviewer beats a broad one for a feature with a shared helper underneath.
+  - ⛔ *`match` is a reserved keyword in Cyrius.* Costs one build. Worth knowing before naming a
+    variable in a comparison loop, which is exactly where the word wants to be used.
+- **1.6.3 — `realpath` flags, and the `sleep` operand decision.** ⚠ Note what 1.6.2 already settled
+  here: ALLOW_MISSING is correct now and the traversal limit has an ADR, so this release is the flag
+  surface only. `realpath -s`/`--strip`/
   `--no-symlinks` (text-only canonicalization), `--relative-to=DIR`, `--relative-base=DIR`, and the
   `-L`/`-P` pair (POSIX `cd -L` semantics vs the current physical default). ⚠ Also settle `sleep`:
   GNU sums several DURATIONs (`sleep 1m 30s`), POSIX specifies exactly one, and kriya rejects the
@@ -358,6 +434,22 @@ than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path
   - **`tee -i`/`--ignore-interrupts`** and `-p`/`--output-error=`. Gated on the signal-handler
     infrastructure named in [`docs/architecture/002-signal-handling-model.md`](../architecture/002-signal-handling-model.md),
     whose trigger row has never fired — `tee -i` would be its first real consumer.
+- **1.6.5 — Backups, which are one enabler for three utilities.** `-b`/`--backup[=CONTROL]` and
+  `-S`/`--suffix=SUFFIX` for `cp`, `mv` and `ln` — split out of 1.6.2 because it is a shared helper
+  and a decision, not an `ln` flag.
+  - The behaviour is a **control matrix**, not a boolean: `none`/`off`, `numbered`/`t`,
+    `existing`/`nil`, `simple`/`never`, each with a different answer depending on whether a numbered
+    or a simple backup already exists. It is not guessable and has to be measured cell by cell.
+  - ⛔ **The ADR comes first, and it is about environment variables.** GNU's backup behaviour is
+    governed by `VERSION_CONTROL` and `SIMPLE_BACKUP_SUFFIX`. kriya has declined behaviour-changing
+    environment variables three times — `POSIXLY_CORRECT` for `echo` (ADR 0011) and for `pwd`,
+    `QUOTING_STYLE` for `ls` — on the reasoning that a variable set for some unrelated tool must not
+    silently change what this one does. ⚠ A backup feature that ignores them is a DIFFERENT feature
+    from GNU's, and the smoke suite would have to unset them the way `smoke-ln.sh` already unsets
+    `QUOTING_STYLE`. Decide it in an ADR, then build it.
+  - ⚠ The helper belongs in `src/lib/`, not in `ln` — `cp -b` and `mv -b` are the same feature, and
+    putting it in the first caller is how `cp` ended up with two answers to one question (see the
+    `_ln_resolve_dest` note under 1.6.2).
 
 ---
 

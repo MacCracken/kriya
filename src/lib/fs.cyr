@@ -519,7 +519,10 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
     }
 
     var loop_count: i64 = 0;
-    var stopped: i64 = 0;  # set when ALLOW_MISSING / REQUIRE_PARENT-last hits ENOENT
+    # ⚠ REQUIRE_PARENT-last only. ALLOW_MISSING used to set this too and that was
+    # the bug: it stops resolving, so a symlink AFTER a missing component was
+    # never followed. GNU keeps going.
+    var stopped: i64 = 0;
     var rp: i64 = 0;
 
     while (load8(remaining + rp) != 0) {
@@ -588,23 +591,63 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
                         var sr = fs_lstat_at(0 - 100, result, &st);
                         if (sr != 0) {
                             var errno = 0 - sr;
-                            if (errno != 2) { return sr; }
-                            # ENOENT — is this the last segment of remaining?
-                            var is_last: i64 = 1;
-                            var pp = seg_end;
-                            while (load8(remaining + pp) == 47) { pp = pp + 1; }
-                            if (load8(remaining + pp) != 0) { is_last = 0; }
+                            # ⛔ ALLOW_MISSING TOLERATES ANY LSTAT FAILURE, not
+                            # only ENOENT — and it KEEPS GOING rather than
+                            # appending the rest untouched. Both halves were
+                            # wrong, and both are measured against GNU's
+                            # `realpath -m`, which is the same mode:
+                            #
+                            #   `realpath -m nonexistent/../slink/sub/f` — GNU
+                            #   resolves `slink` AFTER the missing component and
+                            #   answers `real/sub/f`; stopping answered
+                            #   `slink/sub/f`.
+                            #
+                            #   `realpath -m loopa` on a symlink loop — GNU
+                            #   answers the path; refusing anything but ENOENT
+                            #   made it an error (ELOOP), and `ln -sr` then fell
+                            #   back to the raw operand and wrote a link that
+                            #   silently pointed at a DIFFERENT REAL FILE.
+                            #
+                            # ⚠ gnulib calls this CAN_MISSING and the rule is
+                            # simply "a component we cannot lstat is not a
+                            # symlink" — so commit it and carry on. ENOTDIR and
+                            # EACCES land here too, and both are ordinary.
+                            if (mode == 2) {
+                                ri = candidate_end;
+                                rp = seg_end;
+                            } else {
+                                if (errno != 2) { return sr; }
+                                # ENOENT — is this the last segment of remaining?
+                                var is_last: i64 = 1;
+                                var pp = seg_end;
+                                while (load8(remaining + pp) == 47) { pp = pp + 1; }
+                                if (load8(remaining + pp) != 0) { is_last = 0; }
 
-                            if (mode == 0) { return 0 - 2; }  # REQUIRE_ALL
-                            if (mode == 1) {
-                                if (is_last == 0) { return 0 - 2; }  # REQUIRE_PARENT, not last
+                                if (mode == 0) { return 0 - 2; }  # REQUIRE_ALL
+                                if (mode == 1) {
+                                    if (is_last == 0) { return 0 - 2; }  # REQUIRE_PARENT, not last
+                                }
+                                # REQUIRE_PARENT on the last segment: commit, stop.
+                                ri = candidate_end;
+                                stopped = 1;
+                                rp = seg_end;
                             }
-                            # ALLOW_MISSING or REQUIRE_PARENT-last: commit, stop.
-                            ri = candidate_end;
-                            stopped = 1;
-                            rp = seg_end;
                         } else {
-                            if (fs_is_lnk(&st) == 1) {
+                            var is_link = fs_is_lnk(&st);
+                            # ⛔ THE LOOP LIMIT IS AN ERROR IN THE STRICT MODES AND
+                            # A STOPPING POINT IN ALLOW_MISSING. `realpath -m` on a
+                            # symlink loop answers the path under GNU rather than
+                            # failing — and when it failed here, `ln -sr` fell back
+                            # to the raw operand and wrote a link that silently
+                            # pointed at a DIFFERENT REAL FILE. ⚠ `loop_count` is
+                            # per-call and never resets, so refusing to follow any
+                            # further symlink still terminates.
+                            if (is_link == 1) {
+                                if (loop_count >= 40) {
+                                    if (mode == 2) { is_link = 0; }
+                                }
+                            }
+                            if (is_link == 1) {
                                 loop_count = loop_count + 1;
                                 if (loop_count > 40) { return 0 - 40; }
 

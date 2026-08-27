@@ -392,3 +392,113 @@ fn path_is_under(root, p): i64 {
     if (load8(np + rl) == 47) { return 1; }
     return 0;
 }
+
+# --- relative paths -------------------------------------------------
+#
+# `path_relative(FROM_DIR, TO_PATH)` — TO_PATH expressed relative to FROM_DIR,
+# which is what `ln -r` writes into a symlink.
+#
+# ⚠ BOTH INPUTS MUST ALREADY BE ABSOLUTE AND CANONICAL. This function is pure
+# text: it does not touch the filesystem, does not resolve symlinks and does not
+# normalise `.` or `..`. That split is deliberate — `ln -r` canonicalises with
+# `fs_realpath` in ALLOW_MISSING mode first, because GNU resolves symlinks in
+# BOTH operands (measured: a target reached through a symlinked directory comes
+# out as the real path, and so does a link created inside one) while still
+# accepting a target that does not exist. Keeping the resolution in the caller
+# leaves this half testable without a filesystem.
+#
+# ⚠ Returns TO_PATH unchanged when either input is relative — a caller that has
+# not canonicalised gets its own string back rather than a wrong answer.
+
+# End offset of the component beginning at `start`, which the caller guarantees
+# is either 0 or one past a '/'.
+fn _path_comp_end(p, start): i64 {
+    var len = strlen(p);
+    var i = start;
+    while (i < len) {
+        if (load8(p + i) == 47) { return i; }
+        i = i + 1;
+    }
+    return len;
+}
+
+fn path_relative(from_dir, to_path): i64 {
+    if (path_is_absolute(from_dir) == 0) { return to_path; }
+    if (path_is_absolute(to_path) == 0)  { return to_path; }
+    var fl = strlen(from_dir);
+    var tl = strlen(to_path);
+
+    # Walk the two paths COMPONENT BY COMPONENT rather than byte by byte: a byte
+    # comparison would call `/usr/lib` and `/usr/libexec` common through `lib`
+    # and emit a relative path into the wrong directory.
+    var fi: i64 = 1;
+    var ti: i64 = 1;
+    var scanning: i64 = 1;
+    while (scanning == 1) {
+        if (fi >= fl) { scanning = 0; }
+        else {
+            if (ti >= tl) { scanning = 0; }
+            else {
+                var fe = _path_comp_end(from_dir, fi);
+                var te = _path_comp_end(to_path, ti);
+                var flen = fe - fi;
+                var tlen = te - ti;
+                if (flen != tlen) { scanning = 0; }
+                else {
+                    var k: i64 = 0;
+                    var same: i64 = 1;
+                    while (k < flen) {
+                        if (load8(from_dir + fi + k) != load8(to_path + ti + k)) { same = 0; }
+                        k = k + 1;
+                    }
+                    if (same == 0) { scanning = 0; }
+                    else {
+                        fi = fe + 1;
+                        ti = te + 1;
+                    }
+                }
+            }
+        }
+    }
+
+    # One `..` per component of FROM_DIR still unconsumed.
+    var ups: i64 = 0;
+    var p = fi;
+    while (p < fl) {
+        var e = _path_comp_end(from_dir, p);
+        if (e > p) { ups = ups + 1; }
+        p = e + 1;
+    }
+
+    var tail_len: i64 = 0;
+    if (ti < tl) { tail_len = tl - ti; }
+
+    # ⚠ Nothing left on either side means the two paths are the same directory,
+    # and the answer is `.` rather than the empty string — an empty symlink
+    # target is not a legal path.
+    if (ups == 0) {
+        if (tail_len == 0) {
+            var dot = alloc(2);
+            store8(dot, 46);
+            store8(dot + 1, 0);
+            return dot;
+        }
+    }
+
+    var out = alloc(ups * 3 + tail_len + 2);
+    var n: i64 = 0;
+    var u: i64 = 0;
+    while (u < ups) {
+        store8(out + n, 46);      n = n + 1;
+        store8(out + n, 46);      n = n + 1;
+        if (u + 1 < ups) { store8(out + n, 47); n = n + 1; }
+        else { if (tail_len > 0) { store8(out + n, 47); n = n + 1; } }
+        u = u + 1;
+    }
+    if (tail_len > 0) {
+        memcpy(out + n, to_path + ti, tail_len);
+        n = n + tail_len;
+    }
+    store8(out + n, 0);
+    return out;
+}

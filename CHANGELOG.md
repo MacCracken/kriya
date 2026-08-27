@@ -6,6 +6,219 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.2] - 2026-08-27 — `ln -r`, the target-directory flags, and a comment that was wrong for years
+
+### Added — `ln -r` / `--relative`, and it is not a `..`-counting exercise
+
+⛔ **`-r` CANONICALISES BOTH OPERANDS.** The obvious implementation — count `..` on the strings the
+user typed — is wrong in three measurable ways, and every one of them is in the smoke suite:
+
+| input | result |
+|---|---|
+| `ln -sr slink/sub/f l` where `slink -> real` | `real/sub/f` — the symlinked directory resolves |
+| `ln -sr finalsym l` where `finalsym -> real/sub/f` | `real/sub/f` — the target's OWN last component resolves |
+| `ln -sr dangling l` where `dangling -> /nowhere` | the relative form of `/nowhere`, not of `dangling` |
+| a link created INSIDE a symlinked directory | relative to the REAL directory, not the link's path |
+
+⚠ **ALLOW_MISSING, not REQUIRE_ALL**: `ln -sr nonexistent link` succeeds under GNU and writes
+`nonexistent`, so the canonicalisation has to tolerate components that are not there.
+
+⭐ **The algorithm half is a pure helper.** `path_relative(FROM_DIR, TO_PATH)` in `src/lib/path.cyr`
+is text only — no filesystem, no symlinks, no normalisation — and `ln` does the resolving before
+calling it. That split is what makes it testable: fifteen unit assertions, including the case that
+decides the whole thing. ⛔ **The common prefix is COMPONENT-WISE, not byte-wise**: a byte comparison
+calls `/usr/lib` and `/usr/libexec` common through `lib` and emits a path into the wrong directory.
+
+⚠ `-r` without `-s` is refused, as GNU does — a flag that rewrites symlink text has nothing to say
+about a hard link, and ignoring it would be the accepts-and-lies shape this project keeps removing.
+
+### Added — `ln -T` / `--no-target-directory` and `ln -t DIR` / `--target-directory=DIR`
+
+⛔ **`-T` IS NOT `-n`, and conflating them is the easy mistake.** `-n` asks "is the destination a
+symlink TO a directory — if so, replace the link rather than descend into it", and still treats a
+REAL directory as a place to link into. `-T` says the destination is a NAME, full stop:
+`ln -sT foo existingdir` fails with `File exists` where the bare form creates `existingdir/foo`.
+Both halves are asserted.
+
+`-t DIR` makes every operand a source. ⭐ That is the flag's purpose: a command built from a variable
+that might expand to one name — or to none — cannot silently reinterpret the last one as a
+destination.
+
+### Added — `touch -h` / `--no-dereference`
+
+⛔ **Skipping the create step is the whole point, not an optimisation.** The create is
+`open(O_WRONLY|O_CREAT)`, which FOLLOWS a symlink — so without the skip, `touch -h danglinglink`
+would create the missing TARGET and then stamp it. Measured: GNU stamps the link and leaves the
+target absent, and `touch -h` on a path that is not there at all is an error with no file created.
+
+### Fixed — ⛔ `touch -c` on a missing file exited 1 with a diagnostic, against POSIX *and* GNU
+
+The comment defending it said: *"POSIX says it's still an error (exit 1), GNU agrees"*. Neither is
+true. POSIX says **"Do not create a specified file if it does not exist. Do not write any diagnostic
+messages concerning this condition."** and GNU exits 0 in silence. The smoke suite asserted the wrong
+answer beside the wrong comment.
+
+⚠ **Only the absence is excused.** A `-c` on a file that exists but cannot be stamped — EACCES from
+an unsearchable directory — is still an error, because the condition POSIX forgives is the missing
+file, not a failure to set the times. ⛔ The first attempt at testing that used a missing file in a
+read-only directory, which is still ENOENT and so was excused exactly as it should be: the assertion
+said the opposite of what it meant and failed on its first run.
+
+### Fixed — ⛔ six defects an adversarial review found in the flags this release adds
+
+None of them were visible in the cases written beside the feature:
+
+- **`-T` with ONE operand was silently ignored.** `-T` was checked in the two-or-more arm alone, so
+  `ln -sT f` fell into the one-operand form and tried to link `f` **to itself**, reporting
+  `f: file exists` where GNU says `missing destination file operand after 'f'`.
+- **`-t` given twice took the last one.** The flag table keeps only the last value, so a repeat is
+  invisible to it — and taking it silently links into a directory the user also named something else
+  for. GNU calls it fatal; kriya now does too, via an argv walk.
+- ⛔ **A trailing slash on a source operand failed.** `path_basename_ptr` is a pointer-only fast path
+  whose own header says *"caller must trim trailing slashes"*, and `cmd_ln` handed it raw operand
+  text — so `ln -s f/ dir/` failed with `dir/f/: no such file or directory` where GNU creates
+  `dir/f`. ⚠ **Pre-existing in the multi-into-directory arm**, which is why both forms are asserted.
+- ⚠ **A `/` source operand aimed at the filesystem ROOT.** `path_join(dir, "/")` yields `/`, so the
+  link path became `/` and the attempt reported `/: file exists`. Refused now.
+- **`-t` reported every stat failure as ENOENT.** `-t f/sub` where `f` is a file is ENOTDIR, and
+  "no such file or directory" sends the reader looking for something that is right there.
+- **`-T` with three operands blamed the wrong thing**, saying the last operand must be a directory
+  when it *was* one. GNU says `extra operand`.
+
+### Fixed — ⛔ and three more in `touch`, two of them older than this release
+
+- ⛔ **`-h` never reached the `-r` reference lookup.** With `-h`, GNU reads the reference LINK's own
+  times rather than its target's — measured, a symlink stamped in 2000 pointing at a file stamped in
+  2015 gives 2000 under `touch -h -r` and 2015 without. ⚠ It also makes a **dangling reference
+  legal**, which a plain `stat` cannot survive: GNU exits 0 there and kriya exited 1.
+- ⛔ **`-r` copied the reference's MTIME into BOTH times.** A single stamp value gave the destination
+  an ACCESS time it had never had. Pre-existing, in the function this release edits.
+- ⚠ **Every `-h` case in the new tests passed `-t`**, so the plain form — the one that stamps with
+  "now" — was untested, and a mutant breaking only that path went unnoticed. The replacement fixture
+  stamps the link and the target at DIFFERENT past times, so "moved" and "did not move" are
+  distinguishable; with both at "now" the assertion holds whatever the code does. ⚠ **Third release
+  running** that a test could not tell the two answers apart.
+
+### Fixed — ⛔ two more, and both reduced to ONE root cause outside `ln`
+
+A third review lens, aimed only at `-r`, found two failures that turned out to be the same defect
+seen from two directions — and it was in `fs_realpath`, not in `ln` at all:
+
+- ⛔ **`-r` wrote a WRONG link, silently, with exit 0, whenever canonicalisation failed.** The
+  fallback returned the operand text — but operand text is resolved against the **cwd**, while a
+  symlink's stored text is resolved against the **link's own directory**. Any link not created in the
+  cwd therefore pointed somewhere else, with no diagnostic. ⛔ **The symlink-loop case is the
+  damaging one**: `ln -sr loopa out/m` resolved to a *different real file* that happened to sit
+  beside the link — the exact failure `-r` exists to prevent.
+- ⛔ **`-r` stopped resolving at the first missing component.** A target spelled through a directory
+  that is not there — `nonexistent/../slink/sub/f` — yielded a non-canonical link where GNU resolves
+  `slink` anyway and answers `real/sub/f`.
+
+**Root cause, one line each.** `FS_REALPATH_ALLOW_MISSING` tolerated **only ENOENT**
+(`if (errno != 2) { return sr; }`) and, having tolerated it, **stopped resolving** and appended the
+remainder untouched. gnulib's equivalent mode is CAN_MISSING and its rule is simply *a component we
+cannot `lstat` is not a symlink* — so commit it and carry on; ENOTDIR and EACCES are ordinary there.
+The symlink-loop limit was likewise a hard error in all three modes; under ALLOW_MISSING it now stops
+following instead. ⚠ The counter is per-call and never resets, so refusing to follow any further link
+still terminates.
+
+⭐ **The blast radius is wider than the report.** `FS_REALPATH_ALLOW_MISSING` is the mode behind
+`realpath -m` and `readlink -m` as well, so both carried the same two defects and both are fixed by
+the same change — `realpath -m` on a loop now answers the path instead of `too many levels of
+symbolic links`, and `realpath -m` through an unsearchable directory answers instead of refusing.
+⚠ **The strict modes are untouched and asserted so**: `realpath` and `realpath -e` still refuse a
+loop and still refuse EACCES.
+
+### Changed — ⭐ the symlink-traversal limit is now a decided question (ADR 0014)
+
+Extending the `ln -sr` fuzz corpus to contain symlink **cycles** — it had none, which is why 2,363
+green comparisons had been sitting on top of a real defect — immediately reported kriya and GNU
+landing on different links inside the same cycle. Measuring instead of assuming turned the report
+inside out. A cycle's length lets you read the traversal count off the name each side gives up on;
+cycles of length 3, 5, 6, 7, 9, 11, 13, 17 and 41 pin it exactly:
+
+| | inside a cycle | a straight chain of N links |
+|---|---|---|
+| Linux `open(2)` | ELOOP after 40 | ELOOP past 40 |
+| kriya `fs_realpath` | stops after 40 | refuses past 40 |
+| GNU `realpath` | stops after **20** | resolves **any N** — measured to 121 |
+
+⛔ **The chain column is a GNU defect, not a kriya one.** On a 61-link chain GNU's `realpath` prints
+`target` — and GNU's own `cat` cannot open that same name, because the kernel gives up at 40. A
+`realpath` answer that no `open(2)` will honour is worse than an error.
+
+kriya keeps **the kernel's 40**, uniformly: an error in the strict modes, a stopping point under
+ALLOW_MISSING. The cycle divergence is accepted and written down — every answer inside a cycle is
+unresolvable whoever prints it, so only the spelling differs. ⚠ **The fuzz counts those cases apart
+rather than comparing them equal**, the way the `cp` fuzz counts the POSIX-ACL gap: loosening the
+oracle would hide the next real defect in the same code.
+
+### Changed — a dead function removed from `ln`
+
+`_ln_resolve_dest` had **zero callers** since it was written. It was meant to compose the final
+destination for a (target, dest) pair, and `cmd_ln` grew its own inline copy of the same three-way
+classification instead — so the file carried two answers to one question, one of them untested and
+unreachable. ⚠ Nothing flags this: cyrius reports unreachable functions as a build NOTE with a count
+in the hundreds, nearly all stdlib, so one more in the pile says nothing at all.
+
+### ⚠ Scope — `-b`/`--backup` moved out, and it moved for a reason
+
+The roadmap had it in this release. It is not an `ln` flag: `cp`, `mv` and `ln` all take it, its
+behaviour is a five-value control matrix rather than a boolean, and it is governed by two environment
+variables — `VERSION_CONTROL` and `SIMPLE_BACKUP_SUFFIX`. ⛔ **That last part needs an ADR before any
+code.** kriya has declined behaviour-changing environment variables three times (`POSIXLY_CORRECT`
+for `echo` and `pwd`, `QUOTING_STYLE` for `ls`), and a backup feature that ignores them is a
+different feature from GNU's. Filed as 1.6.5 with the decision named.
+
+`cp -a`/`-d`, `cp -R` of device nodes and `mv --follow` moved out of this release too — they share no
+enabler with each other or with `ln`.
+
+### ⭐ How it was checked
+
+⭐ **A differential fuzz for `ln -sr`** over random trees with symlinked directories at several
+depths in both operands, dangling targets, targets that are themselves symlinks, targets that do not
+exist, and relative/`./`-prefixed/absolute spellings: **0 divergences in 4,935 comparisons** across
+four seeds, with 60 cases matching the documented ADR-0014 cycle gap.
+
+⛔ **The corpus could not reach the defect it should have caught, and the reason is structural.**
+Every symlink it built pointed at a directory that ALREADY EXISTED and resolved — so a cycle could
+never form — and nothing was ever `chmod 000`. ELOOP and EACCES are exactly the two errno families
+`FS_REALPATH_ALLOW_MISSING` was mishandling, so 2,363 green comparisons proved nothing about them.
+⚠ **A generator that can only build well-formed fixtures is not a fuzzer for error paths**; the
+pathological shapes have to be constructed deliberately, because randomness will not stumble into
+them. Adding mutual-cycle pairs and one unsearchable directory per tree turned it red on the first
+40-case run.
+
+⛔ **The harness was wrong before the code was, for the third release running.** Its fixtures contain
+symlinks like `s3 -> ../..`, and several of them COMPOSE — a link name built through three of them
+resolves OUT of the tree under test, so both implementations wrote to one shared path, kriya (running
+first) created it, and GNU then reported `File exists`. It read as a 2% kriya divergence and reduced,
+every time, to identical behaviour in isolation. ⚠ **Nesting the trees deeper only moves the depth at
+which it happens**; the sound fix is to notice the escape and not compare that case. 22 were excluded
+and counted.
+
+⭐ **Every new feature and every fix was mutation-tested.** Making `-r` textual, making `-h` create,
+and making `path_relative` compare bytes instead of components each turned the suite red (6, 4 and 1
+failures); so did restoring each of the three `touch` defects (3, 1 and 3) — including the plain-`-h`
+path the review had called untestable.
+
+⭐ **The `fs_realpath` fix was mutation-tested in both halves.** Restoring "tolerate ENOENT only"
+turned the suite red in 3 realpath cases and 2 `ln` cases; restoring "the loop limit is an error in
+every mode" turned it red in 4 and 3 — including the assertion that the loop link does not read as
+the unrelated file beside it, which is the damaging shape of the original defect.
+
+### Release totals
+
+**4,795 smoke cases across 41 scripts** — `smoke-ln.sh` 35 → **90**, `smoke-touch.sh` 46 → **80**
+and `smoke-realpath.sh` 35 → **54**. ⚠ The measured baseline is **4,687**, not the 4,671 recorded in
+1.6.1's note; that figure was taken before the last cases of the release landed. Counted here by
+summing each script's own `(N total)` rather than its passing count, so a red case cannot shrink the
+corpus silently. **406 unit** (up from 391 —
+`path_relative`'s fifteen), 18 POSIX; fuzz green under poison; four lints clean; both targets build;
+`vet` reports 54 deps. Cold start 0.813 ms — unchanged, as it has been for three releases.
+
+Binary 1,102,432 → **1,111,248** bytes (+8,816) on host, 1,098,232 → **1,107,056** (+8,824) on agnos.
+
 ## [1.6.1] - 2026-08-27 — ownership, extended attributes, and the bit nobody expects
 
 ### Added — `cp --preserve=ownership`, and `-p` finally means what GNU's means

@@ -200,6 +200,77 @@ ln -sf cyc_b cyc_a
 ln -sf cyc_a cyc_b
 expect_exit "symlink cycle still ELOOPs" 1 "$BIN" realpath cyc_a
 
+# =====================================================================
+# -m / ALLOW_MISSING: what "missing" is allowed to mean
+# =====================================================================
+# ⛔ `-m` TOLERATED ONLY ENOENT, AND STOPPED RESOLVING AFTER IT. Both halves were
+# wrong against GNU, and the second one is the subtler: a symlink AFTER a missing
+# component was never followed, so the answer was not canonical.
+# ⚠ gnulib calls this mode CAN_MISSING and its rule is simply "a component we
+# cannot lstat is not a symlink" — commit it and carry on.
+# ⭐ Found through `ln -sr`, which uses the same mode: the ELOOP case made kriya
+# write a link that silently pointed at a DIFFERENT REAL FILE.
+rm -rf mm; mkdir mm; cd mm
+mkdir -p real/sub; echo x > real/sub/f
+ln -s real slink
+ln -s loopb loopa; ln -s loopa loopb
+echo plainfile > plain
+mkdir -p priv/sub; echo secret > priv/sub/f; chmod 000 priv
+
+same_m() {   # same_m <name> <path>
+    expect_eq "$1" "$(realpath -m "$2" 2>&1)" "$("$BIN" realpath -m "$2" 2>&1)"
+}
+same_m "-m resolves a symlink AFTER a missing component" nonexistent/../slink/sub/f
+same_m "-m on a symlink LOOP answers the path"           loopa
+same_m "-m through a plain file (ENOTDIR)"               plain/sub
+same_m "-m on a plain missing name"                      nonexistent
+same_m "-m through a symlinked directory"                slink/sub/f
+same_m "-m with a trailing .."                           slink/sub/..
+chmod 000 priv
+same_m "-m through an unsearchable directory (EACCES)"   priv/sub/f
+chmod 755 priv
+
+# ⚠ THE STRICT MODES ARE UNCHANGED, which is the other half of the fix: only
+# ALLOW_MISSING tolerates a failure, and a loop is still an error without -m.
+expect_exit "plain realpath still refuses a loop"  1 "$BIN" realpath loopa
+expect_eq "...with GNU's exit"                     "$(realpath loopa >/dev/null 2>&1; echo $?)" \
+                                                   "$("$BIN" realpath loopa >/dev/null 2>&1; echo $?)"
+expect_exit "realpath -e still refuses a missing"  1 "$BIN" realpath -e nonexistent
+cd ..
+
+# --- ADR 0014: the traversal limit is the KERNEL'S 40, not GNU's ------------
+# ⛔ THIS IS A DELIBERATE DIVERGENCE and the asymmetry is the reason. GNU's
+# `realpath` resolves a symlink chain of ANY length — measured to 121 — so for a
+# long-enough chain it prints a path that GNU's own `cat` cannot open, because
+# the kernel gives up at 40. An answer no `open(2)` will honour is worse than an
+# error. Inside a CYCLE, GNU stops after 20 traversals and kriya after 40; every
+# answer there is unresolvable either way, so only the name differs.
+mkdir chain; cd chain
+echo hi > target
+N=60; ln -s target "l$N"; i=$N
+while [ "$i" -gt 0 ]; do p=$((i - 1)); ln -s "l$i" "l$p"; i=$p; done
+
+# 40 hops: the kernel allows it, so kriya must resolve it.
+expect_eq "a 40-hop chain resolves (the kernel's limit)" "hi" "$(cat "l$((N - 39))")"
+expect_eq "...and realpath agrees" "$(realpath "l$((N - 39))")" "$("$BIN" realpath "l$((N - 39))")"
+
+# 61 hops: the kernel refuses, so kriya refuses — and GNU does not.
+expect_exit "a 61-hop chain is ELOOP, as it is for open(2)" 1 "$BIN" realpath l0
+expect_eq "...the kernel refuses that same name" "cannot-open" \
+          "$(cat l0 >/dev/null 2>&1 && echo opened || echo cannot-open)"
+expect_eq "...and GNU answers a name it cannot open" "yes" \
+          "$(realpath l0 >/dev/null 2>&1 && echo yes || echo no)"
+expect_exit "...-m refuses to invent one either" 0 "$BIN" realpath -m l0
+
+# A cycle terminates in every mode rather than hanging — the counter never
+# resets, so declining to follow further still ends the walk.
+mkdir -p cyc; ( cd cyc && ln -s n1 n0 && ln -s n2 n1 && ln -s n0 n2 )
+expect_exit "a cycle is ELOOP in the strict mode"   1 "$BIN" realpath cyc/n0
+expect_exit "a cycle ANSWERS under -m"              0 "$BIN" realpath -m cyc/n0
+expect_eq "...and the answer is inside the cycle" "yes" \
+          "$(case "$("$BIN" realpath -m cyc/n0)" in */cyc/n[012]) echo yes;; *) echo no;; esac)"
+cd ..
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"
