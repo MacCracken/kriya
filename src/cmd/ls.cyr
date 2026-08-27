@@ -63,6 +63,7 @@ var _ls_n_idx  = 0;
 var _ls_t_idx  = 0;
 var _ls_S_idx  = 0;
 var _ls_color_idx = 0;
+var _ls_qs_idx = 0;
 var _ls_d_idx  = 0;
 var _ls_R_idx  = 0;
 var _ls_w_idx  = 0;
@@ -82,6 +83,8 @@ fn _ls_init_spec(): i64 {
     _ls_t_idx = flags_add_bool(s, 116, "",                0, "sort by modification time, newest first");
     _ls_S_idx = flags_add_bool(s, 83,  "",                0, "sort by size, largest first");
     _ls_color_idx = flags_add_str(s, 0, "color", 0, "colourise output: always|auto|never");
+    _ls_qs_idx = flags_add_str(s, 0, "quoting-style", 0,
+                               "literal|shell-escape|shell-escape-always");
     _ls_d_idx = flags_add_bool(s, 100, "directory",       0, "list dir operands as entries, not contents");
     _ls_R_idx = flags_add_bool(s, 82,  "recursive",       0, "descend into subdirectories");
     _ls_w_idx = flags_add_int(s, 119, "width",            0, "assume terminal width COLS (0 = auto)");
@@ -157,6 +160,17 @@ var _ls_stat_failed = 0;
 # between for a value none of them inspect. `_ls_stat_failed` above sets the
 # precedent for display state living here.
 var _ls_numeric = 0;
+
+# ⭐ Shell-escape quoting, on when stdout is a TERMINAL — which is GNU's default
+# and the reason `ls | cat` and `ls` on screen differ. ⚠ Piped output stays raw,
+# which is what every script that parses `ls` depends on.
+var _ls_quote = 0;
+
+# ⚠ Set per LISTING in `-l`: when ANY entry needs quotes, the ones that do NOT
+# get a single leading space, so every name starts in the same column as the
+# first character inside a quote. Measured: an all-plain `-l` has no padding,
+# and adding one quoted name shifts every other name right by one.
+var _ls_long_qpad = 0;
 
 fn _ls_rec_new(name_cstr): i64 {
     var rec = alloc(184);
@@ -818,12 +832,49 @@ fn _ls_emit_csi(): i64 {
     return 0;
 }
 
+# Write the (possibly quoted) name bytes. ⚠ One place, so colour and quoting
+# cannot disagree about what the name is.
+fn _ls_put_name(name, nlen): i64 {
+    if (_ls_quote == 0) {
+        k_write( 1, name, nlen);
+        return 0;
+    }
+    var st = QUOTE_IF_NEEDED;
+    if (_ls_quote == 2) { st = QUOTE_ALWAYS; }
+    var qb = alloc(quote_bufsz(nlen));
+    var qn = quote_shell(name, nlen, st, qb);
+    k_write( 1, qb, qn);
+    return 0;
+}
+
+# Display width of a name once quoting is applied — ⛔ NOT `strlen`. A quoted
+# name is longer, and the column layout has to reserve the width it will
+# actually occupy or the columns tear.
+# Would this name come out quoted? ⚠ Asked by the `-l` alignment pass, which
+# needs to know before any name is emitted.
+fn _ls_name_is_quoted(name): i64 {
+    if (_ls_quote == 0) { return 0; }
+    if (_ls_quote == 2) { return 1; }
+    var nlen = strlen(name);
+    var qb = alloc(quote_bufsz(nlen));
+    if (quote_shell(name, nlen, QUOTE_IF_NEEDED, qb) != nlen) { return 1; }
+    return 0;
+}
+
+fn _ls_name_width(name): i64 {
+    var nlen = strlen(name);
+    if (_ls_quote == 0) { return nlen; }
+    var st = QUOTE_IF_NEEDED;
+    if (_ls_quote == 2) { st = QUOTE_ALWAYS; }
+    var qb = alloc(quote_bufsz(nlen));
+    return quote_shell(name, nlen, st, qb);
+}
+
 fn _ls_emit_name(rec): i64 {
     var name = _ls_rec_name(rec);
     var nlen = strlen(name);
     if (_ls_color == 0) {
-        k_write( 1, name, nlen);
-        return 0;
+        return _ls_put_name(name, nlen);
     }
     var code = _ls_color_for(rec);
     if (code == 0) {
@@ -832,8 +883,7 @@ fn _ls_emit_name(rec): i64 {
         if (_ls_is_colored(LSK_NO) == 1) { code = _ls_code(LSK_NO); }
     }
     if (code == 0) {
-        k_write( 1, name, nlen);
-        return 0;
+        return _ls_put_name(name, nlen);
     }
     if (_ls_color_lead == 0) {
         _ls_color_lead = 1;
@@ -860,7 +910,7 @@ fn _ls_emit_name(rec): i64 {
     _ls_emit_csi();
     k_write( 1, code, strlen(code));
     k_write( 1, "m", 1);
-    k_write( 1, name, nlen);
+    _ls_put_name(name, nlen);
     # ⚠ The trailing reset uses `rs` too when it is set: with `rs=99`, GNU
     # closes with `ESC[99m`, not `ESC[0m`.
     _ls_emit_csi();
@@ -1140,7 +1190,7 @@ fn _ls_emit_spaces(n): i64 {
 # Display width of one entry's cell: optional inode prefix (ino_w digits + a space), the name, and
 # the -F type suffix if present. Matches exactly what _ls_print_columns emits per cell.
 fn _ls_entry_width(rec, F_mode, inode_mode, ino_w): i64 {
-    var dw = strlen(_ls_rec_name(rec));
+    var dw = _ls_name_width(_ls_rec_name(rec));
     if (F_mode == 1) { if (_ls_type_suffix(_ls_rec_st(rec)) != 0) { dw = dw + 1; } }
     if (inode_mode == 1) { dw = dw + ino_w + 1; }
     return dw;
@@ -1332,6 +1382,19 @@ fn _ls_print_long(entries, human, F_mode, inode_mode, numeric): i64 {
         }
         i = i + 1;
     }
+    # ⚠ Does any name in THIS listing quote? If so the unquoted ones are padded.
+    _ls_long_qpad = 0;
+    if (_ls_quote == 1) {
+        var qi: i64 = 0;
+        while (qi < n) {
+            if (_ls_name_is_quoted(_ls_rec_name(vec_get(entries, qi))) == 1) {
+                _ls_long_qpad = 1;
+                qi = n;
+            } else {
+                qi = qi + 1;
+            }
+        }
+    }
     # Pass 2: emit.
     i = 0;
     while (i < n) {
@@ -1375,21 +1438,24 @@ fn _ls_print_long(entries, human, F_mode, inode_mode, numeric): i64 {
             k_write( 1, " ", 1);
             _ls_emit_mtime(load64(st + 88));
         }
+        if (_ls_long_qpad == 1) {
+            if (_ls_name_is_quoted(name) == 0) { k_write( 1, " ", 1); }
+        }
         _ls_emit_name(rec);
-        # Symlink target. ⚠ Left UNCOLOURED, matching GNU: with `fi` set, the
-        # name after `->` still prints plain.
+        # Symlink target — QUOTED by the same rules as the name, and left
+        # UNCOLOURED unless `or`/`mi` enabled target colouring.
         if (fs_is_lnk(st) == 1) {
             var tgt = _ls_rec_link_target(rec);
             if (tgt != 0) {
                 k_write( 1, " -> ", 4);
                 var tc = _ls_rec_tgt_code(rec);
                 if (tc == 0) {
-                    k_write( 1, tgt, strlen(tgt));
+                    _ls_put_name(tgt, strlen(tgt));
                 } else {
                     _ls_emit_csi();
                     k_write( 1, tc, strlen(tc));
                     k_write( 1, "m", 1);
-                    k_write( 1, tgt, strlen(tgt));
+                    _ls_put_name(tgt, strlen(tgt));
                     _ls_emit_csi();
                     var trs = _ls_code(LSK_RS);
                     if (trs != 0) { k_write( 1, trs, strlen(trs)); }
@@ -1533,6 +1599,34 @@ fn cmd_ls(start: i64): i64 {
         if (k_isatty(1) == 1) { _ls_color = 1; }
     }
     if (_ls_color == 1) { _ls_color_load(); }
+    # ⚠ GNU quotes on a terminal and not through a pipe, so the same command
+    # produces different bytes depending on where it is pointed. That is
+    # deliberate upstream: the terminal form is for a human to retype, the piped
+    # form is what scripts have always parsed.
+    if (k_isatty(1) == 1) { _ls_quote = 1; }
+    # ⛔ `--quoting-style` exists here for a REASON BEYOND PARITY: without it,
+    # 100% of ls's quoted output sits behind a pty, and on a host with no
+    # `script(1)` the whole quoting block skips — so an `ls` that never quoted
+    # would go green. That was demonstrated with a mutant before this flag
+    # existed: 21 passed, 0 failed. The flag moves the algorithm onto the pipe
+    # path and leaves the pty covering exactly one bit — whether a terminal
+    # turns it on.
+    # ⚠ Only the three styles kriya's helper actually implements are accepted.
+    # The rest (`shell`, `c`, `escape`, `locale`, `clocale`) are REFUSED by name
+    # rather than silently treated as the default (roadmap 1.6.x).
+    var qs = flags_get_str(_ls_spec, _ls_qs_idx);
+    if (qs != 0) {
+        if (load8(qs) != 0) {
+            if (streq(qs, "literal") == 1) { _ls_quote = 0; }
+            elif (streq(qs, "shell-escape") == 1) { _ls_quote = 1; }
+            elif (streq(qs, "shell-escape-always") == 1) { _ls_quote = 2; }
+            else {
+                k_write( 2, "kriya ls: error: --quoting-style must be ", 41);
+                k_write( 2, "literal, shell-escape or shell-escape-always\n", 45);
+                return EXIT_USAGE;
+            }
+        }
+    }
     var d_mode: i64 = 0;
     if (flags_get_bool(_ls_spec, _ls_d_idx) == 1) { d_mode = 1; }
     var R_mode: i64 = 0;

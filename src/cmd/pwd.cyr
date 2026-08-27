@@ -36,6 +36,47 @@ fn pwd_help_declare(): i64 {
     return 0;
 }
 
+# Is `$PWD` usable as the logical path? ⛔ Three tests, and kriya previously
+# ran only the first — so `PWD=/etc kriya pwd` printed `/etc` from a completely
+# different directory, and a `$PWD` full of `..` was echoed verbatim.
+#
+# POSIX requires an absolute pathname with no `.` or `..` components that names
+# the current directory; GNU enforces exactly that. ⚠ The third test is an
+# INODE COMPARE, not a string compare — that is what makes a symlinked path
+# acceptable while a same-length impostor is not.
+fn _pwd_env_usable(p): i64 {
+    if (load8(p) != 47) { return 0; }          # must be absolute
+    # Reject any `.` or `..` component.
+    var i: i64 = 0;
+    var at_start: i64 = 1;
+    while (load8(p + i) != 0) {
+        var c = load8(p + i);
+        if (at_start == 1) {
+            if (c == 46) {
+                var n1 = load8(p + i + 1);
+                if (n1 == 0) { return 0; }             # trailing `.`
+                if (n1 == 47) { return 0; }            # `./`
+                if (n1 == 46) {
+                    var n2 = load8(p + i + 2);
+                    if (n2 == 0) { return 0; }         # trailing `..`
+                    if (n2 == 47) { return 0; }        # `../`
+                }
+            }
+            at_start = 0;
+        }
+        if (c == 47) { at_start = 1; }
+        i = i + 1;
+    }
+    # ...and it must actually name THIS directory.
+    var a[FS_STAT_BUFSZ];
+    var b[FS_STAT_BUFSZ];
+    if (k_stat(p, &a) != 0) { return 0; }
+    if (k_stat(".", &b) != 0) { return 0; }
+    if (load64(&a + FS_STAT_DEV) != load64(&b + FS_STAT_DEV)) { return 0; }
+    if (load64(&a + FS_STAT_INO) != load64(&b + FS_STAT_INO)) { return 0; }
+    return 1;
+}
+
 fn cmd_pwd(start: i64): i64 {
     _pwd_init_spec();
     if (kriya_args_parse(_pwd_spec, start) != 0) {
@@ -47,14 +88,23 @@ fn cmd_pwd(start: i64): i64 {
         return EXIT_USAGE;
     }
 
-    var use_pwd_env: i64 = 1;
-    if (flags_get_bool(_pwd_spec, _pwd_P_idx) == 1) { use_pwd_env = 0; }
+    # ⛔ THE DEFAULT IS PHYSICAL, not logical. POSIX says `pwd` defaults to `-L`
+    # and GNU deliberately does not: measured, `/usr/bin/pwd` from inside a
+    # symlinked directory prints the RESOLVED path, and only
+    # `POSIXLY_CORRECT=1` flips it to the `$PWD` form. kriya matches GNU's
+    # default and does NOT honour `POSIXLY_CORRECT`, for the same reason
+    # ADR 0011 declined it for `echo`: an environment variable set for some
+    # unrelated tool should not silently change what this one prints.
+    # ⚠ kriya defaulted to LOGICAL before 1.5.3, which was wrong twice over —
+    # see the validation below.
+    var use_pwd_env: i64 = 0;
     if (flags_get_bool(_pwd_spec, _pwd_L_idx) == 1) { use_pwd_env = 1; }
+    if (flags_get_bool(_pwd_spec, _pwd_P_idx) == 1) { use_pwd_env = 0; }
 
     if (use_pwd_env == 1) {
         var pwd_env = kriya_getenv("PWD");
         if (pwd_env != 0) {
-            if (load8(pwd_env) == 47) {
+            if (_pwd_env_usable(pwd_env) == 1) {
                 k_write( 1, pwd_env, strlen(pwd_env));
                 k_write( 1, "\n", 1);
                 return EXIT_SUCCESS;

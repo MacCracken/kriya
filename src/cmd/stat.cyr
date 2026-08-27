@@ -328,6 +328,26 @@ fn _st_emit_spec(c, st, name): i64 {
         else { k_write( 1, gn, strlen(gn)); }
         return 0;
     }
+    # %N — the quoted name, plus ` -> quoted target` for a symlink.
+    # ⚠ ALWAYS quotes, unlike `ls`, which leaves an unremarkable name bare:
+    # `stat -c %N plain` is `'plain'`. Same helper, one flag apart.
+    if (c == 78) {   # N
+        var nlen = strlen(name);
+        var qb = alloc(quote_bufsz(nlen));
+        var qn = quote_shell(name, nlen, QUOTE_ALWAYS, qb);
+        k_write( 1, qb, qn);
+        if (fs_is_lnk(st) == 1) {
+            var tbuf = alloc(4096);
+            var tn = k_readlink(name, tbuf, 4095);
+            if (tn > 0) {
+                k_write( 1, " -> ", 4);
+                var tq = alloc(quote_bufsz(tn));
+                var tqn = quote_shell(tbuf, tn, QUOTE_ALWAYS, tq);
+                k_write( 1, tq, tqn);
+            }
+        }
+        return 0;
+    }
     if (c == 115) {  # s
         n = _st_render_dec(load64(st + 48), &buf);
     } else { if (c == 97) {  # a (octal perms)
@@ -413,7 +433,6 @@ fn _st_emit_spec(c, st, name): i64 {
 # `src/lib/userdb.cyr` landed. %N still waits on a quoting helper
 # (roadmap 1.5.2) and %w on statx(2).
 fn _st_is_deferred_spec(c): i64 {  #skip-lint
-    if (c == 78)  { return 1; }   # N
     if (c == 119) { return 1; }   # w
     return 0;
 }

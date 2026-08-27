@@ -8,6 +8,18 @@
 
 set -e
 
+# ⛔ GNU's `ls` and `stat` honour QUOTING_STYLE and kriya does not, so a host
+# exporting it fails every quoted comparison below at once — blaming kriya for
+# the shell's environment. ⚠ Same shape as du/df's BLOCK_SIZE and echo's
+# POSIXLY_CORRECT: if kriya ignores a variable, the ORACLE must ignore it too.
+# ⭐ Caught by the hostile-environment matrix run, not by CI.
+unset QUOTING_STYLE
+# ⛔ ...and POSIXLY_CORRECT, which STOPS GNU permuting options after operands.
+# kriya permutes always, so `ls f1 f2 -rt` is a sort request here and two more
+# operands to a POSIX-strict GNU. kriya does not read the variable at all
+# (ADR 0011's reasoning), so the oracle must not either.
+unset POSIXLY_CORRECT
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/build/kriya"
 
@@ -460,6 +472,92 @@ for w in always yes force auto tty if-tty never no none; do
 done
 rc=0; (cd cdir && "$BIN" ls --color=bogus -1 -d sub) >/dev/null 2>&1 || rc=$?
 expect_eq "color: --color=bogus is a usage error" "2" "$rc"
+
+# --- quoting (1.5.3) ---------------------------------------------------
+#
+# ⛔ `ls` QUOTES ON A TERMINAL AND NOT THROUGH A PIPE, so the two paths need
+# separate tests and the piped one is what every script parsing `ls` depends on.
+#
+# ⛔ AND THE ALGORITHM IS TESTED THROUGH A PIPE, via `--quoting-style`, NOT
+# behind the pty. Before that flag existed the entire quoted-output path sat
+# behind `script(1)`, so on a host without it the block skipped — and a mutant
+# `ls` that never quoted scored 21 passed / 0 failed. The pty now covers exactly
+# one bit: whether a terminal turns quoting on.
+#
+# ⚠ `QUOTING_STYLE` is UNSET on every oracle call. GNU honours it in both `ls`
+# and `stat`, and it overrides the tty/pipe default in both directions — the
+# same shape as the `LS_COLORS` and `POSIXLY_CORRECT` lessons: if kriya does not
+# read a variable, the oracle must not either, or the test measures the shell.
+mkdir -p qdir && cd qdir
+: > 'a b'; : > "it's"; : > 'has"quote'; : > plain
+nl_name=$(printf 'nl\nX'); : > "$nl_name"
+tab_name=$(printf 'tab\there'); : > "$tab_name"
+: > 'a=b'; : > 'mid#hash'; : > 'mid~tilde'; : > 'br]ack'; : > 'cur{ly}'
+cd ..
+
+qs_same() {
+    label=$1; style=$2
+    g=$(cd qdir && env -u QUOTING_STYLE LC_ALL=C ls -1 "--quoting-style=$style")
+    k=$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1 "--quoting-style=$style")
+    expect_eq "quote: $label" "$g" "$k"
+}
+qs_same "shell-escape matches GNU"        shell-escape
+qs_same "shell-escape-always matches GNU" shell-escape-always
+qs_same "literal matches GNU"             literal
+
+# ⛔ ABSOLUTES, and they are viable here in a way they were not for passwd: the
+# quoting map is byte-identical across coreutils 8.30, 9.4 (CI) and 9.11.
+# ⚠ `=` is the correctness-relevant one — an unquoted `a=b` pasted into a shell
+# is a variable ASSIGNMENT, not a filename. kriya under-quoted it before 1.5.3.
+qa() {
+    expect_eq "quote: $1" "$2" \
+        "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1d --quoting-style=shell-escape "$3")"
+}
+qa "= is quoted"          "'a=b'"      'a=b'
+qa "mid-word # is bare"   'mid#hash'   'mid#hash'
+qa "mid-word ~ is bare"   'mid~tilde'  'mid~tilde'
+qa "] is bare"            'br]ack'     'br]ack'
+qa "{ } are bare"         'cur{ly}'    'cur{ly}'
+qa "space is quoted"      "'a b'"      'a b'
+qa "plain stays bare"     'plain'      'plain'
+# ...and the position rule: the same bytes quoted at index 0.
+cd qdir && : > '#lead' && : > '~lead' && cd ..
+qa "leading # is quoted"  "'#lead'"    '#lead'
+qa "leading ~ is quoted"  "'~lead'"    '~lead'
+# ⚠ shell-escape-always must differ from shell-escape on a name needing nothing,
+# or the two style assertions above would both pass for one implementation.
+expect_eq "quote: always-quote differs from if-needed" "'plain'" \
+    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1d --quoting-style=shell-escape-always plain)"
+
+# An unsupported style is REFUSED by name rather than silently defaulted.
+rc=0; (cd qdir && "$BIN" ls --quoting-style=c) >/dev/null 2>&1 || rc=$?
+expect_eq "quote: unsupported style refused" "2" "$rc"
+
+# The piped DEFAULT must stay RAW — the regression that would break scripts.
+expect_eq "quote: piped default is raw" \
+    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C ls -1)" \
+    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1)"
+# ⚠ Look for a WRAPPED name, not for a quote character: one fixture is literally
+# called `it's`, so raw output contains a `'` legitimately.
+praw=$(cd qdir && env -u QUOTING_STYLE "$BIN" ls -1)
+case "$praw" in
+    *"'a b'"*) FAIL=$((FAIL + 1)); printf 'FAIL quote: piped ls quoted a name\n' >&2 ;;
+    *)         PASS=$((PASS + 1)) ;;
+esac
+
+# ⚠ The pty now covers ONE bit: does a terminal turn quoting on? `command -v
+# script` is satisfied by BusyBox's applet too and `-qec` is util-linux syntax
+# it rejects, so probe the FLAGS the way smoke-cp-recursive.sh does.
+if script -qec true /dev/null >/dev/null 2>&1; then
+    tq=$(cd qdir && env -u QUOTING_STYLE LC_ALL=C script -qec "'$BIN' ls -1d 'a b'" /dev/null 2>/dev/null | tr -d '\r')
+    case "$tq" in
+        *"'a b'"*) PASS=$((PASS + 1)) ;;
+        *) FAIL=$((FAIL + 1)); printf 'FAIL quote: a terminal did not turn quoting on\n' >&2 ;;
+    esac
+else
+    echo "note: no util-linux script(1) — the tty-detection bit is unverified;"
+    echo "      the quoting ALGORITHM is still covered above via --quoting-style"
+fi
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

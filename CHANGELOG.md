@@ -6,6 +6,136 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.5.3] - 2026-08-26 — quoting, and `pwd` stops trusting `$PWD`
+
+### Added — `src/lib/quote.cyr`, shared by `ls` and `stat %N`
+
+⭐ **GNU shell-escape quoting**, derived byte by byte rather than read off a manual: every rule below
+came from running `stat -c %N` over all 255 possible single-byte names plus a splice matrix, under
+`LC_ALL=C`, on stock coreutils 9.4 in a container as well as 9.11 here.
+
+- 92 printable bytes go inside single quotes; controls, DEL and **every high byte** become an
+  ANSI-C `$'...'` run — named escapes where one exists, three-digit octal otherwise.
+- ⚠ **Adjacent escaped bytes SHARE one `$'...'` run** (`a<TAB><TAB>b` is `'a'$'\t\t''b'`), a name
+  STARTING with an escape emits an empty `''` first, and one ENDING with an escape does not get a
+  trailing `''`.
+- ⛔ **Quote selection is not "always single quotes".** A name containing `'` uses DOUBLE quotes
+  (`it's` → `"it's"`) — but only if every other byte is in a specific safe set, measured by probing
+  `a'b<X>` for every printable X. ⚠ That set is **not** the same as "needs no quoting": SPACE and
+  `]` are safe there while `=` is not, and `[` forces single-quote style while `]` does not.
+- ⛔ **`#` is double-quote-safe ONLY at index 0.** `#a'b` takes double quotes and `a'b#` does not.
+  It reads backwards — `#` starts a comment at word start, not mid-word — and it is what quotearg
+  does.
+
+⭐ **286 single-byte and splice cases: zero divergences. A 3,000-name fuzz over hostile byte
+sequences: 5 divergences (0.17%).**
+
+⚠ **The residual is recorded rather than hidden**: it is names combining a `'` with escaped bytes in
+particular positions, where GNU emits a leading empty `''` that kriya does not. ⛔ In at least one of
+those cases GNU's own output does not round-trip — `<TAB>kcwA'79hp<NL>` renders with a literal
+`'\t'`, which a shell reads as backslash-t rather than a tab. Chasing bit-parity into that corner
+was not worth it; the shapes are on the roadmap with the measurement.
+
+⚠ **Locale**: under `LC_ALL=C` GNU escapes every high byte, and that is what this implements. In a
+UTF-8 locale GNU renders valid multi-byte sequences bare. kriya is byte-oriented here — more verbose
+than GNU under UTF-8, never wrong, since the escaped form round-trips identically.
+
+### Added — `stat %N`, and `ls` quoting on a terminal
+
+`stat -c %N` renders the quoted name plus ` -> quoted target` for a symlink. ⚠ It **always** quotes,
+unlike `ls`: `stat -c %N plain` is `'plain'`. Same helper, one flag apart.
+
+⛔ **`ls` quotes on a TERMINAL and not through a pipe** — the same command produces different bytes
+depending on where it is pointed. That is deliberate upstream: the terminal form is for a human to
+retype, the piped form is what scripts have always parsed. Both directions are asserted, and the
+piped assertion looks for a WRAPPED name rather than for a quote character, because one fixture is
+literally called `it's`.
+
+Two `-l` details that only a byte-exact comparison finds:
+- ⛔ **When any name in a listing is quoted, the unquoted ones get a leading space**, so every name
+  starts in the same column as the first character inside a quote. An all-plain listing has no
+  padding; adding one quoted name shifts every other name right by one.
+- The symlink **target** is quoted by the same rules.
+- ⚠ Quoting also changes the COLUMN WIDTH — a quoted name is longer, and the layout reserves the
+  width it will actually occupy.
+
+### Fixed — ⛔ `pwd` defaulted to logical and trusted `$PWD` blindly
+
+The roadmap called this "`pwd`'s `$PWD` inode-match, which needs only a stat-compare". The
+measurement found a bigger bug in two parts:
+
+    PWD=/etc kriya-1.5.2 pwd     ->  /etc        (from a completely different directory)
+    PWD=/etc /usr/bin/pwd        ->  the real cwd
+
+1. ⛔ **The default is PHYSICAL, not logical.** POSIX says `pwd` defaults to `-L`; GNU deliberately
+   does not, and only `POSIXLY_CORRECT=1` flips it. kriya defaulted to logical. ⚠ kriya matches
+   GNU's default and does NOT honour `POSIXLY_CORRECT`, for the reason ADR 0011 gave for `echo`: an
+   environment variable set for some unrelated tool should not silently change what this one prints.
+2. ⛔ **`-L` validates `$PWD`; kriya checked only for a leading `/`.** POSIX requires an absolute
+   path with no `.` or `..` components that names the current directory — so `PWD=/etc` and a `$PWD`
+   full of `..` were both echoed back verbatim. The third test is an **inode compare**, not a string
+   compare, which is what lets a symlinked path through while rejecting a same-shaped impostor.
+
+⭐ `pwd` now has its own `scripts/smoke-pwd.sh` (13 cases). ⚠ Its oracle is `/usr/bin/pwd`, never the
+shell builtin — `pwd` is a builtin in every POSIX shell and the builtin's default is `-L`, which is
+exactly the distinction under test.
+
+### Fixed — ⛔ six bytes wrong in `ls`'s bare-character set, found after the fact
+
+⚠ **A background investigation caught this after the release was first reported green**, and the
+`stat %N` fuzz could never have: `%N` **always** quotes, so `_q_needs_quote` — the function deciding
+whether `ls` leaves a name bare — was not reached by a single one of those 3,000 names.
+
+Measured over all 94 printable bytes at both positions, via
+`ls --quoting-style=shell-escape` (byte-identical to the tty default and needing no pty):
+
+- ⛔ **`=` was UNDER-quoted**, and that one is correctness rather than cosmetics: an unquoted `a=b`
+  pasted into a shell is a variable **assignment**, not a filename.
+- **`]`, `{`, `}`, `#` and `~` were OVER-quoted** — GNU leaves all five bare mid-word.
+- ⛔ **Three bytes are POSITION-SENSITIVE**: `#`, `-` and `~` are bare mid-word and quoted as the
+  FIRST byte of a name — comment, option and tilde-expansion respectively, each special only at the
+  start of a word. ⚠ One lane reported that a leading `-` is *not* quoted; measuring all 94 bytes at
+  both positions showed it is, so that reading did not survive.
+
+### Added — `--quoting-style`, which exists to close a test hole
+
+⛔ **Before this flag, 100% of `ls`'s quoted output sat behind a pty**, so on a host without
+`script(1)` the whole quoting block skipped — and a mutant `ls` that never quoted scored **21 passed,
+0 failed**. Demonstrated in advance rather than discovered in CI. `--quoting-style` moves the
+algorithm onto the pipe path and leaves the pty covering exactly one bit: whether a terminal turns
+quoting on. ⭐ Re-checked with the same mutant: it now fails 7 assertions **with `script(1)` hidden**
+and 8 with it present.
+
+⚠ Only the three styles kriya's helper implements — `literal`, `shell-escape`,
+`shell-escape-always` — are accepted; `shell`, `c`, `escape`, `locale` and `clocale` are **refused by
+name** rather than silently treated as the default.
+
+⚠ **`QUOTING_STYLE` and `POSIXLY_CORRECT` are now unset on every affected oracle call**, and the
+hostile-environment matrix is what found it — four scripts failed under it after the release was
+otherwise green. GNU honours `QUOTING_STYLE` in both `ls` and `stat`, overriding the tty/pipe default
+in both directions; and `POSIXLY_CORRECT` does two separate things kriya declines: it flips `pwd`
+from `-P` to `-L` — the exact axis `smoke-pwd.sh` tests — and it **stops GNU permuting options after
+operands**, so `ls f1 f2 -rt` is a sort request to kriya and two more operands to a POSIX-strict GNU.
+
+⛔ **The rule, now stated three releases running**: if kriya does not read a variable, the ORACLE
+must not either, or the test measures the shell rather than the code. It first appeared for
+`du`/`df`'s `BLOCK_SIZE`, again for `echo`'s `POSIXLY_CORRECT`, and again here. All five matrix
+conditions now yield the identical **4,418** cases.
+
+### Release totals
+
+**4,418 smoke cases across 39 scripts** (up from 4,373/38) — `smoke-ls.sh` 105 → **122**,
+`smoke-stat.sh` 53 → **65**, and `smoke-pwd.sh` is new at **13**. 322 unit; 18 POSIX; fuzz green
+under poison; four lints clean; both targets build. `vet` reports **54 deps** (new
+`src/lib/quote.cyr`). Binary 1,072,424 → 1,080,848 bytes (+8,424).
+
+⭐ **Verified under all five matrix conditions**: baseline, hostile env
+(`POSIXLY_CORRECT`+`BLOCK_SIZE`+`QUOTING_STYLE`+`LS_COLORS`), `en_US.UTF-8` and deep `$TMPDIR` all
+39/39 **4,418**; simulated root 39/39 4,402 (root-only paths skipping).
+
+⭐ **And inside the `ubuntu:24.04` container as a non-root user** — 39 scripts, 0 failures,
+4,396 cases.
+
 ## [1.5.2] - 2026-08-26 — `ls --color`, and the environment stops having a cliff
 
 ### Added — `src/lib/env.cyr`, which had to come first

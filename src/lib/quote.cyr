@@ -1,0 +1,283 @@
+# src/lib/quote.cyr — GNU shell-escape quoting, shared by `ls` and `stat %N`.
+#
+# ⭐ The output is re-consumable by a POSIX shell: pasting it back yields the
+# original bytes. That is the whole point — `ls` on a terminal and `stat %N`
+# both exist to show a name you can safely retype.
+#
+# ── The algorithm, derived byte by byte rather than read ──────────────
+#
+# Every rule below came from running `stat -c %N` over all 255 possible
+# single-byte names plus a matrix of splice cases, under `LC_ALL=C`, on stock
+# coreutils 9.4 in a container as well as 9.11 here.
+#
+#   - 92 printable bytes (0x20-0x7E except `'`) go inside SINGLE quotes.
+#   - Control bytes (0x01-0x1F), DEL (0x7F) and every high byte (0x80-0xFF)
+#     become an ANSI-C `$'...'` run: `\a \b \t \n \v \f \r` where a named
+#     escape exists, three-digit OCTAL otherwise.
+#   - ⚠ ADJACENT escaped bytes SHARE one `$'...'` run: `a<TAB><TAB>b` is
+#     `'a'$'\t\t''b'`, not two runs.
+#   - ⚠ A name STARTING with an escaped byte emits an empty `''` first —
+#     `<TAB>a` is `''$'\t''a'` — while one ENDING with one does not get a
+#     trailing `''`: `a<TAB>` is `'a'$'\t'`.
+#
+# ⛔ QUOTE SELECTION IS NOT "always single quotes":
+#   - contains `'` and (a `"` or an escaped byte)  -> single-quote style, with
+#     each `'` written as `'\''`         (`a'b"c` -> `'a'\''b"c'`)
+#   - contains `'` and nothing else special       -> DOUBLE quotes
+#                                          (`it's` -> `"it's"`, `'` -> `"'"`)
+#   - otherwise                                   -> single quotes
+#
+# ⚠ LOCALE. Under `LC_ALL=C` GNU escapes every high byte, and that is what this
+# implements. In a UTF-8 locale GNU renders VALID multi-byte sequences bare
+# (`'é'`) while still escaping invalid ones. kriya is byte-oriented here, so it
+# matches GNU under C and is more verbose than GNU under UTF-8 — never wrong,
+# since the escaped form round-trips identically. Recorded as a measured choice
+# rather than an accident (roadmap 1.5.x).
+
+enum QuoteStyle {
+    # `ls` leaves a name bare when nothing needs quoting; `stat %N` always
+    # quotes, even `plain` -> `'plain'`. Same algorithm, one flag apart.
+    QUOTE_IF_NEEDED = 0;
+    QUOTE_ALWAYS    = 1;
+}
+
+# Does this byte survive inside single quotes untouched?
+fn _q_is_plain(c): i64 {
+    if (c < 32) { return 0; }
+    if (c > 126) { return 0; }
+    if (c == 39) { return 0; }      # `'` needs the quote-selection rules
+    return 1;
+}
+
+# Does this byte force quoting? ⚠ `at_start` matters: THREE bytes are safe
+# mid-word and quoted as the FIRST byte of a name.
+#
+# ⛔ Measured over all 94 printable bytes at both positions, via
+# `ls --quoting-style=shell-escape` (which is byte-identical to the tty
+# default and needs no pty):
+#     mid-word bare : # % + , - . 0-9 : @ A-Z ] _ a-z { } ~
+#     first-pos bare: the same MINUS `#`, `-` and `~`
+# `#` starts a comment, `-` starts an option and `~` starts tilde expansion —
+# only at the beginning of a word, which is exactly where they are quoted.
+#
+# ⛔ `=` IS QUOTED, and that one is a correctness matter rather than cosmetics:
+# an unquoted `a=b` pasted into a shell is a variable ASSIGNMENT, not a
+# filename. kriya had `=` in its safe set and under-quoted it.
+# ⚠ This function is only reached by `ls` (QUOTE_IF_NEEDED); `stat %N` always
+# quotes, so a 3,000-name `%N` fuzz exercised none of it — which is how the
+# whole set went wrong unnoticed.
+fn _q_needs_quote(c, at_start): i64 {
+    if (c < 32) { return 1; }
+    if (c > 126) { return 1; }
+    if (c >= 48) { if (c <= 57) { return 0; } }      # 0-9
+    if (c >= 65) { if (c <= 90) { return 0; } }      # A-Z
+    if (c >= 97) { if (c <= 122) { return 0; } }     # a-z
+    if (c == 37) { return 0; }    # %
+    if (c == 43) { return 0; }    # +
+    if (c == 44) { return 0; }    # ,
+    if (c == 46) { return 0; }    # .
+    if (c == 58) { return 0; }    # :
+    if (c == 64) { return 0; }    # @
+    if (c == 93) { return 0; }    # ]
+    if (c == 95) { return 0; }    # _
+    if (c == 123) { return 0; }   # {
+    if (c == 125) { return 0; }   # }
+    # Safe only away from the start.
+    if (c == 35) { return at_start; }    # #
+    if (c == 45) { return at_start; }    # -
+    if (c == 126) { return at_start; }   # ~
+    return 1;
+}
+
+# ⛔ Which bytes may sit inside DOUBLE quotes alongside a `'`. Measured by
+# probing `a'b<X>` for every printable X: double-quote style survives only when
+# every other byte is in this set, and is otherwise abandoned for single-quote
+# style with `'\''`.
+# ⚠ It is NOT the same as "needs no quoting": SPACE and `]` are safe here while
+# `=` is not, and `[` forces single-quote style while its partner `]` does not.
+fn _q_dq_safe(c): i64 {
+    if (c == 32) { return 1; }                       # space
+    if (c == 37) { return 1; }                       # %
+    if (c >= 43) { if (c <= 46) { return 1; } }      # + , - .
+    if (c >= 48) { if (c <= 58) { return 1; } }      # 0-9 :
+    if (c == 64) { return 1; }                       # @
+    if (c >= 65) { if (c <= 90) { return 1; } }      # A-Z
+    if (c == 93) { return 1; }                       # ]
+    if (c == 95) { return 1; }                       # _
+    if (c >= 97) { if (c <= 122) { return 1; } }     # a-z
+    return 0;
+}
+
+fn _q_named_escape(c): i64 {
+    if (c == 7)  { return 97;  }   # \a
+    if (c == 8)  { return 98;  }   # \b
+    if (c == 9)  { return 116; }   # \t
+    if (c == 10) { return 110; }   # \n
+    if (c == 11) { return 118; }   # \v
+    if (c == 12) { return 102; }   # \f
+    if (c == 13) { return 114; }   # \r
+    return 0;
+}
+
+fn _q_put(out, n, c): i64 {
+    store8(out + n, c);
+    return n + 1;
+}
+
+fn _q_puts(out, n, s): i64 {
+    var i: i64 = 0;
+    var l = strlen(s);
+    while (i < l) {
+        store8(out + n + i, load8(s + i));
+        i = i + 1;
+    }
+    return n + l;
+}
+
+# Render `src` (len bytes) into `out`; returns the byte count written.
+# ⚠ `out` must hold at least `quote_bufsz(len)` bytes.
+fn quote_shell(src, len, style, out): i64 {
+    var n: i64 = 0;
+    # Pass 1: classify the name.
+    var any_special: i64 = 0;   # forces quoting at all
+    var has_sq: i64 = 0;        # contains `'`
+    var has_dq: i64 = 0;        # contains `"`
+    var has_esc: i64 = 0;       # contains a byte needing $'...'
+    var dq_ok: i64 = 1;         # every non-`'` byte is safe inside double quotes
+    var i: i64 = 0;
+    while (i < len) {
+        var c = load8(src + i);
+        var at_start: i64 = 0;
+        if (i == 0) { at_start = 1; }
+        if (_q_needs_quote(c, at_start) == 1) { any_special = 1; }
+        if (c == 39) { has_sq = 1; }
+        if (c == 34) { has_dq = 1; }
+        if (_q_is_plain(c) == 0) {
+            if (c != 39) { has_esc = 1; }
+        }
+        if (c != 39) {
+            # ⚠ `#` is double-quote-safe ONLY at index 0. Measured and
+            # consistent across every probe: `#a'b` and `#'` take double quotes
+            # while `a'b#` and `a#'b` are forced to single-quote style. It reads
+            # backwards — `#` starts a comment at word start, not mid-word — but
+            # it is what quotearg does.
+            if (c == 35) {
+                if (i != 0) { dq_ok = 0; }
+            } elif (_q_dq_safe(c) == 0) {
+                dq_ok = 0;
+            }
+        }
+        i = i + 1;
+    }
+    if (style == QUOTE_IF_NEEDED) {
+        if (any_special == 0) {
+            # Nothing to do — copy the bytes through bare.
+            i = 0;
+            while (i < len) {
+                n = _q_put(out, n, load8(src + i));
+                i = i + 1;
+            }
+            return n;
+        }
+    }
+
+    # ⭐ DOUBLE-QUOTE STYLE: only when a `'` is present and nothing else forces
+    # the single-quote machinery. `it's` -> `"it's"`.
+    if (has_sq == 1) {
+        if (dq_ok == 1) {
+            if (has_esc == 0) {
+                n = _q_put(out, n, 34);
+                i = 0;
+                while (i < len) {
+                    n = _q_put(out, n, load8(src + i));
+                    i = i + 1;
+                }
+                return _q_put(out, n, 34);
+            }
+        }
+    }
+
+    # SINGLE-QUOTE STYLE, with `$'...'` runs spliced in for escaped bytes.
+    # ⚠ `in_sq` tracks whether a single-quoted run is currently open, so that
+    # adjacent escapes share one `$'...'` and no empty `''` is emitted at the
+    # end. The leading `''` for a name starting with an escape falls out of the
+    # same bookkeeping: the run is opened, then immediately closed.
+    var in_sq: i64 = 0;
+    var in_esc: i64 = 0;
+    i = 0;
+    while (i < len) {
+        var c = load8(src + i);
+        if (_q_is_plain(c) == 1) {
+            if (in_esc == 1) {
+                n = _q_put(out, n, 39);      # close $'...'
+                in_esc = 0;
+            }
+            if (in_sq == 0) {
+                n = _q_put(out, n, 39);
+                in_sq = 1;
+            }
+            n = _q_put(out, n, c);
+        } elif (c == 39) {
+            # ⚠ `'` inside single-quote style is written `'\''` — close the run,
+            # escape, reopen. It is not an escaped byte, so it never opens a
+            # `$'...'`.
+            # ⛔ After a `$'...'` run there is NO empty `''` before the escape:
+            # GNU writes `$'\t'\'''` and not `$'\t'''\'''`. Found by comparing
+            # the name `'<TAB>'` — the single case out of 286 that separates the
+            # two readings.
+            if (in_esc == 1) {
+                n = _q_put(out, n, 39);      # close $'...'
+                in_esc = 0;
+                n = _q_puts(out, n, "\\'");
+                n = _q_put(out, n, 39);      # reopen a single-quoted run
+                in_sq = 1;
+            } else {
+                if (in_sq == 0) {
+                    n = _q_put(out, n, 39);
+                    in_sq = 1;
+                }
+                n = _q_put(out, n, 39);      # close the run
+                n = _q_puts(out, n, "\\'");
+                n = _q_put(out, n, 39);      # reopen
+            }
+        } else {
+            if (in_esc == 0) {
+                # Close any open single-quoted run FIRST — this is what emits
+                # the leading `''` when the name starts with an escape.
+                if (in_sq == 0) {
+                    n = _q_put(out, n, 39);
+                    in_sq = 1;
+                }
+                n = _q_put(out, n, 39);
+                in_sq = 0;
+                n = _q_put(out, n, 36);      # $
+                n = _q_put(out, n, 39);      # '
+                in_esc = 1;
+            }
+            n = _q_put(out, n, 92);          # backslash
+            var ne = _q_named_escape(c);
+            if (ne != 0) {
+                n = _q_put(out, n, ne);
+            } else {
+                # Three-digit octal, always padded.
+                n = _q_put(out, n, 48 + ((c >> 6) & 7));
+                n = _q_put(out, n, 48 + ((c >> 3) & 7));
+                n = _q_put(out, n, 48 + (c & 7));
+            }
+        }
+        i = i + 1;
+    }
+    if (in_esc == 1) { n = _q_put(out, n, 39); }
+    elif (in_sq == 1) { n = _q_put(out, n, 39); }
+    else {
+        # An empty name in ALWAYS mode still renders as `''`.
+        n = _q_put(out, n, 39);
+        n = _q_put(out, n, 39);
+    }
+    return n;
+}
+
+# Worst case per input byte: `'` closing + `$'` + `\377` + `'` reopening.
+fn quote_bufsz(len): i64 {
+    return len * 8 + 16;
+}

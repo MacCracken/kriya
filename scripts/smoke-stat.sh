@@ -8,6 +8,13 @@
 
 set -e
 
+# ⛔ GNU's `ls` and `stat` honour QUOTING_STYLE and kriya does not, so a host
+# exporting it fails every quoted comparison below at once — blaming kriya for
+# the shell's environment. ⚠ Same shape as du/df's BLOCK_SIZE and echo's
+# POSIXLY_CORRECT: if kriya ignores a variable, the ORACLE must ignore it too.
+# ⭐ Caught by the hostile-environment matrix run, not by CI.
+unset QUOTING_STYLE
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/build/kriya"
 
@@ -164,9 +171,8 @@ expect_eq "unknown %q matches GNU" "$(stat --format="%q" regfile 2>/dev/null)" "
 # ⚠ The list keeps shrinking and these assertions have to shrink with it:
 # %x/%y/%z left at v1.2.5 and %U/%G at 1.5.0, when `src/lib/userdb.cyr` landed.
 # ⭐ This block going red is the SUCCESS signal for a release that implements
-# one of them — it did exactly that at 1.5.0. Only %N (a quoting helper,
-# roadmap 1.5.2) and %w (statx(2)) are still deferred.
-for spec in %N %w; do
+# one of them — 1.5.0 took %U/%G and 1.5.3 took %N. Only %w (statx(2)) is left.
+for spec in %w; do
     rc=0
     out=$("$BIN" stat -c "$spec" regfile 2>/dev/null) || rc=$?
     expect_eq "deferred $spec exits 1"     "1"  "$rc"
@@ -191,6 +197,44 @@ expect_eq "%U of a root-owned path" "$(stat -c '%U|%G' /)" "$("$BIN" stat -c '%U
 # instead of here — noted so the gap is deliberate rather than forgotten.
 rc=0; "$BIN" stat -c '%U' regfile >/dev/null 2>&1 || rc=$?
 expect_eq "%U now exits 0" "0" "$rc"
+
+# --- %N: the quoted name (1.5.3) ---
+#
+# ⭐ These CAN be absolutes, unlike the %U/%G cases above: quoting output is a
+# pure function of the bytes in the name, not of the machine. ⚠ Compared
+# against GNU as well, so a rule change upstream still shows up.
+qn_same() {
+    label=$1; name=$2
+    : > "$name" 2>/dev/null || return 0
+    g=$(stat -c '%N' "$name" | od -An -c)
+    k=$("$BIN" stat -c '%N' "$name" | od -An -c)
+    expect_eq "%N $label" "$g" "$k"
+    rm -f "$name"
+}
+qn_same "plain is still quoted"  'plain'
+qn_same "space"                  'a b'
+qn_same "single quote"           "it's"
+qn_same "double quote"           'has"quote'
+qn_same "both quotes"            'a'"'"'b"c'
+qn_same "tab"                    "$(printf 'tab\there')"
+qn_same "newline"                "$(printf 'new\nline')"
+qn_same "leading tab"            "$(printf '\tlead')"
+qn_same "shell metachars"        'a$b`c;d&e'
+qn_same "tilde and dash"         '~x-y'
+# ⛔ An ABSOLUTE: `plain` must come out QUOTED, which is what separates %N from
+# `ls`'s if-needed quoting. A test comparing only against GNU would pass for an
+# implementation that never quoted anything, if GNU were also broken.
+: > plainname
+expect_eq "%N always quotes" "'plainname'" "$("$BIN" stat -c '%N' plainname)"
+expect_eq "%n never quotes"  "plainname"   "$("$BIN" stat -c '%n' plainname)"
+rm -f plainname
+# Symlink form.
+: > tgt; ln -sf tgt 'link name' 2>/dev/null
+if [ -L 'link name' ]; then
+    expect_eq "%N symlink form" "$(stat -c '%N' 'link name')" "$("$BIN" stat -c '%N' 'link name')"
+    expect_eq "%N symlink absolute" "'link name' -> 'tgt'" "$("$BIN" stat -c '%N' 'link name')"
+fi
+rm -f tgt 'link name'
 # --- %x / %y / %z render (v1.2.5) ---
 # ⚠ Compared under TZ=UTC on the GNU side: kriya is UTC-only until tzfile
 # parsing lands (ADR 0007) and prints a literal +0000 offset. Under TZ=UTC the

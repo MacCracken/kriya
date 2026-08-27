@@ -161,9 +161,26 @@ kriya's dependency closure for niyama.
   - **Multi-column padding uses spaces where GNU uses a TAB.** ⚠ Column POSITIONS are identical, so
     only a byte-exact tty comparison sees it — which is why every piped smoke comparison passed.
     Pairs with the colour work above, since GNU's own rule switches on whether colour is active.
-- **1.5.3 — Quoting.** `stat %N` (quoted name + symlink target) against a shared quoting helper, and
-  the same helper for `ls`'s quoting story. Also `pwd`'s `$PWD` inode-match, which needs only a
-  stat-compare in `fs.cyr`.
+- ✅ **1.5.3 — Quoting** (shipped). `src/lib/quote.cyr`; `stat %N`, `ls` tty quoting with the `-l`
+  alignment rule, and `pwd`. ⚠ The `pwd` half was BIGGER than this entry said — "needs only a
+  stat-compare" missed that kriya's DEFAULT was logical where GNU's is physical, and that `-L`
+  validated nothing beyond a leading `/`, so `PWD=/etc kriya pwd` printed `/etc`.
+  - ⚠ **Residual quoting divergence, measured at 0.17%** over a 3,000-name hostile fuzz: names
+    combining a `'` with escaped bytes in particular positions, where GNU emits a leading empty `''`
+    kriya does not. ⛔ In at least one of those GNU's own output does not round-trip (`'\t'` reads
+    as backslash-t). Worth revisiting only if a consumer hits it.
+  - ⚠ **UTF-8 locales**: kriya is byte-oriented and escapes every high byte, matching GNU under
+    `LC_ALL=C`; GNU under a UTF-8 locale renders valid multi-byte bare. More verbose, never wrong.
+    Changing it would mean decoding UTF-8 in the quoter — the `cut`/`wc` precedent exists.
+  - ⚠ **`--quoting-style` accepts only `literal`, `shell-escape` and `shell-escape-always`** — the
+    three kriya's helper implements. `shell`, `c`, `escape`, `locale` and `clocale` are REFUSED by
+    name. Adding them is a small, well-bounded follow-up if a consumer asks.
+  - ⚠ **`QUOTING_STYLE` is read by GNU and NOT by kriya.** GNU lets it override the tty/pipe default
+    in both directions. kriya declines it for the reason ADR 0011 gave for `echo`; the smoke oracle
+    unsets it so the tests measure the code rather than the shell. Revisit only with an ADR.
+  - ⛔ **STILL OPEN from 1.5.1: multi-column padding uses spaces where GNU uses a TAB.** Column
+    POSITIONS are identical, so only a byte-exact tty comparison sees it. Now the LAST known `ls`
+    output divergence on a terminal.
 
 ---
 

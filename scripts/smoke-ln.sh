@@ -7,6 +7,13 @@
 
 set -e
 
+# ⛔ GNU's `ls` and `stat` honour QUOTING_STYLE and kriya does not, so a host
+# exporting it fails every quoted comparison below at once — blaming kriya for
+# the shell's environment. ⚠ Same shape as du/df's BLOCK_SIZE and echo's
+# POSIXLY_CORRECT: if kriya ignores a variable, the ORACLE must ignore it too.
+# ⭐ Caught by the hostile-environment matrix run, not by CI.
+unset QUOTING_STYLE
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/build/kriya"
 
