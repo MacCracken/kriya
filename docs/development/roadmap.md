@@ -488,7 +488,47 @@ than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path
   - ⚠ *Arithmetic in a comment is a claim too.* "Four orders of magnitude below the int ceiling" was
     24.9x, and a test comment said the duration ceiling was 292,000 years where the value asserted on
     the next line is 292. Neither changed any behaviour; both would have misled the next reader.
-- **1.6.4 — Defenses that need infrastructure first.** Two items blocked on the same kind of gap:
+- **1.6.4 — Defenses that need infrastructure first.** ✅ **SHIPPED at 1.6.4**, and neither item
+  needed the infrastructure its entry named.
+
+  ⛔ **The `rm` defense was DESIGNED FOUR WAYS AND THEN NOT BUILT.**
+  [architecture 003](../architecture/003-cross-operand-bulk-root-defense.md) exists now and says
+  build nothing. ⭐ **The refusal teaches a strictly worse command** — the shape every candidate
+  refuses is the least destructive of the available ones, because a per-operand route enumerates the
+  dotfiles a glob never matched. ⛔ **`/proc/self/root/*` is invisible to all four**, and text-only
+  canonicalization cannot stop being blind to a symlinked operand prefix. ⛔ **AGNOS's rootfs is
+  `bin data mirshi`**, so no static table covers the platform kriya is built for.
+
+  ⭐ **`tee -i`/`-p`/`--output-error` shipped, and `signal_ignore` had been in the stdlib since
+  v6.4.51.** The entry below says they were "gated on the signal-handler infrastructure named in
+  architecture 002, whose trigger row has never fired". The row still has not fired: a DISPOSITION is
+  not a handler. See [ADR 0016](../adr/0016-tee-signal-dispositions.md).
+
+  ⛔ **Carry forward:**
+  - ⛔ *A SECOND deferral outlived its blocker.* `tee -i` waited six releases on infrastructure that
+    already existed, exactly as `sleep`'s fractional durations waited on a chrono duration parser
+    that was never coming. ⚠ **A deferral naming a blocker is a claim with an expiry date** — the
+    cost of re-checking is one grep, and the cost of not re-checking is measured in releases.
+  - ⭐ *"What would the refused caller do instead?" is the question a safety feature has to answer.*
+    Four independent designs all refused the same shape, and measuring the alternatives showed that
+    shape was the least destructive one available. A guard that cannot see the workaround it creates
+    can raise expected damage while looking like it lowers it.
+  - ⛔ *A false-positive rate measured where the false positives do not live is evidence about where
+    you looked.* 6,475 parsed `rm` invocations said the aggregate rules were nearly free; the corpus
+    contained no container build, no chroot assembly, no initramfs teardown — the three populations
+    that would have paid.
+  - ⚠ *A clean number is a reason to look harder.* The corpus was first reported as a flat zero
+    multi-root-child invocations. Re-running it found fourteen, and inspecting all fourteen found
+    them false — documentation prose about this very problem, `groff` files where `rm` means *remove
+    macro*. The conclusion held; the evidence for it did not, until it was checked.
+  - ⚠ *Mutation testing found a hole in the TESTS three times running now.* Three of seven mutations
+    survived because a whole axis of the matrix — the closed-pipe half — had no fixture, under a
+    comment claiming it did. **The axis that is hard to construct in `sh` is the axis that will be
+    missing.**
+  - ⭐ *A decision to build nothing still needs assertions.* `smoke-rm.sh` pins the measurement that
+    decided it, so reintroducing an aggregate rule is a visible test edit.
+
+  Original entry — two items blocked on the same kind of gap:
   - ⛔ **`rm` cross-operand bulk-root defense.** [ADR 0004](../adr/0004-rm-refuses-root.md) refuses `/`
     per operand, but `rm -rf /*` expands **at the shell** to `/bin /boot /etc …` — every operand
     individually legal, the aggregate catastrophic. Needs `docs/architecture/003-*.md` to define the

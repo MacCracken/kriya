@@ -134,6 +134,26 @@ fn _k_write_note(errno): i64 {
 fn k_write_failed(): i64 { return _K_WRITE_BAD; }
 fn k_write_errno(): i64 { return _K_WRITE_ERRNO; }
 
+# ⭐ CLEAR THE NET FOR ONE ERRNO THE APPLET HAS ALREADY HANDLED ITSELF.
+#
+# ⛔ NARROW ON PURPOSE — it clears only when the RECORDED errno is the one named,
+# so an applet cannot accidentally forgive a failure it never looked at. The
+# caller is asserting "this specific failure is not an error in this mode", which
+# is a claim about one errno, not a licence to ignore writes.
+#
+# The consumer is `tee --output-error=…-nopipe` (and `-p`), whose entire meaning
+# is that EPIPE on an output is not a failure: the mode drops that output and
+# exits 0. Without this the applet returns success, the dispatcher's net sees the
+# sticky EPIPE and prints `write error: broken pipe` / exit 1 — the correct answer
+# for every other utility and the exact opposite of what `-p` asked for.
+fn k_write_forgive(errno): i64 {
+    if (_K_WRITE_BAD == 0) { return 0; }
+    if (_K_WRITE_ERRNO != errno) { return 0; }
+    _K_WRITE_BAD = 0;
+    _K_WRITE_ERRNO = 0;
+    return 1;
+}
+
 fn k_write(fd, buf, n): i64 {
     # write is #1 on BOTH targets, but route it for one consistent layer.
     #ifdef CYRIUS_TARGET_AGNOS

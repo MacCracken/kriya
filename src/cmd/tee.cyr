@@ -22,15 +22,53 @@
 # semantics. Destinations inside a recursive walk would use O_NOFOLLOW
 # per ADR 0003, but tee operates on user-supplied paths only.
 #
-# Deferred (named follow-up): (roadmap 1.6.4)
-#   -i / --ignore-interrupts  SIGINT is ignored during the copy loop.
-#                             Needs the signal-handler infrastructure
-#                             flagged in `docs/architecture/002-signal-handling-model.md`
-#                             (M2/M3 trigger row — not yet installed). (roadmap 1.6.4)
-#   -p / --output-error=...   GNU pipe-failure-mode knob; rare.
+# ⭐ `-i` AND `-p`/`--output-error` ARE HERE NOW, and the infrastructure they were
+# waiting on already existed. This header said they "need the signal-handler
+# infrastructure flagged in `docs/architecture/002-signal-handling-model.md` —
+# not yet installed". ⚠ Checked at pin 6.5.35: the Cyrius stdlib has  #skip-lint
+# `signal_ignore(signum)` and `signal_default(signum)` in `lib/syscalls.cyr`,
+# with `SIGINT` and `SIGPIPE` already enumerated. There was nothing to build.
+# **Second time a deferral outlived its blocker** — `sleep`'s duration parser was
+# the first. See [ADR 0016](../../docs/adr/0016-tee-signal-dispositions.md).
+#
+# ⚠ On agnos both calls are no-ops (ring-3 has no signal delivery yet), so `-i`
+# and `-p` are accepted and there is nothing to ignore. That is the honest
+# behaviour, not a stub: the signals do not arrive.
+
+enum TeeErrMode {
+    # ⛔ TWO INDEPENDENT BITS, NOT FIVE MODES. GNU spells them as five names but
+    # the matrix is (warn | exit) x (pipes count | pipes do not), and measuring
+    # all six combinations against GNU is what makes that visible:
+    #
+    #                    non-pipe error            pipe error
+    #   default          warn, continue, exit 1    KILLED by SIGPIPE
+    #   -p               warn, continue, exit 1    silent, drop it, exit 0
+    #   warn             warn, continue, exit 1    warn, continue, exit 1
+    #   warn-nopipe      warn, continue, exit 1    silent, drop it, exit 0
+    #   exit             warn, STOP, exit 1        warn, STOP, exit 1
+    #   exit-nopipe      warn, STOP, exit 1        silent, drop it, exit 0
+    #
+    # ⛔ ANY of them also means SIGPIPE IS IGNORED — otherwise the process dies
+    # before a write can return EPIPE and no mode is observable at all.
+    TEE_ERR_DEFAULT = 0,
+    TEE_ERR_WARN    = 1,
+    TEE_ERR_EXIT    = 2,
+    TEE_ERR_NOPIPE  = 4,      # OR-ed into the two above
+}
 
 var _tee_spec  = 0;
 var _tee_a_idx = 0;
+var _tee_i_idx = 0;
+var _tee_p_idx = 0;
+var _tee_oe_idx = 0;
+var _tee_mode  = 0;
+# ⛔ THE OPERAND NAME TRAVELS WITH THE FD. It used to be recovered as
+# `flags_positional(spec, fi - 1)`, which assumes the fd list and the operand
+# list line up — and they do not the moment ONE open fails, because the failed
+# operand is never pushed. Measured: `tee nodir/x/y /dev/full ok` reported
+# **"nodir/x/y: no space left on device"**, naming the operand that failed to
+# open for an error that belongs to `/dev/full`. A reader chases the wrong disk.
+var _tee_names = 0;
 
 # Lazy 64 KiB I/O buffer (heap, process-lifetime).
 var _tee_buf   = 0;
@@ -40,6 +78,14 @@ fn _tee_init_spec(): i64 {
     if (_tee_spec != 0) { return 0; }
     var s = flags_new();
     _tee_a_idx = flags_add_bool(s, 97, "append", 0, "append to output files (O_APPEND)");
+    _tee_i_idx = flags_add_bool(s, 105, "ignore-interrupts", 0, "ignore SIGINT during the copy");
+    # ⚠ `-p` HAS NO LONG FORM, because GNU's does not either — its `--help` lists
+    # a bare `-p`. ⭐ The flag table supports that: `_flags_find_long` skips
+    # entries whose long name is 0, by design. Inventing a `--pipe-mode` GNU does
+    # not have would make a script written against kriya fail on GNU, which is
+    # the portability trap running the other way.
+    _tee_p_idx = flags_add_bool(s, 112, 0, 0, "shorthand for --output-error=warn-nopipe");
+    _tee_oe_idx = flags_add_str(s, 0, "output-error", 0, "warn|warn-nopipe|exit|exit-nopipe");
     _tee_spec = s;
     tee_help_declare();
     return 0;
@@ -56,7 +102,21 @@ fn tee_help_declare(): i64 {
     help_exit(1, "a file could not be written");
     help_example("make 2>&1 | tee build.log");
     help_example("echo hi | tee -a log");
+    help_example("long-job | tee -p log | head -5");
     return 0;
+}
+
+# Decode `--output-error=MODE` / `-p` into the two-bit mode. Returns -1 on an
+# unknown MODE. ⚠ A BARE `--output-error` IS `warn`, which is GNU's documented
+# default for the option given without a value.
+fn _tee_parse_mode(v): i64 {
+    if (v == 0) { return TEE_ERR_WARN; }
+    if (load8(v) == 0) { return TEE_ERR_WARN; }
+    if (streq(v, "warn") == 1)        { return TEE_ERR_WARN; }
+    if (streq(v, "warn-nopipe") == 1) { return TEE_ERR_WARN | TEE_ERR_NOPIPE; }
+    if (streq(v, "exit") == 1)        { return TEE_ERR_EXIT; }
+    if (streq(v, "exit-nopipe") == 1) { return TEE_ERR_EXIT | TEE_ERR_NOPIPE; }
+    return 0 - 1;
 }
 
 fn _tee_buf_get(): i64 {
@@ -124,13 +184,47 @@ fn cmd_tee(start: i64): i64 {
     var append: i64 = 0;
     if (flags_get_bool(_tee_spec, _tee_a_idx) == 1) { append = 1; }
 
+    # --- error mode, and the signal dispositions it implies (ADR 0016) -----
+    _tee_mode = TEE_ERR_DEFAULT;
+    if (flags_get_bool(_tee_spec, _tee_p_idx) == 1) {
+        _tee_mode = TEE_ERR_WARN | TEE_ERR_NOPIPE;
+    }
+    var oev = flags_get_str(_tee_spec, _tee_oe_idx);
+    if (oev != 0) {
+        var m = _tee_parse_mode(oev);
+        if (m < 0) {
+            k_write( 2, "kriya tee: error: unknown --output-error mode ", 46);
+            k_write( 2, "(want warn, warn-nopipe, exit or exit-nopipe)\n", 46);
+            return EXIT_USAGE;
+        }
+        # ⚠ A BARE `--output-error` IS A USAGE ERROR HERE AND A VALID FORM IN
+        # GNU, where it means `warn-nopipe`. That is ADR 0002 rule 3 — "a flag is
+        # either a boolean or it requires a value, never both; ambiguity here is
+        # the single biggest source of agent miscalls" — and
+        # `tee --output-error file` is exactly the ambiguity it names. `-p` is the
+        # compact spelling; `--output-error=warn-nopipe` is the explicit one.
+        _tee_mode = m;
+    }
+
+    # ⛔ IGNORING SIGPIPE IS WHAT MAKES ANY MODE OBSERVABLE. Without it the
+    # kernel kills the process on the first write to a closed pipe and no
+    # per-output policy ever runs. ⚠ It is opt-in ONLY — architecture 002's
+    # hard rule "no utility ignores SIGPIPE" stays the default, and this is the
+    # flag-gated carve-out ADR 0016 records.
+    if (_tee_mode != TEE_ERR_DEFAULT) { signal_ignore(SIGPIPE); }
+    # ⚠ `-i` IS A DISPOSITION CHANGE, NOT A HANDLER. Nothing is caught, no flag
+    # is polled, no stack is used — SIG_IGN means the copy loop never sees it.
+    if (flags_get_bool(_tee_spec, _tee_i_idx) == 1) { signal_ignore(SIGINT); }
+
     # Open each output file. Failure-to-open is reported but doesn't
     # halt processing of the others. Successfully-opened fds are
     # collected into a vec; stdout is added unconditionally as the
     # first entry.
     var npos = flags_positional_count(_tee_spec);
     var fds = vec_new();
+    _tee_names = vec_new();
     vec_push(fds, 1);  # fd 1 = stdout
+    vec_push(_tee_names, "standard output");
 
     var any_failed: i64 = 0;
 
@@ -150,6 +244,7 @@ fn cmd_tee(start: i64): i64 {
             any_failed = 1;
         } else {
             vec_push(fds, fd);
+            vec_push(_tee_names, p);
         }
         i = i + 1;
     }
@@ -172,25 +267,41 @@ fn cmd_tee(start: i64): i64 {
                 loop = 0;
             } else {
                 var fi: i64 = 0;
+                var stop: i64 = 0;
                 while (fi < nfds) {
                     var fd = vec_get(fds, fi);
-                    var wr = _tee_write_all(fd, buf, n);
-                    if (wr != 0) {
-                        # Write failure — report and remove the fd from
-                        # the rotation. Other fds keep receiving data.
-                        var op = "(stdout)";
-                        if (fi > 0) {
-                            op = flags_positional(_tee_spec, fi - 1);
+                    # ⛔ A DEAD FD IS NOT WRITTEN TO AGAIN. It used to be: the
+                    # slot was set to -1 and then handed straight to `write(-1,
+                    # …)` on the next chunk, so the diagnostic repeated ONCE PER
+                    # 64 KiB. Measured on a 200 KiB input: kriya printed the
+                    # "no space left on device" line **four times** where GNU
+                    # printed it once.
+                    if (stop == 1) { fd = 0 - 1; }
+                    if (fd >= 0) {
+                        var wr = _tee_write_all(fd, buf, n);
+                        if (wr != 0) {
+                            var errno = 0 - wr;
+                            # ⚠ EPIPE (32) is the one errno the `-nopipe` modes
+                            # discount entirely: not diagnosed, not counted
+                            # towards the exit code, and never a reason to stop.
+                            var is_pipe: i64 = 0;
+                            if (errno == 32) { is_pipe = 1; }
+                            var discount: i64 = 0;
+                            if (is_pipe == 1) {
+                                if ((_tee_mode & TEE_ERR_NOPIPE) != 0) { discount = 1; }
+                            }
+                            if (discount == 0) {
+                                _tee_report(vec_get(_tee_names, fi), errno);
+                                any_failed = 1;
+                                if ((_tee_mode & TEE_ERR_EXIT) != 0) { stop = 1; }
+                            }
+                            if (fi > 0) { k_close( fd); }
+                            vec_set(fds, fi, 0 - 1);
                         }
-                        _tee_report(op, 0 - wr);
-                        any_failed = 1;
-                        # Close the failing fd (unless it's stdout).
-                        if (fi > 0) { k_close( fd); }
-                        # Mark by setting to -1; we'll skip on next pass.
-                        vec_set(fds, fi, 0 - 1);
                     }
                     fi = fi + 1;
                 }
+                if (stop == 1) { loop = 0; }
                 # Compact: remove any -1 fds. Simpler: just check on
                 # next round. We do a quick pass.
                 var any_alive: i64 = 0;
@@ -204,9 +315,20 @@ fn cmd_tee(start: i64): i64 {
                     }
                 }
                 if (any_alive == 0) { loop = 0; }
+                if (stop == 1) { loop = 0; }
             }
         }
     }
+
+    # ⚠ THE DISPATCHER'S WRITE-FAILURE NET HAS TO BE TOLD. `k_write` records a
+    # sticky failure and `src/main.cyr` reports it at exit whenever the applet
+    # returned SUCCESS — correct for every other utility, and the exact opposite
+    # of what `-p` asked for. Measured before this: `tee -p` into a closed pipe
+    # printed `kriya tee: write error: broken pipe` and exited 1 where GNU is
+    # silent and exits 0. ⭐ Forgiving ONE errno keeps the net honest: an ENOSPC
+    # recorded first still stands, because first-failure-wins means it is the one
+    # in the slot.
+    if ((_tee_mode & TEE_ERR_NOPIPE) != 0) { k_write_forgive(32); }
 
     # Close non-stdout fds.
     var ci: i64 = 1;

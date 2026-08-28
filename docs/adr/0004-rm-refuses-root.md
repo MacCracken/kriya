@@ -88,6 +88,17 @@ This is the shell's expansion, not kriya's operand. A defense exists — refuse 
 
 **Deferred to a follow-up architecture note**, named explicitly: `docs/architecture/003-cross-operand-bulk-root-defense.md` (to be authored when M2 destructive utilities have shipped and we have real-world operand patterns to base the heuristic on). Until then, the weakness is documented here and in `kriya rm --help` ("note: shell-expanded `/*` is not blocked by the root-refusal check").
 
+> ⛔ **RESOLVED AT 1.6.4, AND THE ANSWER IS NO HEURISTIC.**
+> [architecture 003](../architecture/003-cross-operand-bulk-root-defense.md) designed four
+> cross-operand defenses — a bigger static table, exact root coverage, an operand-fan-out threshold,
+> and an inverted-glob pre-flight — measured each against real corpora, attacked each, and rejected
+> all four. The gap stays open deliberately.
+>
+> ⚠ **That note also constrains this ADR's extension point.** The grant above — that adding entries
+> to `protected_paths[]` needs no successor ADR because it is "strictly tightening" — holds only
+> while the check is per-operand, and only for paths that always exist. A table entry for a path that
+> can be absent turns `rm -f` on it from a POSIX no-op into a usage error. See its Hard rules.
+
 ## Consequences
 
 - **Positive**

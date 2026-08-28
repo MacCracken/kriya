@@ -6,6 +6,149 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.4] - 2026-08-27 — `tee`'s signal flags, and a defense that was designed four ways and then not built
+
+### ⛔ Decided — the cross-operand bulk-root defense is REJECTED, not deferred again
+
+[ADR 0004](docs/adr/0004-rm-refuses-root.md) has named
+`docs/architecture/003-cross-operand-bulk-root-defense.md` as a promissory note since v0.3.0:
+`rm -rf /*` expands **at the shell** to `/bin /boot /etc …`, every operand individually legal, the
+aggregate catastrophic. Four defenses were designed independently, measured against real corpora, and
+attacked: a bigger static table, exact root coverage, an operand-fan-out threshold, and an
+inverted-glob pre-flight.
+
+**None of them is being built.** [The note](docs/architecture/003-cross-operand-bulk-root-defense.md)
+exists now and says so. Three findings killed all four:
+
+- ⭐ **The refusal teaches a strictly worse command.** Measured on one fixture with a `.dockerenv`
+  and a `.secrets/` dotdir:
+
+  | command | entries left | files left |
+  |---|---|---|
+  | `rm -rf FX/*` — **what all four refuse** | 2 | 2 |
+  | `for d in FX/*; do rm -rf "$d"; done` | 2 | 2 |
+  | `find FX -mindepth 1 -maxdepth 1 -exec rm -rf {} ';'` | **0** | **0** |
+
+  ⛔ The shape every candidate refuses is the **least destructive** of the available ones, because a
+  per-operand route enumerates **the dotfiles the glob never matched**. And every candidate's
+  headline false positive is a container build, a chroot rootfs assembly or an initramfs teardown —
+  populations that automate, have no escape hatch, and whose workaround goes into a Dockerfile and
+  then runs everywhere forever.
+
+- ⛔ **Text-only canonicalization is blind to the operand PREFIX and cannot stop being.**
+  `/proc/self/root` is a kernel-maintained symlink to `/` on every Linux and in every container.
+  `/proc/self/root/*` expands to all 19 root entries and `kriya realpath -s -m /proc/self/root/etc`
+  answers `/proc/self/root/etc` — depth 3, matching no table entry and counting as no root child.
+  ⭐ The **cwd** form *is* caught (`cd /proc/self/root && kriya pwd -P` is `/`), because `getcwd`
+  returns the kernel's physical path. kriya sees through a symlinked cwd and is structurally blind to
+  a symlinked operand prefix.
+
+- ⛔ **There is no universal tripwire.** Exporting `agnos-thin:latest` shows the AGNOS rootfs is
+  `bin data mirshi`. There is **no `/usr` at all**, and the `/etc` that appears holds exactly
+  `hostname hosts mtab resolv.conf`, all four injected by Docker. A `/usr`+`/etc` table has **zero
+  coverage on the platform kriya is built for**, and the only name common to every root kriya ships
+  onto is `/bin` — a symlink into `usr/` on merged-usr systems, which the usrmerge migration removes.
+
+⚠ **The corpus said the rules would have been nearly free, and that is not evidence of safety.** A
+scan of `/usr/share`, `/usr/lib`, `/usr/bin`, `/etc` and `~/Repos` parsed **6,475 `rm` invocations**;
+fourteen appeared to name two or more top-level entries and **all fourteen are false** — prose in
+documentation describing this very problem (kriya's own ADR 0004 scores the worst), `groff` macro
+files where `rm` means *remove macro*, a Go testdata script, a test log. Zero real invocations. ⛔ But
+the corpus contains none of the populations that would pay: **a false-positive rate measured where
+the false positives do not live is evidence about where you looked.**
+
+The note carries five Hard rules that now bind ADR 0004's extension point. The sharpest:
+⛔ **no entry may be added to `protected_paths[]` for a path that can be absent** — a table entry
+converts `rm -f` on a nonexistent path from a POSIX no-op into a usage error. Measured:
+`kriya rm -f /absent-toplevel-xyz` exits **0** today, matching GNU.
+
+⭐ **The decision is asserted, not just written down.** `smoke-rm.sh` gains the measurement that
+decided it (the glob leaves dotfiles, `find -exec` does not), the `rm -f`-is-a-no-op rule, and the
+per-operand refusals that must keep firing — so a future aggregate rule shows up as a test edit
+rather than as silent drift.
+
+### Added — `tee -i`, `-p` and `--output-error=MODE` ([ADR 0016](docs/adr/0016-tee-signal-dispositions.md))
+
+⚠ **The infrastructure they were waiting on already existed.** `tee.cyr` deferred `-i` for six
+releases as needing "the signal-handler infrastructure flagged in architecture 002 — not yet
+installed". `lib/syscalls.cyr` has had `signal_ignore(signum)` and `signal_default(signum)`, with
+`SIGINT` and `SIGPIPE` enumerated, since v6.4.51. **Second kriya deferral to outlive its blocker**,
+after `sleep`'s fractional durations waited on a chrono duration parser that was never coming.
+
+⛔ **Five mode names, two independent bits.** Measured across both a non-pipe failure (`/dev/full`)
+and a pipe failure (a closed reader):
+
+| mode | non-pipe error | pipe error |
+|---|---|---|
+| default | warn, keep other outputs, exit 1 | **killed by SIGPIPE** |
+| `-p` | warn, keep going, exit 1 | silent, drop it, exit **0** |
+| `warn` | warn, keep going, exit 1 | warn, keep going, exit 1 |
+| `warn-nopipe` | warn, keep going, exit 1 | silent, drop it, exit **0** |
+| `exit` | warn, **stop at once**, exit 1 | warn, **stop at once**, exit 1 |
+| `exit-nopipe` | warn, **stop at once**, exit 1 | silent, drop it, exit **0** |
+
+⛔ **Every non-default row also means SIGPIPE is ignored** — otherwise the kernel kills the process
+on the first write to a closed pipe and no row is observable at all. All six match GNU exactly.
+
+⭐ **A disposition is not a handler.** `SIG_IGN` installs no function, uses no stack, needs no
+`sa_restorer`, sets no flag for a loop to poll. Architecture 002's four hard rules are about what a
+handler may DO; none binds a disposition — which is why these shipped without the flag-based-handler
+infrastructure its trigger table anticipates. That table still has no entry that has fired.
+
+Architecture 002's hard rule #1 is amended from "**No utility ignores SIGPIPE**" to "**not by
+default, and never without an explicit flag**". The concern it protects — `kriya yes | head -10`
+hanging — is untouched: `yes` has no such flag.
+
+⚠ **`--output-error` requires its value**, where GNU accepts a bare form meaning `warn-nopipe`.
+[ADR 0002](docs/adr/0002-option-parsing-humans-and-agents.md) rule 3 is *"a flag is either a boolean
+or it requires a value — never both"*, and `tee --output-error file` is exactly that ambiguity.
+⚠ **`-p` has no long form**, because GNU's does not either — inventing `--pipe-mode` would make a
+script written against kriya fail on GNU.
+
+### Fixed — ⛔ two `tee` defects older than this release
+
+- ⛔ **The diagnostic repeated once per 64 KiB.** A failed output was marked `-1` and then handed
+  straight back to `write(-1, …)` on the next chunk. Measured on a 200 KiB input: kriya printed
+  "no space left on device" **four times** where GNU prints it once.
+- ⛔ **The error named the wrong file.** The operand name was recovered as
+  `flags_positional(spec, fi - 1)`, which assumes the fd list and the operand list line up — and they
+  do not the moment one open fails, because the failed operand is never pushed. Measured:
+  `tee nodir/x/y /dev/full ok` reported **"nodir/x/y: no space left on device"**, naming the operand
+  that failed to OPEN for an error belonging to `/dev/full`. The reader chases the wrong disk. The
+  name travels with the fd now.
+
+### Added — `k_write_forgive(errno)` in `src/lib/sys.cyr`
+
+`k_write` records a sticky write failure and the dispatcher reports it at exit whenever the applet
+returned success — right for every other utility, and the exact opposite of what `-p` asks for.
+⛔ **Narrow on purpose**: it clears the sticky state only when the RECORDED errno is the one named,
+so an applet cannot forgive a failure it never looked at, and a first-recorded ENOSPC still stands.
+Verified: `seq`, `echo` and `printf` to `/dev/full` still exit 1 with `write error: no space left on
+device`.
+
+### ⭐ How it was checked
+
+⚠ **The first mutation pass found a hole in my own tests, not in the code.** Seven mutations, and
+three survived: turning off the SIGPIPE ignore, the EPIPE discount and the write-net forgive all left
+the suite fully green — because the `--output-error` block used `/dev/full` for every mode and a
+comment claimed it covered the matrix. **A closed-reader pipe is not constructible in portable `sh`,
+which is exactly why the coverage was missing.** Adding the pipe half turned all three red; all seven
+are red now (1–10 failures apiece).
+
+⭐ **Every claim in architecture 003 was re-measured before it was written down** — the `find -exec`
+teardown, the `/proc/self/root` blindness and its cwd counterpart, the `rm -f` no-op, the merged-usr
+four-operand kill, and the AGNOS rootfs export. ⚠ **The corpus figure was wrong as first reported**
+(a clean "zero matches" that was actually fourteen false ones), and the corrected version — with the
+reason each is false — is the one in the note.
+
+### Release totals
+
+**5,223 smoke cases across 41 scripts** (from 5,173) — `smoke-tee.sh` 20 → **49** and `smoke-rm.sh`
+82 → **92**. **440 unit**, 18 POSIX; fuzz green under poison; four lints clean; both targets build;
+`vet` reports 54 deps.
+
+Binary 1,120,024 → **1,124,496** bytes (+4,472) on host, 1,115,832 → **1,120,304** (+4,472) on agnos.
+
 ## [1.6.3] - 2026-08-27 — `realpath`'s flag surface, and a default that had been wrong since v0.4.0
 
 ### Fixed — ⛔ `realpath`'s default mode was `-e`, and GNU's is `-E`

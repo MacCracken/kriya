@@ -298,6 +298,47 @@ while [ "$i" -lt 128 ]; do : > "capok/g$i"; i=$((i + 1)); done
 ( cd capok && "$BIN" rm ./* ) 2>/dev/null
 expect_eq "exactly 128 operands still deletes them" "0" "$(find capok -type f | wc -l)"
 
+# --- architecture 003: the bulk-root gap is a DECISION, and these pin it ----
+# ⚠ A note that decides "build nothing" still needs tests, or the next
+# well-meaning patch adds an aggregate rule and nothing turns red. These assert
+# the two halves of that decision: the per-operand check still fires on every
+# spelling of the root, and the things the note deliberately does NOT catch stay
+# uncaught — so a change of policy is visible as a test edit, not a silent drift.
+mkdir -p a003
+i=0
+while [ "$i" -lt 6 ]; do mkdir -p "a003/d$i"; : > "a003/d$i/f"; i=$((i + 1)); done
+: > a003/.hidden
+
+# ⛔ NOT CAUGHT, ON PURPOSE. The aggregate is unguarded; architecture 003's Hard
+# rule 1 says adding a rule here needs a successor note.
+# shellcheck disable=SC2086
+expect_exit "a full glob expansion is NOT refused" 0 "$BIN" rm -rf a003/d0 a003/d1 a003/d2 a003/d3 a003/d4 a003/d5
+expect_eq "...and it really removed them" "0" "$(find a003 -mindepth 1 -type d | wc -l)"
+
+# ⭐ THE REFUSAL WOULD TEACH A WORSE COMMAND, and this is the measurement that
+# decided it: `find -exec` enumerates the dotfiles a glob never matches.
+mkdir -p a003b/x; : > a003b/x/f; : > a003b/.dot
+"$BIN" rm -rf a003b/* 2>/dev/null
+expect_eq "a glob leaves the dotfiles behind"  "1" "$(ls -A a003b | wc -l)"
+mkdir -p a003c/x; : > a003c/x/f; : > a003c/.dot
+find a003c -mindepth 1 -maxdepth 1 -exec "$BIN" rm -rf {} ';' 2>/dev/null
+expect_eq "find -exec takes it to zero"        "0" "$(ls -A a003c | wc -l)"
+
+# ⛔ HARD RULE 2: a table entry must never be added for a path that can be
+# absent, because it turns `rm -f` on a nonexistent path from a POSIX no-op into
+# a usage error. This assertion is what would go red.
+expect_exit "rm -f on an absent top-level path is a no-op" 0 "$BIN" rm -f /absent-toplevel-xyz-003
+expect_eq "...and GNU agrees" "0" "$(rm -f /absent-toplevel-xyz-003 >/dev/null 2>&1; echo $?)"
+# ⚠ While the ONE entry that is in the table still refuses, under -f and all.
+expect_exit "...while / itself still refuses under -f" 2 "$BIN" rm -f /
+
+# ⛔ HARD RULE 1's other half: the per-operand check is the whole policy, so it
+# must still fire on every spelling — including from a cwd that IS the root
+# reached through a symlink, which `getcwd` resolves.
+expect_exit "the root is refused as a bare operand"  2 "$BIN" rm -rf /
+expect_exit "...and through a .. chain"              2 "$BIN" rm -rf /tmp/..
+expect_exit "...and with redundant slashes"          2 "$BIN" rm -rf ////
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

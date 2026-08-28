@@ -37,10 +37,24 @@
 # (the protection is not a toggle), no env-var bypass. Documented in
 # `--help` and reinforced here.
 #
-# Known weakness (per ADR 0004 § "shell-expanded `/*`"): `rm -rf /*`
+# ⛔ KNOWN GAP, AND IT IS NOW A DECISION RATHER THAN A DEFERRAL. `rm -rf /*`
 # expands at the shell to `/bin /boot /dev …`, none of which match `/`.
-# Cross-operand bulk-root defense is deferred to a future architecture (roadmap 1.6.4)
-# note. Documented in --help.
+# [architecture 003](../../docs/architecture/003-cross-operand-bulk-root-defense.md)
+# designed four cross-operand defenses, measured them, and rejected all four.
+#
+# ⚠ THE PRE-UNLINK PASS BELOW IS THE WHOLE POLICY. There is no aggregate rule
+# here and adding one needs a successor to that note: it found that the shape
+# every candidate refuses is the LEAST destructive of the available ones —
+# `find / -mindepth 1 -maxdepth 1 -exec rm -rf {} ';'` took a fixture to zero
+# where `rm -rf FX/*` left two entries, because a per-operand route enumerates
+# the dotfiles the glob never matched. A refusal manufactures demand for a
+# workaround that is worse than what was refused.
+#
+# ⛔ AND DO NOT ADD A TABLE ENTRY FOR A PATH THAT CAN BE ABSENT. It converts
+# `rm -f` on a nonexistent path from a POSIX no-op into a usage error —
+# `kriya rm -f /absent-toplevel-xyz` exits 0 today, matching GNU. `/` always
+# exists; `/usr` and `/etc` are not even on the AGNOS rootfs, which is
+# `bin data mirshi`.
 #
 # Each operand is attempted independently after the protected-path
 # pre-check. Exit EXIT_FAILURE if any failed, EXIT_SUCCESS otherwise.
