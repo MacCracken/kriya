@@ -35,6 +35,8 @@ var _rl_m_idx = 0;
 var _rl_n_idx = 0;
 var _rl_z_idx = 0;
 var _rl_q_idx = 0;
+var _rl_s_idx = 0;
+var _rl_v_idx = 0;
 
 fn _rl_init_spec(): i64 {
     if (_rl_spec != 0) { return 0; }
@@ -44,7 +46,12 @@ fn _rl_init_spec(): i64 {
     _rl_m_idx = flags_add_bool(s, 109, "canonicalize-missing",  0, "canonicalize (nothing need exist)");
     _rl_n_idx = flags_add_bool(s, 110, "no-newline",            0, "suppress trailing newline of final output");
     _rl_z_idx = flags_add_bool(s, 122, "zero",                  0, "NUL-terminate each output");
-    _rl_q_idx = flags_add_bool(s, 113, "quiet",                 0, "suppress error messages");
+    _rl_q_idx = flags_add_bool(s, 113, "quiet",                 0, "suppress error messages (default)");
+    # ⚠ `readlink -s` IS NOT `realpath -s`. Here it is a synonym for `-q`; there
+    # it means "do not expand symlinks". Two utilities that look alike, one
+    # letter, opposite meanings — which is why they do not share a flag table.
+    _rl_s_idx = flags_add_bool(s, 115, "silent",                 0, "synonym for -q");
+    _rl_v_idx = flags_add_bool(s, 118, "verbose",                0, "report error messages");
     _rl_spec = s;
     readlink_help_declare();
     return 0;
@@ -64,31 +71,11 @@ fn readlink_help_declare(): i64 {
     return 0;
 }
 
-fn _rl_report(operand, errno): i64 {
-    k_write( 2, "kriya readlink: ", 16);
-    k_write( 2, operand, strlen(operand));
-    k_write( 2, ": ", 2);
-    if (errmsg_is_known(errno) == 1) {
-        var m = errmsg_for(errno);
-        k_write( 2, m, strlen(m));
-    } else {
-        k_write( 2, "errno ", 6);
-        var buf[8];
-        var i: i64 = 7;
-        store8(&buf + i, 0);
-        i = i - 1;
-        var v = errno;
-        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
-        while (v > 0) {
-            store8(&buf + i, 48 + (v - (v / 10) * 10));
-            v = v / 10;
-            i = i - 1;
-        }
-        k_write( 2, &buf + i + 1, 6 - i);
-    }
-    k_write( 2, "\n", 1);
-    return 0;
-}
+# ⭐ ONE LINE NOW. The 24-line body this replaces was byte-identical in every
+# utility apart from the name; `errmsg_report` in `src/lib/report.cyr` is the
+# single implementation of architecture 001's framing, and it shell-quotes the
+# operand so a name containing a newline cannot split the diagnostic in two.
+fn _rl_report(operand, errno): i64 { return errmsg_report("readlink", operand, errno); }
 
 fn cmd_readlink(start: i64): i64 {
     _rl_init_spec();
@@ -103,8 +90,24 @@ fn cmd_readlink(start: i64): i64 {
         return EXIT_USAGE;
     }
 
-    var quiet: i64 = 0;
+    # ⛔ SILENT BY DEFAULT, WHICH IS A BREAKING CHANGE AND A DELIBERATE ONE.
+    # GNU's `readlink` prints nothing on failure — `readlink plain` is exit 1
+    # with no output — while GNU's `realpath` on the same operand is verbose.
+    # That asymmetry is GNU's, and `readlink` is the one script authors wrap in
+    # `$(readlink -f x)` where a stray stderr line is noise.
+    #
+    # ⛔ GNU REACHES ITS VERBOSE MODE THROUGH `POSIXLY_CORRECT`, AND THAT
+    # VARIABLE BEATS AN EXPLICIT `-q`: measured, `POSIXLY_CORRECT=1 readlink -q
+    # plain` still prints the diagnostic. An environment variable overriding a
+    # flag the caller wrote is precisely what
+    # [ADR 0017](../../docs/adr/0017-environment-variables-configure-features-the-caller-turned-on.md)
+    # forbids, so kriya does not honour it — `-v` is the whole opt-in.
+    #
+    # ⚠ Migration for anyone who relied on kriya's old default: add `-v`.
+    var quiet: i64 = 1;
+    if (flags_get_bool(_rl_spec, _rl_v_idx) == 1) { quiet = 0; }
     if (flags_get_bool(_rl_spec, _rl_q_idx) == 1) { quiet = 1; }
+    if (flags_get_bool(_rl_spec, _rl_s_idx) == 1) { quiet = 1; }
     var no_newline: i64 = 0;
     if (flags_get_bool(_rl_spec, _rl_n_idx) == 1) { no_newline = 1; }
     var zero: i64 = 0;

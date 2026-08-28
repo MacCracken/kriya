@@ -581,8 +581,28 @@ than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path
     putting it in the first caller is how `cp` ended up with two answers to one question (see the
     `_ln_resolve_dest` note under 1.6.2).
 
-- **1.6.6 — `readlink`'s own flag surface, and the diagnostic-quoting decision.** Three things the
-  1.6.3 research surfaced in the utility next door, none of which belong in a `realpath` release:
+- **1.6.6 — `readlink`'s own flag surface, and the diagnostic-quoting decision.** ✅ **SHIPPED at
+  1.6.6** — all three items, plus two things found on the way in.
+
+  ⛔ **Carry forward:**
+  - ⭐ *Twenty-four byte-identical copies of one function is a defect with twenty-four homes.* The
+    error line could not change shape without 24 edits, so it never did — and the quoting bug lived
+    in all of them. Collapsing them removed **401 lines** and made the binary **8 KiB smaller**.
+    ⚠ **Duplication is not just a tidiness problem; it is why the bug was unfixable.**
+  - ⚠ *A note with no single implementation to check it against drifts.* architecture 001 had the
+    operand and message fields the wrong way round, with four examples to match, describing something
+    that never shipped in 38 utilities. It was caught by writing the one function the note describes.
+  - ⛔ *A quoting table measured for one caller is not measured for the next.* `ls` names can never
+    contain `/`, so `/` was never in the set — and reusing it for diagnostics quoted every path in
+    every message. ⚠ **The bytes a caller cannot produce are the bytes its test set does not cover.**
+  - ⛔ *An assertion cannot see a flag whose effect matches the default.* `-s` silences, and the
+    default is already silent, so the test stayed green against a build that ignored `-s` entirely.
+    ⭐ **Test a flag against its OPPOSITE, not against the default** — `-v -s` discriminates where
+    `-s` alone cannot. **Third release running.**
+  - ⚠ *A piped listing prints literally whatever the quoting table says.* The `ls` half of the same
+    assertion needed `--quoting-style=shell-escape` explicitly; without it, the test could not fail.
+
+  The original three items:
   - **`readlink -s`/`--silent` and `-v`/`--verbose` are missing.** ⚠ `readlink -s` is NOT
     `realpath -s` — it is a synonym for `-q`, which is the sort of collision that makes a shared
     flag table the wrong shape for two utilities that merely look similar.

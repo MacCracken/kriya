@@ -162,6 +162,72 @@ ln -s "plain/" slashtgt
 expect_exit "readlink -f through a link whose target ends in /" 1 "$BIN" readlink -f slashtgt
 cd "$WORK"
 
+# --- 1.6.6: silent by default, and the -s/-v pair (ADR 0018) --------------
+# ⛔ THE DEFAULT CHANGED AND NOTHING WENT RED. kriya's readlink used to print a
+# diagnostic on failure; GNU's prints nothing. The suite passed either way,
+# which is the gap these assertions close.
+mkdir -p rlq; echo x > rlq/plain; ln -s plain rlq/good; ln -s nowhere rlq/dang
+expect_eq "a non-symlink is SILENT by default" "" \
+          "$("$BIN" readlink rlq/plain 2>&1)"
+expect_exit "...and still exit 1"            1 "$BIN" readlink rlq/plain
+expect_eq "a missing operand is silent too"  "" \
+          "$("$BIN" readlink rlq/missing 2>&1)"
+expect_eq "...and GNU agrees on both"        "" \
+          "$(readlink rlq/plain 2>&1; readlink rlq/missing 2>&1)"
+# ⭐ `-v` IS THE WHOLE OPT-IN, because kriya does not honour POSIXLY_CORRECT —
+# GNU's own route to verbose, and one that BEATS an explicit -q (measured).
+expect_eq "-v opts into the diagnostic" "1" \
+          "$("$BIN" readlink -v rlq/plain 2>&1 | grep -c 'invalid argument')"
+expect_eq "--verbose does too"          "1" \
+          "$("$BIN" readlink --verbose rlq/plain 2>&1 | grep -c 'invalid argument')"
+# ⚠ `readlink -s` IS NOT `realpath -s`: here it is a synonym for -q, there it
+# means "do not expand symlinks". One letter, opposite meanings.
+# ⚠ AGAINST `-v`, NOT AGAINST THE DEFAULT. The default is already silent, so
+# `readlink -s plain` produces no output whether `-s` does anything or not —
+# mutation-testing found the first version of these three green against a build
+# where `-s` was ignored entirely.
+expect_eq "-s silences an explicit -v"      "" "$("$BIN" readlink -v -s rlq/plain 2>&1)"
+expect_eq "--silent does too"               "" "$("$BIN" readlink -v --silent rlq/plain 2>&1)"
+expect_eq "-q silences an explicit -v"      "" "$("$BIN" readlink -v -q rlq/plain 2>&1)"
+expect_eq "...and -v alone still speaks"    "1" \
+          "$("$BIN" readlink -v rlq/plain 2>&1 | grep -c 'invalid argument')"
+# ⛔ AN EXPLICIT -q BEATS -v, in either order. GNU cannot say this — its
+# POSIXLY_CORRECT overrides -q, which is what ADR 0017 forbids.
+expect_eq "-v -q is quiet"              "" "$("$BIN" readlink -v -q rlq/plain 2>&1)"
+expect_eq "-q -v is quiet"              "" "$("$BIN" readlink -q -v rlq/plain 2>&1)"
+# ⚠ And POSIXLY_CORRECT changes nothing here, unlike GNU.
+expect_eq "POSIXLY_CORRECT does not flip it" "" \
+          "$(POSIXLY_CORRECT=1 "$BIN" readlink rlq/plain 2>&1)"
+expect_eq "...where GNU's does"              "1" \
+          "$(POSIXLY_CORRECT=1 readlink rlq/plain 2>&1 | grep -c 'Invalid argument')"
+
+# --- 1.6.6: the operand is shell-quoted when it needs to be ---------------
+# ⛔ A NAME CONTAINING A NEWLINE USED TO SPLIT THE DIAGNOSTIC IN TWO, breaking
+# architecture 001's "one write per error line" in writing. ⚠ It also made
+# `kriya rm: a b: ...` unreadable — one operand or two?
+_nl_name=$(printf 'a\nb')
+expect_eq "a newline name stays on ONE line" "1" \
+          "$("$BIN" readlink -v "rlq/$_nl_name" 2>&1 | wc -l)"
+expect_eq "...quoted the way GNU quotes it"  "1" \
+          "$("$BIN" readlink -v "rlq/$_nl_name" 2>&1 | grep -cF "\$'\\n'")"
+expect_eq "a space forces quoting"           "1" \
+          "$("$BIN" readlink -v "rlq/a b" 2>&1 | grep -c "'rlq/a b'")"
+# ⭐ AND A PLAIN PATH STAYS BARE. Reusing `ls`'s quoting set would have quoted
+# every path in every diagnostic, because `/` can never appear in an `ls` name
+# and was therefore never in the measured set.
+expect_eq "a plain path is NOT quoted"       "1" \
+          "$("$BIN" readlink -v rlq/missing 2>&1 | grep -c 'rlq/missing: no such')"
+expect_eq "an empty operand shows as ''"     "1" \
+          "$("$BIN" readlink -v '' 2>&1 | grep -c "'': no such")"
+# ⛔ `:` IS QUOTED, and it is the one byte where the diagnostic style differs
+# from `ls`'s in the OTHER direction. The message is colon-delimited, so an
+# unquoted `a:b` makes `kriya readlink: a:b: no such file` unparseable back into
+# utility, operand and message. ⚠ `ls` leaves it bare and must keep doing so.
+expect_eq "a colon in the name is quoted"    "1" \
+          "$("$BIN" readlink -v 'rlq/a:b' 2>&1 | grep -c "'rlq/a:b'")"
+expect_eq "...and GNU quotes it too"         "1" \
+          "$(readlink -v 'rlq/a:b' 2>&1 | grep -c "'rlq/a:b'")"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

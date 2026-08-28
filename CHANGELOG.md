@@ -6,6 +6,94 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.6] - 2026-08-27 — one error line, one implementation of it, and `readlink` stops talking
+
+### Breaking — ⛔ `readlink` is silent on failure; add `-v` to keep the diagnostics
+
+[ADR 0018](docs/adr/0018-readlink-is-silent-by-default.md). GNU ships two utilities that answer
+nearly the same question and disagree about explaining a failure:
+
+```
+$ readlink plain            (nothing)            exit 1
+$ realpath plain            realpath: plain: …   exit 1
+```
+
+kriya's `readlink` printed a diagnostic, matching neither GNU's `readlink` nor any stated policy — it
+matched `realpath`, the utility next door. **Migration: add `-v`.**
+
+⛔ **GNU reaches its verbose mode through `POSIXLY_CORRECT`, and that variable BEATS AN EXPLICIT
+`-q`** — measured: `POSIXLY_CORRECT=1 readlink -q plain` still prints. An environment variable
+overriding a flag the caller wrote is exactly what [ADR 0017](docs/adr/0017-environment-variables-configure-features-the-caller-turned-on.md)
+forbids, so kriya could not copy GNU's mechanism even to reach GNU's default. ⭐ In kriya an explicit
+`-q` beats `-v` in either order, which GNU cannot say.
+
+### Added — `readlink -s`/`--silent` and `-v`/`--verbose`
+
+⚠ **`readlink -s` is NOT `realpath -s`.** Here it is a synonym for `-q`; there it means "do not
+expand symlinks". One letter, opposite meanings — which is why two utilities that look alike do not
+share a flag table.
+
+### Fixed — ⛔ a filename with a newline split one diagnostic across two lines
+
+[architecture 001](docs/architecture/001-errno-message-policy.md) commits in writing to *"one write
+per error line"*. Writing the operand raw broke it:
+
+```
+kriya realpath: a
+b: no such file or directory
+```
+
+⚠ It also made `kriya rm: a b: no such file or directory` unreadable — one operand, or two?
+
+The operand is now shell-quoted when it needs it. ⭐ **The style is its own**, `QUOTE_DIAGNOSTIC`,
+which is GNU's `quotearg_style_colon` and differs from `ls`'s shell-escape in exactly two bytes:
+
+- ⛔ **`:` is quoted**, because the message is colon-delimited and `a:b` makes the line unparseable
+  back into utility, operand and message. `ls` leaves it bare and must keep doing so — asserted on
+  both sides.
+- ⛔ **`/` is bare**, because every path has one. `ls` names never do, so `/` was never in the
+  measured set — reusing it quoted every path in every diagnostic: `kriya tee: '/dev/full': …`.
+
+Measured against GNU across ten shapes — plain, spaces, quotes, tabs, newlines, `=`, `:`, paths and
+the empty string — **all ten match**. ⚠ The empty operand is now visible at all: `kriya rm: '': …`
+where it used to print a hole, which is how an unset shell variable announces itself.
+
+### Changed — ⭐ twenty-four copies of the error line became one
+
+Every utility carried its own `_xx_report(operand, errno)` — **byte-identical to the others apart
+from the name in the prefix**, the same 24 lines including the same errno-to-digits fallback. A
+change to the shape meant 24 edits, so the shape never changed and the quoting defect had 24 homes.
+
+`errmsg_report(util, operand, errno)` in `src/lib/report.cyr` is now the only implementation, and
+each `_xx_report` is one line. **-401 lines** across 20 files, and architecture 001 gains a rule 5
+saying where the shape lives.
+
+### Fixed — ⚠ architecture 001 documented the fields in the wrong order
+
+The note said the framing is `kriya <util>: <message>: <operand>` and gave four examples in that
+order. The code has always emitted **operand then message** — GNU's shape — across all 38 utilities,
+so the note described something that never shipped. ⭐ **It survived because there was no single
+implementation to check it against**, which is the same reason the quoting defect did.
+
+### ⭐ How it was checked
+
+⭐ **Six mutations, and the first pass caught three test gaps rather than three defects.**
+"`-s` is not a synonym for `-q`" stayed green because **the default is already silent**, so `-s`
+doing nothing looked identical to `-s` working — the assertion now runs it against an explicit `-v`.
+"`ls` starts quoting `:` too" stayed green because a piped `ls` prints names literally whatever the
+quoting table says — it now passes `--quoting-style=shell-escape` explicitly. And nothing asserted
+`:` quoting at all. ⚠ **Third release running that the fixture, not the code, was the thing that
+needed fixing first.**
+
+### Release totals
+
+**5,354 smoke cases across 41 scripts** (from 5,322) — `smoke-readlink.sh` 33 → **54** and
+`smoke-ls.sh` 128 → **131**. **453 unit**, 18 POSIX; fuzz green under poison; four lints clean; both
+targets build; `vet` reports **56 deps** (`src/lib/report.cyr` is the new one).
+
+⭐ Binary 1,129,504 → **1,121,208** bytes — **8,296 SMALLER**, because 23 copies of one function
+became one. The agnos target drops the same amount, 1,125,312 → **1,117,016**.
+
 ## [1.6.5] - 2026-08-27 — backups for `cp`, `mv` and `ln`, and the environment-variable rule that had to come first
 
 ### ⭐ Decided — [ADR 0017](docs/adr/0017-environment-variables-configure-features-the-caller-turned-on.md): an environment variable may configure a feature the caller turned on; it may never turn one on

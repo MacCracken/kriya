@@ -39,7 +39,25 @@ enum QuoteStyle {
     # quotes, even `plain` -> `'plain'`. Same algorithm, one flag apart.
     QUOTE_IF_NEEDED = 0;
     QUOTE_ALWAYS    = 1;
+    # ⭐ THE DIAGNOSTIC STYLE, which is GNU's `quotearg_style_colon` and differs
+    # from `ls`'s in exactly two bytes. Measured:
+    #
+    #   $ ls --quoting-style=shell-escape a:b        a:b        (bare)
+    #   $ realpath -e a:b                            'a:b'      (quoted)
+    #   $ realpath -e /no/such/f                     /no/such/f (bare)
+    #
+    # ⛔ `:` IS QUOTED BECAUSE THE MESSAGE ITSELF IS COLON-DELIMITED. `kriya rm:
+    # a:b: no such file` cannot be parsed back into utility, operand and message.
+    # ⛔ `/` IS BARE BECAUSE EVERY PATH HAS ONE. Reusing `ls`'s set — where `/`
+    # can never appear inside a single name, so it was never measured — quoted
+    # every path in every diagnostic: `kriya tee: '/dev/full': …`.
+    QUOTE_DIAGNOSTIC = 2;
 }
+
+# ⚠ Set by `quote_shell` for the duration of one call. A parameter would have to
+# be threaded through `_q_needs_quote`'s two call sites and both of its
+# neighbours; the two bytes it changes do not earn that.
+var _q_colon_style = 0;
 
 # Does this byte survive inside single quotes untouched?
 fn _q_is_plain(c): i64 {
@@ -76,12 +94,16 @@ fn _q_needs_quote(c, at_start): i64 {
     if (c == 43) { return 0; }    # +
     if (c == 44) { return 0; }    # ,
     if (c == 46) { return 0; }    # .
-    if (c == 58) { return 0; }    # :
+    # ⚠ `:` is bare for `ls` and QUOTED for a diagnostic — see QUOTE_DIAGNOSTIC.
+    if (c == 58) { return _q_colon_style; }    # :
     if (c == 64) { return 0; }    # @
     if (c == 93) { return 0; }    # ]
     if (c == 95) { return 0; }    # _
     if (c == 123) { return 0; }   # {
     if (c == 125) { return 0; }   # }
+    # ⚠ `/` cannot occur in an `ls` name, so it was never in the measured set.
+    # It is bare in a diagnostic, where operands are whole paths.
+    if (c == 47) { return 1 - _q_colon_style; }   # /
     # Safe only away from the start.
     if (c == 35) { return at_start; }    # #
     if (c == 45) { return at_start; }    # -
@@ -137,6 +159,14 @@ fn _q_puts(out, n, s): i64 {
 # Render `src` (len bytes) into `out`; returns the byte count written.
 # ⚠ `out` must hold at least `quote_bufsz(len)` bytes.
 fn quote_shell(src, len, style, out): i64 {
+    # ⚠ QUOTE_DIAGNOSTIC is QUOTE_IF_NEEDED with two bytes reclassified, so it
+    # sets the flag and then behaves as IF_NEEDED everywhere below.
+    _q_colon_style = 0;
+    var eff = style;
+    if (style == QUOTE_DIAGNOSTIC) {
+        _q_colon_style = 1;
+        eff = QUOTE_IF_NEEDED;
+    }
     var n: i64 = 0;
     # Pass 1: classify the name.
     var any_special: i64 = 0;   # forces quoting at all
@@ -169,7 +199,7 @@ fn quote_shell(src, len, style, out): i64 {
         }
         i = i + 1;
     }
-    if (style == QUOTE_IF_NEEDED) {
+    if (eff == QUOTE_IF_NEEDED) {
         if (any_special == 0) {
             # Nothing to do — copy the bytes through bare.
             i = 0;

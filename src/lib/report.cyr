@@ -1,0 +1,75 @@
+# report.cyr — the one implementation of architecture 001's error line.
+#
+# ⛔ THERE WERE TWENTY-FOUR COPIES OF THIS FUNCTION. Every utility carried its
+# own `_xx_report(operand, errno)`, byte-identical to the others apart from the
+# utility name in the prefix — the same 24 lines, the same errno-to-digits
+# fallback, the same trailing newline, duplicated across `src/cmd/`. A change to
+# the shape meant 24 edits, so the shape never changed.
+#
+# ⛔ AND THE SHAPE WAS WRONG FOR A NAME CONTAINING A NEWLINE. Writing the
+# operand raw split the diagnostic across two lines, which breaks the invariant
+# [architecture 001](../../docs/architecture/001-errno-message-policy.md) states
+# in writing — *"Trailing newline is mandatory. One write per error line"* —
+# and the framing agents pattern-match on. Measured before this:
+#
+#     kriya realpath: a
+#     b: no such file or directory
+#
+# ⭐ THE OPERAND IS SHELL-QUOTED WHEN, AND ONLY WHEN, IT NEEDS IT — GNU's own
+# rule, and `src/lib/quote.cyr` already implemented it for `ls` and `stat %N`.
+# Measured against GNU: a plain name stays bare, `no such` becomes `'no such'`,
+# `it's` becomes `"it's"`, a tab becomes `'a'$'\t''b'`, and the empty string
+# becomes `''` — which is also the first time an empty operand has been visible
+# in a kriya diagnostic at all.
+#
+# ⚠ QUOTING IS NOT COSMETIC HERE. The reader of `kriya rm: a b: no such file or
+# directory` cannot tell whether one operand or two failed.
+
+# `kriya <util>: <operand>: <message>` on stderr, with the trailing newline.
+#
+# ⚠ `errno` is the POSITIVE errno. Callers holding a negative syscall result
+# pass `0 - r`, as they always have.
+fn errmsg_report(util, operand, errno): i64 {
+    k_write( 2, "kriya ", 6);
+    k_write( 2, util, strlen(util));
+    k_write( 2, ": ", 2);
+
+    var olen: i64 = 0;
+    if (operand != 0) { olen = strlen(operand); }
+    if (olen == 0) {
+        # ⛔ AN EMPTY OPERAND HAS TO BE VISIBLE. `QUOTE_IF_NEEDED` writes nothing
+        # for zero bytes — correct for `ls`, where the name is the payload —
+        # which left `kriya realpath: : no such file or directory` with a hole
+        # where the operand should be. GNU prints `''`, and that is the one
+        # spelling that shows the reader an empty string was passed rather than
+        # a formatting slip. ⚠ It is also how an unset shell variable announces
+        # itself, which is the case worth seeing.
+        k_write( 2, "''", 2);
+    } else {
+        var qbuf = alloc(quote_bufsz(olen));
+        var qn = quote_shell(operand, olen, QUOTE_DIAGNOSTIC, qbuf);
+        k_write( 2, qbuf, qn);
+    }
+
+    k_write( 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        k_write( 2, m, strlen(m));
+    } else {
+        k_write( 2, "errno ", 6);
+        var buf[8];
+        var i: i64 = 7;
+        store8(&buf + i, 0);
+        i = i - 1;
+        var v = errno;
+        if (v == 0) { store8(&buf + i, 48); i = i - 1; }
+        while (v > 0) {
+            store8(&buf + i, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            i = i - 1;
+        }
+        k_write( 2, &buf + i + 1, 6 - i);
+    }
+    k_write( 2, "\n", 1);
+    return 0;
+}

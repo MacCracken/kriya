@@ -590,6 +590,25 @@ expect_eq "-w still forces columns (kriya-only, roadmap 1.6.8)" "1" \
 expect_eq "...where GNU gives one per line"    "6" \
           "$(env -u COLUMNS ls -w 200 colw | wc -l)"
 
+# ⚠ AND `ls` MUST KEEP LEAVING `:` BARE. 1.6.6 gave diagnostics their own
+# quoting style precisely so this one did not change: GNU's `ls
+# --quoting-style=shell-escape` prints `a:b` bare while its error messages quote
+# it, and kriya now does both.
+mkdir -p qcol && : > 'qcol/a:b' && : > 'qcol/plainq'
+# ⚠ `--quoting-style=shell-escape` EXPLICITLY, not the piped default. Off a tty
+# `ls` prints names literally, so a piped listing is bare whatever the quoting
+# table says — the first version of this assertion could not tell the two
+# answers apart and stayed green against a build that quoted `:` everywhere.
+expect_eq "ls leaves a colon bare"  "a:b plainq " \
+          "$("$BIN" ls --quoting-style=shell-escape qcol | tr '\n' ' ')"
+expect_eq "...and GNU agrees"       "a:b plainq " \
+          "$(ls --quoting-style=shell-escape qcol | tr '\n' ' ')"
+# ⭐ And a name that DOES need quoting still gets it, so the assertion above is
+# about `:` specifically rather than about quoting being off.
+: > 'qcol/a b'
+expect_eq "...while a space is still quoted" "1" \
+          "$("$BIN" ls --quoting-style=shell-escape qcol | grep -c "'a b'")"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"
