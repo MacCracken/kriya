@@ -137,6 +137,31 @@ expect_eq "-f -e -m: m wins"      "$WORK_REAL/a/b/nope/deeper" "$out"
 # --- no operands ---
 expect_exit "no operands"         2 "$BIN" readlink
 
+# --- 1.6.3: readlink shares fs_realpath, so it shared the defect ----------
+# ⛔ A TRAILING SLASH IS A DIRECTORY ASSERTION. `readlink -f flink/` on a symlink
+# to a REGULAR FILE is an error under GNU and under open(2); kriya stripped the
+# slash and printed the file with exit 0. ⚠ That output is normally fed straight
+# into the next command, which is why a wrong answer here is worse than an error.
+mkdir -p rl163/dir
+echo f > rl163/plain
+( cd rl163 && ln -s plain flink && ln -s dir dlink )
+cd rl163
+expect_exit "readlink -f on a symlink-to-file WITH a slash" 1 "$BIN" readlink -f flink/
+expect_exit "...and without one"                            0 "$BIN" readlink -f flink
+expect_exit "readlink -f on a symlink-to-dir with a slash"  0 "$BIN" readlink -f dlink/
+expect_exit "readlink -f through a regular file"            1 "$BIN" readlink -f plain/..
+# ⚠ -m never asserts it, in readlink as in realpath.
+expect_exit "readlink -m ignores the assertion"             0 "$BIN" readlink -m flink/
+# ⛔ AND THE `.` SPELLING, which the first version of the fix missed entirely —
+# it read the last byte of the operand, so `flink/.` slipped through.
+expect_exit "readlink -f with a trailing ."                1 "$BIN" readlink -f flink/.
+expect_exit "readlink -e with a trailing ."                1 "$BIN" readlink -e flink/.
+expect_exit "...and on a real directory it is fine"        0 "$BIN" readlink -f dir/.
+# ⚠ A separator arriving from the LINK'S OWN TARGET, which argv never sees.
+ln -s "plain/" slashtgt
+expect_exit "readlink -f through a link whose target ends in /" 1 "$BIN" readlink -f slashtgt
+cd "$WORK"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

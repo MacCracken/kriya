@@ -870,6 +870,67 @@ fn main() {
     assert_eq(streq(path_relative("w", "/w/x"), "/w/x"), 1, "a relative FROM is refused");
     assert_eq(streq(path_relative("/w", "w/x"), "w/x"), 1, "a relative TO is refused");
 
+    # ================================================================
+    # kriya_parse_duration_us — the number half of `sleep` (ADR 0015)
+    # ================================================================
+    test_group("kriya_parse_duration_us");
+
+    assert_eq(kriya_parse_duration_us("1"), 1000000, "a bare number is seconds");
+    assert_eq(kriya_parse_duration_us("1.5"), 1500000, "a fraction of a second");
+    assert_eq(kriya_parse_duration_us("0.25"), 250000, "a quarter second");
+    assert_eq(kriya_parse_duration_us(".5"), 500000, "a leading decimal point");
+    # ⚠ `1.` IS A DECIMAL, and `.5` always worked. Rejecting the first was an
+    # accident of the trailing-character check, not a decision.
+    assert_eq(kriya_parse_duration_us("1."), 1000000, "a trailing decimal point");
+    assert_eq(kriya_parse_duration_us("2s"), 2000000, "the s suffix");
+    assert_eq(kriya_parse_duration_us("2m"), 120000000, "the m suffix");
+    assert_eq(kriya_parse_duration_us("1h"), 3600000000, "the h suffix");
+    assert_eq(kriya_parse_duration_us("1d"), 86400000000, "the d suffix");
+    assert_eq(kriya_parse_duration_us("0.5m"), 30000000, "a fraction of a minute");
+
+    # ⛔ SUB-MILLISECOND VALUES SURVIVE. They are what made summing wrong: two
+    # thousand `0.0004` operands are 0.8 s, and were 42 ms when each one
+    # truncated to whole milliseconds on its own before being added.
+    assert_eq(kriya_parse_duration_us("0.0004"), 400, "400 microseconds are not zero");
+    assert_eq(kriya_parse_duration_us("0.000001"), 1, "one microsecond");
+    assert_eq(kriya_parse_duration_us("0.0000001"), 0, "finer than a microsecond truncates");
+
+    # Malformed is -1.
+    assert_eq(kriya_parse_duration_us("1x"), 0 - 1, "an unknown suffix");
+    assert_eq(kriya_parse_duration_us("+1"), 0 - 1, "a leading sign");
+    assert_eq(kriya_parse_duration_us("1e2"), 0 - 1, "an exponent");
+    assert_eq(kriya_parse_duration_us("0x1d"), 0 - 1, "hex — 29 SECONDS under strtod, not a day");
+    assert_eq(kriya_parse_duration_us("inf"), 0 - 1, "inf");
+    assert_eq(kriya_parse_duration_us("1.2.3"), 0 - 1, "two decimal points");
+    assert_eq(kriya_parse_duration_us("."), 0 - 1, "a bare decimal point");
+    assert_eq(kriya_parse_duration_us("s"), 0 - 1, "a bare suffix");
+    assert_eq(kriya_parse_duration_us(""), 0 - 1, "the empty string");
+    assert_eq(kriya_parse_duration_us("1S"), 0 - 1, "an uppercase suffix");
+
+    # ⛔ OUT OF RANGE IS -2, DISTINCTLY. One error channel for two failures made
+    # the diagnostic lie: `sleep 9999999999999999` — a legal 317-million-year
+    # request — printed "DURATION must be a non-negative number" about an
+    # operand that was one, because the accumulator wrapped negative and the
+    # caller only knew "< 0 means malformed".
+    assert_eq(kriya_parse_duration_us("9999999999999999"), 0 - 2, "past the ceiling");
+    assert_eq(kriya_parse_duration_us("99999999999999999999"), 0 - 2, "far past it");
+    assert_eq(kriya_parse_duration_us("200000000000d"), 0 - 2, "past it via the suffix");
+    # ⚠ And the boundary still parses rather than tipping over. ⛔ It is in the
+    # OPERAND'S unit, not in microseconds: a bare number is SECONDS, so the
+    # largest accepted bare value is the ceiling divided by a million — about
+    # **292 years**, the same figure `args.cyr` and ADR 0015 give — and one more
+    # is refused.
+    assert_eq(kriya_parse_duration_us("9223372036"), 9223372036000000, "the ceiling in seconds");
+    assert_eq(kriya_parse_duration_us("9223372037"), 0 - 2, "...and one second past it");
+    assert_eq(kriya_parse_duration_us("106751d"), 9223286400000000, "the ceiling in days");
+    assert_eq(kriya_parse_duration_us("106752d"), 0 - 2, "...and one day past it");
+
+    # The millisecond wrapper truncates the microsecond answer, once.
+    assert_eq(kriya_parse_duration_ms("1.5"), 1500, "the ms wrapper");
+    assert_eq(kriya_parse_duration_ms("0.0004"), 0, "...and it truncates");
+    assert_eq(kriya_parse_duration_ms("1x"), 0 - 1, "...and forwards -1");
+    assert_eq(kriya_parse_duration_ms("9999999999999999"), 0 - 2, "...and forwards -2");
+
     return assert_summary();
 
 

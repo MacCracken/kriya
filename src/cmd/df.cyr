@@ -679,9 +679,23 @@ fn cmd_df(start: i64): i64 {
         var canon = alloc(4096);
         var rp = fs_realpath(op, FS_REALPATH_REQUIRE_ALL, canon, 4096);
         if (rp < 0) {
+            # ⛔ THE REAL ERRNO, NOT A HARDCODED ENOENT. `fs_realpath` returns
+            # ENOTDIR, ELOOP and EACCES too, and reporting all of them as "no
+            # such file or directory" sends the reader looking for something
+            # that is right there — `df somefile/` is ENOTDIR, and the file
+            # exists. ⚠ It also violates architecture 001, which says the
+            # message slot is exactly what `errmsg_for` returns.
+            var errno = 0 - rp;
             k_write( 2, "kriya df: ", 10);
             k_write( 2, op, strlen(op));
-            k_write( 2, ": No such file or directory\n", 28);
+            k_write( 2, ": ", 2);
+            if (errmsg_is_known(errno) == 1) {
+                var em = errmsg_for(errno);
+                k_write( 2, em, strlen(em));
+            } else {
+                k_write( 2, "cannot resolve", 14);
+            }
+            k_write( 2, "\n", 1);
             _df_any_failed = 1;
         }
         if (rp >= 0) {

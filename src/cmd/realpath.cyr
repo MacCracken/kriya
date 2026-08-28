@@ -5,45 +5,120 @@
 #   realpath [opts] PATH...
 #
 # Flags:
-#   -e / --canonicalize-existing  every path component must exist
-#                                 (default; alias for the default mode).
-#   -m / --canonicalize-missing   no component need exist; once an
-#                                 ENOENT is encountered, the rest of
-#                                 the path is appended textually.
-#   -q / --quiet                  suppress error messages; the exit
-#                                 code still reflects failure.
+#   -E / --canonicalize           all but the LAST component must exist.
+#                                 ⛔ THIS IS THE DEFAULT, and it is not `-e`.
+#   -e / --canonicalize-existing  every component must exist.
+#   -m / --canonicalize-missing   no component need exist.
+#   -L / --logical                resolve `..` textually BEFORE symlinks.
+#   -P / --physical               resolve symlinks as encountered (default).
+#   -s / --strip / --no-symlinks  do not expand symlinks at all.
+#   -q / --quiet                  suppress error messages; exit code still set.
 #   -z / --zero                   NUL-terminate each output instead of \n.
+#   --relative-to=DIR             print the resolved path relative to DIR.
+#   --relative-base=DIR           print absolute unless the path is below DIR.
 #
 # Each PATH is processed independently. The invocation exits with
 # EXIT_FAILURE if any PATH fails; the canonical paths for the others
 # are still emitted to stdout.
 #
-# Deferred to follow-up commits: (roadmap 1.6.3)
-#   -s / --strip / --no-symlinks  skip symlink resolution (text-only).
-#   --relative-to=DIR             print path relative to DIR.
-#   --relative-base=DIR           print relative when under DIR, else absolute.
-#   -L / --logical                resolve `..` before symlinks (POSIX `cd -L`).
-#   -P / --physical               resolve symlinks first (the current default).
+# ⛔ THE DEFAULT MODE IS `-E`, NOT `-e`, AND KRIYA HAD IT WRONG UNTIL 1.6.3.
+# GNU's own `--help` says so in one line — "all but the last component must
+# exist (default)" — and the consequence is not cosmetic: `realpath build/out`
+# for a file a build is about to create answers under GNU and failed here.
+# The comment that got it wrong said "-e ... (default; alias for the default
+# mode)", which is a claim about GNU that nobody had measured.
+#
+# ⚠ THE THREE MODES ARE LAST-WINS, AND SO ARE -L/-P. `realpath -m -e X` is the
+# `-e` answer and `realpath -e -m X` is the `-m` one; likewise `-L -P` is
+# physical and `-P -L` is logical. The flag table cannot express that — it keeps
+# a bool per flag with no order — so both pairs are resolved by an argv walk
+# (`_rp_scan_order`). ⛔ A precedence rule instead of order is WRONG in a way
+# that only shows up in generated command lines, where a wrapper appends `-e`
+# to a base command that already carried `-m`.
+#
+# ⛔ THERE ARE TWO INDEPENDENT AXES, NOT ONE LIST OF FLAGS, and modelling them
+# as one list is the mistake that makes half of this wrong:
+#
+#   AXIS A — HOW (`-P` physical, `-L` logical, `-s` strip). ONE mutually
+#   exclusive slot, LAST-WINS. Measured: `-s -P X` prints the resolved path and
+#   `-P -s X` prints the unresolved one; likewise `-s -L` vs `-L -s`. ⛔ OR-ing
+#   `-s` into a separate boolean — the obvious shape, since the flag table has
+#   one entry per spelling — makes `-P -s` strip when GNU does not.
+#
+#   AXIS B — HOW HARD TO LOOK (`-E` default, `-e`, `-m`). Also last-wins.
+#
+# `-L` normalises `..` textually FIRST and then canonicalises the result, so
+# `-L slink/../y` is `./y` where `-P slink/../y` follows `slink` and comes out in
+# its parent. ⚠ The logical treatment applies to `..` in the OPERAND ONLY: a `..`
+# inside a symlink's own target is still resolved physically (measured with
+# `via -> slink/..`, which both modes answer identically).
+#
+# ⛔ `-s` DOES NOT MEAN "DO NOT TOUCH THE FILESYSTEM". It means "do not expand
+# symlinks in the OUTPUT". The answer is the lexical form — absolute, with
+# `.`/`..`/`//` collapsed — and then that text is `stat`ed unless `-m` is in
+# force. So:
+#
+#     -s -m   the only genuinely lexical combination; nothing is stat'ed
+#     -s -E   stat the text; ENOENT is forgiven, ELOOP/ENOTDIR/EACCES are not
+#     -s -e   stat the text; ANY failure is fatal
+#
+#   Measured, and every one of these is a case a "skip readlink" model gets
+#   wrong: `-s -E cycA` is ELOOP, `-s -E file/q` is ENOTDIR, `-s -E priv/x` is
+#   EACCES, `-s -E no/such/thing` SUCCEEDS, and `-s -e dangling` is ENOENT while
+#   `-s -E dangling` is fine. ⛔ `-s -e slink/../f` fails where plain
+#   `-e slink/../f` succeeds — the stripped text names a different file than the
+#   physical walk does, and the stat follows the text.
+#
+# ⚠ THE STAT KEEPS THE TRAILING SLASH. `-s -E flink/` is ENOTDIR where
+# `-s -E flink` is fine, so the slash cannot be normalised away before the
+# check — even though it is always absent from the OUTPUT.
 #
 # Symlink policy (ADR 0003): realpath's *purpose* is to follow
 # symlinks — that's the whole utility. ADR 0003's matrix is about
 # destructive utilities (cp/mv/rm); realpath is purely informational.
-# The 40-symlink hop limit in `fs_realpath` (returns ELOOP) handles
-# cycles deterministically.
+# The symlink-hop limit is the kernel's 40 per ADR 0014.
 
 var _rp_spec  = 0;
+var _rp_bigE_idx = 0;
 var _rp_e_idx = 0;
 var _rp_m_idx = 0;
+var _rp_bigL_idx = 0;
+var _rp_bigP_idx = 0;
 var _rp_q_idx = 0;
+var _rp_s_idx = 0;
+var _rp_nosym_idx = 0;
 var _rp_z_idx = 0;
+var _rp_relto_idx = 0;
+var _rp_relbase_idx = 0;
+
+# Resolved by `_rp_scan_order` from argv, because ORDER decides both axes.
+var _rp_mode = 0;
+var _rp_how  = 0;      # RP_PHYSICAL | RP_LOGICAL | RP_STRIP
+
+enum RpHow {
+    RP_PHYSICAL = 0,
+    RP_LOGICAL  = 1,
+    RP_STRIP    = 2,
+}
 
 fn _rp_init_spec(): i64 {
     if (_rp_spec != 0) { return 0; }
     var s = flags_new();
-    _rp_e_idx = flags_add_bool(s, 101, "canonicalize-existing", 0, "every component must exist (default)");
-    _rp_m_idx = flags_add_bool(s, 109, "canonicalize-missing", 0, "no component need exist");
-    _rp_q_idx = flags_add_bool(s, 113, "quiet",   0, "suppress error messages");
-    _rp_z_idx = flags_add_bool(s, 122, "zero",    0, "NUL-terminate each output");
+    _rp_bigE_idx  = flags_add_bool(s, 69,  "canonicalize", 0, "all but the last component must exist (default)");  #skip-lint
+    _rp_e_idx     = flags_add_bool(s, 101, "canonicalize-existing", 0, "every component must exist");
+    _rp_m_idx     = flags_add_bool(s, 109, "canonicalize-missing", 0, "no component need exist");
+    _rp_bigL_idx  = flags_add_bool(s, 76,  "logical",  0, "resolve '..' before symlinks");
+    _rp_bigP_idx  = flags_add_bool(s, 80,  "physical", 0, "resolve symlinks as encountered (default)");
+    _rp_s_idx     = flags_add_bool(s, 115, "strip",    0, "do not expand symlinks");
+    # ⚠ GNU spells one flag three ways (`-s`, `--strip`, `--no-symlinks`) and the
+    # flag table holds ONE long name per entry, so the third spelling is a second
+    # entry OR-ed into the same variable. Registering it is what makes
+    # `--no-symlinks` an accepted option rather than a usage error.
+    _rp_nosym_idx = flags_add_bool(s, 0,   "no-symlinks", 0, "synonym for --strip");
+    _rp_q_idx     = flags_add_bool(s, 113, "quiet",    0, "suppress error messages");
+    _rp_z_idx     = flags_add_bool(s, 122, "zero",     0, "NUL-terminate each output");
+    _rp_relto_idx   = flags_add_str(s, 0, "relative-to",   0, "print the resolved path relative to DIR");
+    _rp_relbase_idx = flags_add_str(s, 0, "relative-base", 0, "print absolute unless the path is below DIR");  #skip-lint
     _rp_spec = s;
     realpath_help_declare();
     return 0;
@@ -56,11 +131,227 @@ fn realpath_help_declare(): i64 {
     help_begin("realpath", "Resolve a path to its canonical absolute form.",
                "realpath [OPTIONS] PATH...");
     help_positional(1, HELP_POS_UNBOUNDED, "PATH");
-    help_operands("Symlinks are followed and `.`/`..` resolved. -e requires every component to exist, -m allows a missing tail.");  #skip-lint
+    help_operands("Symlinks are followed and `.`/`..` resolved. -E (the default) requires all but the last component to exist, -e all of them, -m none.");  #skip-lint
     help_exit(1, "a path could not be resolved");
     help_example("realpath ./src/../README.md");
     help_example("realpath -m /no/such/path");
+    help_example("realpath --relative-to=/usr /usr/bin/awk");
     return 0;
+}
+
+# ⛔ ORDER DECIDES, SO THE FLAG TABLE CANNOT ANSWER THIS. One pass over argv
+# picks the LAST of {-E,-e,-m} and the LAST of {-L,-P}, which is what GNU does.
+#
+# ⚠ A long option taking a separated value swallows the next token, and missing
+# that would read `--relative-to -e` as a `-e` the user never wrote.
+fn _rp_scan_order(start: i64): i64 {
+    _rp_mode = FS_REALPATH_REQUIRE_PARENT;
+    _rp_how = RP_PHYSICAL;
+    var n = kriya_argv_count();
+    var i = start;
+    var no_more: i64 = 0;
+    while (i < n) {
+        var tok = argv(i);
+        var tlen = strlen(tok);
+        var skip_next: i64 = 0;
+        if (no_more == 0) {
+            if (tlen >= 2) {
+                if (load8(tok) == 45) {
+                    if (load8(tok + 1) == 45) {
+                        if (tlen == 2) { no_more = 1; }
+                        else {
+                            if (streq(tok, "--canonicalize") == 1)          { _rp_mode = FS_REALPATH_REQUIRE_PARENT; }
+                            if (streq(tok, "--canonicalize-existing") == 1) { _rp_mode = FS_REALPATH_REQUIRE_ALL; }
+                            if (streq(tok, "--canonicalize-missing") == 1)  { _rp_mode = FS_REALPATH_ALLOW_MISSING; }
+                            if (streq(tok, "--logical") == 1)               { _rp_how = RP_LOGICAL; }
+                            if (streq(tok, "--physical") == 1)              { _rp_how = RP_PHYSICAL; }
+                            if (streq(tok, "--strip") == 1)                 { _rp_how = RP_STRIP; }
+                            if (streq(tok, "--no-symlinks") == 1)           { _rp_how = RP_STRIP; }
+                            if (streq(tok, "--relative-to") == 1)           { skip_next = 1; }
+                            if (streq(tok, "--relative-base") == 1)         { skip_next = 1; }
+                        }
+                    } else {
+                        # ⚠ Bundled shorts are rejected by the parser (ADR 0002),
+                        # so a short option is exactly two bytes here.
+                        if (tlen == 2) {
+                            var c = load8(tok + 1);
+                            if (c == 69)  { _rp_mode = FS_REALPATH_REQUIRE_PARENT; }
+                            if (c == 101) { _rp_mode = FS_REALPATH_REQUIRE_ALL; }
+                            if (c == 109) { _rp_mode = FS_REALPATH_ALLOW_MISSING; }
+                            if (c == 76)  { _rp_how = RP_LOGICAL; }
+                            if (c == 80)  { _rp_how = RP_PHYSICAL; }
+                            if (c == 115) { _rp_how = RP_STRIP; }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+        if (skip_next == 1) { i = i + 1; }
+    }
+    return 0;
+}
+
+# The existence rule under `-s`, applied to the LEXICAL text with its trailing
+# slash intact. ⛔ NOT "only -e checks something": `-E` forgives ENOENT and
+# nothing else, so `-s -E cycA` is ELOOP and `-s -E file/q` is ENOTDIR while
+# `-s -E no/such/thing` succeeds. ⚠ It is `stat`, not `lstat` — `-s -e dangling`
+# is ENOENT — and the trailing slash is what makes `-s -E flink/` ENOTDIR.
+# `p` with one trailing slash appended. ⚠ Written out rather than reaching for
+# `path_join(p, "")`, whose contract says nothing about an empty right operand.
+fn _rp_with_slash(p): i64 {
+    var n = strlen(p);
+    var out = alloc(n + 2);
+    memcpy(out, p, n);
+    store8(out + n, 47);
+    store8(out + n + 1, 0);
+    return out;
+}
+
+# ⛔ THE LEXICAL WALK IS NOT `path_normalize`, AND THE DIFFERENCE IS A STAT PER
+# `..`. Collapsing `base/plainfile/..` to `base` as pure text answers a question
+# nobody asked: GNU says ENOTDIR, because `..` is an assertion that what precedes
+# it is a directory. `base/nope/..` is ENOENT for the same reason even under
+# `-E`, which otherwise forgives a missing LAST component — `nope` is not last
+# once a `..` follows it.
+#
+# ⚠ Shared by `-s` and `-L`, which differ only in what happens AFTERWARDS: `-s`
+# prints this text and stats it once; `-L` hands it to the ordinary symlink walk.
+# ⭐ No per-component stat is needed here — for `-L` the surviving components are
+# re-walked by `fs_realpath`, and the ones that get POPPED are exactly the ones
+# a `..` has already asserted about.
+var _rp_lex_err = 0;
+
+fn _rp_lex_walk(p, mode): i64 {
+    _rp_lex_err = 0;
+    # ⛔ THE EMPTY STRING IS ENOENT IN EVERY MODE, `-m` INCLUDED. `fs_realpath`
+    # already refuses it, so the non-strip paths were right; the lexical walk
+    # bypasses `fs_realpath` and would have answered the CWD instead — the exact
+    # "an unset shell variable silently became `.`" failure this project keeps
+    # removing.
+    if (p == 0)        { _rp_lex_err = 0 - 2; return 0; }
+    if (load8(p) == 0) { _rp_lex_err = 0 - 2; return 0; }
+    var abs = p;
+    if (path_is_absolute(p) == 0) {
+        var cwd_buf[4096];
+        var cn = k_getcwd(&cwd_buf, 4096);
+        if (cn < 0) { _rp_lex_err = cn; return 0; }
+        abs = path_join(&cwd_buf, p);
+    }
+    var alen = strlen(abs);
+    var out = alloc(alen + 2);
+    store8(out, 47);
+    store8(out + 1, 0);
+    var oi: i64 = 1;
+    var i: i64 = 0;
+    while (i < alen) {
+        if (load8(abs + i) == 47) {
+            i = i + 1;
+        } else {
+            var se = i;
+            var sc: i64 = 1;
+            while (sc == 1) {
+                var c = load8(abs + se);
+                if (c == 0) { sc = 0; }
+                else {
+                    if (c == 47) { sc = 0; } else { se = se + 1; }
+                }
+            }
+            var sl = se - i;
+            var is_dot: i64 = 0;
+            var is_dd: i64 = 0;
+            if (sl == 1) {
+                if (load8(abs + i) == 46) { is_dot = 1; }
+            }
+            if (sl == 2) {
+                if (load8(abs + i) == 46) {
+                    if (load8(abs + i + 1) == 46) { is_dd = 1; }
+                }
+            }
+            # ⛔ `.` IS A DIRECTORY ASSERTION TOO, and dropping it as a no-op is
+            # how `-s d/f/.` answered the FILE with exit 0 while `-P d/f/.`
+            # correctly refused — kriya disagreeing with kriya. Worse,
+            # `-L dang/.` printed `/…/nowhere`, a path that does not exist, at
+            # exit 0. ⚠ Same rule as `..`: the accumulated path must exist and
+            # be a directory, and ALLOW_MISSING asserts nothing.
+            var needs_dir: i64 = 0;
+            if (is_dot == 1) { needs_dir = 1; }
+            if (is_dd == 1)  { needs_dir = 1; }
+            if (needs_dir == 1) {
+                if (mode != FS_REALPATH_ALLOW_MISSING) {
+                    var dst[144];
+                    var dr = fs_fstatat(fs_at_fdcwd(), out, &dst, 0);
+                    if (dr != 0) { _rp_lex_err = dr; return 0; }
+                    if (fs_is_dir(&dst) == 0) { _rp_lex_err = 0 - 20; return 0; }
+                }
+            }
+            if (is_dot == 1) {
+                i = se;
+            } else {
+                if (is_dd == 1) {
+                    oi = _fs_strip_last_component(out, oi);
+                    i = se;
+                } else {
+                    if (oi > 1) {
+                        store8(out + oi, 47);
+                        oi = oi + 1;
+                    }
+                    memcpy(out + oi, abs + i, sl);
+                    oi = oi + sl;
+                    store8(out + oi, 0);
+                    i = se;
+                }
+            }
+        }
+    }
+    return out;
+}
+
+fn _rp_strip_exists(p, had_slash, mode): i64 {
+    if (mode == FS_REALPATH_ALLOW_MISSING) { return 0; }
+    var probe = p;
+    if (had_slash == 1) { probe = _rp_with_slash(p); }
+    var st[144];
+    var rc = fs_fstatat(fs_at_fdcwd(), probe, &st, 0);
+    if (rc == 0) { return 0; }
+    if (mode == FS_REALPATH_REQUIRE_ALL) { return rc; }
+    # REQUIRE_PARENT: ENOENT alone is forgiven.
+    if (rc == 0 - 2) { return 0; }
+    return rc;
+}
+
+# One operand, canonicalised under the (how, mode) pair. Writes a cstring into
+# `out_buf`; returns its length, or a negative errno.
+fn _rp_canon(p, mode, out_buf, out_bufsize): i64 {
+    if (_rp_how == RP_STRIP) {
+        var plen = strlen(p);
+        var had_slash: i64 = 0;
+        if (plen > 1) {
+            if (load8(p + plen - 1) == 47) { had_slash = 1; }
+        }
+        var t = _rp_lex_walk(p, mode);
+        if (t == 0) { return _rp_lex_err; }
+        var xr = _rp_strip_exists(t, had_slash, mode);
+        if (xr < 0) { return xr; }
+        var tl = strlen(t);
+        if (tl >= out_bufsize) { return 0 - 36; }
+        memcpy(out_buf, t, tl + 1);
+        return tl;
+    }
+    if (_rp_how == RP_LOGICAL) {
+        # ⚠ `fs_path_absolute` IS the logical half — cwd-join plus a purely
+        # textual `.`/`..` collapse — so `-L` is that, then the ordinary walk.
+        # ⛔ It also DROPS a trailing slash, and the slash is a directory
+        # assertion, so it is put back before the walk sees it.
+        var plen2 = strlen(p);
+        var lp = _rp_lex_walk(p, mode);
+        if (lp == 0) { return _rp_lex_err; }
+        if (plen2 > 1) {
+            if (load8(p + plen2 - 1) == 47) { lp = _rp_with_slash(lp); }
+        }
+        return fs_realpath(lp, mode, out_buf, out_bufsize);
+    }
+    return fs_realpath(p, mode, out_buf, out_bufsize);
 }
 
 fn _rp_report(operand, errno): i64 {
@@ -106,13 +397,85 @@ fn cmd_realpath(start: i64): i64 {
     if (flags_get_bool(_rp_spec, _rp_q_idx) == 1) { quiet = 1; }
     var zero: i64 = 0;
     if (flags_get_bool(_rp_spec, _rp_z_idx) == 1) { zero = 1; }
+    _rp_scan_order(start);
+    var mode = _rp_mode;
 
-    # Mode resolution: -m wins over -e if both given (last-mode-wins
-    # is the GNU behaviour; the parser doesn't surface order, so we
-    # arbitrate by precedence).
-    var mode: i64 = FS_REALPATH_REQUIRE_ALL;
-    if (flags_get_bool(_rp_spec, _rp_e_idx) == 1) { mode = FS_REALPATH_REQUIRE_ALL; }
-    if (flags_get_bool(_rp_spec, _rp_m_idx) == 1) { mode = FS_REALPATH_ALLOW_MISSING; }
+    var rel_to   = flags_get_str(_rp_spec, _rp_relto_idx);
+    var rel_base = flags_get_str(_rp_spec, _rp_relbase_idx);
+
+    # ⛔ THE TWO DIRECTORIES ARE CANONICALISED ONCE, UP FRONT, AND A FAILURE IS
+    # FATAL BEFORE ANY OPERAND IS TOUCHED. Measured: `realpath -e
+    # --relative-to=/nodir a b` prints ONE diagnostic naming the directory and
+    # exits 1 without emitting either operand. Reporting it per operand would
+    # print the same line N times and still get the exit code right, which is
+    # exactly the kind of nearly-correct that shows up in a diff of two runs.
+    var to_buf = alloc(16384);
+    var base_buf = alloc(16384);
+    # ⚠ `-e` ALSO REQUIRES EACH DIR TO BE A DIRECTORY, and only `-e`.
+    # `realpath -e --relative-base=somefile X` is "Not a directory" under GNU
+    # while `-E` and `-m` accept a regular file there. ⛔ The check applies to
+    # the DIRs only — an OPERAND that is a regular file is fine in every mode.
+    var need_dir: i64 = 0;
+    if (mode == FS_REALPATH_REQUIRE_ALL) { need_dir = 1; }
+    var have_to: i64 = 0;
+    var have_base: i64 = 0;
+    # ⚠ `--relative-to` IS DIAGNOSED FIRST WHATEVER THE ARGV ORDER. With both
+    # unresolvable, GNU prints only the `--relative-to` line, in either ordering.
+    if (rel_to != 0) {
+        var tn = _rp_canon(rel_to, mode, to_buf, 16384);
+        # ⚠ `-q` DOES NOT SUPPRESS THIS ONE. GNU's `-q` is "suppress most error
+        # messages" and the DIR failure is the exception — it aborts the whole
+        # run before any operand is printed, so swallowing it leaves the caller
+        # with no output and no reason.
+        if (tn < 0) {
+            _rp_report(rel_to, 0 - tn);
+            return EXIT_FAILURE;
+        }
+        if (need_dir == 1) {
+            var tst[144];
+            var tr = fs_fstatat(fs_at_fdcwd(), to_buf, &tst, 0);
+            if (tr != 0) {
+                _rp_report(rel_to, 0 - tr);
+                return EXIT_FAILURE;
+            }
+            if (fs_is_dir(&tst) == 0) {
+                _rp_report(rel_to, 20);
+                return EXIT_FAILURE;
+            }
+        }
+        have_to = 1;
+    }
+    if (rel_base != 0) {
+        var bn = _rp_canon(rel_base, mode, base_buf, 16384);
+        if (bn < 0) {
+            _rp_report(rel_base, 0 - bn);
+            return EXIT_FAILURE;
+        }
+        if (need_dir == 1) {
+            var bst[144];
+            var br = fs_fstatat(fs_at_fdcwd(), base_buf, &bst, 0);
+            if (br != 0) {
+                _rp_report(rel_base, 0 - br);
+                return EXIT_FAILURE;
+            }
+            if (fs_is_dir(&bst) == 0) {
+                _rp_report(rel_base, 20);
+                return EXIT_FAILURE;
+            }
+        }
+        have_base = 1;
+    }
+
+    # ⚠ With BOTH given, GNU requires DIR1 to be under DIR2 — "otherwise
+    # realpath prints absolute file names", says the manual, and it means for
+    # EVERY operand, including ones that are themselves under DIR2. Constant
+    # across operands, so it is decided once.
+    var to_under_base: i64 = 1;
+    if (have_to == 1) {
+        if (have_base == 1) {
+            to_under_base = path_is_under(base_buf, to_buf);
+        }
+    }
 
     var term_byte: i64 = 10;
     if (zero == 1) { term_byte = 0; }
@@ -124,12 +487,25 @@ fn cmd_realpath(start: i64): i64 {
     var i: i64 = 0;
     while (i < npos) {
         var p = flags_positional(_rp_spec, i);
-        var n = fs_realpath(p, mode, out_buf, 16384);
+        var n = _rp_canon(p, mode, out_buf, 16384);
         if (n < 0) {
             if (quiet == 0) { _rp_report(p, 0 - n); }
             any_failed = 1;
         } else {
-            k_write( 1, out_buf, n);
+            var emit = out_buf;
+            var relative: i64 = 0;
+            if (have_base == 1) {
+                if (path_is_under(base_buf, out_buf) == 1) {
+                    if (to_under_base == 1) { relative = 1; }
+                }
+            } else {
+                if (have_to == 1) { relative = 1; }
+            }
+            if (relative == 1) {
+                if (have_to == 1) { emit = path_relative(to_buf, out_buf); }
+                else              { emit = path_relative(base_buf, out_buf); }
+            }
+            k_write( 1, emit, strlen(emit));
             k_write( 1, &term_buf, 1);
         }
         i = i + 1;

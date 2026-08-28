@@ -6,6 +6,296 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.3] - 2026-08-27 — `realpath`'s flag surface, and a default that had been wrong since v0.4.0
+
+### Fixed — ⛔ `realpath`'s default mode was `-e`, and GNU's is `-E`
+
+GNU's own `--help` says it in one line — *"-E, --canonicalize   all but the last component must exist
+(default)"* — and kriya's source comment said the opposite: *"-e / --canonicalize-existing  every
+path component must exist (default; alias for the default mode)"* — written when `realpath` shipped
+at **v0.4.0** and never questioned since. The tests agreed with the code and
+both agreed with a comment nobody had measured.
+
+⛔ **The consequence is not cosmetic.** `realpath build/out` for a file a build is about to create
+answers under GNU and **failed here**. So did `realpath dangling-symlink`, and so did any
+multi-operand run containing one path whose tail does not exist yet — the whole invocation exited 1.
+
+`-E`/`--canonicalize` did not exist at all; it does now.
+
+### Added — the rest of `realpath`'s flags, and they are TWO axes rather than one list
+
+⛔ **Modelling them as one list of flags is the mistake that makes half of it wrong.**
+
+- **AXIS A — how**: `-P` physical (default), `-L` logical, `-s`/`--strip`/`--no-symlinks`. **One
+  mutually exclusive slot, last-wins.** Measured: `-s -P X` prints the resolved path and `-P -s X`
+  prints the unresolved one. ⛔ OR-ing `-s` into a separate boolean — the obvious shape, since the
+  flag table holds one entry per spelling — makes `-P -s` strip when GNU does not.
+- **AXIS B — how hard to look**: `-E` (default), `-e`, `-m`. Also last-wins: `realpath -m -e X` is
+  the `-e` answer and `realpath -e -m X` is the `-m` one.
+
+⚠ Neither axis is expressible in the flag table, which keeps a bool per flag with no order, so both
+are resolved by an argv walk. ⛔ A precedence rule instead of order only shows up in **generated**
+command lines, where a wrapper appends `-e` to a base command that already carried `-m`.
+
+⛔ **`-s` DOES NOT MEAN "DO NOT TOUCH THE FILESYSTEM".** It means "do not expand symlinks in the
+OUTPUT". The answer is the lexical form and then that text is `stat`ed unless `-m` is in force:
+
+| | behaviour |
+|---|---|
+| `-s -m` | the only genuinely lexical combination; nothing is stat'ed |
+| `-s -E` | stat the text; ENOENT is forgiven, ELOOP / ENOTDIR / EACCES are not |
+| `-s -e` | stat the text; any failure is fatal |
+
+Every one of those is a case a "skip readlink" model gets wrong: `-s -E cycA` is ELOOP, `-s -E
+file/q` is ENOTDIR, `-s -E no/such/thing` **succeeds**, and `-s -e dangling` is ENOENT while
+`-s -E dangling` is fine. ⛔ `-s -e slink/../f` **fails where plain `-e slink/../f` succeeds** — the
+stripped text names a different file than the physical walk does.
+
+`-L` normalises `..` textually FIRST and then canonicalises the result, so `-L slink/../y` is `./y`
+where `-P slink/../y` follows `slink` and comes out in its parent. ⚠ The logical treatment is for
+`..` in the OPERAND ONLY: a `..` inside a symlink's own target stays physical, measured with a link
+whose target is `slink/..`, which both modes answer identically.
+
+### Added — `--relative-to=DIR` and `--relative-base=DIR`
+
+⭐ Both are backed by `path_relative`, the pure-text helper `ln -r` needed at 1.6.2, and by
+`path_is_under` — both already component-wise, which is what keeps `/usr/lib` and `/usr/libexec` from
+being called common through `lib`.
+
+The decision procedure, measured rather than inferred:
+
+- **`--relative-base=B` alone** — relative to `B` when the operand is under `B` (or equal to it),
+  absolute otherwise.
+- **Both** — relative to `TO`, but **only when `TO` is itself under `B`**. The manual says it
+  plainly: *"DIR1 must be a subdirectory of DIR2. Otherwise, realpath prints absolute file names"* —
+  for every operand, including ones that are themselves under `B`.
+- ⚠ **An operand equal to `B` does NOT always print `.`**; that only holds when `TO` defaults to `B`.
+- ⚠ **A `B` that does not exist still participates in the prefix test** and can silently disable the
+  feature.
+
+⛔ **A failing DIR aborts the whole run** — one diagnostic naming the directory, no operands printed,
+exit 1. It is the one place `realpath` does not continue past an error, and `--relative-to` is
+diagnosed first whatever the argv order. ⚠ **`-q` does not suppress that one**: swallowing it leaves
+the caller with no output and no reason.
+
+⚠ **`-e` additionally requires each DIR to BE a directory**, and only `-e`. The check is on the DIRs
+alone — an OPERAND that is a regular file is fine in every mode.
+
+### Fixed — ⛔ a trailing slash and a `..` were not directory assertions, and both are
+
+Two defects in the shared `fs_realpath`, so `readlink -f`/`-e` carried them too — and that output is
+normally fed straight into the next command:
+
+- ⛔ **`realpath flink/` on a symlink to a REGULAR FILE answered the file, exit 0.** GNU says
+  ENOTDIR, and so does `open(2)`.
+- ⛔ **`realpath base/plainfile/..` answered `base`, exit 0** — a canonical path built by walking
+  THROUGH a regular file. The text was popped unconditionally, with no syscall to contradict it.
+
+⚠ **The assertion only rejects an EXISTING non-directory.** `MISSING/`, `dangling/` and
+`real/sub/MISSING/` are all legal; coding it as "a trailing slash means it must be a directory"
+refuses three inputs GNU accepts. ⚠ `-m` never asserts either.
+
+⭐ **`df` gets the fix for free, and it had the same defect.** Measured at 1.6.2: `kriya df f/` and
+`kriya df f/..` for a regular file `f` both reported a filesystem, exit 0, where GNU errors. `df`
+resolves its operands through the same helper, and it now matches GNU on all five shapes.
+⚠ **Three utilities, one defect, one fix** — which is the argument for the helper living in
+`src/lib/` rather than in whichever utility needed it first.
+
+### Changed — ⭐ `sleep` sums its operands ([ADR 0015](docs/adr/0015-sleep-sums-its-operands.md))
+
+`sleep 1m 30s` is ninety seconds. Every operand is validated **before any sleeping starts** — the
+obvious shape, parse one and sleep it, makes `sleep 3600 bogus` block for an hour and THEN report the
+bad operand — and every bad operand is named, not just the first.
+
+⛔ **The refusal it replaces rested on a claim not in evidence.** The source said *"POSIX specifies
+exactly one"* and the message said *"POSIX sleep takes one integer"*. There is no POSIX text on this
+machine to source that from — no `man`, no `man1p`, no `man-pages-posix` — and naming one operand in
+a SYNOPSIS constrains what portable callers should write, not what an implementation may accept.
+ADR 0011's own test points the other way: kriya ships the binary that `/usr/bin/sleep` is, and that
+binary sums and documents summing.
+
+kriya keeps its **decimal-only** grammar rather than inheriting `strtod`. ⛔ **`sleep 0x1d` under
+`strtod` is 29 SECONDS, not one day** — the `d` is consumed as a hexadecimal DIGIT and the day suffix
+silently disappears. Measured at 29,002 ms. GNU documents the workaround rather than fixing it
+(`0x1p-16d` really does sleep 1,320 ms). Inheriting that is a regression dressed as compatibility.
+
+### Fixed — ⛔ three silent `sleep` defects, all pre-existing, all in the dangerous direction
+
+- ⛔ **A 49.7-day sleep returned in 707 milliseconds.** `sleep_ms` hands its argument to `poll(2)`,
+  whose timeout is an **`int`**; 2^32 ms truncates to nothing. Measured: `kriya sleep 4294968` — forty
+  nine days — returned in **707 ms with exit 0**. ⚠ A retry loop or a boot script believes it waited.
+  The total is now slept in one-day chunks, four orders of magnitude below the `int` ceiling.
+- ⛔ **A well-formed long duration was reported as malformed.** The accumulator wrapped, the caller
+  read the negative result as "not a number", and `kriya sleep 9999999999999999` printed *"DURATION
+  must be a non-negative number"* about an operand that was one. Overflow now returns a **distinct
+  sentinel** and saturates at ~292 years. ⚠ One error channel for two different failures makes the
+  diagnostic lie.
+- ⛔ **`--` was counted as an operand.** `kriya sleep -- 0.1` reported *"too many operands"* for a
+  command line with exactly one. ⚠ Left unfixed, summing would have turned that usage error into a
+  silently wrong TOTAL.
+
+### Fixed — ⚠ and one the summing itself created, caught before release
+
+⛔ **Each operand was truncated to whole milliseconds before being added.** Two thousand `0.0004`
+operands are 0.8 s under GNU and were **42 ms** here — every one of them rounded to zero on its own.
+`kriya_parse_duration_ms` is now `kriya_parse_duration_us` and the conversion to milliseconds happens
+ONCE, on the total. ⚠ Sub-millisecond resolution is still lost at the syscall; it is lost once
+instead of per operand. Now measured at 842 ms against GNU's 802.
+
+### ⭐ How it was checked
+
+⭐ **Every rule was MEASURED, not read.** Five parallel research agents probed GNU on this box, and
+then five more tried to refute what the first five reported. That second pass changed the
+implementation three times — `-s` still stats, `-L`/`-P`/`-s` are one group, and `-e` type-checks the
+DIRs are all things the first pass got wrong and the second pass caught with a fresh fixture.
+
+⭐ **A 369-case differential run** over the whole flag matrix — every mode against every how-axis
+against a fixture tree of symlinked directories, symlinks to files, dangling links, cycles,
+unsearchable directories and paths through a regular file — reaches **0 divergences**, with the
+diagnostics normalised for kriya's framing (architecture 001) and GNU's operand quoting.
+
+⚠ **The differential helper was wrong before the code was.** `same_rp` took the test's own
+description as `$1` and never shifted it off, so every GNU invocation got that sentence as an extra
+operand and returned 1. ⭐ It failed LOUDLY — 65 red assertions — only because the two sides then
+disagreed by construction.
+
+⭐ **A differential fuzz over the whole flag matrix**: random trees crossed with every how-axis,
+every mode, and the `--relative-*` pair, on operands that include each name bare, with a trailing
+slash, with a trailing `..`, and `./`-prefixed. **0 divergences in 4,500 comparisons** across five
+seeds, with 1 case in the documented ADR-0014 cycle gap, counted apart rather than compared equal. ⛔ **Its corpus contains the pathological shapes DELIBERATELY** — symlink cycles, unsearchable
+directories, symlinks to regular files, dangling links, and paths through a regular file — because
+1.6.2's lesson was that a generator which can only build well-formed fixtures is not a fuzzer for
+error paths, and those are exactly the shapes these assertions are about.
+
+⭐ **Five mutations, each red in both the fuzz and the smoke suite.** Turning off the `..` assertion
+in `fs_realpath` (6/360 fuzz, 2 smoke), turning off the trailing-slash assertion (11/360, 8), making
+`-E` behave like `-e` — the defect this release fixes (13/360, 16), making `-s` a boolean beside the
+`-L`/`-P` pair instead of the third value of one group (26/360, 7), and turning off the lexical `..`
+assertion that `-s` and `-L` share (24/360, 6).
+
+⭐ **Seven more after the review, one per fix, each red again**: the separator assertion (34 smoke),
+the symlink-supplied separator (10), the lexical `.` assertion (20), the operand-overflow guard
+(3 in `smoke-rm.sh` — the `rm` that used to delete 128 of 200), `df`'s errno (2), `sleep`'s mid-scan
+sentinel (3) and its per-unit fraction (1).
+
+### Fixed — ⛔ **`kriya rm *` on 200 files deleted 128 and exited 0**
+
+A five-lens adversarial review found this in shared code, where it had been since the flag table
+arrived. `lib/flags.cyr`'s `_flags_push_positional` is `if (pc >= cap) { return 0; }` — the 129th
+operand onward is **discarded, with no error, no flag, and success returned**. Measured:
+
+```
+$ ls | wc -l          200
+$ kriya rm *          (exit 0, silent)
+$ ls | wc -l          72
+```
+
+⛔ **A `rm` that deletes some of what it was given and reports success is the worst failure this
+project can have.** `cp` was worse in a different way: with 200 sources the DESTINATION was among the
+discarded tokens, so it reported *"with multiple sources, the last operand must be a directory"* — a
+diagnostic about an operand the user did supply.
+
+⚠ **The cap is upstream and stays upstream.** What kriya owes is a refusal rather than a silent
+truncation: `kriya_args_parse` now counts what the parser was handed — over the EXPANDED argv, so the
+classification is `flags_parse`'s own — compares it with what the table kept, and exits 2 when they
+differ. ⭐ Exactly 128 operands still works, and so does 128 plus a flag; the guard is not a
+threshold, it is a comparison.
+
+⚠ **A refusal is the safe stopgap, not the destination.** `rm *` on a directory with 200 files is an
+ordinary thing to do and GNU has no such limit — kriya now says no where it used to lie. Filed as
+**1.6.8**: stop routing operands through the flag table at all, and iterate them from the expanded
+argv the parser already builds. That touches every utility, which is why it is not a patch inside
+this release.
+
+### Fixed — ⛔ the trailing-slash assertion read the OPERAND, and three spellings say the same thing
+
+The first version of this release's fix looked at the last byte of argv. That caught `flink/` and
+missed every one of these, each confirmed against GNU:
+
+- **`realpath dir/file/.`** — a `.` component is the same directory assertion, and there is no
+  trailing slash on the operand at all. Answered the FILE, exit 0. So did `dir/file/./.`.
+- **A separator arriving from a SYMLINK'S OWN TARGET** — `slashtgt -> base/plainfile/` is ENOTDIR
+  under GNU, and argv never sees that slash.
+- **A separator arriving AFTER a symlink** — `flink/` expands to the target and the expansion then
+  *dropped* the slash, so the assertion had nothing left to see.
+
+⭐ **Moved into the walk, where the separator is visible however it got there.** The rule is now: a
+separator after a component asserts that component is a directory — and the stat is the one the walk
+already did, so it costs nothing.
+
+⛔ **`-L` and `-s` dropped a trailing `.` outright**, so kriya disagreed with *kriya*: `-P d/nope/.`
+refused while `-s d/nope/.` succeeded, and **`-L dang/.` printed `/…/nowhere` — a path that does not
+exist — at exit 0.**
+
+### Fixed — ⛔ two more in `sleep`, one of which hangs
+
+- ⛔ **A malformed operand whose digits overflowed first was never fully validated.**
+  `sleep 99999999999999999999.1.2` has two decimal points and is plainly broken; the overflow
+  sentinel returned mid-scan, so it saturated to ~292 years and **slept**. GNU exits 1. ⚠ A hang is
+  the dangerous direction for a typo. Overflow is recorded now and returned after the whole operand
+  has been checked.
+- ⛔ **The fraction was six digits of the SUFFIX'S UNIT, not of a second.** Six digits of a day is a
+  granularity of **86.4 milliseconds**: `sleep 0.0000009d` is 78 ms and returned in **2**. The
+  fraction is accumulated in microseconds as it is read, with a running place value that reaches zero
+  exactly when the next digit is finer than a microsecond. Now 81 ms against GNU's 81.
+
+### Fixed — ⚠ `df` reported every resolution failure as ENOENT
+
+`fs_realpath` returns ENOTDIR, ELOOP and EACCES too, and `df` printed *"No such file or directory"*
+for all of them — so `df somefile/` sent the reader looking for a file that is right there. It also
+contradicted [architecture 001](docs/architecture/001-errno-message-policy.md), which says the
+message slot is exactly what `errmsg_for` returns.
+
+### Fixed — ⚠ five assertions that could not tell the right answer from the wrong one
+
+The review's most valuable finding was not a defect in the code:
+
+- **The `-L`/`-P` last-wins pair used an operand with no `..`**, so both orders gave the same answer
+  and the assertion held against a binary with the ordering scan removed.
+- **The `-s -e` vs `-e` contrast pair was ENOENT on both sides** — one file short of distinguishing
+  the stripped text from the physical walk. Now `base/onlystrip` and `base/one/onlyphys` exist so
+  exactly one path resolves at a time.
+- **The ADR-0014 block asserted exit codes only**, so it passed 9/9 against a binary whose
+  `realpath -m` printed GNU's stopping point rather than kriya's — the entire subject of that ADR.
+- **Nothing combined `-s` or `-L` with a trailing slash**; both slash-preservation paths could be
+  deleted with the suite green.
+- **ADR 0015 records `sleep 5 --help` and `sleep -- -0` as deliberate divergences and nothing
+  asserted either**, so the ADR and the binary could drift apart silently.
+
+⚠ **And the fuzz corpus had `/` and `/..` but not `/.`** — the third spelling of one statement. That
+is 1.6.2's lesson exactly, one release later: **a generator that cannot express a shape will never
+find the defect in it.**
+
+### ⭐ Benchmarks
+
+Three new cases in `tests/kriya.bcyr`, all filesystem-free so the number is the algorithm rather
+than the page cache. ⚠ Medians of five runs, because a single run of any of these varies by ~8%:
+
+| bench | avg |
+|---|---|
+| `path/relative` — `--relative-to`'s whole answer once both operands are canonical | **380 ns** |
+| `path/is_under` — the gate `--relative-base` asks per operand | **465 ns** |
+| `args/parse_duration_us` — ⚠ now runs ONCE PER OPERAND, a count the caller controls | **42 ns** |
+
+### Release totals
+
+**5,163 smoke cases across 41 scripts** (from 4,795) — `smoke-realpath.sh` 54 → **347**,
+`smoke-sleep.sh` 15 → **48**, `smoke-readlink.sh` 24 → **33**, `smoke-df.sh` 18 → **24**,
+`smoke-rm.sh` 76 → **82**. **440 unit** (from 406 — the
+microsecond parser and both overflow boundaries), 18 POSIX; fuzz green under poison; four lints
+clean; both targets build; `vet` reports 54 deps.
+
+Binary 1,111,248 → **1,120,024** bytes (+8,776) on host, 1,107,056 → **1,115,832** (+8,776) on agnos.
+
+⚠ **Cold-start is flat, and the way to know that is to measure both.** Five interleaved rounds of 200
+spawns each give medians of **621 µs for 1.6.2 and 605 µs for 1.6.3** — a 2.6% gap inside a per-series
+spread of ~50 µs. Flat for four releases running.
+
+⚠ **A pre-existing repo-wide defect measured and filed, not fixed here**: kriya's shared argv layer is
+quadratic — 1,000 operands cost 6 ms, 4,000 cost 57 ms and 16,000 cost 826 ms, against GNU's 6 ms. It
+affects every utility and predates this release; summing is only what makes a long operand list a
+plausible thing to hand `sleep`.
+
 ## [1.6.2] - 2026-08-27 — `ln -r`, the target-directory flags, and a comment that was wrong for years
 
 ### Added — `ln -r` / `--relative`, and it is not a `..`-counting exercise

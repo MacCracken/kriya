@@ -416,14 +416,70 @@ than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path
     defect: a narrow reviewer beats a broad one for a feature with a shared helper underneath.
   - ⛔ *`match` is a reserved keyword in Cyrius.* Costs one build. Worth knowing before naming a
     variable in a comparison loop, which is exactly where the word wants to be used.
-- **1.6.3 — `realpath` flags, and the `sleep` operand decision.** ⚠ Note what 1.6.2 already settled
-  here: ALLOW_MISSING is correct now and the traversal limit has an ADR, so this release is the flag
-  surface only. `realpath -s`/`--strip`/
-  `--no-symlinks` (text-only canonicalization), `--relative-to=DIR`, `--relative-base=DIR`, and the
-  `-L`/`-P` pair (POSIX `cd -L` semantics vs the current physical default). ⚠ Also settle `sleep`:
-  GNU sums several DURATIONs (`sleep 1m 30s`), POSIX specifies exactly one, and kriya rejects the
-  second operand today. **It is a decision, not an omission** — either implement the summing or
-  record the POSIX-strict refusal in an ADR, but stop carrying it as an unnamed follow-up.
+- **1.6.3 — `realpath` flags, and the `sleep` operand decision.** ✅ **SHIPPED at 1.6.3** —
+  `-E`/`--canonicalize`, `-L`/`--logical`, `-P`/`--physical`, `-s`/`--strip`/`--no-symlinks`,
+  `--relative-to=DIR`, `--relative-base=DIR`; and `sleep` sums its operands
+  ([ADR 0015](../adr/0015-sleep-sums-its-operands.md)).
+
+  ⛔ **The entry did not mention the biggest thing in it, because nobody had measured the default.**
+  kriya's `realpath` defaulted to `-e`; GNU defaults to `-E`. `realpath build/out` for a file a build
+  is about to create answers under GNU and failed here — since **v0.4.0**, defended by a source
+  comment asserting the opposite of GNU's own `--help`.
+
+  ⭐ Also fixed, in the shared `fs_realpath` and therefore in `readlink -f`/`-e` too: a trailing
+  slash and a `..` are DIRECTORY ASSERTIONS. `realpath flink/` on a symlink to a regular file
+  answered the file with exit 0, and `base/plainfile/..` answered `base` — a canonical path built by
+  walking THROUGH a regular file.
+
+  ⛔ **Carry forward:**
+  - ⛔ *A comment asserting what another tool does is a claim to check, not a citation to trust —
+    SECOND RELEASE RUNNING.* 1.6.2 caught `touch -c`'s "POSIX says it's still an error (exit 1), GNU
+    agrees"; this one caught `realpath`'s "-e … (default; alias for the default mode)" and `sleep`'s
+    "POSIX sleep takes one integer". ⚠ All three were load-bearing, all three were wrong, and in
+    every case **the tests had been written to agree with the comment**.
+  - ⛔ *Measure the tool, then measure the measurement.* Five research agents probed GNU and five
+    more tried to refute them. The second pass changed the implementation THREE times — `-s` still
+    stats the filesystem, `-L`/`-P`/`-s` are one last-wins group rather than a flag plus a pair, and
+    `-e` type-checks the DIR arguments. ⚠ Each of those would have shipped as a plausible-looking
+    divergence found later by a user.
+  - ⚠ *A fixture where two branches agree asserts nothing.* A symlink pointing at a directory in the
+    CWD makes `-L` and `-P` give the same answer for `link/..`; the first `-L` probe used exactly
+    that and concluded the flags were identical. **Fourth release running** that a test could not
+    tell two answers apart.
+  - ⛔ *An `int` in a syscall ABI is a silent truncation waiting for a big argument.* `sleep_ms`
+    passes its argument to `poll(2)`; a 49.7-day request is 2^32 ms and returned in **707 ms with
+    exit 0**. ⚠ The dangerous direction — the caller believes it waited. Chunking is the fix, and
+    the same question is worth asking of every other stdlib call kriya hands a large number to.
+  - ⚠ *One error channel cannot carry two failures.* `kriya_parse_duration_ms` returned -1 for
+    "malformed" and, on overflow, a wrapped negative that the caller also read as "malformed" — so a
+    legal 317-million-year duration was diagnosed as not-a-number. A distinct sentinel is three
+    lines and makes the message true.
+  - ⚠ *A differential helper that never shifts its own test name into `$@` compares nothing to
+    something.* It failed loudly here (65 red assertions) only because the two sides then disagreed
+    by construction; a helper that swallowed the extra operand would have passed everything.
+  - ⛔ *THE WORST DEFECT IN THE RELEASE WAS IN CODE NOBODY WAS LOOKING AT.* An adversarial review
+    aimed at `realpath` found that the stdlib flag table keeps 128 positionals and DISCARDS the rest
+    while returning success — so `kriya rm *` on 200 files deleted 128, left 72, and exited 0. It had
+    been true since the flag table arrived. ⚠ **A cap that silently truncates is worse than one that
+    refuses**, and the place to notice it is a review of something else entirely.
+  - ⛔ *One statement, three spellings — and a check that reads argv only sees one of them.* A
+    trailing slash, a trailing `.`, and a separator arriving from a SYMLINK'S OWN TARGET all assert
+    "this component is a directory". The first fix read the last byte of the operand and caught
+    exactly one. ⭐ **Assert where the thing is visible, not where it was typed** — moved into the
+    walk, the rule covers all three and the stat is already in hand.
+  - ⚠ *A test corpus is a list of shapes you thought of.* The fuzz had `/` and `/..` and not `/.`,
+    so 4,500 green comparisons sat on top of `realpath dir/file/.` answering the file at exit 0.
+    **Second release running** that the generator, not the code, was the thing that needed fixing
+    first.
+  - ⛔ *Five assertions could not tell the right answer from the wrong one, and the review found them
+    by MUTATING rather than reading.* The `-L`/`-P` last-wins pair used an operand where both orders
+    agree; the `-s -e` contrast was ENOENT on both sides; the ADR-0014 block compared exit codes
+    only; nothing paired `-s`/`-L` with a trailing slash; ADR 0015's recorded divergences had no
+    assertion at all. ⭐ **"Which mutation would this test catch?" is a better review question than
+    "is this test correct?"**
+  - ⚠ *Arithmetic in a comment is a claim too.* "Four orders of magnitude below the int ceiling" was
+    24.9x, and a test comment said the duration ceiling was 292,000 years where the value asserted on
+    the next line is 292. Neither changed any behaviour; both would have misled the next reader.
 - **1.6.4 — Defenses that need infrastructure first.** Two items blocked on the same kind of gap:
   - ⛔ **`rm` cross-operand bulk-root defense.** [ADR 0004](../adr/0004-rm-refuses-root.md) refuses `/`
     per operand, but `rm -rf /*` expands **at the shell** to `/bin /boot /etc …` — every operand
@@ -450,6 +506,43 @@ than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path
   - ⚠ The helper belongs in `src/lib/`, not in `ln` — `cp -b` and `mv -b` are the same feature, and
     putting it in the first caller is how `cp` ended up with two answers to one question (see the
     `_ln_resolve_dest` note under 1.6.2).
+
+- **1.6.6 — `readlink`'s own flag surface, and the diagnostic-quoting decision.** Three things the
+  1.6.3 research surfaced in the utility next door, none of which belong in a `realpath` release:
+  - **`readlink -s`/`--silent` and `-v`/`--verbose` are missing.** ⚠ `readlink -s` is NOT
+    `realpath -s` — it is a synonym for `-q`, which is the sort of collision that makes a shared
+    flag table the wrong shape for two utilities that merely look similar.
+  - ⛔ **GNU's `readlink` is SILENT BY DEFAULT and kriya's is not.** Measured: `readlink plain`
+    prints nothing and exits 1; kriya prints `kriya readlink: plain: invalid argument`. GNU's help
+    says the quiet default flips with `POSIXLY_CORRECT`, which kriya declines (ADR 0011) — so this
+    is a decision about which of GNU's two behaviours to be, not a bug to fix. **Name it in an ADR.**
+  - ⛔ **kriya never shell-quotes an operand in a diagnostic and GNU does.** GNU emits
+    `realpath: 'a b': …` for a name with a space, `$'\t'` for a tab, and double quotes for a name
+    containing a single quote. ⚠ **A filename containing a newline splits a kriya diagnostic across
+    two lines**, which breaks the one-error-line-per-failure invariant that
+    [architecture 001](../architecture/001-errno-message-policy.md) commits to in writing. That note
+    is where the decision belongs; `src/lib/quote.cyr` already exists.
+
+- **1.6.8 — 128 operands is a REFUSAL now, and it should be a non-issue.** ⛔ 1.6.3 turned the
+  stdlib flag table's silent truncation into an honest error, because `kriya rm *` on 200 files was
+  deleting 128 and exiting 0. ⚠ **A refusal is the safe stopgap, not the destination**: `rm *` on a
+  directory with 200 files is an ordinary thing to do, GNU has no such limit, and kriya now says no.
+  - The cap is `FLAGS_POS_MAX = 128` in `lib/flags.cyr`, which is UPSTREAM and stays upstream.
+  - The kriya-side fix is to stop routing operands through the flag table at all — parse options
+    from the expanded argv (which `kriya_args_parse` already builds) and let each utility iterate
+    operands directly from argv, unbounded. ⚠ That touches every utility, which is why it is its own
+    release and not a patch inside 1.6.3.
+  - ⭐ Keep the overflow guard until then, and keep its `smoke-rm.sh` assertion afterwards: the test
+    that says "200 operands must not silently become 128" stays true whichever way it is satisfied.
+
+- **1.6.7 — What `sleep` does when something interrupts it.** GNU's `sleep` is DEADLINE-based: a
+  process SIGSTOPped for a second still returns at its original deadline rather than sleeping an
+  extra second. kriya's `_sleep_total_ms` calls `sleep_ms` with RELATIVE durations in a loop, so it
+  is structurally at risk of re-sleeping after any interruption — and 1.6.3's chunking multiplied the
+  number of places that can happen. ⚠ Untested today because
+  [architecture 002](../architecture/002-signal-handling-model.md) classes `sleep` as bounded and
+  gives it no handler. Decide whether the deadline is part of the contract, then either compute one
+  from a monotonic clock or record the divergence.
 
 ---
 

@@ -328,6 +328,29 @@ else
     echo "FAIL df / /home should yield >=1 row; got $nrows_multi" >&2
 fi
 
+# --- 1.6.3: df resolves through fs_realpath, so it shared its defect ------
+# ⛔ `df f/` and `df f/..` for a REGULAR FILE both reported a filesystem with
+# exit 0 until 1.6.3 — a trailing slash and a `..` are directory assertions, and
+# the shared canonicalizer was not making them. GNU errors on both.
+# ⚠ IN $WORK, NOT THE CWD. `smoke-df.sh` never `cd`s — its other cases probe
+# real mount points by absolute path — so a fixture built with a relative name
+# lands in whatever directory the runner happened to be in, and the trap that
+# cleans `$WORK` never sees it. The first version of this block left a `df163/`
+# directory in the repo.
+mkdir -p "$WORK/df163/d"
+echo x > "$WORK/df163/f"
+expect_exit "a trailing slash on a regular file" 1 "$BIN" df "$WORK/df163/f/"
+# ⛔ THE REAL ERRNO, NOT A HARDCODED ENOENT. `df somefile/` is ENOTDIR and the
+# file is right there; reporting "no such file or directory" sends the reader
+# looking for something that exists.
+expect_eq "...reported as ENOTDIR, not ENOENT" "1" \
+          "$("$BIN" df "$WORK/df163/f/" 2>&1 >/dev/null | grep -c 'not a directory')"
+expect_eq "...and a genuinely missing path still says so" "1" \
+          "$("$BIN" df "$WORK/df163/nosuch" 2>&1 >/dev/null | grep -c 'no such file or directory')"
+expect_exit ".. through a regular file"          1 "$BIN" df "$WORK/df163/f/.."
+expect_exit "...while the file itself is fine"   0 "$BIN" df "$WORK/df163/f"
+expect_exit "...and so is a real directory"      0 "$BIN" df "$WORK/df163/d/"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

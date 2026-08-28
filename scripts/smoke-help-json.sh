@@ -221,7 +221,10 @@ too_many basename a b c
 too_many date +%Y extra
 too_many pwd extra
 too_many seq 1 1 5 9
-too_many sleep 0 0
+# ⚠ `sleep` LEFT THIS LIST AT 1.6.3. Its declaration went from max 1 to
+# unbounded when operands started summing (ADR 0015), and this assertion is the
+# thing that notices — it is the schema and the behaviour checked against each
+# other, so a declaration edited without the code, or the reverse, fails here.
 too_many tr a b c
 : > u1; : > u2
 too_many uniq u1 u2 u3

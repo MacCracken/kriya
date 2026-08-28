@@ -41,6 +41,18 @@ var _kriya_expanded_n = 0;
 enum KriyaOptval {
     KRIYA_OPTVAL_MAX = 4,
 }
+
+# ⚠ The largest duration `kriya_parse_duration_us` will return, in MICROSECONDS.
+# i64's ceiling divided by a thousand, so both `N * mult` and the accumulated sum
+# stay three orders of magnitude clear of a wrap. ⭐ About 292 YEARS — nothing
+# legitimate is near it, and everything past it saturates rather than wrapping
+# into a SHORT sleep, which is the failure mode that matters.
+#
+# ⚠ It is a ceiling on the RESULT, so the largest accepted operand depends on its
+# unit: 9,223,372,036 seconds, or 106,751 days. Both boundaries are asserted.
+enum KriyaDuration {
+    KRIYA_DUR_MAX_US = 9223372036854775,
+}
 var _kriya_optval_names = 0;   # cstr array, KRIYA_OPTVAL_MAX slots
 var _kriya_optval_vals  = 0;   # captured values, parallel
 var _kriya_optval_n     = 0;
@@ -587,6 +599,99 @@ fn _kriya_wants_help(start: i64, end: i64): i64 {
     return 0;
 }
 
+# ⛔ THE STDLIB PARSER DROPS OPERANDS PAST ITS 128-SLOT CAP AND REPORTS SUCCESS.
+# `lib/flags.cyr`'s `_flags_push_positional` is `if (pc >= cap) { return 0; }` —
+# no error, no flag, nothing to notice afterwards. Measured before this check:
+#
+#     $ ls | wc -l              200
+#     $ kriya rm *              (exit 0, silent)
+#     $ ls | wc -l              72
+#
+# ⛔ **A `rm` THAT DELETES 128 OF 200 FILES AND EXITS 0 IS THE WORST FAILURE THIS
+# PROJECT CAN HAVE.** The caller is told it succeeded. `cp` was worse in a
+# different way: with 200 sources the DESTINATION was among the discarded
+# tokens, so it reported "with multiple sources, the last operand must be a
+# directory" — a diagnostic about an operand the user did supply.
+#
+# ⚠ The cap is upstream and stays upstream. What kriya owes is a REFUSAL rather
+# than a silent truncation: this counts what the parser was given, compares it
+# with what the table kept, and exits 2 when they differ.
+#
+# ⭐ Counted over the EXPANDED argv — the parser's own view, with clusters split,
+# long forms normalised, `--` honoured and permutation resolved — so the
+# classification below is `flags_parse`'s, not a second opinion about it.
+fn _kriya_count_operands(spec): i64 {
+    var av = _kriya_expanded;
+    var n  = _kriya_expanded_n;
+    if (av == 0) { return 0; }
+    var count: i64 = 0;
+    var i: i64 = 1;
+    var in_pos: i64 = 0;
+    while (i < n) {
+        var tok = load64(av + i * 8);
+        var step: i64 = 1;
+        if (tok != 0) {
+            if (in_pos == 1) { count = count + 1; }
+            else {
+                if (load8(tok) != 45) { count = count + 1; }
+                else {
+                    if (load8(tok + 1) == 0) { count = count + 1; }      # "-" is stdin
+                    else {
+                        var is_term: i64 = 0;
+                        if (load8(tok + 1) == 45) {
+                            if (load8(tok + 2) == 0) { is_term = 1; }
+                        }
+                        if (is_term == 1) { in_pos = 1; }
+                        else {
+                            var ep: i64 = 0;
+                            if (load8(tok + 1) == 45) {
+                                var ns = tok + 2;
+                                var j: i64 = 0;
+                                var eq: i64 = 0 - 1;
+                                while (load8(ns + j) != 0) {
+                                    if (eq < 0) {
+                                        if (load8(ns + j) == 61) { eq = j; }
+                                    }
+                                    j = j + 1;
+                                }
+                                var nlen = j;
+                                if (eq >= 0) { nlen = eq; }
+                                ep = _flags_find_long(spec, ns, nlen);
+                                if (ep != 0) {
+                                    if (eq < 0) {
+                                        # ⚠ A value-taking long in the SEPARATED
+                                        # form eats the next token, which is
+                                        # therefore not an operand.
+                                        if (load64(ep + 16) != FLAG_BOOL) { step = 2; }
+                                    }
+                                }
+                            } else {
+                                if (load8(tok + 2) == 0) {
+                                    ep = _flags_find_short(spec, load8(tok + 1));
+                                    if (ep != 0) {
+                                        if (load64(ep + 16) != FLAG_BOOL) { step = 2; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + step;
+    }
+    return count;
+}
+
+fn _kriya_operand_overflow(): i64 {
+    k_write( 2, "kriya ", 6);
+    if (_help_name != 0) { k_write( 2, _help_name, strlen(_help_name)); }
+    k_write( 2, ": error: too many operands (128 maximum)\n", 41);
+    if (k_write_failed() == 1) { syscall(SYS_EXIT, 1); }
+    syscall(SYS_EXIT, EXIT_USAGE);
+    return 0;
+}
+
 fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
     _kriya_optval_bad = 0;
 
@@ -639,7 +744,17 @@ fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
     # allow an argument"), so return a plain failure and let the caller's usage
     # exit stand — a second, vaguer message on top would be noise.
     if (_kriya_optval_bad == 1) { return 0 - 1; }
-    return flags_parse(spec, m, out);
+    var pr = flags_parse(spec, m, out);
+    if (pr != 0) { return pr; }
+    # ⛔ EXITS RATHER THAN RETURNING, for the reason `--help` above does: every
+    # one of the call sites answers a non-zero return with "bad option (see ADR
+    # 0002)", which is not what happened. A third outcome threaded through all
+    # of them is 28 chances to get it wrong, for a condition where continuing is
+    # never the right answer — the operands are already gone.
+    if (_kriya_count_operands(spec) > flags_positional_count(spec)) {
+        _kriya_operand_overflow();
+    }
+    return 0;
 }
 
 # Parse a null-terminated cstring as a non-negative base-10 integer.
@@ -784,6 +899,14 @@ fn kriya_parse_nonneg_int(s): i64 {
 # Returns -1 on any of: null, empty, a sign, a bad digit, a bad suffix, more
 # than one decimal point, or an empty numeric part.
 #
+# ⛔ AND -2, DISTINCTLY, WHEN THE VALUE IS WELL-FORMED BUT OUT OF RANGE. Until
+# 1.6.3 the accumulator wrapped silently, so `sleep 9999999999999999` — a
+# perfectly legal 317-million-year request — came back NEGATIVE and the caller,
+# which only knew "< 0 means malformed", printed *"DURATION must be a
+# non-negative number"* about an operand that was one. ⚠ A single error channel
+# for two different failures makes the diagnostic lie; the second return value
+# is what lets `sleep` say "out of range" and saturate instead.
+#
 # ⚠ MILLISECONDS, not seconds, because that is `sleep_ms`'s unit and the whole
 # point is sub-second waits. Fractions beyond millisecond resolution are
 # truncated, not rounded — `sleep 0.0001` is a no-op rather than a surprise.
@@ -792,31 +915,59 @@ fn kriya_parse_nonneg_int(s): i64 {
 # in lib/chrono.cyr". Checked at pin 6.5.35: chrono has duration CONSTRUCTORS
 # (`dur_seconds`, `dur_minutes`, …) but no duration STRING parser, so there is
 # nothing upstream to wait for. ~50 lines here beats a blocked follow-up.  #skip-lint
-fn kriya_parse_duration_ms(s): i64 {
+# ⛔ MICROSECONDS, AND THE MILLISECOND VERSION IS NOW A WRAPPER. Truncating
+# EACH operand to whole milliseconds before summing is a wrong answer that
+# summing made reachable: two thousand `0.0004` operands are 0.8 s under GNU and
+# were **42 ms** here, because every one of them truncated to zero. ⚠ Sub-ms
+# resolution is still lost at the syscall — `sleep_ms` is what it is — but it is
+# lost ONCE, at the end, instead of once per operand.
+fn kriya_parse_duration_us(s): i64 {
     if (s == 0) { return 0 - 1; }
     var len = strlen(s);
     if (len == 0) { return 0 - 1; }
 
     # Trailing unit suffix. Bare digits mean seconds, as POSIX `sleep` requires.
-    var mult: i64 = 1000;                       # seconds -> ms
+    var mult: i64 = 1000000;                    # seconds -> us
     var last = load8(s + len - 1);
     var digits = len;
-    if (last == 115) { mult = 1000;      digits = len - 1; }        # s
-    elif (last == 109) { mult = 60000;   digits = len - 1; }        # m
-    elif (last == 104) { mult = 3600000; digits = len - 1; }        # h
-    elif (last == 100) { mult = 86400000; digits = len - 1; }       # d
+    if (last == 115) { mult = 1000000;      digits = len - 1; }     # s
+    elif (last == 109) { mult = 60000000;   digits = len - 1; }     # m
+    elif (last == 104) { mult = 3600000000; digits = len - 1; }     # h
+    elif (last == 100) { mult = 86400000000; digits = len - 1; }    # d
     else {
-        # Not a suffix — must be a digit, or the operand is malformed.
-        if (last < 48) { return 0 - 1; }
-        if (last > 57) { return 0 - 1; }
+        # Not a suffix — must be a digit or a trailing `.`, or the operand is
+        # malformed. ⚠ `1.` IS A DECIMAL. Rejecting it while accepting `.5` was
+        # an accident of this one check, not a decision: the loop below already
+        # handles an empty fractional part.
+        if (last == 46) {
+            if (len == 1) { return 0 - 1; }         # "." alone
+        } else {
+            if (last < 48) { return 0 - 1; }
+            if (last > 57) { return 0 - 1; }
+        }
     }
     if (digits == 0) { return 0 - 1; }          # a bare suffix like "s"
 
     var whole: i64 = 0;
-    var frac_ms: i64 = 0;
+    var frac_us: i64 = 0;
+    # ⛔ THE FRACTION IS ACCUMULATED IN MICROSECONDS AS IT IS READ, using a
+    # running place value, rather than as six digits of the UNIT scaled at the
+    # end. Six digits of a DAY is a granularity of 86.4 MILLISECONDS: measured
+    # before this change, `sleep 0.0000009d` returned in 2 ms where GNU slept
+    # 80. ⭐ `scale` starts at one unit in µs and is divided by ten per decimal
+    # place, so it reaches zero exactly when the next digit is finer than a
+    # microsecond — which is the resolution `sleep_ms` can express anyway — and
+    # `frac_us` can never exceed one unit, so nothing can overflow.
+    var scale = mult;
     var seen_dot: i64 = 0;
     var frac_digits: i64 = 0;
     var int_digits: i64 = 0;
+    # ⛔ OVERFLOW IS RECORDED, NOT RETURNED MID-SCAN. Returning -2 on the first
+    # oversized digit run leaves the REST of the operand unvalidated, so
+    # `sleep 99999999999999999999.1.2` — two decimal points, plainly malformed —
+    # saturated to ~292 years and SLEPT, where GNU exits 1. ⚠ A hang is the
+    # dangerous direction for a typo.
+    var over: i64 = 0;
     var i: i64 = 0;
     while (i < digits) {
         var c = load8(s + i);
@@ -827,14 +978,20 @@ fn kriya_parse_duration_ms(s): i64 {
             if (c < 48) { return 0 - 1; }
             if (c > 57) { return 0 - 1; }
             if (seen_dot == 0) {
-                whole = whole * 10 + (c - 48);
+                # ⛔ CHECK BEFORE MULTIPLYING. Testing the product for a wrap
+                # afterwards is the bug this replaces — signed overflow has
+                # already happened by then, and the wrapped value can land
+                # anywhere, including a small positive.
+                if (whole > KRIYA_DUR_MAX_US / 10) { over = 1; }
+                if (over == 0) {
+                    whole = whole * 10 + (c - 48);
+                    if (whole < 0) { over = 1; }
+                }
                 int_digits = int_digits + 1;
             } else {
-                # Keep three fractional digits; anything finer truncates.
-                if (frac_digits < 3) {
-                    frac_ms = frac_ms * 10 + (c - 48);
-                    frac_digits = frac_digits + 1;
-                }
+                scale = scale / 10;
+                frac_us = frac_us + (c - 48) * scale;
+                frac_digits = frac_digits + 1;
             }
         }
         i = i + 1;
@@ -842,12 +999,17 @@ fn kriya_parse_duration_ms(s): i64 {
     if (int_digits == 0) {
         if (frac_digits == 0) { return 0 - 1; } # "." or "" alone
     }
-    # Scale the fraction to a thousandth of the UNIT, then to ms.
-    while (frac_digits < 3) {
-        frac_ms = frac_ms * 10;
-        frac_digits = frac_digits + 1;
-    }
-    return whole * mult + (frac_ms * mult) / 1000;
+    if (over == 1) { return 0 - 2; }
+    if (whole > KRIYA_DUR_MAX_US / mult) { return 0 - 2; }
+    return whole * mult + frac_us;
+}
+
+# Milliseconds, for any caller that wants them. ⚠ Truncates — see above for why
+# `sleep` does not use this one.
+fn kriya_parse_duration_ms(s): i64 {
+    var us = kriya_parse_duration_us(s);
+    if (us < 0) { return us; }
+    return us / 1000;
 }
 
 fn kriya_parse_octal_mode(s): i64 {

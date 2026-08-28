@@ -1,38 +1,117 @@
-# sleep — POSIX `sleep(1)`: pause for the given number of seconds.
+# sleep — POSIX `sleep(1)`: pause for the given duration.
 #
 # Accepts a non-negative decimal with an optional unit suffix:
 # `1`, `1.5`, `0.25`, `1s`, `2m`, `1h`, `1d`. A bare number is seconds, as POSIX
 # requires; the fractional and suffix forms are the GNU extension.
 #
-# ⚠ The suffix/fraction support was deferred here "until the wider duration  #skip-lint
-# parser lands in lib/chrono.cyr". Checked at pin 6.5.35: chrono has duration
-# CONSTRUCTORS but no duration STRING parser, so there was nothing to wait for —
-# it is `kriya_parse_duration_ms` in `src/lib/args.cyr` now.
+# ⭐ SEVERAL OPERANDS SUM, as GNU does — `sleep 1m 30s` is ninety seconds.
+# Settled in [ADR 0015](../../docs/adr/0015-sleep-sums-its-operands.md), which
+# also records what kriya deliberately does NOT take from GNU here.
 #
-# ⚠ Still one operand only. GNU sums multiple (`sleep 1m 30s`); POSIX specifies
-# exactly one, and summing would make `sleep 1 2` silently mean 3 rather than an
-# error. Named as a follow-up rather than assumed. (roadmap 1.6.3)
+# ⛔ EVERY OPERAND IS PARSED BEFORE ANY SLEEPING STARTS. The obvious shape —
+# parse one, sleep it, move on — makes `sleep 3600 bogus` block for an hour and
+# THEN report the bad operand. GNU returns in a millisecond; so does this.
+
+enum SleepChunk {
+    # ⛔ `sleep_ms` HANDS ITS ARGUMENT TO `poll(2)`, WHOSE TIMEOUT IS AN `int`.
+    # A 49.7-day request is 2^32 ms, which truncates to zero — measured before
+    # the fix: `kriya sleep 4294968` returned in **707 ms with exit 0**, having
+    # been asked for forty-nine days. ⚠ The failure is SILENT and it is the
+    # dangerous direction: a retry loop or a boot script believes it waited.
+    # ⚠ One day per chunk is 86,400,000 ms against `INT_MAX`'s 2,147,483,647 —
+    # a margin of **24.9x**, not the "four orders of magnitude" an earlier
+    # version of this comment claimed. The number is comfortable; the claim
+    # about it was arithmetic nobody had done.
+    SLEEP_CHUNK_MS = 86400000,
+}
+
+# Sleep `total` milliseconds in chunks small enough for `poll`'s int timeout.
+fn _sleep_total_ms(total: i64): i64 {
+    var left = total;
+    while (left > 0) {
+        var chunk = left;
+        if (chunk > SLEEP_CHUNK_MS) { chunk = SLEEP_CHUNK_MS; }
+        sleep_ms(chunk);
+        left = left - chunk;
+    }
+    return 0;
+}
+
+fn _sleep_bad_operand(tok): i64 {
+    k_write( 2, "kriya sleep: error: invalid duration '", 38);
+    k_write( 2, tok, strlen(tok));
+    k_write( 2, "' (a non-negative number with an optional s/m/h/d suffix)\n", 58);
+    return 0;
+}
 
 fn cmd_sleep(start: i64): i64 {
     sleep_help_declare();
     help_if_requested(0, start);
     var n = kriya_argv_count();
-    if (start >= n) {
+
+    # ⛔ PASS ONE VALIDATES AND ACCUMULATES; NOTHING BLOCKS UNTIL IT FINISHES.
+    # ⚠ ACCUMULATED IN MICROSECONDS, converted to milliseconds ONCE at the end.
+    # Truncating each operand first is a wrong answer that summing made
+    # reachable: two thousand `0.0004` operands are 0.8 s under GNU and were
+    # 42 ms here, every one of them having rounded to zero on its own.
+    var total: i64 = 0;
+    var count: i64 = 0;
+    var i = start;
+    var no_more: i64 = 0;
+    var failed: i64 = 0;
+    var saturated: i64 = 0;
+    while (i < n) {
+        var tok = argv(i);
+        var consumed: i64 = 0;
+        # ⚠ `--` ENDS THE OPTIONS, and until 1.6.3 it was counted as an operand:
+        # `kriya sleep -- 0.1` reported "too many operands" for a command line
+        # with exactly one. ⛔ Left unfixed, the summing change would have turned
+        # that usage error into a silently wrong TOTAL.
+        if (no_more == 0) {
+            if (streq(tok, "--") == 1) {
+                no_more = 1;
+                consumed = 1;
+            }
+        }
+        if (consumed == 0) {
+            var us = kriya_parse_duration_us(tok);
+            # -2 is "well-formed but past the ceiling", distinct from -1's
+            # "malformed". Saturating matches GNU, which sleeps forever on
+            # anything that overflows a double and never diagnoses it.
+            if (us == 0 - 2) {
+                saturated = 1;
+                us = KRIYA_DUR_MAX_US;
+            }
+            if (us < 0) {
+                # ⚠ EVERY bad operand is named, not just the first — GNU emits
+                # one diagnostic per invalid operand and a caller fixing a
+                # generated command line wants all of them in one run.
+                _sleep_bad_operand(tok);
+                failed = 1;
+            } else {
+                if (total > KRIYA_DUR_MAX_US - us) {
+                    saturated = 1;
+                    total = KRIYA_DUR_MAX_US;
+                } else {
+                    total = total + us;
+                }
+                count = count + 1;
+            }
+        }
+        i = i + 1;
+    }
+    if (failed == 1) { return EXIT_USAGE; }
+
+    # ⚠ `sleep --` with nothing after it is an ERROR here, where GNU exits 0.
+    # GNU's answer is a getopt accident — its missing-operand check runs before
+    # `--` is consumed — and it contradicts bare `sleep`, which GNU does reject.
+    if (count == 0) {
         k_write( 2, "kriya sleep: error: expected 1 positional argument(s), got 0\n", 61);
         return EXIT_USAGE;
     }
-    if (start + 1 < n) {
-        k_write( 2, "kriya sleep: error: too many operands (POSIX sleep takes one integer)\n", 70);
-        return EXIT_USAGE;
-    }
-    var arg = argv(start);
-    var ms = kriya_parse_duration_ms(arg);
-    if (ms < 0) {
-        k_write( 2, "kriya sleep: error: DURATION must be a non-negative number with an optional s/m/h/d suffix\n", 91);
-        return EXIT_USAGE;
-    }
-    if (ms > 0) {
-        sleep_ms(ms);
+
+    if (total > 0) {
+        _sleep_total_ms(total / 1000);
     }
     return EXIT_SUCCESS;
 }
@@ -42,12 +121,12 @@ fn cmd_sleep(start: i64): i64 {
 # `--help=json` and `--list` alike.
 fn sleep_help_declare(): i64 {
     help_begin("sleep", "Pause for a duration.",
-               "sleep DURATION");
-    help_positional(1, 1, "DURATION");
+               "sleep DURATION...");
+    help_positional(1, HELP_POS_UNBOUNDED, "DURATION");
     help_no_options();
-    help_operands("DURATION is a non-negative number with an optional s/m/h/d suffix. One operand only; GNU sums several, POSIX specifies one.");  #skip-lint
+    help_operands("Each DURATION is a non-negative number with an optional s/m/h/d suffix; several are summed. Hex, exponents and inf are refused (ADR 0015).");  #skip-lint
     help_example("sleep 5");
     help_example("sleep 0.25");
-    help_example("sleep 2m");
+    help_example("sleep 1m 30s");
     return 0;
 }

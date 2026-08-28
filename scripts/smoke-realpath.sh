@@ -106,11 +106,16 @@ case "$out" in
     *) FAIL=$((FAIL + 1)); echo "FAIL absolute symlink resolved to non-absolute: $out" >&2 ;;
 esac
 
-# --- default mode is -e: ENOENT on missing ---
-expect_exit "missing default"    1 "$BIN" realpath a/b/nope
-
-# Dangling symlink under -e: error (the target doesn't exist).
-expect_exit "dangling under -e"  1 "$BIN" realpath dangling
+# --- default mode is -E, and these four assertions used to say otherwise ------
+# ⛔ THE HEADING HERE READ "default mode is -e" AND KRIYA IMPLEMENTED IT.
+# GNU's default is -E — "all but the last component must exist" — so
+# `realpath a/b/nope` and `realpath dangling` both SUCCEED, and a multi-operand
+# run with one missing tail exits 0 with every operand printed. ⚠ The tests
+# agreed with the code and both agreed with a comment nobody had measured.
+expect_exit "a missing LAST component is fine by default" 0 "$BIN" realpath a/b/nope
+expect_exit "a missing PARENT is not"                     1 "$BIN" realpath a/b/nope/deeper
+expect_exit "a dangling symlink is fine by default"       0 "$BIN" realpath dangling
+expect_exit "...and -e refuses it"                        1 "$BIN" realpath -e dangling
 
 # --- -m: ALLOW_MISSING ---
 out=$("$BIN" realpath -m a/b/nope)
@@ -145,16 +150,18 @@ $WORK_REAL/a/b/file
 $WORK_REAL/a/b/file"
 expect_eq "multi all good"       "$expected" "$out"
 
-# Multi with one bad: exit 1, others still printed.
+# Multi with one bad: exit 1, others still printed. ⚠ The bad one has to be bad
+# under the REAL default: `a/b/nope` is a missing LAST component, which -E
+# allows, so this needs a missing PARENT to fail at all.
 rc=0
-out=$("$BIN" realpath a/b/file a/b/nope linkfile 2>/dev/null) || rc=$?
+out=$("$BIN" realpath a/b/file a/b/nope/deeper linkfile 2>/dev/null) || rc=$?
 expect_eq "multi partial rc"     "1" "$rc"
 expected="$WORK_REAL/a/b/file
 $WORK_REAL/a/b/file"
 expect_eq "multi partial stdout" "$expected" "$out"
 
 # -q silences stderr on failure.
-err=$("$BIN" realpath -q a/b/nope 2>&1 >/dev/null || true)
+err=$("$BIN" realpath -q a/b/nope/deeper 2>&1 >/dev/null || true)
 expect_eq "-q silences stderr"   "" "$err"
 
 # --- -z NUL terminator ---
@@ -267,9 +274,280 @@ expect_exit "...-m refuses to invent one either" 0 "$BIN" realpath -m l0
 mkdir -p cyc; ( cd cyc && ln -s n1 n0 && ln -s n2 n1 && ln -s n0 n2 )
 expect_exit "a cycle is ELOOP in the strict mode"   1 "$BIN" realpath cyc/n0
 expect_exit "a cycle ANSWERS under -m"              0 "$BIN" realpath -m cyc/n0
+# ⚠ AND THE ANSWER ITSELF, not just the exit code. Every assertion in this block
+# used to check `rc` alone, so it passed 9/9 against a binary whose `realpath -m`
+# printed GNU's stopping point instead of kriya's — which is the entire subject
+# of ADR 0014.
+expect_eq "...at KRIYA's stopping point, not GNU's" "$(pwd -P)/cyc/n1" \
+          "$("$BIN" realpath -m cyc/n0)"
+expect_eq "...and GNU stops somewhere else" "no" \
+          "$([ "$(realpath -m cyc/n0)" = "$("$BIN" realpath -m cyc/n0)" ] && echo yes || echo no)"
 expect_eq "...and the answer is inside the cycle" "yes" \
           "$(case "$("$BIN" realpath -m cyc/n0)" in */cyc/n[012]) echo yes;; *) echo no;; esac)"
 cd ..
+
+# --- 1.6.3: the flag surface, measured against GNU ------------------------
+# ⭐ A DIFFERENTIAL HELPER, because every rule below was pinned by running GNU
+# rather than by reading its manual — and three of them contradict what the
+# manual's phrasing suggests. ⚠ Only stdout and the exit code are compared:
+# kriya's diagnostics follow its own framing (architecture 001) and GNU
+# shell-quotes operands where kriya does not, which is a project-wide style
+# difference rather than anything realpath decides.
+same_rp() {   # same_rp <name> <arg...>
+    # ⚠ SHIFT THE NAME OFF. Without it every GNU invocation gets the test's own
+    # description as an extra operand and returns 1, which reads as "kriya
+    # diverges everywhere" — a harness bug that fails LOUDLY rather than
+    # silently, but only because the two sides disagree by construction.
+    _n=$1; shift
+    _g=$(realpath "$@" 2>/dev/null || true)
+    _gr=0; realpath "$@" >/dev/null 2>&1 || _gr=$?
+    _k=$("$BIN" realpath "$@" 2>/dev/null || true)
+    _kr=0; "$BIN" realpath "$@" >/dev/null 2>&1 || _kr=$?
+    expect_eq "$_n [out]" "$_g" "$_k"
+    expect_eq "$_n [rc]"  "$_gr" "$_kr"
+}
+
+mkdir -p fx/base/one/two/three fx/base/d fx/deep/a/b fx/usr/lib fx/usr/libexec fx/x/y fx/priv/inner
+echo f > fx/base/plainfile
+echo A > fx/realy
+( cd fx && ln -s base/plainfile flink && ln -s base dlink && ln -s one/two base/link1 )
+( cd fx && ln -s deep/a/b nest && ln -s /nowhere dang )
+( cd fx/base && ln -s cycB cycA && ln -s cycA cycB )
+cd fx
+
+# ⛔ THE DEFAULT MODE IS `-E`, NOT `-e`, AND KRIYA HAD IT WRONG UNTIL 1.6.3.
+# GNU's own --help says "all but the last component must exist (default)". The
+# consequence is not cosmetic: `realpath build/out` for a file a build is about
+# to create answers under GNU and failed here.
+same_rp "default mode allows a missing LAST component" base/nope
+same_rp "...but not a missing parent"                  nope/deeper
+same_rp "-E is that default, spelled"                  -E base/nope
+same_rp "-e requires every component"                  -e base/nope
+same_rp "-m requires none"                             -m nope/deeper
+same_rp "a dangling symlink resolves by default"       dang
+
+# ⚠ BOTH AXES ARE LAST-WINS. The flag table keeps a bool per flag with no order,
+# so an argv walk decides. A precedence rule instead only shows up in generated
+# command lines, where a wrapper appends `-e` to a base that already carried -m.
+same_rp "-e then -m is -m" -e -m base/nope
+same_rp "-m then -e is -e" -m -e base/nope
+same_rp "-E then -m is -m" -E -m nope/deeper
+same_rp "-m then -E is -E" -m -E nope/deeper
+
+# ⛔ -L/-P/-s ARE ONE MUTUALLY-EXCLUSIVE GROUP, also last-wins. OR-ing `-s` into
+# a separate boolean — the obvious shape, since the flag table has one entry per
+# spelling — makes `-P -s` strip when GNU does not.
+same_rp "-s then -P is physical" -s -P base/link1/three
+same_rp "-P then -s is stripped" -P -s base/link1/three
+same_rp "-s then -L is logical"  -s -L base/link1/three
+same_rp "-L then -s is stripped" -L -s base/link1/three
+# ⚠ THE OPERAND HAS TO MAKE -L AND -P DISAGREE. `base/link1/three` has no `..`,
+# so both answers are identical and the pair asserted NOTHING — a review found
+# these two green against a binary with the last-wins scan removed. `nest/..` is
+# `.` logically and `deep/a` physically.
+same_rp "-L then -P is physical" -L -P nest/..
+same_rp "-P then -L is logical"  -P -L nest/..
+same_rp "-L then -P, second operand shape" -L -P nest/../..
+same_rp "-P then -L, second operand shape" -P -L nest/../..
+
+# --- -s / --strip / --no-symlinks ---
+same_rp "-s leaves the last symlink"     -s flink
+same_rp "-s leaves an intermediate one"  -s base/link1/three
+same_rp "--strip is the same flag"       --strip base/link1/three
+same_rp "--no-symlinks is the same flag" --no-symlinks base/link1/three
+same_rp "-s is still absolute"           -s base/d
+same_rp "-s collapses . and //"          -s ./base//d
+same_rp "-s clamps .. at the root"       -s ../../../../../../..
+
+# ⛔ `-s` DOES NOT MEAN "DO NOT TOUCH THE FILESYSTEM". It means "do not expand
+# symlinks in the OUTPUT" — the text is still stat'ed unless -m is in force, so
+# every one of these is a case a "skip readlink" model gets wrong.
+same_rp "-s still fails ELOOP"                 -s base/cycA
+same_rp "-s still fails ENOTDIR"               -s base/plainfile/q
+same_rp "-s FORGIVES a missing component"      -s base/no/pe/q
+same_rp "-s -e forgives nothing"               -s -e base/no/pe/q
+same_rp "-s -e on a dangling link is ENOENT"   -s -e dang
+same_rp "-s -E on a dangling link is fine"     -s -E dang
+same_rp "-s -m is the only lexical form"       -s -m base/cycA
+same_rp "-s -m tolerates ENOTDIR too"          -s -m base/plainfile/q
+
+# ⛔ `-s -e slink/../f` FAILS WHERE PLAIN `-e slink/../f` SUCCEEDS: the stripped
+# text names a different file than the physical walk does, and the stat follows
+# the text.
+# ⚠ THE CONTRAST NEEDS A FILE THAT EXISTS ON EXACTLY ONE OF THE TWO PATHS.
+# `base/link1/../realy` was ENOENT under both, so the pair could not tell the
+# stripped text from the physical walk apart. `link1 -> one/two`, so
+# `base/link1/../x` is `base/x` stripped and `base/one/x` physical — and only
+# one of those exists at a time.
+echo strip-side > base/onlystrip
+same_rp "-s -e follows the STRIPPED text"      -s -e base/link1/../onlystrip
+same_rp "...where -e follows the physical one" -e    base/link1/../onlystrip
+echo phys-side > base/one/onlyphys
+same_rp "...and the reverse, stripped"         -s -e base/link1/../onlyphys
+same_rp "...and the reverse, physical"         -e    base/link1/../onlyphys
+
+# --- -L / --logical vs -P / --physical ---
+# ⚠ The fixture has to make them disagree: `nest -> deep/a/b`, so `nest/..` is
+# `.` logically and `deep/a` physically. A symlink pointing at a directory in
+# the CWD makes both answers identical and asserts nothing.
+same_rp "-L pops the name"           -L nest/..
+same_rp "-P follows then pops"       -P nest/..
+same_rp "-L twice over"              -L nest/../..
+same_rp "-P twice over"              -P nest/../..
+same_rp "-L still expands symlinks"  -L base/link1/three
+same_rp "-L can change EXISTENCE"    -L -e nest/../realy
+same_rp "-P on the same operand"     -P -e nest/../realy
+# ⚠ THE LOGICAL TREATMENT IS FOR `..` IN THE OPERAND ONLY. A `..` inside a
+# symlink's own TARGET stays physical, which is why both answer the same here.
+( cd base && ln -s link1/.. via ) 2>/dev/null || true
+same_rp "-L on a link whose TARGET has .." -L base/via
+same_rp "-P on the same link"              -P base/via
+
+# ⛔ `..` IS A DIRECTORY ASSERTION ABOUT WHAT PRECEDES IT. Collapsing
+# `base/plainfile/..` to `base` as pure text answers a question nobody asked —
+# a canonical path built by walking THROUGH a regular file, exit 0.
+same_rp "..  after a regular file is ENOTDIR"    base/plainfile/..
+same_rp "..  after a missing component is ENOENT" base/nope/..
+same_rp "...and -m forgives both"                 -m base/plainfile/..
+same_rp "-s asserts it too"                       -s base/plainfile/..
+same_rp "-L asserts it too"                       -L base/plainfile/..
+same_rp "-s on a missing one"                     -s base/nope/../d
+
+# ⛔ A TRAILING SLASH IS A DIRECTORY ASSERTION, NOT DECORATION. `realpath flink/`
+# on a symlink to a REGULAR FILE is ENOTDIR under GNU and under open(2); kriya
+# used to strip the slash and answer the file with exit 0, and so did
+# `readlink -f`, whose output is normally fed straight into the next command.
+same_rp "trailing slash on a symlink-to-file" flink/
+same_rp "trailing slash on a plain file"      base/plainfile/
+same_rp "trailing slash on a symlink-to-dir"  dlink/
+same_rp "several trailing slashes"            base/plainfile///
+same_rp "...and on a directory"               base/d///
+# ⚠ THE ASSERTION ONLY REJECTS AN *EXISTING* NON-DIRECTORY. Coding it as
+# "trailing slash means must be a directory" refuses three legal inputs.
+same_rp "trailing slash on a MISSING name"    base/nope/
+same_rp "trailing slash on a dangling link"   dang/
+same_rp "-m never asserts it"                 -m flink/
+same_rp "-e does"                             -e flink/
+
+# --- --relative-to=DIR ---
+same_rp "--relative-to below"          --relative-to=base/one base/one/two/three
+same_rp "--relative-to above"          --relative-to=base/one/two base/one
+same_rp "--relative-to sideways"       --relative-to=base x/y
+same_rp "--relative-to equal is ."     --relative-to=base base
+# ⛔ COMPONENT-WISE, NOT BYTE-WISE: a byte prefix calls /usr/lib and
+# /usr/libexec common through `lib` and emits a path into the wrong directory.
+same_rp "--relative-to is component-wise" --relative-to=usr/lib usr/libexec
+same_rp "--relative-to canonicalises DIR" --relative-to=base/link1 base/one/two/three
+same_rp "--relative-to with several operands" --relative-to=base base/d x/y
+same_rp "a repeated --relative-to takes the last" --relative-to=base --relative-to=x base/d
+same_rp "--relative-to DIR need not exist under -E" --relative-to=nodir base/d
+same_rp "--relative-to under -m"       -m --relative-to=base base/nope/deep
+same_rp "--relative-to with -s"        -s --relative-to=base/link1 base/link1/three
+
+# --- --relative-base=DIR ---
+same_rp "--relative-base below is relative" --relative-base=base base/one/two
+same_rp "--relative-base outside is absolute" --relative-base=base x/y
+same_rp "--relative-base equal is ."        --relative-base=base base
+same_rp "--relative-base is component-wise" --relative-base=usr/lib usr/libexec
+same_rp "--relative-base=/ drops the slash" --relative-base=/ base/d
+# ⛔ WITH BOTH, DIR1 MUST BE UNDER DIR2 — "otherwise realpath prints absolute
+# file names", says the manual, and it means for EVERY operand, including ones
+# that are themselves under DIR2.
+same_rp "both, operand under base"      --relative-to=base/one --relative-base=base base/one/two
+same_rp "both, operand outside base"    --relative-to=base/one --relative-base=base x/y
+same_rp "both, TO not under BASE"       --relative-to=x --relative-base=base base/one/two
+same_rp "both, BASE deeper than TO"     --relative-to=base --relative-base=base/one base/one/two
+# ⚠ An operand equal to BASE does NOT always print `.` — that only holds when TO
+# defaults to BASE.
+same_rp "both, operand equals base"     --relative-to=base/one/two --relative-base=base base
+# ⚠ A BASE that does not exist still participates in the prefix test and can
+# silently disable the feature.
+same_rp "both, a missing BASE still gates" --relative-to=base --relative-base=base/nope base/d
+
+# ⛔ A FAILING DIR ABORTS THE WHOLE RUN — one diagnostic, no operands printed.
+# It is the one place realpath does not continue past an error.
+same_rp "-e with an unresolvable DIR is fatal" -e --relative-to=/no/such/dir base/d base/plainfile
+expect_eq "...and prints no operand" "" \
+          "$("$BIN" realpath -e --relative-to=/no/such/dir base/d 2>/dev/null)"
+# ⚠ `-q` DOES NOT SUPPRESS THAT ONE. Swallowing it leaves the caller with no
+# output and no reason.
+expect_eq "-q still reports the fatal DIR error" "1" \
+          "$("$BIN" realpath -q -e --relative-to=/no/such/dir base/d 2>&1 >/dev/null | grep -c 'no such file')"
+# ⚠ `-e` ALSO REQUIRES EACH DIR TO BE A DIRECTORY, and only `-e`. The check is
+# on the DIRs alone — an OPERAND that is a regular file is fine in every mode.
+same_rp "-e refuses a file as --relative-base" -e --relative-base=base/plainfile base/plainfile
+same_rp "-E accepts one"                       -E --relative-base=base/plainfile base/plainfile
+same_rp "-e refuses a file as --relative-to"   -e --relative-to=base/plainfile base/plainfile
+
+# --- 1.6.3 review: the `.` spelling, and separators from symlink targets ---
+# ⛔ A `.` COMPONENT IS THE SAME DIRECTORY ASSERTION AS A SLASH, and the first
+# version of this fix read the LAST BYTE OF THE OPERAND, so it caught `flink/`
+# and missed every one of these: `flink/.` (no trailing slash at all),
+# `flink/./.`, and a separator arriving from a SYMLINK'S OWN TARGET, which argv
+# never sees. ⚠ `realpath dir/file/.` answered the FILE with exit 0 — a path no
+# `open(2)` will honour.
+ln -s base/plainfile fslash 2>/dev/null || true
+ln -s "base/plainfile/" slashtgt 2>/dev/null || true
+ln -s "base/" dirtgt 2>/dev/null || true
+for how in "" "-L" "-P" "-s"; do
+    same_rp "$how . after a regular file"        $how base/plainfile/.
+    same_rp "$how . after a symlink-to-file"     $how flink/.
+    same_rp "$how . twice over"                  $how base/plainfile/./.
+    same_rp "$how . after a real directory"      $how base/d/.
+    same_rp "$how . after a missing component"   $how base/nope/.
+    same_rp "$how . after a dangling symlink"    $how dang/.
+    same_rp "$how a slash from the link TARGET"  $how slashtgt
+    same_rp "$how ...and a directory target"     $how dirtgt
+    same_rp "$how a slash AFTER a symlink"       $how flink/
+done
+# ⚠ ALLOW_MISSING asserts none of it, in every how-value.
+for how in "" "-L" "-P" "-s"; do
+    same_rp "$how -m never asserts . " $how -m base/plainfile/.
+    same_rp "$how -m on a link target" $how -m slashtgt
+done
+
+# ⛔ AND `-s`/`-L` MUST KEEP THE TRAILING SLASH THEY ARE HANDED. Nothing here
+# combined either flag with a trailing slash, so both slash-preservation paths
+# could be deleted with the suite still green.
+same_rp "-s keeps a trailing slash"      -s base/plainfile/
+same_rp "-L keeps a trailing slash"      -L base/plainfile/
+same_rp "-s keeps it on a directory"     -s base/d/
+same_rp "-L keeps it on a directory"     -L base/d/
+same_rp "-s -e keeps it"                 -s -e base/plainfile/
+same_rp "-s -m drops the assertion"      -s -m base/plainfile/
+
+# ⚠ `--relative-to` IS DIAGNOSED FIRST WHATEVER THE ARGV ORDER, and nothing
+# asserted it — swapping the two blocks left the whole suite green.
+expect_eq "--relative-to is diagnosed before --relative-base" "1" \
+          "$("$BIN" realpath -e --relative-base=/no/such/b --relative-to=/no/such/t base/d 2>&1 >/dev/null \
+             | grep -c '/no/such/t')"
+expect_eq "...in the other argv order too" "1" \
+          "$("$BIN" realpath -e --relative-to=/no/such/t --relative-base=/no/such/b base/d 2>&1 >/dev/null \
+             | grep -c '/no/such/t')"
+
+# ⛔ OPERANDS PAST THE PARSER'S 128-SLOT CAP ARE REFUSED, NOT DISCARDED. The
+# stdlib drops them and returns success; `kriya rm *` on 200 files deleted 128
+# and exited 0.
+MANY=""
+i=0
+while [ "$i" -lt 140 ]; do MANY="$MANY base/d"; i=$((i + 1)); done
+# shellcheck disable=SC2086
+expect_exit "141 operands is a usage error, not a silent truncation" 2 "$BIN" realpath $MANY
+FEW=""
+i=0
+while [ "$i" -lt 128 ]; do FEW="$FEW base/d"; i=$((i + 1)); done
+# shellcheck disable=SC2086
+expect_exit "...and exactly 128 is still fine" 0 "$BIN" realpath $FEW
+# shellcheck disable=SC2086
+expect_exit "...as is 128 plus a flag"         0 "$BIN" realpath -m $FEW
+
+# ⛔ THE EMPTY STRING IS ENOENT IN EVERY MODE, `-m` AND `-s` INCLUDED. Answering
+# the CWD instead is the "an unset shell variable silently became `.`" failure.
+same_rp "empty operand"        ""
+same_rp "empty operand under -m" -m ""
+same_rp "empty operand under -s" -s ""
+same_rp "empty operand under -s -m" -s -m ""
+cd "$WORK"
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

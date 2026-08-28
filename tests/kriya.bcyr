@@ -109,6 +109,27 @@ fn bench_parse_octal_mode() {
     return 0;
 }
 
+# ⭐ The two halves of `realpath -r`-style work that do NOT touch the filesystem,
+# so the number is the algorithm rather than the page cache. `path_relative` is
+# `--relative-to`'s whole answer once both operands are canonical, and
+# `path_is_under` is the gate `--relative-base` asks per operand.
+fn bench_path_relative() {
+    var r = path_relative("/usr/local/share/doc", "/usr/local/lib/x/y");
+    return 0;
+}
+
+fn bench_path_is_under() {
+    var r = path_is_under("/usr/local", "/usr/local/lib/x/y");
+    return 0;
+}
+
+# ⚠ The duration parser runs ONCE PER OPERAND now that `sleep` sums, so its cost
+# is multiplied by an operand count a caller controls.
+fn bench_parse_duration() {
+    var r = kriya_parse_duration_us("1.25m");
+    return 0;
+}
+
 fn bench_niyama_bre_search() {
     var r = niyama_bre_search_at(_grep_bench_bre, _grep_bench_line, _grep_bench_llen, 0);
     return 0;
@@ -181,6 +202,18 @@ fn main() {
     var b13 = bench_new("fs/inoset_lookup_miss");
     bench_run_batch(b13, &bench_inoset_miss, 10000, 100);
     bench_report(b13);
+
+    var b14 = bench_new("path/relative");
+    bench_run_batch(b14, &bench_path_relative, 10000, 100);
+    bench_report(b14);
+
+    var b15 = bench_new("path/is_under");
+    bench_run_batch(b15, &bench_path_is_under, 10000, 100);
+    bench_report(b15);
+
+    var b16 = bench_new("args/parse_duration_us");
+    bench_run_batch(b16, &bench_parse_duration, 10000, 100);
+    bench_report(b16);
 
     return 0;
 }

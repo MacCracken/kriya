@@ -274,6 +274,30 @@ expect_present "…target survives"               adr10/real/data.txt
 expect_exit   "real dir with trailing slash"   0 "$BIN" rm -r adr10/real/
 expect_absent  "…real dir removed"              adr10/real
 
+# --- 1.6.3: operands past the parser's cap are REFUSED, not discarded -----
+# ⛔ THE WORST FAILURE THIS PROJECT CAN HAVE, and it shipped for eleven releases.
+# The stdlib parser keeps 128 positionals and DISCARDS the rest, returning
+# success — so `kriya rm *` on 200 files deleted 128, left 72, and exited 0.
+# The caller is told it worked. ⚠ The cap is upstream; what kriya owes is a
+# refusal, and this is the assertion that says so.
+mkdir -p capdir
+i=0
+while [ "$i" -lt 200 ]; do : > "capdir/f$i"; i=$((i + 1)); done
+( cd capdir && "$BIN" rm ./* >/dev/null 2>&1 ) || true
+expect_eq "200 operands: nothing is deleted" "200" "$(find capdir -type f | wc -l)"
+rc=0
+( cd capdir && "$BIN" rm ./* >/dev/null 2>&1 ) || rc=$?
+expect_eq "...and it is a usage error"       "2"   "$rc"
+expect_eq "...naming the utility"            "1" \
+          "$( ( cd capdir && "$BIN" rm ./* 2>&1 >/dev/null ) | grep -c 'kriya rm: error: too many operands')"
+
+# ⚠ AND EXACTLY 128 STILL WORKS — the guard must not refuse a legal command.
+mkdir -p capok
+i=0
+while [ "$i" -lt 128 ]; do : > "capok/g$i"; i=$((i + 1)); done
+( cd capok && "$BIN" rm ./* ) 2>/dev/null
+expect_eq "exactly 128 operands still deletes them" "0" "$(find capok -type f | wc -l)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

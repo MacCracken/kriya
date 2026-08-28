@@ -559,6 +559,21 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
                 rp = seg_end;
             } else {
                 if (is_dotdot == 1) {
+                    # ⛔ `..` IS A DIRECTORY ASSERTION ABOUT WHAT PRECEDES IT.
+                    # Popping the text unconditionally is how `base/plainfile/..`
+                    # used to answer `/…/base` with exit 0 — a canonical path
+                    # invented by walking THROUGH a regular file. GNU says
+                    # ENOTDIR, and so does `cd`. ⚠ Only the strict modes assert
+                    # it: `realpath -m base/plainfile/..` answers `/…/base`, and
+                    # that is measured, not assumed.
+                    if (mode != 2) {
+                        if (stopped == 0) {
+                            var dst[144];
+                            var dr = fs_fstatat(0 - 100, result, &dst, 0);
+                            if (dr != 0) { return dr; }
+                            if (fs_is_dir(&dst) == 0) { return 0 - 20; }
+                        }
+                    }
                     ri = _fs_strip_last_component(result, ri);
                     rp = seg_end;
                 } else {
@@ -679,6 +694,15 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
                                     memcpy(new_remaining, link_buf, tl);
                                 }
                                 var rest_off = seg_end;
+                                # ⛔ REMEMBER WHETHER A SEPARATOR FOLLOWED THE
+                                # LINK. `flink/` expands to the target and the
+                                # slash-skipping below then DROPS the slash, so
+                                # the directory assertion at the commit never
+                                # sees it and `realpath flink/` answered the
+                                # regular file with exit 0. ⚠ The slash is the
+                                # whole statement being made about the path.
+                                var had_sep: i64 = 0;
+                                if (load8(remaining + seg_end) == 47) { had_sep = 1; }
                                 while (load8(remaining + rest_off) == 47) { rest_off = rest_off + 1; }
                                 var rest_len = strlen(remaining + rest_off);
                                 # ⚠ `tl` is bounded by the readlink limit and `rest_len` by
@@ -694,12 +718,33 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
                                     store8(new_remaining + tl, 47);
                                     memcpy(new_remaining + tl + 1, remaining + rest_off, rest_len + 1);
                                 } else {
-                                    store8(new_remaining + tl, 0);
+                                    if (had_sep == 1) {
+                                        store8(new_remaining + tl, 47);
+                                        store8(new_remaining + tl + 1, 0);
+                                    } else {
+                                        store8(new_remaining + tl, 0);
+                                    }
                                 }
 
                                 remaining = new_remaining;
                                 rp = 0;
                             } else {
+                                # ⛔ A SEPARATOR AFTER A COMPONENT IS A DIRECTORY
+                                # ASSERTION ABOUT THAT COMPONENT. `d/f/`, `d/f/.`
+                                # and `d/f/x` all say "f is a directory", and
+                                # `open(2)` agrees — GNU answers ENOTDIR for all
+                                # three. ⭐ Asserted HERE, at the commit, rather
+                                # than on the operand text afterwards, because
+                                # the separator can arrive from a SYMLINK'S OWN
+                                # TARGET: `slashlink -> d/f/` is ENOTDIR under
+                                # GNU, and a check that reads argv cannot see it.
+                                # ⭐ Free — `st` is the lstat the walk just did,
+                                # and at the commit the entry is never a symlink.
+                                if (mode != 2) {
+                                    if (load8(remaining + seg_end) == 47) {
+                                        if (fs_is_dir(&st) == 0) { return 0 - 20; }
+                                    }
+                                }
                                 # Regular file/dir — commit.
                                 ri = candidate_end;
                                 rp = seg_end;
@@ -710,6 +755,19 @@ fn fs_realpath(input, mode, out_buf, out_bufsize): i64 {
             }
         }
     }
+
+    # ⚠ THE TRAILING-SLASH ASSERTION USED TO LIVE HERE, reading the LAST BYTE OF
+    # THE OPERAND. It caught `realpath flink/` and missed three things that are
+    # the same statement in different spellings: `flink/.` (a `.` after the
+    # component, no trailing slash on the operand), `flink/./.`, and a separator
+    # arriving from a SYMLINK'S TARGET (`slashlink -> d/f/`, which argv never
+    # sees). ⭐ Moved into the walk, where the separator is visible however it
+    # got there and the stat is already in hand.
+    #
+    # ⚠ Two exemptions survive there, both measured: ALLOW_MISSING never
+    # asserts (`-m flink/` answers the file), and a component tolerated as
+    # missing is never committed, so `-E base/nope/` still answers the path
+    # while `-e base/nope/` is already ENOENT from the walk.
 
     if (ri + 1 > out_bufsize) { return 0 - 36; }
     memcpy(out_buf, result, ri);
