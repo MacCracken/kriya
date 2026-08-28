@@ -6,6 +6,122 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.5] - 2026-08-27 — backups for `cp`, `mv` and `ln`, and the environment-variable rule that had to come first
+
+### ⭐ Decided — [ADR 0017](docs/adr/0017-environment-variables-configure-features-the-caller-turned-on.md): an environment variable may configure a feature the caller turned on; it may never turn one on
+
+kriya had declined behaviour-changing environment variables three times — `POSIXLY_CORRECT` for
+`echo` and for `pwd`, `QUOTING_STYLE` for `ls` — and *read* three others: `LS_COLORS`, `COLUMNS`,
+`PATH`. Three refusals and three acceptances with no rule between them is a habit, not a policy, and
+GNU's backups are governed by `VERSION_CONTROL` and `SIMPLE_BACKUP_SUFFIX`.
+
+⛔ **The distinguishing property is measurable**: *with the feature's flag absent, does the variable
+change anything?*
+
+| variable | with no relevant flag | |
+|---|---|---|
+| `POSIXLY_CORRECT` | `/usr/bin/echo 'a\tb'` prints `a\tb`; with it set, a **real tab** | changes behaviour |
+| `QUOTING_STYLE` | `ls` prints `has space`; with it, `has\ space` | changes behaviour |
+| `VERSION_CONTROL` | no backup made, in `cp`, `mv` **and** `ln` | **inert** |
+| `SIMPLE_BACKUP_SUFFIX` | same | **inert** |
+| `LS_COLORS` | no escape sequences without `--color` | **inert** |
+
+So the two backup variables are honoured and the two others stay declined — and ADR 0011's refusal
+becomes *required* by the rule rather than merely precedented.
+
+### Fixed — ⛔ applying the rule found `ls` on the wrong side of it
+
+⛔ **`kriya ls | while read f` could produce multi-column output.** `_ls_term_width` consulted
+`$COLUMNS` before testing `isatty`, and bash exports `COLUMNS` from interactive shells — so a piped
+listing came back as several names per line and the reader got `file1  file2` as one filename.
+
+⚠ **The comment defending it was load-bearing and wrong**: *"An explicit -w or $COLUMNS forces
+columns even off a tty (a real GNU affordance + the host test hook)."* Measured, GNU does neither:
+
+```
+$ COLUMNS=200 ls | cat     one name per line
+$ ls -w 200 | cat          one name per line
+$ ls -C | cat              columns          <- -C is what forces them
+```
+
+**Fourth release running that a comment asserting another tool's behaviour was load-bearing and
+false.** `$COLUMNS` is now read only when stdout is a terminal. ⚠ `-w` still forces columns, which
+GNU does not — kriya has no `-C`, and removing `-w`'s behaviour without adding one would delete the
+capability. Both are filed at 1.6.8 and the divergence is asserted rather than incidental.
+
+### Added — `-b`, `--backup=CONTROL` and `-S`/`--suffix=SUFFIX` for `cp`, `mv` and `ln`
+
+⭐ **One helper, `src/lib/backup.cyr`, three consumers** — and `cp` alone needed **two hook sites**,
+because `_cp_one` handles a single file and `_cp_file_at` handles each entry of a `-R` walk. A
+backup wired into only one of them would have made `cp -b` work and `cp -Rb` silently not. That is
+the concrete form of the rule the roadmap set: the helper goes in `src/lib/`, not in the first caller.
+
+⛔ **The control is a matrix and it is not guessable.** Every cell measured against GNU:
+
+| control | nothing else | `dst~` present | `dst.~1~` present |
+|---|---|---|---|
+| `none` / `off` | *(no backup)* | *(no backup)* | *(no backup)* |
+| `numbered` / `t` | `dst.~1~` | `dst.~1~` + `dst~` | `dst.~2~` |
+| `existing` / `nil` | `dst~` | `dst~` | `dst.~2~` |
+| `simple` / `never` | `dst~` | `dst~` *(clobbered)* | `dst~` |
+
+⚠ **`existing` — the default — asks ONE question**: does any `dst.~N~` exist? It does not care
+whether `dst~` does. ⚠ **Numbering is HIGHEST + 1, not first gap**: with `.~1~` and `.~3~` present
+GNU writes `.~4~`, and a first-gap implementation would write `.~2~` and silently reuse a slot the
+user can still see.
+
+⛔ **The backup is a RENAME of the old destination, not a copy** — measured by inode for both
+`cp -b` and `mv -b`. A hard link to the old destination therefore follows the **backup**, and the new
+destination is a fresh inode. ⭐ Asserted three ways: the inode, the backup's contents, and that
+writing the destination afterwards leaves the backup alone. A hard-link implementation passes the
+first and fails the last two.
+
+⭐ **`-b` needs no `-f`.** kriya refuses a silent overwrite without `-f`, and a backup is not a silent
+overwrite — the old contents survive under a new name. Measured: GNU needs no `-f` either. Without
+this the flag would be useless on its own. ⚠ `--backup=none` is *not* a backup and does not grant it.
+
+⚠ **`--backup` requires its value and `-b` has no long form**, because GNU's `--backup[=CONTROL]` is
+an optional-value flag and [ADR 0002](docs/adr/0002-option-parsing-humans-and-agents.md) rule 3
+forbids those — the same split `tee` got for `-p` and `--output-error=MODE` at 1.6.4. ⛔ **And no
+prefix matching**: GNU takes `--backup=num` and rejects `--backup=n` as ambiguous; kriya takes the
+eight exact spellings and nothing else, per ADR 0002's no-prefix-matching rule.
+
+### Fixed — ⛔ `cp` wrote through a dangling symlink destination
+
+`k_stat` follows, so a destination symlink pointing at nothing read as *"no destination"* and the
+copy created the link's **target**. Measured before the fix: `cp -f src dst` with `dst -> nowhere`
+exited **0** and produced a file called `nowhere` — a path the caller never named. GNU refuses with
+*"not writing through dangling symlink"*, exit 1, and kriya now does too.
+
+⭐ **`-b` rescues it**, in both implementations: the backup renames the dangling link aside, so there
+is nothing left to write through. All three rows — plain, `-f`, `-b` — now match GNU exactly.
+
+### ⭐ How it was checked
+
+⭐ **A 57-case differential run across all three utilities** — every control spelling, every suffix
+shape, and the four starting states — reaches **0 divergences**, plus **11 more** for the two
+environment variables including both precedence directions.
+
+⚠ **Three divergences are deliberate and asserted so they cannot drift into accidents**: an invalid
+control is exit **2** where GNU uses 1 (ADR 0008), an abbreviation is refused (ADR 0002), and
+`--backup=none` without `-f` is still an overwrite kriya declines.
+
+⚠ **Two mutations survived the first pass and both were test gaps.** "The backup is a hard link, not
+a rename" passed every name assertion — a link shares the inode, so even the inode check held, and
+only the *content* assertions catch it. And "a missing destination still backs up" turns out to be
+**unreachable from all three call sites**, because each utility hooks the backup inside its own
+"destination exists" branch. That guard stays as the helper's documented contract, with a comment
+saying plainly that no test stands behind it rather than letting a reader assume one does.
+
+### Release totals
+
+**5,322 smoke cases across 41 scripts** (from 5,223) — `smoke-cp.sh` 26 → **70**, `smoke-mv.sh`
+58 → **66**, `smoke-ln.sh` 90 → **98**, `smoke-ls.sh` 122 → **128**. **453 unit** (from 440 — the
+control-name mapping and its refusals), 18 POSIX; fuzz green under poison; four lints clean; both
+targets build; `vet` reports **55 deps** (`src/lib/backup.cyr` is the new one).
+
+Binary 1,124,496 → **1,129,504** bytes (+5,008) on host, 1,120,304 → **1,125,312** (+5,008) on agnos.
+
 ## [1.6.4] - 2026-08-27 — `tee`'s signal flags, and a defense that was designed four ways and then not built
 
 ### ⛔ Decided — the cross-operand bulk-root defense is REJECTED, not deferred again

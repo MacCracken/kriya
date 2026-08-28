@@ -1149,11 +1149,37 @@ fn _ls_collect(dir_path, all_mode, almost_all): i64 {
 
 # Terminal width for multi-column packing. Priority: -w flag, then $COLUMNS, then the platform's
 # live console geometry. Returns 0 to mean "not a terminal / unknown" → the caller falls back to
-# one-per-line (script-safe, matching GNU ls piped output). An explicit -w or $COLUMNS forces
-# columns even off a tty (a real GNU affordance + the host test hook).
+# one-per-line (script-safe, matching GNU ls piped output).
+#
+# ⛔ `$COLUMNS` NO LONGER FORCES COLUMNS OFF A TTY, AND THE COMMENT THAT SAID IT
+# DOES WAS WRONG. It read "an explicit -w or $COLUMNS forces columns even off a
+# tty (a real GNU affordance)". Measured — GNU does neither:
+#
+#     $ COLUMNS=200 ls | cat        one name per line
+#     $ ls -w 200 | cat             one name per line
+#     $ ls -C | cat                 columns   <- `-C` is what forces them
+#
+# ⚠ THE FAILURE IS THE ONE ADR 0011 DESCRIBES, and it was live: bash exports
+# `COLUMNS` from interactive shells, so `kriya ls | while read f` could produce
+# MULTI-COLUMN output — several names per line — purely because of the parent
+# shell. A script reading that gets `file1  file2` as one "filename".
+#
+# ⭐ [ADR 0017](../../docs/adr/0017-environment-variables-configure-features-the-caller-turned-on.md)
+# is the rule this now obeys: an environment variable may configure a feature the
+# command line already turned on, and may never turn one on. `$COLUMNS` sets the
+# WIDTH of a columnar format; it does not decide that the format is columnar.
+#
+# ⚠ `-w` still forces columns here, which GNU does not — kriya has no `-C` yet,
+# so `-w` is the only way to ask for columns off a tty, and removing it without
+# adding `-C` would delete the capability. Both are roadmap 1.6.8. (roadmap 1.6.8)
 fn _ls_term_width(): i64 {
     var wf = flags_get_int(_ls_spec, _ls_w_idx);
     if (wf > 0) { return wf; }
+    #ifndef CYRIUS_TARGET_AGNOS
+    # ⛔ THE TTY TEST COMES FIRST FOR `$COLUMNS`. Off a tty the variable is inert,
+    # which is what makes it a width setting rather than a format switch.
+    if (k_isatty(1) == 0) { return 0; }
+    #endif
     var ce = kriya_getenv("COLUMNS");
     if (ce != 0) {
         var cw = atoi(ce);

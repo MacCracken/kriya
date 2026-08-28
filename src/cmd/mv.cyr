@@ -47,6 +47,9 @@
 # if any failed.
 
 var _mv_spec  = 0;
+var _mv_b_idx = 0;
+var _mv_bk_idx = 0;
+var _mv_S_idx = 0;
 var _mv_f_idx = 0;
 var _mv_i_idx = 0;
 var _mv_n_idx = 0;
@@ -59,6 +62,14 @@ fn _mv_init_spec(): i64 {
     _mv_i_idx = flags_add_bool(s, 105, "interactive", 0, "prompt before overwrite");
     _mv_n_idx = flags_add_bool(s, 110, "no-clobber",  0, "refuse to overwrite existing dest");
     _mv_v_idx = flags_add_bool(s, 118, "verbose",     0, "print each rename");
+    # ⭐ THE BACKUP TRIO, shared with the other two utilities via
+    # `src/lib/backup.cyr`. ⛔ `-b` IS SHORT-ONLY AND `--backup` REQUIRES ITS
+    # VALUE, because GNU's `--backup[=CONTROL]` is an optional-value flag and
+    # ADR 0002 rule 3 forbids those — the same split `tee` got for `-p` and
+    # `--output-error=MODE` at 1.6.4.
+    _mv_b_idx  = flags_add_bool(s, 98, 0, 0, "back up each existing destination");
+    _mv_bk_idx = flags_add_str(s, 0, "backup", 0, "none|off|numbered|t|existing|nil|simple|never");
+    _mv_S_idx  = flags_add_str(s, 83, "suffix", 0, "simple-backup suffix (implies -b)");
     _mv_spec = s;
     mv_help_declare();
     return 0;
@@ -72,7 +83,7 @@ fn mv_help_declare(): i64 {
                "mv [OPTIONS] SOURCE... DEST");
     help_positional(2, HELP_POS_UNBOUNDED, "SOURCE,DEST");
     help_destructive(1);
-    help_operands("A same-filesystem move is a rename; across filesystems it is a copy followed by a removal. ⚠ If the copy succeeds and the source removal fails, the destination is KEPT and the failure reported (ADR 0009).");  #skip-lint
+    help_operands("A same-filesystem move is a rename; across filesystems it is a copy followed by a removal. ⚠ If the copy succeeds and the source removal fails, the destination is KEPT and the failure reported (ADR 0009). -b honours $VERSION_CONTROL and $SIMPLE_BACKUP_SUFFIX (ADR 0017); the command line wins.");  #skip-lint
     help_exit(1, "a move failed");
     help_example("mv old.txt new.txt");
     help_example("mv -n a.txt b.txt /tmp/");
@@ -345,6 +356,20 @@ fn _mv_one(src, dst, force, interactive, no_clobber, verbose): i64 {
                 if (_mv_prompt(dst) == 0) { return 0; }
             }
         }
+        # ⭐ AFTER `-n` AND THE PROMPT, NOT BEFORE. `mv -n` is a silent skip, and
+        # a backup taken before that check would move the destination aside for a
+        # move that then does not happen — losing the file `-n` exists to
+        # protect. Measured against GNU: `mv -bn src dst` makes no backup.
+        #
+        # ⚠ It also has to precede BOTH move paths — the `rename(2)` below and
+        # the cross-filesystem copy — which it does by sitting above the branch.
+        if (backup_control() != BACKUP_NONE) {
+            var bkr = backup_make(dst);
+            if (bkr != 0) {
+                _mv_report(dst, 0 - bkr);
+                return bkr;
+            }
+        }
     } else {
         if (interactive == 1) {
             if (_mv_isatty(0) == 0) {
@@ -377,6 +402,18 @@ fn cmd_mv(start: i64): i64 {
     _mv_init_spec();
     if (kriya_args_parse(_mv_spec, start) != 0) {
         k_write( 2, "kriya mv: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        return EXIT_USAGE;
+    }
+    # ⛔ RESOLVED ONCE, BEFORE ANY OPERAND IS TOUCHED. An invalid control name is
+    # a usage error and GNU performs no copy at all — measured:
+    # `VERSION_CONTROL=bogus cp -b src dst` exits 1 with the destination
+    # unchanged. Resolving per operand would back some of them up and then fail.
+    var _bk = backup_resolve(flags_get_bool(_mv_spec, _mv_b_idx),
+                             flags_get_str(_mv_spec, _mv_bk_idx),
+                             flags_get_str(_mv_spec, _mv_S_idx));
+    if (_bk == BACKUP_INVALID) {
+        k_write( 2, "kriya mv: error: invalid backup control ", 40);
+        k_write( 2, "(want none, off, numbered, t, existing, nil, simple or never)\n", 62);
         return EXIT_USAGE;
     }
 

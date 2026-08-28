@@ -559,6 +559,37 @@ else
     echo "      the quoting ALGORITHM is still covered above via --quoting-style"
 fi
 
+# --- ADR 0017: $COLUMNS sets a width, it does not choose the format ---------
+# ⛔ THIS WAS LIVE AND IT BREAKS SCRIPTS. bash exports COLUMNS from interactive
+# shells, so `kriya ls | while read f` produced MULTI-COLUMN output — several
+# names on one line — purely because of the parent shell, and the reader gets
+# "file1  file2" as one filename. GNU ignores COLUMNS off a tty; kriya let it
+# force columnation.
+#
+# ⚠ The comment defending it claimed "$COLUMNS forces columns even off a tty (a
+# real GNU affordance)". Measured, GNU does neither that nor the same for -w;
+# `-C` is what forces columns. **Fourth release running that a comment asserting
+# another tool's behaviour was load-bearing and wrong.**
+mkdir -p colw
+i=1
+while [ "$i" -le 6 ]; do : > "colw/f$i"; i=$((i + 1)); done
+expect_eq "COLUMNS does not columnate a pipe" "6" \
+          "$(COLUMNS=200 "$BIN" ls colw | wc -l)"
+expect_eq "...and GNU agrees"                 "6" \
+          "$(COLUMNS=200 ls colw | wc -l)"
+expect_eq "...nor does a huge COLUMNS"        "6" \
+          "$(COLUMNS=9999 "$BIN" ls colw | wc -l)"
+expect_eq "...and an unset COLUMNS is the same" "6" \
+          "$(env -u COLUMNS "$BIN" ls colw | wc -l)"
+# ⚠ `-w` STILL forces columns here, which GNU does not — kriya has no `-C`, so
+# `-w` is the only way to ask for columns off a tty and removing it would delete
+# the capability. Asserted so the divergence is visible rather than incidental;
+# both are roadmap 1.6.8.
+expect_eq "-w still forces columns (kriya-only, roadmap 1.6.8)" "1" \
+          "$(env -u COLUMNS "$BIN" ls -w 200 colw | wc -l)"
+expect_eq "...where GNU gives one per line"    "6" \
+          "$(env -u COLUMNS ls -w 200 colw | wc -l)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

@@ -356,6 +356,35 @@ expect_eq "--help names --target-directory"  "1" "$("$BIN" ln --help 2>&1 | grep
 expect_eq "--help names --no-target-directory" "1" \
           "$("$BIN" ln --help 2>&1 | grep -c -- '--no-target-directory')"
 
+# --- 1.6.5: the backup trio, same helper as cp (ADR 0017) -----------------
+# ⚠ THE SAME MATRIX, DELIBERATELY RE-ASSERTED HERE. `src/lib/backup.cyr` serves
+# all three utilities, and a hook wired into only one of them is exactly the
+# failure this catches — `cp` needed TWO hooks because it has two copy paths,
+# and neither of them is ln's.
+BK="env -u VERSION_CONTROL -u SIMPLE_BACKUP_SUFFIX"
+ubk_mk() { rm -rf ubk; mkdir ubk; echo NEW > ubk/src; echo OLD > ubk/dst; for _f in "$@"; do echo B > "ubk/$_f"; done; }
+ubk_show() { ls ubk | tr '\n' ' '; }
+ubk() {   # ubk <name> <expected> <flag...>
+    _n=$1; _want=$2; shift 2
+    ubk_mk
+    ( cd ubk && $BK "$BIN" ln "$@" src dst 2>/dev/null ) || true
+    expect_eq "$_n" "$_want" "$(ubk_show)"
+}
+ubk "-b makes a simple backup"     "dst dst~ src "     -b
+ubk "--backup=numbered"            "dst dst.~1~ src "   --backup=numbered
+ubk "--backup=simple"              "dst dst~ src "     --backup=simple
+ubk "-S .bak"                      "dst dst.bak src "   -S .bak
+ubk_mk "dst.~1~"
+( cd ubk && $BK "$BIN" ln -b src dst 2>/dev/null ) || true
+expect_eq "existing goes numbered when one exists" "dst dst.~1~ dst.~2~ src " "$(ubk_show)"
+# ⭐ The variables reach ln too — the helper reads them, not the utility.
+ubk_mk; ( cd ubk && env -u SIMPLE_BACKUP_SUFFIX VERSION_CONTROL=numbered "$BIN" ln -b src dst 2>/dev/null ) || true
+expect_eq "\$VERSION_CONTROL reaches ln"    "dst dst.~1~ src " "$(ubk_show)"
+# ⛔ ...and is INERT without the flag, which is the ADR 0017 property.
+ubk_mk; ( cd ubk && env -u SIMPLE_BACKUP_SUFFIX VERSION_CONTROL=numbered "$BIN" ln -f src dst 2>/dev/null ) || true
+expect_eq "...and makes no backup on its own" "dst src " "$(ubk_show)"
+expect_exit "a bad control is a usage error"  2 "$BIN" ln --backup=bogus src dst
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

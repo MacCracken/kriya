@@ -1,0 +1,243 @@
+# backup.cyr — the `-b` / `--backup=CONTROL` / `-S SUFFIX` machinery, shared by
+# `cp`, `mv` and `ln`.
+#
+# ⛔ THE HELPER IS HERE AND NOT IN THE FIRST CALLER. `cp -b`, `mv -b` and
+# `ln -b` are one feature with three consumers, and putting it in whichever
+# utility needed it first is exactly how `cp` ended up with two answers to one
+# question (see the dead `_ln_resolve_dest` removed at 1.6.2).
+#
+# ⭐ THE CONTROL IS A MATRIX, NOT A BOOLEAN, and every cell below was measured
+# against GNU rather than inferred. `dst` exists; the second column is what the
+# directory holds afterwards:
+#
+#   control          nothing else      dst~ present       dst.~1~ present
+#   ---------------  ----------------  -----------------  -------------------
+#   none / off       (no backup)       (no backup)        (no backup)
+#   numbered / t     dst.~1~           dst.~1~ + dst~     dst.~2~
+#   existing / nil   dst~              dst~               dst.~2~
+#   simple / never   dst~              dst~ (clobbered)   dst~
+#
+# ⚠ `existing` — the default — asks ONE question: does any `dst.~N~` already
+# exist? If so it makes another numbered backup; if not, a simple one. It does
+# not care whether `dst~` exists.
+#
+# ⚠ NUMBERING IS HIGHEST + 1, NOT FIRST GAP. Measured: with `dst.~1~` and
+# `dst.~3~` present, GNU writes `dst.~4~`.
+#
+# ⛔ THE BACKUP IS A RENAME OF THE OLD DESTINATION, not a copy of it. Measured by
+# inode for both `cp -b` and `mv -b`: the old destination's inode is what ends up
+# at the backup name. So a hard link to the old destination follows the backup,
+# and the new destination is a fresh inode.
+#
+# ⚠ NO DESTINATION MEANS NO BACKUP. `cp -b src dst` with no `dst` makes no
+# backup file at all — there is nothing to move out of the way.
+#
+# ⭐ ENVIRONMENT: `VERSION_CONTROL` and `SIMPLE_BACKUP_SUFFIX` are honoured, per
+# [ADR 0017](../../docs/adr/0017-environment-variables-configure-features-the-caller-turned-on.md).
+# Both are INERT without `-b`/`-S` — measured, in all three utilities — which is
+# the property that distinguishes them from `POSIXLY_CORRECT` and
+# `QUOTING_STYLE`, which this project declines. The command line always wins:
+# `VERSION_CONTROL=numbered cp --backup=simple` makes a simple backup.
+#
+# ⛔ NO PREFIX MATCHING. GNU accepts `--backup=num` and `VERSION_CONTROL=numb`,
+# and rejects `--backup=n` as ambiguous. [ADR 0002](../../docs/adr/0002-option-parsing-humans-and-agents.md)
+# turns prefix matching off across kriya — "the three permissive features are
+# exactly the ones that cause agent miscalls" — so kriya takes the eight exact
+# spellings and nothing else.
+
+enum BackupControl {
+    BACKUP_NONE     = 0,
+    BACKUP_NUMBERED = 1,
+    BACKUP_EXISTING = 2,
+    BACKUP_SIMPLE   = 3,
+    # ⚠ NOT -1. Enum members must be literals and Cyrius has no negative ones, so
+    # the sentinel is a value no control maps to rather than a negative.
+    BACKUP_INVALID  = 99,
+}
+
+var _backup_control = 0;      # a BackupControl, resolved once per invocation
+var _backup_suffix  = 0;      # cstring; 0 until resolved
+
+# Map one control name to a BackupControl. `BACKUP_INVALID` for anything else.
+# ⚠ Both spellings of each style, because GNU documents both and scripts use both.
+fn backup_control_from(name): i64 {
+    if (name == 0) { return BACKUP_INVALID; }
+    if (streq(name, "none") == 1)     { return BACKUP_NONE; }
+    if (streq(name, "off") == 1)      { return BACKUP_NONE; }
+    if (streq(name, "numbered") == 1) { return BACKUP_NUMBERED; }
+    if (streq(name, "t") == 1)        { return BACKUP_NUMBERED; }
+    if (streq(name, "existing") == 1) { return BACKUP_EXISTING; }
+    if (streq(name, "nil") == 1)      { return BACKUP_EXISTING; }
+    if (streq(name, "simple") == 1)   { return BACKUP_SIMPLE; }
+    if (streq(name, "never") == 1)    { return BACKUP_SIMPLE; }
+    return BACKUP_INVALID;
+}
+
+# Resolve the control and suffix for this invocation.
+#
+#   b_given      1 if `-b` was given
+#   control_str  the `--backup=` value, or 0
+#   suffix_str   the `-S`/`--suffix=` value, or 0
+#
+# Returns the resolved control, or BACKUP_INVALID when a name is unusable — the
+# caller reports and exits. ⚠ `-S` IMPLIES `-b`: measured, `cp -S .bak src dst`
+# with no `-b` makes `dst.bak`.
+fn backup_resolve(b_given, control_str, suffix_str): i64 {
+    _backup_control = BACKUP_NONE;
+
+    var want: i64 = 0;
+    if (b_given == 1)      { want = 1; }
+    if (control_str != 0)  { want = 1; }
+    if (suffix_str != 0)   { want = 1; }
+
+    if (want == 1) {
+        # ⭐ PRECEDENCE, MEASURED IN BOTH DIRECTIONS: an explicit `--backup=`
+        # beats `VERSION_CONTROL`, and `VERSION_CONTROL` beats the `existing`
+        # default that bare `-b` implies.
+        if (control_str != 0) {
+            _backup_control = backup_control_from(control_str);
+        } else {
+            var vc = kriya_getenv("VERSION_CONTROL");
+            var have_vc: i64 = 0;
+            if (vc != 0) {
+                # ⚠ AN EMPTY VALUE IS AN UNSET ONE. Measured: `VERSION_CONTROL=`
+                # with `-b` gives `dst~`, the same as no variable at all.
+                if (load8(vc) != 0) { have_vc = 1; }
+            }
+            if (have_vc == 1) { _backup_control = backup_control_from(vc); }
+            else              { _backup_control = BACKUP_EXISTING; }
+        }
+    }
+    if (_backup_control == BACKUP_INVALID) { return BACKUP_INVALID; }
+
+    # ⚠ THE SUFFIX IS ONLY EVER USED BY A SIMPLE BACKUP. `--backup=numbered
+    # -S .bak` writes `dst.~1~` — measured — so resolving it here costs nothing
+    # and misapplying it would be silent.
+    _backup_suffix = "~";
+    var sbs = kriya_getenv("SIMPLE_BACKUP_SUFFIX");
+    if (sbs != 0) {
+        if (load8(sbs) != 0) { _backup_suffix = sbs; }
+    }
+    if (suffix_str != 0) {
+        # ⚠ AN EMPTY `-S ''` FALLS BACK TO THE DEFAULT rather than producing a
+        # backup that IS the destination. Measured: `cp -b -S '' src dst` gives
+        # `dst~`.
+        if (load8(suffix_str) != 0) { _backup_suffix = suffix_str; }
+    }
+    return _backup_control;
+}
+
+fn backup_control(): i64 { return _backup_control; }
+fn backup_suffix(): i64  { if (_backup_suffix == 0) { return "~"; } return _backup_suffix; }
+
+# `path` + `suffix`, heap-allocated.
+fn _backup_join(path, suffix): i64 {
+    var pl = strlen(path);
+    var sl = strlen(suffix);
+    var out = alloc(pl + sl + 1);
+    memcpy(out, path, pl);
+    memcpy(out + pl, suffix, sl);
+    store8(out + pl + sl, 0);
+    return out;
+}
+
+# `dir/base.~N~`, heap-allocated.
+fn _backup_numbered_name(path, n): i64 {
+    var pl = strlen(path);
+    var digits[24];
+    var i: i64 = 23;
+    store8(&digits + i, 0);
+    var v = n;
+    if (v == 0) { i = i - 1; store8(&digits + i, 48); }
+    while (v > 0) {
+        i = i - 1;
+        store8(&digits + i, 48 + (v - (v / 10) * 10));
+        v = v / 10;
+    }
+    var dl = 23 - i;
+    var out = alloc(pl + dl + 4);
+    memcpy(out, path, pl);
+    store8(out + pl, 46);          # '.'
+    store8(out + pl + 1, 126);     # '~'
+    memcpy(out + pl + 2, &digits + i, dl);
+    store8(out + pl + 2 + dl, 126);
+    store8(out + pl + 3 + dl, 0);
+    return out;
+}
+
+fn _backup_exists(path): i64 {
+    var st[144];
+    if (fs_lstat_at(0 - 100, path, &st) == 0) { return 1; }
+    return 0;
+}
+
+# Highest N for which `path.~N~` exists, or 0 when none do.
+#
+# ⛔ PROBED, NOT ENUMERATED. Reading the directory would need a readdir plus a
+# name match per entry, and the answer only has to be "highest + 1" — so this
+# walks upward from 1 and stops at the first gap-free ceiling. ⚠ That is NOT the
+# same as GNU's answer when the numbers have a HOLE: with `dst.~1~` and
+# `dst.~3~` present GNU writes `dst.~4~`, so a walk that stopped at the first
+# missing number would write `dst.~2~` and silently reuse a slot the user can
+# still see. The scan therefore continues past a gap up to a bounded horizon.
+fn _backup_highest(path): i64 {
+    var highest: i64 = 0;
+    var n: i64 = 1;
+    var misses: i64 = 0;
+    # ⚠ The horizon is what keeps this bounded on a directory with a stray
+    # `dst.~9999999~`: 1,000 consecutive misses past the highest hit is far more
+    # slack than any real backup set, and the cost is paid only under `-b`.
+    while (misses < 1000) {
+        var cand = _backup_numbered_name(path, n);
+        if (_backup_exists(cand) == 1) {
+            highest = n;
+            misses = 0;
+        } else {
+            misses = misses + 1;
+        }
+        n = n + 1;
+    }
+    return highest;
+}
+
+# The name a backup of `dst` would take under the resolved control, or 0 when no
+# backup is called for.
+fn backup_name_for(dst): i64 {
+    if (_backup_control == BACKUP_NONE)    { return 0; }
+    if (_backup_control == BACKUP_INVALID) { return 0; }
+    # ⚠ Nothing to move out of the way. Measured: GNU makes no backup file when
+    # the destination does not exist.
+    #
+    # ⚠ NO CURRENT CALLER REACHES THIS — all three utilities hook the backup
+    # inside their own "destination exists" branch, because the ordering against
+    # `-n` and `-i` has to be theirs. Mutation-testing found it: inverting this
+    # line leaves the whole suite green. It stays because it is the helper's
+    # documented contract ("returns 0 when no backup is called for") and the
+    # next caller may not have an existence check of its own — but it is
+    # belt-and-braces, not a live guard, and the comment says so rather than
+    # letting a reader assume a test stands behind it.
+    if (_backup_exists(dst) == 0) { return 0; }
+
+    if (_backup_control == BACKUP_SIMPLE) {
+        return _backup_join(dst, backup_suffix());
+    }
+    var highest = _backup_highest(dst);
+    if (_backup_control == BACKUP_EXISTING) {
+        # ⚠ ONE QUESTION: does ANY numbered backup exist? `dst~` is not consulted.
+        if (highest == 0) { return _backup_join(dst, backup_suffix()); }
+    }
+    return _backup_numbered_name(dst, highest + 1);
+}
+
+# Move `dst` out of the way. Returns 0 when nothing was needed or the backup
+# succeeded, and a negative errno when the rename failed.
+#
+# ⛔ RENAME, NOT COPY — measured by inode against GNU for both `cp -b` and
+# `mv -b`. A copy would leave the old destination in place for the caller to
+# clobber, which is a different feature: hard links to it would follow the
+# ORIGINAL rather than the backup.
+fn backup_make(dst): i64 {
+    var name = backup_name_for(dst);
+    if (name == 0) { return 0; }
+    return fs_rename(dst, name);
+}

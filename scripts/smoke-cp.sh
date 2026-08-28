@@ -146,6 +146,158 @@ echo "good_content" > good.src
 expect_exit "partial fail (after)"   1 "$BIN" cp missing.src good.src into/
 expect_file_match "into/good.src"    good.src into/good.src
 
+# --- 1.6.5: the backup matrix, shared with mv and ln (ADR 0017) -----------
+# ⛔ EVERY CELL WAS MEASURED AGAINST GNU, not inferred. The control is a matrix:
+# `existing` asks ONE question — does any dst.~N~ exist? — and numbering is
+# HIGHEST + 1, not first gap. Both are counter-intuitive and both are asserted.
+#
+# ⚠ The variables are unset for every case that means to measure the DEFAULT. A
+# value inherited from the runner's shell would silently rewrite every result.
+BK="env -u VERSION_CONTROL -u SIMPLE_BACKUP_SUFFIX"
+
+bk_mk() {   # bk_mk [extra files...]
+    rm -rf bk; mkdir bk
+    echo NEW > bk/src; echo OLD > bk/dst
+    for _f in "$@"; do echo B > "bk/$_f"; done
+}
+bk_show() { ls bk | grep -v '^src$' | tr '\n' ' '; }
+# ⚠ TWO HELPERS RATHER THAN A `--` SENTINEL. The first version took
+# `[--pre f1 f2] -- <flags>` and, with no `--pre`, passed the bare `--` straight
+# through to `cp` — which turned every flag after it into an OPERAND, so twelve
+# cases ran a plain copy and reported the backup missing.
+bk_case() {   # bk_case <name> <expected> <flag...>
+    _n=$1; _want=$2; shift 2
+    bk_mk
+    ( cd bk && $BK "$BIN" cp "$@" src dst 2>/dev/null ) || true
+    expect_eq "$_n" "$_want" "$(bk_show)"
+}
+bk_case_pre() {   # bk_case_pre <name> <expected> <"pre files"> <flag...>
+    _n=$1; _want=$2; _pre=$3; shift 3
+    # shellcheck disable=SC2086
+    bk_mk $_pre
+    ( cd bk && $BK "$BIN" cp "$@" src dst 2>/dev/null ) || true
+    expect_eq "$_n" "$_want" "$(bk_show)"
+}
+
+bk_case "-b with nothing else"        "dst dst~ " -b
+bk_case "--backup=numbered"           "dst dst.~1~ " --backup=numbered
+bk_case "--backup=t is numbered"      "dst dst.~1~ " --backup=t
+bk_case "--backup=existing"           "dst dst~ " --backup=existing
+bk_case "--backup=nil is existing"    "dst dst~ " --backup=nil
+bk_case "--backup=simple"             "dst dst~ " --backup=simple
+bk_case "--backup=never is simple"    "dst dst~ " --backup=never
+bk_case "--backup=none makes none"    "dst " --backup=none -f
+bk_case "--backup=off makes none"     "dst " --backup=off -f
+
+# ⛔ `existing` ASKS ABOUT NUMBERED BACKUPS ONLY. With `dst~` present and no
+# numbered one it stays simple; with `dst.~1~` present it goes numbered — even
+# when `dst~` is there too.
+bk_case_pre "existing + dst~ stays simple" "dst dst~ " "dst~" -b
+bk_case_pre "existing + dst.~1~ goes numbered" "dst dst.~1~ dst.~2~ " "dst.~1~" -b
+bk_case_pre "existing + both goes numbered" "dst dst.~1~ dst.~2~ dst~ " "dst~ dst.~1~" -b
+# ⛔ HIGHEST + 1, NOT FIRST GAP. With ~1~ and ~3~ present GNU writes ~4~; a
+# first-gap implementation would write ~2~ and silently reuse a visible slot.
+bk_case_pre "numbering skips the gap" "dst dst.~1~ dst.~3~ dst.~4~ " "dst.~1~ dst.~3~" -b
+bk_case_pre "simple clobbers its own" "dst dst~ " "dst~" --backup=simple
+
+# ⚠ THE SUFFIX ONLY EVER APPLIES TO A SIMPLE BACKUP.
+bk_case "-S sets the simple suffix"   "dst dst.bak " -S .bak
+bk_case "--suffix= does too"          "dst dst.bak " --suffix=.bak
+bk_case "-S implies -b"               "dst dst.bak " -S .bak
+bk_case "numbered ignores -S"         "dst dst.~1~ " --backup=numbered -S .bak
+bk_case "an empty -S falls back to ~" "dst dst~ " -b -S ''
+
+# ⛔ NO DESTINATION MEANS NO BACKUP — there is nothing to move aside.
+rm -rf bk; mkdir bk; echo NEW > bk/src
+( cd bk && $BK "$BIN" cp -b src dst 2>/dev/null ) || true
+expect_eq "no destination, no backup file" "dst src " "$(ls bk | tr '\n' ' ')"
+
+# ⛔ THE BACKUP IS A RENAME, NOT A COPY. Measured by inode against GNU: the old
+# destination's inode is what ends up at the backup name, so a hard link to it
+# follows the BACKUP and the new destination is a fresh inode. A copy-based
+# implementation passes every name assertion above and fails this one.
+bk_mk
+_ino_before=$(stat -c %i bk/dst)
+( cd bk && $BK "$BIN" cp -b src dst 2>/dev/null ) || true
+expect_eq "the backup carries the old inode" "$_ino_before" "$(stat -c %i bk/dst~)"
+# ⚠ AND ITS CONTENT, which the inode alone does not pin. A hard link would give
+# the backup the same inode AND then be truncated by the copy's O_TRUNC, leaving
+# both names holding the NEW bytes — every name assertion above still green.
+expect_eq "the backup holds the OLD bytes" "OLD" "$(cat bk/dst~)"
+expect_eq "...and the destination the new" "NEW" "$(cat bk/dst)"
+# ⚠ And they are now separate files: writing one must not change the other.
+echo CHANGED > bk/dst
+expect_eq "the backup is independent of the destination" "OLD" "$(cat bk/dst~)"
+
+# ⭐ `-b` NEEDS NO `-f`. kriya refuses a silent overwrite without -f, and a
+# backup is not a silent overwrite — the old contents survive under a new name.
+# Without this the flag would be useless on its own.
+bk_mk
+rc=0; ( cd bk && $BK "$BIN" cp -b src dst >/dev/null 2>&1 ) || rc=$?
+expect_eq "-b alone is allowed to replace" "0" "$rc"
+bk_mk
+rc=0; ( cd bk && $BK "$BIN" cp src dst >/dev/null 2>&1 ) || rc=$?
+expect_eq "...while a plain overwrite still needs -f" "1" "$rc"
+# ⚠ And `--backup=none` is NOT a backup, so it does not grant the replacement.
+bk_mk
+rc=0; ( cd bk && $BK "$BIN" cp --backup=none src dst >/dev/null 2>&1 ) || rc=$?
+expect_eq "--backup=none does not grant it" "1" "$rc"
+
+# ⛔ A DANGLING SYMLINK DESTINATION IS NOT AN ABSENT ONE. `k_stat` follows, so a
+# link pointing at nothing read as "no destination" and the copy created the
+# link's TARGET — measured before the fix: `cp -f src dst` with `dst -> nowhere`
+# exited 0 and produced a file called `nowhere`, which the caller never named.
+# GNU refuses. ⭐ `-b` rescues it in both, by renaming the dangling link aside.
+rm -rf dang; mkdir dang; echo SRC > dang/src; ln -s nowhere dang/dst
+rc=0; ( cd dang && $BK "$BIN" cp -f src dst >/dev/null 2>&1 ) || rc=$?
+expect_eq "cp -f refuses a dangling symlink dest" "1" "$rc"
+expect_eq "...and writes nothing through it" "dst src " "$(ls -A dang | tr '\n' ' ')"
+# ⚠ The GNU side needs its own fixture — the kriya run above already refused,
+# but a subshell that only `cd`s and runs cannot report a code the caller reads
+# when `set -e` is in force. Rebuild and measure it on its own.
+rm -rf dang2; mkdir dang2; echo SRC > dang2/src; ln -s nowhere dang2/dst
+_grc=0
+( cd dang2 && env -u VERSION_CONTROL -u SIMPLE_BACKUP_SUFFIX cp -f src dst >/dev/null 2>&1 ) || _grc=$?
+expect_eq "...with GNU's exit code" "1" "$_grc"
+rm -rf dang; mkdir dang; echo SRC > dang/src; ln -s nowhere dang/dst
+rc=0; ( cd dang && $BK "$BIN" cp -b src dst >/dev/null 2>&1 ) || rc=$?
+expect_eq "-b rescues it by renaming the link aside" "0" "$rc"
+expect_eq "...leaving the link at the backup name" "dst dst~ src " "$(ls -A dang | tr '\n' ' ')"
+
+# --- ADR 0017: the two variables, and the deliberate divergences ----------
+# ⭐ HONOURED, because they are INERT without -b/-S — that is the property that
+# separates them from POSIXLY_CORRECT and QUOTING_STYLE, which kriya declines.
+bk_mk; ( cd bk && env -u SIMPLE_BACKUP_SUFFIX VERSION_CONTROL=numbered "$BIN" cp -b src dst 2>/dev/null )
+expect_eq "\$VERSION_CONTROL selects the style" "dst dst.~1~ " "$(bk_show)"
+bk_mk; ( cd bk && env -u VERSION_CONTROL SIMPLE_BACKUP_SUFFIX=.bak "$BIN" cp -b src dst 2>/dev/null )
+expect_eq "\$SIMPLE_BACKUP_SUFFIX sets the suffix" "dst dst.bak " "$(bk_show)"
+# ⛔ INERT WITHOUT THE FLAG. This is the assertion ADR 0017 turns on.
+bk_mk; ( cd bk && env -u SIMPLE_BACKUP_SUFFIX VERSION_CONTROL=numbered "$BIN" cp -f src dst 2>/dev/null )
+expect_eq "\$VERSION_CONTROL alone makes no backup" "dst " "$(bk_show)"
+bk_mk; ( cd bk && env -u VERSION_CONTROL SIMPLE_BACKUP_SUFFIX=.bak "$BIN" cp -f src dst 2>/dev/null )
+expect_eq "\$SIMPLE_BACKUP_SUFFIX alone makes none" "dst " "$(bk_show)"
+# ⚠ An empty value is an unset one.
+bk_mk; ( cd bk && env -u SIMPLE_BACKUP_SUFFIX VERSION_CONTROL= "$BIN" cp -b src dst 2>/dev/null )
+expect_eq "an empty \$VERSION_CONTROL is unset" "dst dst~ " "$(bk_show)"
+# ⭐ THE COMMAND LINE ALWAYS WINS, in both directions.
+bk_mk; ( cd bk && env -u SIMPLE_BACKUP_SUFFIX VERSION_CONTROL=numbered "$BIN" cp --backup=simple src dst 2>/dev/null )
+expect_eq "--backup beats \$VERSION_CONTROL" "dst dst~ " "$(bk_show)"
+bk_mk; ( cd bk && env -u SIMPLE_BACKUP_SUFFIX VERSION_CONTROL=simple "$BIN" cp --backup=numbered src dst 2>/dev/null )
+expect_eq "...and the other way round" "dst dst.~1~ " "$(bk_show)"
+bk_mk; ( cd bk && env -u VERSION_CONTROL SIMPLE_BACKUP_SUFFIX=.bak "$BIN" cp -b -S .x src dst 2>/dev/null )
+expect_eq "-S beats \$SIMPLE_BACKUP_SUFFIX" "dst dst.x " "$(bk_show)"
+
+# ⚠ DELIBERATE DIVERGENCES, asserted so they cannot drift into accidents.
+# GNU exits 1 for a bad control; ADR 0008 makes every kriya usage error 2.
+expect_exit "a bad --backup value is a usage error" 2 "$BIN" cp --backup=bogus src dst
+rc=0; ( cd bk && env -u SIMPLE_BACKUP_SUFFIX VERSION_CONTROL=bogus "$BIN" cp -b src dst >/dev/null 2>&1 ) || rc=$?
+expect_eq "...and so is a bad \$VERSION_CONTROL" "2" "$rc"
+# ⛔ NO PREFIX MATCHING (ADR 0002). GNU takes `--backup=num` and rejects `n` as
+# ambiguous; kriya takes the eight exact spellings and nothing else.
+expect_exit "an abbreviation is not a control name" 2 "$BIN" cp --backup=num src dst
+rc=0; ( cd bk && env -u SIMPLE_BACKUP_SUFFIX VERSION_CONTROL=numb "$BIN" cp -b src dst >/dev/null 2>&1 ) || rc=$?
+expect_eq "...in the variable either" "2" "$rc"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

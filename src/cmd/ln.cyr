@@ -36,6 +36,9 @@
 # operation failed, EXIT_SUCCESS otherwise.
 
 var _ln_spec = 0;
+var _ln_b_idx = 0;
+var _ln_bk_idx = 0;
+var _ln_S_idx = 0;
 var _ln_s_idx = 0;
 var _ln_f_idx = 0;
 var _ln_P_idx = 0;
@@ -59,6 +62,14 @@ fn _ln_init_spec(): i64 {
                                "treat the destination as a name, never as a directory");
     _ln_t_idx = flags_add_str(s,  116, "target-directory",  0,
                               "link every operand into this directory");
+    # ⭐ THE BACKUP TRIO, shared with the other two utilities via
+    # `src/lib/backup.cyr`. ⛔ `-b` IS SHORT-ONLY AND `--backup` REQUIRES ITS
+    # VALUE, because GNU's `--backup[=CONTROL]` is an optional-value flag and
+    # ADR 0002 rule 3 forbids those — the same split `tee` got for `-p` and
+    # `--output-error=MODE` at 1.6.4.
+    _ln_b_idx  = flags_add_bool(s, 98, 0, 0, "back up each existing destination");
+    _ln_bk_idx = flags_add_str(s, 0, "backup", 0, "none|off|numbered|t|existing|nil|simple|never");
+    _ln_S_idx  = flags_add_str(s, 83, "suffix", 0, "simple-backup suffix (implies -b)");
     _ln_spec = s;
     ln_help_declare();
     return 0;
@@ -72,7 +83,7 @@ fn ln_help_declare(): i64 {
                "ln [OPTIONS] TARGET [LINKNAME]");
     help_positional(1, HELP_POS_UNBOUNDED, "TARGET,LINKNAME");
     help_destructive(1);
-    help_operands("Without -s a hard link is made. ⚠ Under -f the new link is created under a temporary name and renamed over the destination, so the destination is never lost when the link cannot be made.");  #skip-lint
+    help_operands("Without -s a hard link is made. ⚠ Under -f the new link is created under a temporary name and renamed over the destination, so the destination is never lost when the link cannot be made. -b needs no -f and honours $VERSION_CONTROL and $SIMPLE_BACKUP_SUFFIX (ADR 0017); the command line wins.");  #skip-lint
     help_exit(1, "the link could not be created");
     help_example("ln -s /usr/share/doc docs");
     help_example("ln -f a.txt b.txt");
@@ -269,6 +280,23 @@ fn _ln_make(target, link, symbolic, physical, force, verbose): i64 {
     # create-if-absent, so a colliding name simply answers EEXIST and we take the
     # next one. Ten candidates is far past any real contention; beyond that we
     # report EEXIST rather than guessing.
+    # ⭐ THE BACKUP RUNS BEFORE THE LINK IS ATTEMPTED, which is both what GNU
+    # does and what keeps the careful failure story above intact: the
+    # destination is RENAMED aside rather than unlinked, so if the link then
+    # fails the old file still exists — under the backup name — instead of being
+    # gone. ⚠ It also means the attempt below sees no destination and succeeds
+    # directly, so the link-to-temp-then-rename dance is only for `-f` without a
+    # backup.
+    #
+    # ⚠ `-b` NEEDS NO `-f`: measured, `ln -b src dst` and `ln -sb src dst` both
+    # succeed on an existing destination under GNU. Nothing is overwritten.
+    if (backup_control() != BACKUP_NONE) {
+        var bkr = backup_make(link);
+        if (bkr != 0) {
+            _ln_report(link, 0 - bkr);
+            return bkr;
+        }
+    }
     var r = _ln_link_once(target, link, symbolic, physical);
     if (r == (0 - 17)) {                                   # EEXIST
         if (force == 1) {
@@ -386,6 +414,18 @@ fn cmd_ln(start: i64): i64 {
     _ln_init_spec();
     if (kriya_args_parse(_ln_spec, start) != 0) {
         k_write( 2, "kriya ln: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        return EXIT_USAGE;
+    }
+    # ⛔ RESOLVED ONCE, BEFORE ANY OPERAND IS TOUCHED. An invalid control name is
+    # a usage error and GNU performs no copy at all — measured:
+    # `VERSION_CONTROL=bogus cp -b src dst` exits 1 with the destination
+    # unchanged. Resolving per operand would back some of them up and then fail.
+    var _bk = backup_resolve(flags_get_bool(_ln_spec, _ln_b_idx),
+                             flags_get_str(_ln_spec, _ln_bk_idx),
+                             flags_get_str(_ln_spec, _ln_S_idx));
+    if (_bk == BACKUP_INVALID) {
+        k_write( 2, "kriya ln: error: invalid backup control ", 40);
+        k_write( 2, "(want none, off, numbered, t, existing, nil, simple or never)\n", 62);
         return EXIT_USAGE;
     }
 

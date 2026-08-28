@@ -31,6 +31,7 @@ include "src/lib/fs.cyr"
 include "src/lib/userdb.cyr"
 include "src/lib/protected.cyr"
 include "src/lib/args.cyr"
+include "src/lib/backup.cyr"
 # ⚠ `args.cyr` calls into `help.cyr` since v1.3.0 (`--help` is intercepted in
 # `kriya_args_parse_range`), so a subset build must include it too. This is the
 # roadmap M15e trap: cyrius only rejects REACHABLE undefined functions, so a
@@ -930,6 +931,27 @@ fn main() {
     assert_eq(kriya_parse_duration_ms("0.0004"), 0, "...and it truncates");
     assert_eq(kriya_parse_duration_ms("1x"), 0 - 1, "...and forwards -1");
     assert_eq(kriya_parse_duration_ms("9999999999999999"), 0 - 2, "...and forwards -2");
+
+    # ================================================================
+    # backup.cyr — the control matrix, measured against GNU (ADR 0017)
+    # ================================================================
+    test_group("backup_control_from");
+    assert_eq(backup_control_from("none"),     BACKUP_NONE,     "none");
+    assert_eq(backup_control_from("off"),      BACKUP_NONE,     "off is the same style");
+    assert_eq(backup_control_from("numbered"), BACKUP_NUMBERED, "numbered");
+    assert_eq(backup_control_from("t"),        BACKUP_NUMBERED, "t is the same style");
+    assert_eq(backup_control_from("existing"), BACKUP_EXISTING, "existing");
+    assert_eq(backup_control_from("nil"),      BACKUP_EXISTING, "nil is the same style");
+    assert_eq(backup_control_from("simple"),   BACKUP_SIMPLE,   "simple");
+    assert_eq(backup_control_from("never"),    BACKUP_SIMPLE,   "never is the same style");
+    # ⛔ NO PREFIX MATCHING. GNU accepts `--backup=num` and rejects `--backup=n`
+    # as ambiguous; ADR 0002 turns prefix matching off across kriya, so an
+    # abbreviation is simply not a control name.
+    assert_eq(backup_control_from("num"),      BACKUP_INVALID,  "an abbreviation is not a name");
+    assert_eq(backup_control_from("n"),        BACKUP_INVALID,  "...nor the ambiguous one");
+    assert_eq(backup_control_from("NONE"),     BACKUP_INVALID,  "the names are case-sensitive");
+    assert_eq(backup_control_from(""),         BACKUP_INVALID,  "the empty string");
+    assert_eq(backup_control_from("bogus"),    BACKUP_INVALID,  "anything else");
 
     return assert_summary();
 

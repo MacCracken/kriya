@@ -538,7 +538,33 @@ than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path
   - **`tee -i`/`--ignore-interrupts`** and `-p`/`--output-error=`. Gated on the signal-handler
     infrastructure named in [`docs/architecture/002-signal-handling-model.md`](../architecture/002-signal-handling-model.md),
     whose trigger row has never fired — `tee -i` would be its first real consumer.
-- **1.6.5 — Backups, which are one enabler for three utilities.** `-b`/`--backup[=CONTROL]` and
+- **1.6.5 — Backups, which are one enabler for three utilities.** ✅ **SHIPPED at 1.6.5** —
+  `-b`, `--backup=CONTROL` and `-S`/`--suffix=SUFFIX` for `cp`, `mv` and `ln`, from one helper in
+  `src/lib/backup.cyr`, with [ADR 0017](../adr/0017-environment-variables-configure-features-the-caller-turned-on.md)
+  settling the environment-variable question the entry said had to come first.
+
+  ⛔ **Carry forward:**
+  - ⭐ *The env-var question had a measurable answer all along.* "Does the variable change anything
+    with the feature's flag absent?" separates `VERSION_CONTROL` (inert) from `POSIXLY_CORRECT` (not)
+    in one command, and it turns three precedents plus three unexplained acceptances into one rule.
+  - ⛔ *Applying a new rule to the EXISTING code is where it earns its keep.* `$COLUMNS` was forcing
+    multi-column output down a pipe — a live script-breaker, eleven releases old, found by asking the
+    rule's question of code nobody had complained about.
+  - ⛔ *A comment asserting another tool's behaviour was load-bearing and false — FOURTH release
+    running.* `touch -c`'s POSIX claim, `realpath`'s default mode, `sleep`'s operand count, and now
+    `ls`'s "$COLUMNS forces columns even off a tty (a real GNU affordance)". ⚠ **The pattern is
+    specific enough to grep for**: a comment that says what GNU or POSIX does, with no measurement
+    beside it, is the highest-yield place to look for a defect in this codebase.
+  - ⚠ *One utility, two code paths, one feature.* `cp` needed the backup hook in BOTH `_cp_one` and
+    `_cp_file_at`; the second is only reachable under `-R`, so wiring one would have shipped
+    `cp -b` working and `cp -Rb` silently not.
+  - ⛔ *An inode assertion does not prove a rename.* A hard link shares the inode, so the
+    "is it a rename?" test passed a link-based mutation; only asserting the backup's CONTENT — and
+    that it stays independent when the destination is rewritten — catches it.
+  - ⚠ *A guard no caller reaches is worth keeping only if the comment says so.* The helper's
+    missing-destination check is unreachable from all three utilities, which hook inside their own
+    existence branch. It stays as the contract, with the unreachability written down rather than
+    left for a reader to assume a test covers it. `-b`/`--backup[=CONTROL]` and
   `-S`/`--suffix=SUFFIX` for `cp`, `mv` and `ln` — split out of 1.6.2 because it is a shared helper
   and a decision, not an `ln` flag.
   - The behaviour is a **control matrix**, not a boolean: `none`/`off`, `numbered`/`t`,
@@ -571,7 +597,15 @@ than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path
     [architecture 001](../architecture/001-errno-message-policy.md) commits to in writing. That note
     is where the decision belongs; `src/lib/quote.cyr` already exists.
 
-- **1.6.8 — 128 operands is a REFUSAL now, and it should be a non-issue.** ⛔ 1.6.3 turned the
+- **1.6.8 — `ls -C`, `-w`, and the 128-operand refusal.** Two unrelated items that both landed here
+  from a release that found them.
+  - ⚠ **`ls` has no `-C`, and `-w` forces columns off a tty where GNU's does not.** 1.6.5 stopped
+    `$COLUMNS` from choosing the output format (ADR 0017) and left `-w` alone, because `-w` is
+    currently the only way to ask for columns off a tty and removing that without adding `-C` would
+    delete the capability. Add `-C`, then make `-w` a width-only flag as GNU has it. The divergence
+    is asserted in `smoke-ls.sh` today, so the change is a test edit.
+
+- **1.6.8b — 128 operands is a REFUSAL now, and it should be a non-issue.** ⛔ 1.6.3 turned the
   stdlib flag table's silent truncation into an honest error, because `kriya rm *` on 200 files was
   deleting 128 and exiting 0. ⚠ **A refusal is the safe stopgap, not the destination**: `rm *` on a
   directory with 200 files is an ordinary thing to do, GNU has no such limit, and kriya now says no.

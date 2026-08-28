@@ -58,6 +58,9 @@
 # EXIT_FAILURE if any failed.
 
 var _cp_spec  = 0;
+var _cp_b_idx = 0;
+var _cp_bk_idx = 0;
+var _cp_S_idx = 0;
 var _cp_f_idx = 0;
 var _cp_i_idx = 0;
 var _cp_p_idx = 0;
@@ -190,6 +193,14 @@ fn _cp_init_spec(): i64 {
     _cp_BIG_P_idx = flags_add_bool(s, 80,  "no-deref",    0, "preserve all symlinks (-R default)");
     _cp_BIG_H_idx = flags_add_bool(s, 72,  "",            0, "follow command-line symlinks only (-R)");
     _cp_BIG_L_idx = flags_add_bool(s, 76,  "dereference", 0, "follow all symlinks (-R)");
+    # ⭐ THE BACKUP TRIO, shared with the other two utilities via
+    # `src/lib/backup.cyr`. ⛔ `-b` IS SHORT-ONLY AND `--backup` REQUIRES ITS
+    # VALUE, because GNU's `--backup[=CONTROL]` is an optional-value flag and
+    # ADR 0002 rule 3 forbids those — the same split `tee` got for `-p` and
+    # `--output-error=MODE` at 1.6.4.
+    _cp_b_idx  = flags_add_bool(s, 98, 0, 0, "back up each existing destination");
+    _cp_bk_idx = flags_add_str(s, 0, "backup", 0, "none|off|numbered|t|existing|nil|simple|never");
+    _cp_S_idx  = flags_add_str(s, 83, "suffix", 0, "simple-backup suffix (implies -b)");
     _cp_spec = s;
     cp_help_declare();
     return 0;
@@ -203,7 +214,7 @@ fn cp_help_declare(): i64 {
                "cp [OPTIONS] SOURCE... DEST");
     help_positional(2, HELP_POS_UNBOUNDED, "SOURCE,DEST");
     help_destructive(1);
-    help_operands("With one SOURCE, DEST is the new name or an existing directory. With several, DEST must be a directory. Directories need -R/-r. Existing destinations are refused without -f (ADR 0003, ADR 0004).");  #skip-lint
+    help_operands("With one SOURCE, DEST is the new name or an existing directory. With several, DEST must be a directory. Directories need -R/-r. Existing destinations are refused without -f — or without -b, which moves the old one aside instead of losing it (ADR 0003, ADR 0004). -b honours $VERSION_CONTROL and $SIMPLE_BACKUP_SUFFIX (ADR 0017); the command line wins.");  #skip-lint
     help_exit(1, "a copy failed, or a destination existed without -f");
     help_example("cp notes.txt backup.txt");
     help_example("cp -r src/ dest/");
@@ -678,6 +689,35 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
     var dr = k_stat(dst, &dst_stat);
     var dst_existed: i64 = 0;
     if (dr == 0) { dst_existed = 1; }
+
+    # ⛔ A DANGLING SYMLINK DESTINATION IS NOT AN ABSENT ONE, AND WRITING THROUGH
+    # IT CREATES A FILE THE CALLER DID NOT NAME. `k_stat` follows, so a link
+    # pointing at nothing reads as "no destination" and the copy then creates the
+    # link's TARGET — measured before this: `cp -f src dst` with `dst -> nowhere`
+    # exited 0 and produced `nowhere`. GNU refuses: "not writing through dangling
+    # symlink 'dst'", exit 1.
+    #
+    # ⭐ `-b` RESCUES IT, which is GNU's behaviour too: the backup renames the
+    # dangling link aside, so there is nothing to write through and the copy
+    # lands on a fresh name. Measured — `cp -b` gives `dst dst~` under both.
+    if (dr != 0) {
+        var dl_stat[144];
+        if (fs_lstat_at(0 - 100, dst, &dl_stat) == 0) {
+            if (fs_is_lnk(&dl_stat) == 1) {
+                if (backup_control() == BACKUP_NONE) {
+                    k_write( 2, "kriya cp: not writing through dangling symlink ", 47);
+                    k_write( 2, dst, strlen(dst));
+                    k_write( 2, "\n", 1);
+                    return 0 - 17;
+                }
+                var dbk = backup_make(dst);
+                if (dbk != 0) {
+                    _cp_report(dst, 0 - dbk);
+                    return dbk;
+                }
+            }
+        }
+    }
     if (dr == 0) {
         if (load64(&src_stat + 0) == load64(&dst_stat + 0)) {
             if (load64(&src_stat + 8) == load64(&dst_stat + 8)) {
@@ -700,8 +740,32 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
                 }
                 if (_cp_prompt(dst) == 0) { _cp_declined = 1; return 0; }
             } else {
-                _cp_report(dst, 17);
-                return 0 - 17;
+                # ⭐ `-b` IS ITSELF AN ANSWER TO "may I replace this?". kriya
+                # refuses a silent overwrite without `-f`, and a backup is not a
+                # silent overwrite — the old contents survive under a new name.
+                # ⚠ GNU needs no `-f` either: measured, `cp -b src dst` and
+                # `ln -b src dst` both succeed on an existing destination.
+                # Without this, every backup invocation would need `-bf` and the
+                # flag would be useless on its own.
+                if (backup_control() == BACKUP_NONE) {
+                    _cp_report(dst, 17);
+                    return 0 - 17;
+                }
+            }
+        }
+        # ⭐ THE BACKUP GOES HERE TOO, and `cp` having TWO copy paths is exactly
+        # why the helper lives in `src/lib/`. `_cp_one` handles a single file and
+        # `_cp_file_at` handles each entry of a `-R` walk; a backup hooked into
+        # only one of them would make `cp -b` work and `cp -Rb` silently not.
+        #
+        # ⚠ Same position in both: after the rules that decide WHETHER the
+        # destination may be replaced, before it is opened. A failed backup
+        # aborts the operand rather than clobbering it anyway.
+        if (backup_control() != BACKUP_NONE) {
+            var bkr1 = backup_make(dst);
+            if (bkr1 != 0) {
+                _cp_report(dst, 0 - bkr1);
+                return bkr1;
             }
         }
     } else {
@@ -925,9 +989,31 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
                     return 0;                    # declined: not an error, but exit 1
                 }
             } else {
+                # ⭐ Same rule in the `-R` walk: a backup makes room, so it does
+                # not need `-f` to do it.
+                if (backup_control() == BACKUP_NONE) {
+                    fs_close(src_fd);
+                    _cp_report(dst_display, 17);     # EEXIST
+                    return 0 - 17;
+                }
+            }
+        }
+        # ⭐ THE BACKUP GOES HERE: after the rules that decide WHETHER the
+        # destination may be replaced, and before it is opened. ⛔ It is a
+        # RENAME, so the destination stops existing and the `O_CREAT|O_TRUNC`
+        # below creates a fresh inode — which is GNU's behaviour, measured by
+        # inode, and the reason a hard link to the old destination follows the
+        # BACKUP rather than the new file.
+        #
+        # ⚠ A failed backup does NOT proceed to overwrite. Losing the old
+        # destination is the one outcome `-b` exists to prevent, so a rename
+        # failure aborts this operand rather than clobbering it anyway.
+        if (backup_control() != BACKUP_NONE) {
+            var bkr = backup_make(dst_display);
+            if (bkr != 0) {
                 fs_close(src_fd);
-                _cp_report(dst_display, 17);     # EEXIST
-                return 0 - 17;
+                _cp_report(dst_display, 0 - bkr);
+                return bkr;
             }
         }
     }
@@ -1469,6 +1555,18 @@ fn cmd_cp(start: i64): i64 {
     # quietly turned into independent copies.
     if (kriya_args_parse_optval(_cp_spec, start, 0, "preserve") != 0) {
         k_write( 2, "kriya cp: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        return EXIT_USAGE;
+    }
+    # ⛔ RESOLVED ONCE, BEFORE ANY OPERAND IS TOUCHED. An invalid control name is
+    # a usage error and GNU performs no copy at all — measured:
+    # `VERSION_CONTROL=bogus cp -b src dst` exits 1 with the destination
+    # unchanged. Resolving per operand would back some of them up and then fail.
+    var _bk = backup_resolve(flags_get_bool(_cp_spec, _cp_b_idx),
+                             flags_get_str(_cp_spec, _cp_bk_idx),
+                             flags_get_str(_cp_spec, _cp_S_idx));
+    if (_bk == BACKUP_INVALID) {
+        k_write( 2, "kriya cp: error: invalid backup control ", 40);
+        k_write( 2, "(want none, off, numbered, t, existing, nil, simple or never)\n", 62);
         return EXIT_USAGE;
     }
 
