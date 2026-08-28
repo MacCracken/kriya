@@ -25,6 +25,12 @@ cd "$WORK"
 
 PASS=0
 FAIL=0
+SKIP=0
+
+skip() {
+    SKIP=$((SKIP + 1))
+    echo "skip: $1"
+}
 
 expect_eq() {
     if [ "$2" = "$3" ]; then
@@ -307,6 +313,37 @@ same_rp() {   # same_rp <name> <arg...>
     expect_eq "$_n [rc]"  "$_gr" "$_kr"
 }
 
+# ⛔ `-E` / `--canonicalize` IS NOT IN EVERY GNU, AND ITS ABSENCE LOOKS EXACTLY
+# LIKE A PATH FAILURE. An older coreutils rejects it as an invalid option — rc=1
+# with empty stdout — which is byte-identical to "this path could not be
+# resolved", so a differential comparison reports kriya as diverging when kriya
+# is right. Measured: green on coreutils 9.11 here, four red on the CI runner.
+# ⚠ **A differential test is only as portable as the oracle's option surface.**
+#
+# ⭐ kriya's own answer is asserted EITHER WAY. The claim under test — that `-E`
+# spells kriya's default — is about kriya, and skipping it entirely would leave
+# the flag untested exactly where the comparison could not run.
+HAVE_E=no
+if realpath -E . >/dev/null 2>&1; then HAVE_E=yes; fi
+if [ "$HAVE_E" = no ]; then
+    echo "note: this GNU realpath has no -E — those comparisons assert kriya alone"
+fi
+
+same_rp_e() {   # same_rp_e <name> <expected-stdout> <expected-rc> <arg...>
+    _en=$1; _eo=$2; _erc=$3
+    shift 3
+    if [ "$HAVE_E" = yes ]; then
+        same_rp "$_en" "$@"
+    else
+        skip "$_en — this GNU realpath has no -E"
+    fi
+    _ek=$("$BIN" realpath "$@" 2>/dev/null || true)
+    _ekr=0
+    "$BIN" realpath "$@" >/dev/null 2>&1 || _ekr=$?
+    expect_eq "$_en [kriya out]" "$_eo" "$_ek"
+    expect_eq "$_en [kriya rc]"  "$_erc" "$_ekr"
+}
+
 mkdir -p fx/base/one/two/three fx/base/d fx/deep/a/b fx/usr/lib fx/usr/libexec fx/x/y fx/priv/inner
 echo f > fx/base/plainfile
 echo A > fx/realy
@@ -314,6 +351,7 @@ echo A > fx/realy
 ( cd fx && ln -s deep/a/b nest && ln -s /nowhere dang )
 ( cd fx/base && ln -s cycB cycA && ln -s cycA cycB )
 cd fx
+FX=$(pwd -P)
 
 # ⛔ THE DEFAULT MODE IS `-E`, NOT `-e`, AND KRIYA HAD IT WRONG UNTIL 1.6.3.
 # GNU's own --help says "all but the last component must exist (default)". The
@@ -321,7 +359,7 @@ cd fx
 # to create answers under GNU and failed here.
 same_rp "default mode allows a missing LAST component" base/nope
 same_rp "...but not a missing parent"                  nope/deeper
-same_rp "-E is that default, spelled"                  -E base/nope
+same_rp_e "-E is that default, spelled" "$FX/base/nope" 0    -E base/nope
 same_rp "-e requires every component"                  -e base/nope
 same_rp "-m requires none"                             -m nope/deeper
 same_rp "a dangling symlink resolves by default"       dang
@@ -331,8 +369,11 @@ same_rp "a dangling symlink resolves by default"       dang
 # command lines, where a wrapper appends `-e` to a base that already carried -m.
 same_rp "-e then -m is -m" -e -m base/nope
 same_rp "-m then -e is -e" -m -e base/nope
-same_rp "-E then -m is -m" -E -m nope/deeper
-same_rp "-m then -E is -E" -m -E nope/deeper
+same_rp_e "-E then -m is -m" "$FX/nope/deeper" 0 -E -m nope/deeper
+# ⚠ This one AGREED WITH GNU BY ACCIDENT on a runner without `-E`: an invalid
+# option and a missing parent are both rc=1 with no stdout. Asserted deliberately
+# now rather than passing for the wrong reason.
+same_rp_e "-m then -E is -E" "" 1 -m -E nope/deeper
 
 # ⛔ -L/-P/-s ARE ONE MUTUALLY-EXCLUSIVE GROUP, also last-wins. OR-ing `-s` into
 # a separate boolean — the obvious shape, since the flag table has one entry per
@@ -367,7 +408,7 @@ same_rp "-s still fails ENOTDIR"               -s base/plainfile/q
 same_rp "-s FORGIVES a missing component"      -s base/no/pe/q
 same_rp "-s -e forgives nothing"               -s -e base/no/pe/q
 same_rp "-s -e on a dangling link is ENOENT"   -s -e dang
-same_rp "-s -E on a dangling link is fine"     -s -E dang
+same_rp_e "-s -E on a dangling link is fine" "$FX/dang" 0 -s -E dang
 same_rp "-s -m is the only lexical form"       -s -m base/cycA
 same_rp "-s -m tolerates ENOTDIR too"          -s -m base/plainfile/q
 
@@ -476,7 +517,7 @@ expect_eq "-q still reports the fatal DIR error" "1" \
 # ⚠ `-e` ALSO REQUIRES EACH DIR TO BE A DIRECTORY, and only `-e`. The check is
 # on the DIRs alone — an OPERAND that is a regular file is fine in every mode.
 same_rp "-e refuses a file as --relative-base" -e --relative-base=base/plainfile base/plainfile
-same_rp "-E accepts one"                       -E --relative-base=base/plainfile base/plainfile
+same_rp_e "-E accepts one" "." 0               -E --relative-base=base/plainfile base/plainfile
 same_rp "-e refuses a file as --relative-to"   -e --relative-to=base/plainfile base/plainfile
 
 # --- 1.6.3 review: the `.` spelling, and separators from symlink targets ---
@@ -551,6 +592,10 @@ cd "$WORK"
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))
-printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"
+if [ "$SKIP" -gt 0 ]; then
+    printf "%d passed, %d failed, %d skipped (%d total)\n" "$PASS" "$FAIL" "$SKIP" "$TOTAL"
+else
+    printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"
+fi
 if [ "$FAIL" -gt 0 ]; then exit 1; fi
 exit 0

@@ -266,6 +266,30 @@ The review's most valuable finding was not a defect in the code:
 is 1.6.2's lesson exactly, one release later: **a generator that cannot express a shape will never
 find the defect in it.**
 
+### Fixed — ⛔ four assertions that were green here and red on CI, for the third time
+
+⛔ **AN OPTION THE ORACLE DOES NOT HAVE LOOKS EXACTLY LIKE A FAILING PATH.** `realpath -E` is present
+in this box's coreutils 9.11 and absent from the CI runner's, and GNU rejects an unknown option with
+**rc=1 and empty stdout** — byte-identical to *"this path could not be resolved"*. So four
+differential comparisons reported kriya as diverging when kriya was right, and one more
+(`-m -E nope/deeper`) **agreed by accident**, because an invalid option and a missing parent produce
+the same pair.
+
+⚠ **Third time a dev-box-versus-runner version difference has cost this project a release cycle** —
+`scripts/check-oracles.sh` already carries the note about 1.3.2 losing two to it, and its header
+already says it checks *identity, not version*, because "version differences are legitimate and
+unavoidable".
+
+The fix is not to pin a version:
+
+- **`smoke-realpath.sh` probes for `-E` once** and skips those comparisons when the oracle cannot
+  play — ⭐ **while still asserting kriya's own answer**, so the flag stays tested exactly where the
+  comparison cannot run. Verified by running the whole suite against a shim that rejects `-E` the way
+  an older GNU does: 5,163 passed, 0 failed, 5 skipped.
+- **`check-oracles.sh` now PRINTS the oracle's version and whether it has `-E`** — informational, not
+  a failure, because a version difference is legitimate. ⚠ The next log that shows an inexplicable
+  divergence will also show which option surface produced it.
+
 ### ⭐ Benchmarks
 
 Three new cases in `tests/kriya.bcyr`, all filesystem-free so the number is the algorithm rather
@@ -279,9 +303,10 @@ than the page cache. ⚠ Medians of five runs, because a single run of any of th
 
 ### Release totals
 
-**5,163 smoke cases across 41 scripts** (from 4,795) — `smoke-realpath.sh` 54 → **347**,
+**5,173 smoke cases across 41 scripts** (from 4,795) — `smoke-realpath.sh` 54 → **357**,
 `smoke-sleep.sh` 15 → **48**, `smoke-readlink.sh` 24 → **33**, `smoke-df.sh` 18 → **24**,
-`smoke-rm.sh` 76 → **82**. **440 unit** (from 406 — the
+`smoke-rm.sh` 76 → **82**. ⚠ **5,163 on a runner whose GNU has no `realpath -E`**, where five
+comparisons are skipped and kriya's own answer is asserted instead; both shapes are green. **440 unit** (from 406 — the
 microsecond parser and both overflow boundaries), 18 POSIX; fuzz green under poison; four lints
 clean; both targets build; `vet` reports 54 deps.
 

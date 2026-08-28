@@ -103,6 +103,25 @@ else
     note "wc -m" "counts BYTES here (got $mb_wc, expected 3: a + é + newline) — character comparisons unavailable"
 fi
 
+# --- version-sensitive OPTION SURFACE ------------------------------------
+# ⛔ AN OPTION THE ORACLE DOES NOT HAVE LOOKS EXACTLY LIKE A FAILING PATH. GNU
+# rejects an unknown option with rc=1 and empty stdout, which is byte-identical
+# to "this path could not be resolved" — so a differential assertion reports
+# kriya as diverging when kriya is right. It cost 1.6.3 a red CI run: this box
+# has coreutils 9.11 with `realpath -E`, the runner's does not, and four
+# comparisons flipped.
+#
+# ⚠ **This does not FAIL the run** — a version difference is legitimate, exactly
+# as the header says. It PRINTS, so the next log that shows an inexplicable
+# divergence also shows which option surface produced it. The scripts do their
+# own probing; this is the record.
+note "coreutils" "$(realpath --version 2>/dev/null | head -1 | sed 's/^realpath //')"
+if realpath -E . >/dev/null 2>&1; then
+    note "realpath -E" "present"
+else
+    note "realpath -E" "ABSENT — smoke-realpath.sh asserts kriya alone for those cases"
+fi
+
 if [ "$fail" -gt 0 ]; then
     printf '\ncheck-oracles: %s problem(s). The smoke suite would compare kriya against\n' "$fail" >&2
     printf 'something other than the reference it claims, which passes for the wrong reason.\n' >&2

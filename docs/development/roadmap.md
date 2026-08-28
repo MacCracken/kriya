@@ -477,6 +477,14 @@ than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path
     only; nothing paired `-s`/`-L` with a trailing slash; ADR 0015's recorded divergences had no
     assertion at all. ⭐ **"Which mutation would this test catch?" is a better review question than
     "is this test correct?"**
+  - ⛔ *AN OPTION THE ORACLE LACKS LOOKS EXACTLY LIKE A FAILING PATH, and this is the THIRD release
+    cycle lost to a dev-box-versus-runner version difference.* GNU rejects an unknown option with
+    rc=1 and empty stdout, which is byte-identical to "this path could not be resolved" — so
+    `realpath -E`, present here and absent on the runner, turned four correct comparisons red and
+    made a fifth pass for the wrong reason. ⭐ **Probe the oracle's option surface, skip the
+    comparison, and still assert kriya's own answer** — skipping the whole case would leave the flag
+    untested precisely where the comparison could not run. ⚠ `check-oracles.sh` prints the version
+    and the surface now; it does not fail on them, because a version difference is legitimate.
   - ⚠ *Arithmetic in a comment is a claim too.* "Four orders of magnitude below the int ceiling" was
     24.9x, and a test comment said the duration ceiling was 292,000 years where the value asserted on
     the next line is 292. Neither changed any behaviour; both would have misled the next reader.
