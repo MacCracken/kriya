@@ -174,7 +174,7 @@ fn kriya_argv_count(): i64 {
 # +16 entries_count; entry +0 short_ch, +16 type.
 # ⚠ That layout is a published contract in the stdlib header, not a guess — but
 # it IS a coupling. If a pin bump ever changes it, this is the first thing to
-# re-read (roadmap M15).
+# re-read (see lessons.md § The compiler watchlist).
 fn kriya_short_type(spec, ch): i64 {
     if (spec == 0) { return 0 - 1; }
     if (ch == 0)   { return 0 - 1; }

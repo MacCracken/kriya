@@ -43,7 +43,7 @@
 # ⚠ %x / %y / %z LEFT this list at v1.2.5 — they render today (see CHANGELOG).
 #
 # ⭐ %U / %G shipped at 1.5.0 on `src/lib/userdb.cyr`, and %N at 1.5.3 on
-# `src/lib/quote.cyr`. %w waits on statx(2) (roadmap 1.5.4); `_st_is_deferred_spec`
+# `src/lib/quote.cyr`. %w waits on statx(2) (roadmap 1.6.10); `_st_is_deferred_spec`
 # below is the single list of specifiers kriya knows about and does not render.
 #   %w / %W       — birth time. Needs `statx(2)` not `stat(2)`.
 #
@@ -389,7 +389,7 @@ fn _st_emit_spec(c, st, name): i64 {
             var eb[8];
             store8(&eb, c);
             k_write( 2, &eb, 1);
-            k_write( 2, ": not implemented (see roadmap M12a/M12c)\n", 42);
+            k_write( 2, ": not implemented (see roadmap 1.6.10)\n", 39);
             _st_bad = 1;
             n = 0;
         } else {

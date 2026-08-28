@@ -2,8 +2,14 @@
 
 > **Open work only.** Anything shipped has been removed from this file — the record of what
 > landed and why lives in [`CHANGELOG.md`](../../CHANGELOG.md) (per release) and
-> [`state.md`](state.md) (current snapshot). This file answers one question: *what next, in
-> what order, against what gate.*
+> [`state.md`](state.md) (current snapshot); what it taught lives in [`lessons.md`](lessons.md).
+> This file answers one question: *what next, in what order, against what gate.*
+>
+> ⚠ **That promise had drifted by 1.6.6** — seven shipped milestones and three closed arcs were
+> still here, carrying their own retrospectives, while four open items sat under `✅ CLOSED`
+> headings with no version to ship in. Cleaned up at 1.6.6: every item below now names a release
+> it can land in, and `scripts/lint-deferrals.sh` scans `scripts/` and `tests/` as well as `src/`
+> so a source comment can no longer cite a version that has already gone by.
 
 ## How this file is organised
 
@@ -11,9 +17,16 @@ Three sections, each answering a different question:
 
 | Section | Answers | Use it when |
 |---|---|---|
-| **Arcs** (1.2.6 → 1.9.x) | *What ships next?* | Picking up work |
+| **Arcs** (1.6.x → 1.9.x) | *What ships next?* | Picking up work |
+| **Non-goals** | *Why will this never ship?* | Before re-adding something that looks missing |
 | **Gated** | *Why isn't this moving?* | Asking why an item never appears in an arc |
 | **Standing** | *What must I re-check every time?* | Bumping the toolchain pin |
+
+⭐ **Two companion files, and neither belongs here.** [`lessons.md`](lessons.md) holds the durable
+process knowledge — what has already cost time and how not to pay it again, including the compiler
+watchlist. [`CHANGELOG.md`](../../CHANGELOG.md) holds what landed and why. ⚠ **Every open item below
+names a release it can land in.** An item with no version is how three of them ended up cited from
+`src/` as `roadmap 1.5.4` and `roadmap 1.4.x` — versions that had already closed.
 
 ### A note on the M-numbers
 
@@ -26,9 +39,9 @@ number is kept (**M10** consumer-burn, **M11** proposal sweeps, **M14** getenv, 
 | Old bucket | Where it went |
 |---|---|
 | M0–M9 | shipped; see `CHANGELOG.md` |
-| M12a (chrono) | 1.8.3 (`date -d`) + Gated (tzfile); the rest shipped in 1.2.5 |
+| M12a (chrono) | 1.8.3 (`date -d`), 1.8.4 (ISO-week specifiers) + Gated (tzfile); the rest shipped in 1.2.5 |
 | M12b (flags upgrade) | 1.2.0 (clustering, shipped) + 1.3.x (`--help`/`--list`) |
-| M12c (stdlib helpers) | distributed across 1.4.x–1.6.x by enabler |
+| M12c (stdlib helpers) | distributed across 1.4.x–1.6.x by enabler; `stat`'s unrendered specifiers are 1.6.10 |
 | M12d (per-utility) | distributed across 1.4.x–1.8.x by theme |
 | M13 (performance) | 1.9.x |
 | M17 (all of a–j) | shipped across 1.2.0–1.2.6; the bucket is retired |
@@ -45,15 +58,18 @@ Two rules hold across the arcs, both learned the hard way:
 
 ## Arc sequence
 
-| Arc | Theme | Enabler | Gate |
+| Arc | Theme | Enabler | Next up |
 |---|---|---|---|
-| **1.3.x** | Discoverability | spec-renderer atop `flags.cyr` | ✅ closed at 1.3.8; **consumer waiting** (agnoshi) |
-| **1.4.x** | Pattern & text parity | repeatable-option collector, UTF-8 decoder | ✅ closed at 1.4.5 |
-| **1.5.x** | Identity & listing | passwd/group parser, comparator indirection | ✅ closed at 1.5.3 |
-| **1.6.x** | File-op completeness | inode-set helper ✅, xattr API ✅ | in progress — 1.6.0, 1.6.1, 1.6.2 shipped |
+| **1.6.x** | File-op completeness, then the parity leftovers | inode-set ✅, xattr API ✅, backup helper ✅, one error line ✅ | **1.6.7** — `sleep` under interruption |
 | **1.7.x** | Traversal, exec & FS reporting | spawn helper ✅, ARG_MAX chunking | ready |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | ready |
 | **1.9.x** | Performance | niyama literal fast path (upstream, partial) | partly gated |
+
+⭐ **1.3.x (discoverability), 1.4.x (pattern & text parity) and 1.5.x (identity & listing) are
+closed** — 1.3.8, 1.4.5 and 1.5.3. What each shipped is in `CHANGELOG.md`; what each taught is in
+`lessons.md`; the handful of items they closed *without* is pinned above at 1.6.9–1.6.11. ⚠ All five
+things kriya owed agnoshi shipped at 1.3.8; that consumer is blocked only on agnoshi gaining
+interactive input.
 
 No arc depends on another — they are independent and can be resequenced by consumer demand. The
 order below reflects **who is waiting**: 1.3.x first because agnoshi has a named, external need for
@@ -65,89 +81,41 @@ wrong. Expect more ADRs and more GNU-comparison work per item than 1.2.x needed.
 
 ---
 
-## 1.3.x — Discoverability ✅ CLOSED at 1.3.8
+## 1.6.x — File-op completeness, then the parity leftovers
 
-⭐ **Complete.** `--help` (1.3.0), `--help=json` (1.3.1), `kriya --list` + a CI that can fail (1.3.2),
-the checks covering the tree (1.3.3), `--version` (1.3.4), the parity audit in three batches
-(1.3.5–1.3.7 incl. option tables), and the last two items (1.3.8). All five items kriya owed agnoshi
-ship; the kriya side is unblocked and waiting only on agnoshi gaining interactive input.
+**Enablers:** an inode-set helper in `src/lib/fs.cyr` ✅ (1.6.0), an fd-anchored xattr API ✅ (1.6.1),
+a shared backup helper ✅ (1.6.5) and one error-line implementation ✅ (1.6.6). ⚠ The M8 security
+audit named the safe xattr pattern in advance and it was followed rather than reinvented —
+`fgetxattr`/`fsetxattr` on the two descriptors, never a path.
 
-⛔ **Carry these forward, they are not arc-specific:**
-- **One declaration per utility, three readers.** `<util>_help_declare()` in `src/cmd/` feeds the human
-  page, the JSON schema and `kriya --list`; the dispatcher table in `src/main.cyr` drives both routing
-  and enumeration. `scripts/lint-help-schema.sh` fails the build if a fourth reader copies the data
-  instead of deriving it.
-- **A spec the parser does not consult is a second source of truth.** `find` carried one for five
-  releases — built, never read, never called. The seven hand-rolled utilities now declare specs their
-  own walks use as the acceptance gate.
-- **Cold start: report the release-over-release delta, never an absolute.** The pre-1.3.2 history is
-  mismeasured (it timed kriya plus a whole `date` fork). Name any reference binary `kriya` or the
-  dispatcher rejects it on `argv[0]`.
-- **A green test is not a finding.** Three of the arc's six bugs hid behind something that looked like
-  evidence: a comment naming only the cases where the bug is invisible, a local GNU version, and a
-  type list that matched by coincidence.
----
+⚠ **1.6.9 onward are the leftovers of the closed 1.4.x and 1.5.x arcs**, re-homed here at 1.6.6
+because they were sitting under `✅ CLOSED` headings with no version to ship in — which is how three
+of them ended up cited from `src/` as `roadmap 1.5.4` and `roadmap 1.4.x`, versions that can never
+arrive. Every open item now names a release it can land in.
 
-## 1.4.x — Pattern & text parity ✅ CLOSED at 1.4.5
+- **1.6.7 — What `sleep` does when something interrupts it.** GNU's `sleep` is DEADLINE-based: a
+  process SIGSTOPped for a second still returns at its original deadline rather than sleeping an
+  extra second. kriya's `_sleep_total_ms` calls `sleep_ms` with RELATIVE durations in a loop, so it
+  is structurally at risk of re-sleeping after any interruption — and 1.6.3's chunking multiplied the
+  number of places that can happen. ⚠ Untested today because
+  [architecture 002](../architecture/002-signal-handling-model.md) classes `sleep` as bounded and
+  gives it no handler. Decide whether the deadline is part of the contract, then either compute one
+  from a monotonic clock or record the divergence.
 
-**Enablers:** the repeatable-option collector (`kriya_argv_collect`, shipped 1.2.1) and a UTF-8
-decoder. ⚠ Check `unicode/_decode` in the vendored stdlib before writing one — it is already in
-kriya's dependency closure for niyama.
+- **1.6.8 — `ls -C`, and `-w` as a width-only flag.**
+    ⚠ **`ls` has no `-C`, and `-w` forces columns off a tty where GNU's does not.** 1.6.5 stopped
+    `$COLUMNS` from choosing the output format (ADR 0017) and left `-w` alone, because `-w` is
+    currently the only way to ask for columns off a tty and removing that without adding `-C` would
+    delete the capability. Add `-C`, then make `-w` a width-only flag as GNU has it. The divergence
+    is asserted in `smoke-ls.sh` today, so the change is a test edit.
 
-- **1.4.x — `grep -NUM` shorthand.** ⚠ Left out of 1.4.0 deliberately: `grep -3` for `-C 3` needs a
-  bare `-DIGIT` to parse as an OPTION rather than an operand, and `grep` goes through the shared
-  parser where a digit is not a registered short. `seq` solves the same problem with a dedicated argv
-  walk (`_seq_token_is_negnum`); lifting that into `src/lib/args.cyr` would serve both. ⛔ Do not
-  special-case it inside `grep` — that is the second-source-of-truth shape the 1.3.x arc spent nine
-  releases removing.
-- **1.4.x — `grep --exclude-dir`.** ⚠ Deliberately not in 1.4.1. `--exclude` does NOT prune
-  directories (measured against GNU: a directory matching `--exclude` is still descended), so
-  `--exclude-dir` is a genuinely separate flag with its own subject — the directory name during
-  descent — rather than a variation on the file filter now shipped. ⭐ The ordered
-  rightmost-wins/first-option-default machinery in `_gr_name_allowed` is the part to reuse; the
-  matcher (`src/lib/glob.cyr`) is already shared.
-- ⛔ **Multibyte `tr` and `uniq -i` are NON-GOALS, not pending work** — settled at 1.4.2 by measuring
-  GNU. `tr` is byte-based in every locale (`tr 'é' 'e'` on `café` yields `cafee`, two e's, because
-  SET1 is two bytes) and `uniq -i` does not fold non-ASCII. kriya matches both. Changing either would
-  **diverge from GNU and silently alter existing scripts**, so it is sovereign design needing its own
-  ADR — not a gap. ⚠ Do not re-add them to this arc as if they were unfinished.
-- ⛔ **`nl -b pBRE`'s GNU-only operators are a NON-GOAL here — the gap is upstream.** Shipped at
-  1.4.4 with `\+ \? \| \b \B \w \W \s \S` REFUSED at parse time, because niyama compiles them
-  clean and then matches nothing: the failure mode is a wrong line number, not an error. The fix
-  belongs to niyama (**M11**, third item), and closing it there deletes `_nl_rx_unsupported` rather
-  than growing it. ⚠ Do not re-implement these inside `nl`.
-- ⛔ **Two `grep` divergences found by 1.4.5's fuzz and NOT fixed there** — both predate it, both sit
-  in paths that release did not touch, and neither is about `-i`:
-  - **A leading `*` in an ERE.** `grep -E '*'` (and `'*a'`, `'a**'`) is a LITERAL asterisk in GNU and
-    a usage error in kriya. ⚠ Check POSIX before matching GNU: a leading `*` in an ERE is undefined
-    by the standard, so this may be a deliberate divergence rather than a bug — decide, then record
-    the decision either way.
-  - **`grep -o` emits empty matches.** `grep -o 'x*'` on `abc` prints four empty lines in kriya and
-    nothing in GNU. ⚠ Related but distinct: kriya's `-o` also disagrees with GNU on a case-gap range
-    under `-i`, and there kriya is the CORRECT one — GNU's `-o` contradicts GNU's own line matcher
-    (1.4.5). Do not "fix" that second case toward GNU.
+- **1.6.9 — `cp` mode-restore parity.** GNU withholds the group and other WRITE bits on directories
+  during a recursive copy and adds them back unconditionally at the end; kriya has no such restore,
+  so a `cp -R` into a directory tree can leave modes that GNU would have repaired. ⚠ Measured and
+  documented at `src/cmd/cp.cyr`'s `_cp_create_mode`, which points here. Small, and it interacts with
+  `--preserve=mode` — decide the ordering before writing it.
 
----
-
-## 1.5.x — Identity & listing ✅ CLOSED at 1.5.3
-
-⭐ **Complete.** The passwd/group parser (1.5.0), `ls` sort keys (1.5.1), `ls --color` (1.5.2) and
-the quoting helper (1.5.3). Three new shared modules — `src/lib/userdb.cyr`, `src/lib/env.cyr`,
-`src/lib/quote.cyr` — and `ls` gained `-n`, `-t`, `-S`, `--color` and `--quoting-style`.
-
-⛔ **NON-GOALS, settled by measurement. Do not re-open these as unfinished work:**
-- **Users who exist only in LDAP / SSSD / systemd-homed.** They have no line in `/etc/passwd` and
-  resolve to numeric ids. Closing that means NSS, which means dynamic linking — a **No-Go** for a
-  static tool, not a deferral.
-- **UTF-8-locale quoting.** kriya is byte-oriented and escapes every high byte, matching GNU under
-  `LC_ALL=C`; GNU under a UTF-8 locale renders valid multi-byte bare. More verbose, never wrong —
-  the escaped form round-trips identically. Changing it means decoding UTF-8 in the quoter (the
-  `cut`/`wc` precedent exists) and wants an ADR.
-- **`QUOTING_STYLE`.** GNU lets it override the tty/pipe default in both directions; kriya declines
-  it for the reason [ADR 0011](../adr/0011-echo-matches-the-non-xsi-binary-not-the-shell-builtin.md)
-  gave for `echo`. Revisit only with an ADR.
-
-- **1.5.4 — `ls` / `stat` output fidelity** (the leftovers, roughly in priority order). Small,
+- **1.6.10 — `ls` / `stat` output fidelity** (the leftovers, roughly in priority order). Small,
   well-bounded, and none of it blocks another arc:
   - **`ls -d` with no operand lists the directory's CONTENTS**; GNU lists `.`. Pre-existing (confirmed
     against the 1.4.4 binary), small and clearly wrong. ⚠ It needs a test that would have caught it,
@@ -174,466 +142,36 @@ the quoting helper (1.5.3). Three new shared modules — `src/lib/userdb.cyr`, `
   - **`--quoting-style` accepts only the three styles kriya implements** — `literal`, `shell-escape`,
     `shell-escape-always`. `shell`, `c`, `escape`, `locale` and `clocale` are REFUSED by name. Adding
     them is small and well-bounded.
+  - **`--quoting-style` accepts only the three styles kriya implements.** `shell`, `c`, `escape`,
+    `locale` and `clocale` are REFUSED by name. Small and well-bounded. (`src/cmd/ls.cyr` points
+    here.)
 
-⛔ **Carry these forward, they are not arc-specific:**
-- **If kriya does not read an environment variable, the ORACLE must not either** — or the test
-  measures the shell rather than the code. Cost three separate repairs: `BLOCK_SIZE` for `du`/`df`,
-  `POSIXLY_CORRECT` for `echo` and `pwd`, `QUOTING_STYLE` for `ls`/`stat`. ⚠ `POSIXLY_CORRECT` also
-  stops GNU permuting options after operands, which is not obvious from its name.
-- **A test that cannot go red is not a test, and it is worth PROVING with a mutant.** All of `ls`'s
-  quoted output once sat behind a pty; on a host without `script(1)` the block skipped and an `ls`
-  that never quoted scored 21 passed / 0 failed. `--quoting-style` exists to move the algorithm onto
-  the pipe path.
-- **A fuzz only covers the path it reaches.** A 3,000-name `stat %N` fuzz found zero defects in
-  `ls`'s bare-character set — because `%N` ALWAYS quotes, so the function deciding whether to quote
-  was never called. Six bytes were wrong, including `=`, where an unquoted `a=b` pasted into a shell
-  is an assignment.
-- **Confidence is not correctness.** "There is NO per-type colour table to ship" was written down
-  with as much certainty as the rules that were right, and was half wrong: with `LS_COLORS` unset
-  there are no escapes at all, but set it to any valid key and GNU loads a compiled-in default table
-  and overlays the variable.
+- **1.6.11 — `grep` parity leftovers.** Four items the 1.4.x arc closed without: two deliberate
+  omissions and two divergences its own fuzz found.
+  - **`grep -NUM` shorthand.** ⚠ Left out of 1.4.0 deliberately: `grep -3` for `-C 3` needs a
+    bare `-DIGIT` to parse as an OPTION rather than an operand, and `grep` goes through the shared
+    parser where a digit is not a registered short. `seq` solves the same problem with a dedicated argv
+    walk (`_seq_token_is_negnum`); lifting that into `src/lib/args.cyr` would serve both. ⛔ Do not
+    special-case it inside `grep` — that is the second-source-of-truth shape the 1.3.x arc spent nine
+    releases removing.
+  - **`grep --exclude-dir`.** ⚠ Deliberately not in 1.4.1. `--exclude` does NOT prune
+    directories (measured against GNU: a directory matching `--exclude` is still descended), so
+    `--exclude-dir` is a genuinely separate flag with its own subject — the directory name during
+    descent — rather than a variation on the file filter now shipped. ⭐ The ordered
+    rightmost-wins/first-option-default machinery in `_gr_name_allowed` is the part to reuse; the
+    matcher (`src/lib/glob.cyr`) is already shared.
+  - ⛔ **Two divergences found by 1.4.5's fuzz and NOT fixed there** — both predate it, both sit
+    in paths that release did not touch, and neither is about `-i`:
+    - **A leading `*` in an ERE.** `grep -E '*'` (and `'*a'`, `'a**'`) is a LITERAL asterisk in GNU and
+      a usage error in kriya. ⚠ Check POSIX before matching GNU: a leading `*` in an ERE is undefined
+      by the standard, so this may be a deliberate divergence rather than a bug — decide, then record
+      the decision either way.
+    - **`grep -o` emits empty matches.** `grep -o 'x*'` on `abc` prints four empty lines in kriya and
+      nothing in GNU. ⚠ Related but distinct: kriya's `-o` also disagrees with GNU on a case-gap range
+      under `-i`, and there kriya is the CORRECT one — GNU's `-o` contradicts GNU's own line matcher
+      (1.4.5). Do not "fix" that second case toward GNU.
 
----
-
-## 1.6.x — File-op completeness
-
-**Enablers:** an inode-set helper in `src/lib/fs.cyr` ✅ (1.6.0) and an fd-anchored xattr API ✅
-(1.6.1). ⚠ The M8 security audit named the safe xattr pattern in advance and it was followed rather
-than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path.
-
-- **1.6.0 — Hard-link awareness.** ✅ **SHIPPED at 1.6.0.** `fs_inoset_*` in `src/lib/fs.cyr` serves
-  both callers; `cp --preserve=links` does what it says after five releases of refusing to, and `du`
-  dedupes by default with `-l`/`--count-links` to opt out. See
-  [ADR 0012](../adr/0012-hard-link-awareness.md). ⚠ **Three things came out of it that are still
-  open**, none blocking:
-  - ⛔ **`du` tracks a NARROWER set than GNU, and the residual is one measured shape**: an operand
-    naming a single-link file that an *earlier* operand's walk already counted — `du DIR DIR/file`
-    lists it where GNU omits it. Closing it needs a **sparse inode structure**: GNU's set costs about
-    one bit per counted file (200,000 files measured at 20 KB), kriya's hash costs 32 bytes per entry
-    (~6 MB for the same set). ⚠ The same structure would also cut `du -L`'s peak, where kriya tracks
-    everything and measured **39 MB against GNU's 10 MB** on a 200,000-file tree. Filed under 1.7.3
-    with the rest of `du`.
-  - **`cp -a` and `cp -d`** — the aliases that imply `--preserve=links`. `-d` is
-    `--no-dereference --preserve=links` and is nearly free now that both halves exist; `-a` is
-    `-dR --preserve=all` and therefore waits on 1.6.1's ownership/xattr work. Naturally 1.6.2.
-  - ⚠ **`--preserve=` records only ONE value per invocation**, so `--preserve=mode --preserve=links`
-    keeps the last rather than the union. Repeating the option is not a shape GNU users reach for
-    (`--preserve=mode,links` is), and fixing it means a repeatable optional-value collector in
-    `src/lib/args.cyr` — the 1.4.x enabler, pointed at a different option.
-
-  - ⚠ **`cp`'s hard link re-resolves both paths from the cwd**, so a destination tree deeper than
-    PATH_MAX can be COPIED by the dirfd-anchored walk and then fail to be LINKED. GNU has the same
-    limitation (it calls `link()` with full paths too), so this is parity rather than a regression —
-    but the walk around it is fd-anchored precisely so that depth is not a limit, and the link path
-    is now the one place that is not.
-
-  ⛔ **Carry forward, and every one of these cost something:**
-  - *A link count of 1 proves "cannot be reached twice" only while you are not dereferencing.* Both
-    utilities needed the same widening — `cp` under `-L`/`-H`, `du` under `-L` — and both would have
-    looked correct in every test that did not involve a symlink.
-  - ⭐ *Checking a set is not the same decision as filling it.* A lookup measured at **16 ns** against
-    a ~1 µs `stat`, so `du` consults the set for every entry while inserting only some. That
-    asymmetry closed half the divergences for nothing, and it only became visible once the two
-    decisions were separated in the code.
-  - ⛔ *A visited-set is not cycle detection.* It stops the recursion and it silently drops
-    legitimate second paths — and it survives review, because the crash it was written to fix does
-    stop. The test that catches it is the one asserting a POPPED directory reads as absent.
-  - ⛔ *A test whose fixture was created seconds ago cannot detect a missing timestamp.* Both mtimes
-    are the current second. The `-p --preserve=links` case passed green while the feature dropped
-    mode and timestamps entirely. **Stamp the fixture in the past, and pick a mode the umask bites.**
-    ⚠ This is the second release running where a green assertion was measuring nothing — 1.5.3's was
-    an `ls` quoting fuzz that never reached the function deciding whether to quote.
-  - ⛔ *A differential fuzz harness is code, and it is wrong first.* With both implementations'
-    destinations beside the source, a `..` symlink made each walk into the OTHER's output; the first
-    run "found" kriya runaways that were kriya faithfully copying a giant tree GNU had just written.
-    Isolating source and destinations took the reported cp divergence rate from 2.08% to 0.00%
-    without a line of kriya changing. **Explain every divergence before believing the rate.**
-  - ⛔ *The smoke suite was green at 86/86 while `cp` was deleting files.* Everything in this
-    release's `Fixed` sections came from an adversarial review pass or the fuzz, not from the tests
-    written alongside the feature. A suite written by the same pass that wrote the code tests what
-    the author already thought of.
-- **1.6.1 — Ownership and xattrs.** ✅ **SHIPPED at 1.6.1.** `--preserve=ownership` and
-  `--preserve=xattr` implemented, `-p` gains ownership to match GNU, every metadata restore moved
-  onto the OPEN DESCRIPTOR, and cross-filesystem `mv` carries all four attributes. Closes **M8 audit
-  rows 35350, 35351 and 35354**. See [ADR 0013](../adr/0013-ownership-and-extended-attributes.md).
-  ⚠ **Still open, none blocking:**
-  - **`--preserve=context` and `--preserve=all`** stay refused by name. `all` implies the SELinux
-    context, and kriya is not SELinux-aware. Closing it means either an SELinux story or a documented
-    decision that `all` means "all of what kriya carries" — ⛔ the second reading is the
-    accepts-and-lies shape in its most dangerous spot, so it needs an ADR either way.
-  - ⛔ **The destination DIRECTORY is created at the source's full mode**, so under a permissive
-    umask it is world-writable for the whole recursive copy. GNU withholds the group and other WRITE
-    bits on every directory it creates and adds them back **unconditionally** at the end; kriya has
-    no unconditional restore — a directory's mode is only touched when `--preserve=mode` is set — so
-    withholding today would drop the bits permanently on a plain `cp -R`. ⚠ The file half of this
-    IS closed at 1.6.1 (set-id bits withheld at create, restored by the `--preserve=mode` fchmod that
-    is guaranteed to run); the directory half needs the unconditional restore first. Naturally
-    **1.6.2**, beside the ACL work.
-  - ⚠ **A cross-filesystem `mv` diagnostic says `kriya cp:`.** The cross-filesystem path routes
-    through `cp`'s copy functions, so every error they raise carries `cp`'s prefix during an `mv`.
-    Pre-existing and cosmetic — GNU says `mv:` — but it is now more visible, because the xattr
-    warning is the first diagnostic a SUCCESSFUL `mv` prints. Needs a program-name global in
-    `cp.cyr`, which touches every diagnostic in that file.
-  - ⚠ **The xattr scratch buffers grow to the largest attribute seen in a walk and are never
-    released** — the bump-allocator bargain the rest of `src/lib/fs.cyr` already takes, but worth
-    naming beside `du`'s allocation problem in 1.7.3.
-  - ⛔ **POSIX ACLs are not preserved, and the gap is wider than "an attribute is missing."** GNU
-    carries a POSIX ACL as part of **MODE** preservation — its own `copy_acl`, a separate path from
-    the xattr copy — so `cp -p` and `cp --preserve=mode` both carry it while `--preserve=xattr` does
-    not. ⚠ kriya's xattr path deliberately EXCLUDES `system.*` (see ADR 0013: copying
-    `system.posix_acl_access` silently changes the destination's effective permissions), which is
-    right for that path and leaves nothing carrying the ACL at all.
-    ⛔ **The consequence is a silent over-grant, not just a missing feature**: the source's `st_mode`
-    group bits ARE the ACL mask, so copying the mode literally gives the destination's own group the
-    MASK's permissions where GNU gives it the group entry's. Measured on a 0640 file with
-    `g:<grp>:rwx` — GNU's copy is `group::r-- group:<grp>:rwx mask::rwx`, kriya's is `group::rwx`,
-    and **both report st_mode 0640**, which is exactly why nothing noticed. Asserted in
-    `scripts/smoke-ownership-xattr.sh` as kriya's own answer, and counted separately by the fuzz
-    (880 of 3,240 comparisons) rather than hidden. ⚠ Closing it means an ACL path with the mode↔mask
-    interaction handled, which is a feature and wants its own ADR — naturally **1.6.2** beside the
-    other `cp` stragglers.
-
-  ⛔ **Carry forward:**
-  - ⛔ *An adversarial review pass is worth more than the tests written beside the feature, again.*
-    **Fifteen** real defects and none refuted — thirteen fixed in the release, two filed above —
-    of which the 76-case suite could see exactly none: attributes written before the
-    chown that strips `security.capability`; `system.posix_acl_access` copied, silently granting
-    access; a cross-filesystem `mv` onto a filesystem without xattr support failing the restore and
-    leaving the file in BOTH places; an empty reason on the only two errnos this path produces; and
-    three narrower races in the size protocol. ⛔ And the worst of them was **data loss**: a
-    cross-filesystem `mv` merged into a non-empty destination directory, overwrote same-named files,
-    exited 0 and removed the source — while the SAME command on one filesystem refused, because
-    `rename()` gave that arm the guard for free. ⚠ **Second release running** that the review found
-    more than the suite did, and by a wider margin.
-  - ⛔ *A cold-start number means nothing without the previous binary measured beside it.* One run of
-    1.6.1 read 0.599 ms against a recorded 1.6.0 of 0.599 — and building 1.6.0 and re-measuring both
-    in the same minute gave 0.884 and 0.899, indistinguishable. **Build the previous release and
-    measure the pair**; an absolute figure compared against a number from another day is comparing
-    machine states.
-  - ⛔ *A guard the kernel gives one code path for free is a guard the other path does not have.*
-    `mv`'s same-filesystem arm inherits `ENOTEMPTY` from `rename()`; its cross-filesystem arm is a
-    `cp -R -f` plus an `rm -r` and inherits nothing. **Where one arm is implemented by a syscall and
-    the other by hand, list what the syscall was enforcing.**
-  - ⛔ *Widening a fuzz's fixtures finds what the fixtures never contained.* Adding ACLs found the
-    ACL gap in one run; adding setuid/setgid/sticky modes found a plain-`cp` divergence older than
-    the release. **The corpus is the coverage.**
-  - ⛔ *A test whose fixture the caller OWNS cannot see a rule about failing to own it.* The
-    sticky-bit case passed against a mask that kept sticky and against the mask that does not,
-    because a chown of your own file to yourself always succeeds. ⚠ **Third release running** that a
-    green assertion was measuring nothing — 1.5.3's fuzz never reached the function under test,
-    1.6.0's mtime comparison used a fixture created seconds earlier, and this one used a fixture
-    whose ownership could not fail. **The fixture has to be able to produce the wrong answer.**
-  - ⭐ *`unshare -Ur` is a real privilege fixture and it is already in the tree.* `smoke-df.sh` used
-    it for mount namespaces; ownership needs the user-namespace half. It makes the
-    ownership-SUCCEEDS path testable on an unprivileged runner, which is the half that no amount of
-    care with `id` shims can reach.
-  - ⚠ *The "simulated root" release condition shims `id` to answer 0 and cannot make a chown
-    succeed.* Guarding a privileged assertion on `[ "$(id -u)" = 0 ]` would skip it in exactly the
-    condition whose name suggests it should run.
-  - ⭐ *Widening a fuzz's fixtures finds bugs older than the release.* Generating setuid, setgid and
-    sticky modes to test the new drop rule immediately surfaced a plain-`cp` divergence that predated
-    it — the kernel clears setuid and setgid on `open(O_CREAT)` and keeps sticky, and nothing had
-    ever copied a sticky regular file in a test.
-- **1.6.2 — `ln` and the stragglers.** ✅ **SHIPPED at 1.6.2** — `ln -r`/`--relative`,
-  `-T`/`--no-target-directory`, `-t DIR`/`--target-directory=DIR`, and `touch -h`. Plus two things
-  found while measuring: the dead `_ln_resolve_dest` (zero callers) removed, and ⛔ **`touch -c` on a
-  missing file, which exited 1 with a diagnostic against BOTH POSIX and GNU** — the comment
-  defending it asserted the opposite of what POSIX says.
-  ⭐ New shared helper: `path_relative` in `src/lib/path.cyr`, pure text, so the half of `-r` that is
-  an algorithm is unit-testable without a filesystem.
-
-  ⭐ **And one fix that landed outside `ln` entirely.** `FS_REALPATH_ALLOW_MISSING` tolerated only
-  ENOENT and, having tolerated it, stopped resolving — so `realpath -m` and `readlink -m` carried the
-  same two defects `ln -sr` did, and one change fixed all three. The traversal limit that goes with
-  it is now decided rather than incidental:
-  [ADR 0014](../adr/0014-symlink-traversal-limit-is-the-kernels.md) — the kernel's 40, uniformly.
-
-  ⚠ **The rest of this bullet moved out, because it is not one release.** Each of these is its own
-  enabler, and batching by enabler is this file's own rule:
-  - ⛔ **`-b`/`--backup` (+ `-S`/`--suffix`) is a SHARED enabler, not an `ln` flag.** `cp`, `mv` and
-    `ln` all take it in GNU, its behaviour is a five-value control matrix (`none`/`off`,
-    `numbered`/`t`, `existing`/`nil`, `simple`/`never`), and it is governed by two environment
-    variables — `VERSION_CONTROL` and `SIMPLE_BACKUP_SUFFIX`. ⚠ **That last part needs an ADR before
-    any code**: kriya has declined behaviour-changing environment variables three times
-    (`POSIXLY_CORRECT` for `echo` and `pwd`, `QUOTING_STYLE` for `ls`, ADR 0011's reasoning), and a
-    backup feature that ignores them is a different feature from GNU's. Naturally **1.6.5**.
-  - **`cp -a` and `cp -d`.** `-d` is `--no-dereference --preserve=links` and both halves exist.
-    `-a` is `-dR --preserve=all`, so it still waits on the `all`/`context` decision — and ⚠ `-a`
-    also carries GNU's quieter diagnostics (measured at 1.6.1: an unsettable xattr under `-a` is
-    silent and exits 0, where the explicit `--preserve=xattr` reports and exits 1), which is a second
-    behaviour and not a flag alias.
-  - **`cp -R` of char/block device nodes**, currently rejected per the M8 audit decision, and
-    **`mv` multi-file `--follow`**. Independent one-offs with no shared enabler.
-
-  ⛔ **Carry forward:**
-  - ⛔ *A differential fuzz harness is wrong before the code is — for the THIRD release running.*
-    This one's fixtures contain symlinks like `s3 -> ../..`, and several of them COMPOSE: a link
-    name built through three of them resolves OUT of the tree under test, so both implementations
-    wrote to one shared path, kriya (running first) created it, and GNU then reported `File exists`.
-    It read as a 2% kriya divergence. ⚠ **Nesting the trees deeper only moves the depth at which it
-    happens** — the sound fix is to notice the escape and not compare that case. 0/4,935 afterwards
-    across four seeds, with escapes counted and excluded.
-  - ⛔ *A generator that can only build WELL-FORMED fixtures is not a fuzzer for error paths.* This
-    harness ran 2,363 green comparisons over a real defect because it could not construct the two
-    shapes that trigger it: every symlink it built pointed at a directory that ALREADY EXISTED and
-    resolved — so a cycle could never form — and nothing was ever `chmod 000`. ELOOP and EACCES were
-    exactly the errno families the code mishandled. ⚠ **Randomness will not stumble into a
-    pathological shape the generator cannot express**; the shapes have to be added deliberately.
-    Adding mutual-cycle pairs and one unsearchable directory per tree turned it red on the first
-    40-case run.
-  - ⛔ *A fallback that returns the operand text changes the FRAME OF REFERENCE.* `ln -sr`'s fallback
-    returned what the user typed, which resolves against the CWD — but a symlink's stored text
-    resolves against the LINK's directory. Every link created outside the cwd pointed somewhere
-    else, at exit 0, with no diagnostic. ⚠ **A silent fallback in a path-rewriting utility is worse
-    than an error**, because the wrong answer is indistinguishable from the right one.
-  - ⭐ *Two review findings, one root cause, and it was not in the file under review.* Both `-r`
-    findings reduced to `FS_REALPATH_ALLOW_MISSING` tolerating only ENOENT and then stopping.
-    Fixing it also fixed `realpath -m` and `readlink -m`, which share the mode. **When two findings
-    in one feature look unrelated, check whether the shared helper is the defect.**
-  - ⛔ *Measure both implementations before calling a divergence a defect.* The fuzz reported `ln -sr`
-    disagreeing with GNU inside symlink cycles. Cycles of length 3/5/6/7/9/11/13/17/41 pin each
-    side's traversal count exactly — and the answer was that **GNU has no chain limit at all**, so
-    its `realpath` prints paths its own `cat` cannot open, while kriya matches the kernel's 40.
-    [ADR 0014](../adr/0014-symlink-traversal-limit-is-the-kernels.md). ⚠ **The fix for a divergence
-    you decide to keep is to count it apart in the oracle, never to loosen the comparison** — the
-    `cp` fuzz's POSIX-ACL counter is the precedent.
-  - ⛔ *A comment can be confidently wrong for years.* `touch -c`'s said "POSIX says it's still an
-    error (exit 1), GNU agrees"; POSIX says *"Do not write any diagnostic messages concerning this
-    condition"* and GNU exits 0 in silence. The smoke suite asserted the wrong answer beside it.
-    **A comment citing a standard is a claim to check, not a citation to trust.**
-  - ⚠ *Dead code hides in a build note.* `_ln_resolve_dest` had zero callers since it was written.
-    Cyrius reports unreachable functions as a NOTE with a count in the hundreds — nearly all stdlib
-    — so one more in the pile says nothing, and no lint will ever raise it.
-  - ⛔ *A helper's contract is a precondition somebody has to enforce.* `path_basename_ptr`'s header
-    says "caller must trim trailing slashes"; `cmd_ln` handed it raw operand text and had done so
-    since the multi-into-directory form existed, so `ln -s f/ dir/` failed where GNU succeeds.
-    **A documented precondition with no enforcement is a bug waiting for its first caller** — and it
-    had three.
-  - ⛔ *An adversarial review found ELEVEN more defects, and the tests written beside the feature
-    found none of them.* Six in the new flags, three in `touch` — two of those older than the
-    release — and two more from a third lens aimed only at `-r`, which reduced to one root cause in
-    `fs_realpath`. ⚠ **Third release running.** ⭐ The lens aimed at ONE flag found the deepest
-    defect: a narrow reviewer beats a broad one for a feature with a shared helper underneath.
-  - ⛔ *`match` is a reserved keyword in Cyrius.* Costs one build. Worth knowing before naming a
-    variable in a comparison loop, which is exactly where the word wants to be used.
-- **1.6.3 — `realpath` flags, and the `sleep` operand decision.** ✅ **SHIPPED at 1.6.3** —
-  `-E`/`--canonicalize`, `-L`/`--logical`, `-P`/`--physical`, `-s`/`--strip`/`--no-symlinks`,
-  `--relative-to=DIR`, `--relative-base=DIR`; and `sleep` sums its operands
-  ([ADR 0015](../adr/0015-sleep-sums-its-operands.md)).
-
-  ⛔ **The entry did not mention the biggest thing in it, because nobody had measured the default.**
-  kriya's `realpath` defaulted to `-e`; GNU defaults to `-E`. `realpath build/out` for a file a build
-  is about to create answers under GNU and failed here — since **v0.4.0**, defended by a source
-  comment asserting the opposite of GNU's own `--help`.
-
-  ⭐ Also fixed, in the shared `fs_realpath` and therefore in `readlink -f`/`-e` too: a trailing
-  slash and a `..` are DIRECTORY ASSERTIONS. `realpath flink/` on a symlink to a regular file
-  answered the file with exit 0, and `base/plainfile/..` answered `base` — a canonical path built by
-  walking THROUGH a regular file.
-
-  ⛔ **Carry forward:**
-  - ⛔ *A comment asserting what another tool does is a claim to check, not a citation to trust —
-    SECOND RELEASE RUNNING.* 1.6.2 caught `touch -c`'s "POSIX says it's still an error (exit 1), GNU
-    agrees"; this one caught `realpath`'s "-e … (default; alias for the default mode)" and `sleep`'s
-    "POSIX sleep takes one integer". ⚠ All three were load-bearing, all three were wrong, and in
-    every case **the tests had been written to agree with the comment**.
-  - ⛔ *Measure the tool, then measure the measurement.* Five research agents probed GNU and five
-    more tried to refute them. The second pass changed the implementation THREE times — `-s` still
-    stats the filesystem, `-L`/`-P`/`-s` are one last-wins group rather than a flag plus a pair, and
-    `-e` type-checks the DIR arguments. ⚠ Each of those would have shipped as a plausible-looking
-    divergence found later by a user.
-  - ⚠ *A fixture where two branches agree asserts nothing.* A symlink pointing at a directory in the
-    CWD makes `-L` and `-P` give the same answer for `link/..`; the first `-L` probe used exactly
-    that and concluded the flags were identical. **Fourth release running** that a test could not
-    tell two answers apart.
-  - ⛔ *An `int` in a syscall ABI is a silent truncation waiting for a big argument.* `sleep_ms`
-    passes its argument to `poll(2)`; a 49.7-day request is 2^32 ms and returned in **707 ms with
-    exit 0**. ⚠ The dangerous direction — the caller believes it waited. Chunking is the fix, and
-    the same question is worth asking of every other stdlib call kriya hands a large number to.
-  - ⚠ *One error channel cannot carry two failures.* `kriya_parse_duration_ms` returned -1 for
-    "malformed" and, on overflow, a wrapped negative that the caller also read as "malformed" — so a
-    legal 317-million-year duration was diagnosed as not-a-number. A distinct sentinel is three
-    lines and makes the message true.
-  - ⚠ *A differential helper that never shifts its own test name into `$@` compares nothing to
-    something.* It failed loudly here (65 red assertions) only because the two sides then disagreed
-    by construction; a helper that swallowed the extra operand would have passed everything.
-  - ⛔ *THE WORST DEFECT IN THE RELEASE WAS IN CODE NOBODY WAS LOOKING AT.* An adversarial review
-    aimed at `realpath` found that the stdlib flag table keeps 128 positionals and DISCARDS the rest
-    while returning success — so `kriya rm *` on 200 files deleted 128, left 72, and exited 0. It had
-    been true since the flag table arrived. ⚠ **A cap that silently truncates is worse than one that
-    refuses**, and the place to notice it is a review of something else entirely.
-  - ⛔ *One statement, three spellings — and a check that reads argv only sees one of them.* A
-    trailing slash, a trailing `.`, and a separator arriving from a SYMLINK'S OWN TARGET all assert
-    "this component is a directory". The first fix read the last byte of the operand and caught
-    exactly one. ⭐ **Assert where the thing is visible, not where it was typed** — moved into the
-    walk, the rule covers all three and the stat is already in hand.
-  - ⚠ *A test corpus is a list of shapes you thought of.* The fuzz had `/` and `/..` and not `/.`,
-    so 4,500 green comparisons sat on top of `realpath dir/file/.` answering the file at exit 0.
-    **Second release running** that the generator, not the code, was the thing that needed fixing
-    first.
-  - ⛔ *Five assertions could not tell the right answer from the wrong one, and the review found them
-    by MUTATING rather than reading.* The `-L`/`-P` last-wins pair used an operand where both orders
-    agree; the `-s -e` contrast was ENOENT on both sides; the ADR-0014 block compared exit codes
-    only; nothing paired `-s`/`-L` with a trailing slash; ADR 0015's recorded divergences had no
-    assertion at all. ⭐ **"Which mutation would this test catch?" is a better review question than
-    "is this test correct?"**
-  - ⛔ *AN OPTION THE ORACLE LACKS LOOKS EXACTLY LIKE A FAILING PATH, and this is the THIRD release
-    cycle lost to a dev-box-versus-runner version difference.* GNU rejects an unknown option with
-    rc=1 and empty stdout, which is byte-identical to "this path could not be resolved" — so
-    `realpath -E`, present here and absent on the runner, turned four correct comparisons red and
-    made a fifth pass for the wrong reason. ⭐ **Probe the oracle's option surface, skip the
-    comparison, and still assert kriya's own answer** — skipping the whole case would leave the flag
-    untested precisely where the comparison could not run. ⚠ `check-oracles.sh` prints the version
-    and the surface now; it does not fail on them, because a version difference is legitimate.
-  - ⚠ *Arithmetic in a comment is a claim too.* "Four orders of magnitude below the int ceiling" was
-    24.9x, and a test comment said the duration ceiling was 292,000 years where the value asserted on
-    the next line is 292. Neither changed any behaviour; both would have misled the next reader.
-- **1.6.4 — Defenses that need infrastructure first.** ✅ **SHIPPED at 1.6.4**, and neither item
-  needed the infrastructure its entry named.
-
-  ⛔ **The `rm` defense was DESIGNED FOUR WAYS AND THEN NOT BUILT.**
-  [architecture 003](../architecture/003-cross-operand-bulk-root-defense.md) exists now and says
-  build nothing. ⭐ **The refusal teaches a strictly worse command** — the shape every candidate
-  refuses is the least destructive of the available ones, because a per-operand route enumerates the
-  dotfiles a glob never matched. ⛔ **`/proc/self/root/*` is invisible to all four**, and text-only
-  canonicalization cannot stop being blind to a symlinked operand prefix. ⛔ **AGNOS's rootfs is
-  `bin data mirshi`**, so no static table covers the platform kriya is built for.
-
-  ⭐ **`tee -i`/`-p`/`--output-error` shipped, and `signal_ignore` had been in the stdlib since
-  v6.4.51.** The entry below says they were "gated on the signal-handler infrastructure named in
-  architecture 002, whose trigger row has never fired". The row still has not fired: a DISPOSITION is
-  not a handler. See [ADR 0016](../adr/0016-tee-signal-dispositions.md).
-
-  ⛔ **Carry forward:**
-  - ⛔ *A SECOND deferral outlived its blocker.* `tee -i` waited six releases on infrastructure that
-    already existed, exactly as `sleep`'s fractional durations waited on a chrono duration parser
-    that was never coming. ⚠ **A deferral naming a blocker is a claim with an expiry date** — the
-    cost of re-checking is one grep, and the cost of not re-checking is measured in releases.
-  - ⭐ *"What would the refused caller do instead?" is the question a safety feature has to answer.*
-    Four independent designs all refused the same shape, and measuring the alternatives showed that
-    shape was the least destructive one available. A guard that cannot see the workaround it creates
-    can raise expected damage while looking like it lowers it.
-  - ⛔ *A false-positive rate measured where the false positives do not live is evidence about where
-    you looked.* 6,475 parsed `rm` invocations said the aggregate rules were nearly free; the corpus
-    contained no container build, no chroot assembly, no initramfs teardown — the three populations
-    that would have paid.
-  - ⚠ *A clean number is a reason to look harder.* The corpus was first reported as a flat zero
-    multi-root-child invocations. Re-running it found fourteen, and inspecting all fourteen found
-    them false — documentation prose about this very problem, `groff` files where `rm` means *remove
-    macro*. The conclusion held; the evidence for it did not, until it was checked.
-  - ⚠ *Mutation testing found a hole in the TESTS three times running now.* Three of seven mutations
-    survived because a whole axis of the matrix — the closed-pipe half — had no fixture, under a
-    comment claiming it did. **The axis that is hard to construct in `sh` is the axis that will be
-    missing.**
-  - ⭐ *A decision to build nothing still needs assertions.* `smoke-rm.sh` pins the measurement that
-    decided it, so reintroducing an aggregate rule is a visible test edit.
-
-  Original entry — two items blocked on the same kind of gap:
-  - ⛔ **`rm` cross-operand bulk-root defense.** [ADR 0004](../adr/0004-rm-refuses-root.md) refuses `/`
-    per operand, but `rm -rf /*` expands **at the shell** to `/bin /boot /etc …` — every operand
-    individually legal, the aggregate catastrophic. Needs `docs/architecture/003-*.md` to define the
-    heuristic (operand count against a threshold of top-level directories?) before any code, because
-    a false positive here refuses a legitimate `rm -rf ./*`. ⚠ Design first; this is the one place a
-    wrong guess is worse than the gap.
-  - **`tee -i`/`--ignore-interrupts`** and `-p`/`--output-error=`. Gated on the signal-handler
-    infrastructure named in [`docs/architecture/002-signal-handling-model.md`](../architecture/002-signal-handling-model.md),
-    whose trigger row has never fired — `tee -i` would be its first real consumer.
-- **1.6.5 — Backups, which are one enabler for three utilities.** ✅ **SHIPPED at 1.6.5** —
-  `-b`, `--backup=CONTROL` and `-S`/`--suffix=SUFFIX` for `cp`, `mv` and `ln`, from one helper in
-  `src/lib/backup.cyr`, with [ADR 0017](../adr/0017-environment-variables-configure-features-the-caller-turned-on.md)
-  settling the environment-variable question the entry said had to come first.
-
-  ⛔ **Carry forward:**
-  - ⭐ *The env-var question had a measurable answer all along.* "Does the variable change anything
-    with the feature's flag absent?" separates `VERSION_CONTROL` (inert) from `POSIXLY_CORRECT` (not)
-    in one command, and it turns three precedents plus three unexplained acceptances into one rule.
-  - ⛔ *Applying a new rule to the EXISTING code is where it earns its keep.* `$COLUMNS` was forcing
-    multi-column output down a pipe — a live script-breaker, eleven releases old, found by asking the
-    rule's question of code nobody had complained about.
-  - ⛔ *A comment asserting another tool's behaviour was load-bearing and false — FOURTH release
-    running.* `touch -c`'s POSIX claim, `realpath`'s default mode, `sleep`'s operand count, and now
-    `ls`'s "$COLUMNS forces columns even off a tty (a real GNU affordance)". ⚠ **The pattern is
-    specific enough to grep for**: a comment that says what GNU or POSIX does, with no measurement
-    beside it, is the highest-yield place to look for a defect in this codebase.
-  - ⚠ *One utility, two code paths, one feature.* `cp` needed the backup hook in BOTH `_cp_one` and
-    `_cp_file_at`; the second is only reachable under `-R`, so wiring one would have shipped
-    `cp -b` working and `cp -Rb` silently not.
-  - ⛔ *An inode assertion does not prove a rename.* A hard link shares the inode, so the
-    "is it a rename?" test passed a link-based mutation; only asserting the backup's CONTENT — and
-    that it stays independent when the destination is rewritten — catches it.
-  - ⚠ *A guard no caller reaches is worth keeping only if the comment says so.* The helper's
-    missing-destination check is unreachable from all three utilities, which hook inside their own
-    existence branch. It stays as the contract, with the unreachability written down rather than
-    left for a reader to assume a test covers it. `-b`/`--backup[=CONTROL]` and
-  `-S`/`--suffix=SUFFIX` for `cp`, `mv` and `ln` — split out of 1.6.2 because it is a shared helper
-  and a decision, not an `ln` flag.
-  - The behaviour is a **control matrix**, not a boolean: `none`/`off`, `numbered`/`t`,
-    `existing`/`nil`, `simple`/`never`, each with a different answer depending on whether a numbered
-    or a simple backup already exists. It is not guessable and has to be measured cell by cell.
-  - ⛔ **The ADR comes first, and it is about environment variables.** GNU's backup behaviour is
-    governed by `VERSION_CONTROL` and `SIMPLE_BACKUP_SUFFIX`. kriya has declined behaviour-changing
-    environment variables three times — `POSIXLY_CORRECT` for `echo` (ADR 0011) and for `pwd`,
-    `QUOTING_STYLE` for `ls` — on the reasoning that a variable set for some unrelated tool must not
-    silently change what this one does. ⚠ A backup feature that ignores them is a DIFFERENT feature
-    from GNU's, and the smoke suite would have to unset them the way `smoke-ln.sh` already unsets
-    `QUOTING_STYLE`. Decide it in an ADR, then build it.
-  - ⚠ The helper belongs in `src/lib/`, not in `ln` — `cp -b` and `mv -b` are the same feature, and
-    putting it in the first caller is how `cp` ended up with two answers to one question (see the
-    `_ln_resolve_dest` note under 1.6.2).
-
-- **1.6.6 — `readlink`'s own flag surface, and the diagnostic-quoting decision.** ✅ **SHIPPED at
-  1.6.6** — all three items, plus two things found on the way in.
-
-  ⛔ **Carry forward:**
-  - ⭐ *Twenty-four byte-identical copies of one function is a defect with twenty-four homes.* The
-    error line could not change shape without 24 edits, so it never did — and the quoting bug lived
-    in all of them. Collapsing them removed **401 lines** and made the binary **8 KiB smaller**.
-    ⚠ **Duplication is not just a tidiness problem; it is why the bug was unfixable.**
-  - ⚠ *A note with no single implementation to check it against drifts.* architecture 001 had the
-    operand and message fields the wrong way round, with four examples to match, describing something
-    that never shipped in 38 utilities. It was caught by writing the one function the note describes.
-  - ⛔ *A quoting table measured for one caller is not measured for the next.* `ls` names can never
-    contain `/`, so `/` was never in the set — and reusing it for diagnostics quoted every path in
-    every message. ⚠ **The bytes a caller cannot produce are the bytes its test set does not cover.**
-  - ⛔ *An assertion cannot see a flag whose effect matches the default.* `-s` silences, and the
-    default is already silent, so the test stayed green against a build that ignored `-s` entirely.
-    ⭐ **Test a flag against its OPPOSITE, not against the default** — `-v -s` discriminates where
-    `-s` alone cannot. **Third release running.**
-  - ⛔ *SECOND release cycle lost to a dev-box-versus-runner coreutils difference, and this time the
-    rule was already written.* 1.6.3 established "probe the oracle's option surface, skip the
-    comparison, still assert kriya's own answer" after `realpath -E`; 1.6.6 then added three
-    un-probed GNU-dependent assertions and one of them — `POSIXLY_CORRECT` making `readlink`
-    verbose — is honoured on 9.11 and **ignored entirely on 9.4**. ⭐ **The fix is a habit, not a
-    patch: run the suite against the runner's coreutils in a container before calling a release
-    green.** `docker run -v "$PWD":/w -w /w ubuntu:24.04 sh -c '…'` found it in one pass, and
-    `check-oracles.sh` now prints the capability so a future log carries its own explanation.
-  - ⚠ *A piped listing prints literally whatever the quoting table says.* The `ls` half of the same
-    assertion needed `--quoting-style=shell-escape` explicitly; without it, the test could not fail.
-
-  The original three items:
-  - **`readlink -s`/`--silent` and `-v`/`--verbose` are missing.** ⚠ `readlink -s` is NOT
-    `realpath -s` — it is a synonym for `-q`, which is the sort of collision that makes a shared
-    flag table the wrong shape for two utilities that merely look similar.
-  - ⛔ **GNU's `readlink` is SILENT BY DEFAULT and kriya's is not.** Measured: `readlink plain`
-    prints nothing and exits 1; kriya prints `kriya readlink: plain: invalid argument`. GNU's help
-    says the quiet default flips with `POSIXLY_CORRECT`, which kriya declines (ADR 0011) — so this
-    is a decision about which of GNU's two behaviours to be, not a bug to fix. **Name it in an ADR.**
-  - ⛔ **kriya never shell-quotes an operand in a diagnostic and GNU does.** GNU emits
-    `realpath: 'a b': …` for a name with a space, `$'\t'` for a tab, and double quotes for a name
-    containing a single quote. ⚠ **A filename containing a newline splits a kriya diagnostic across
-    two lines**, which breaks the one-error-line-per-failure invariant that
-    [architecture 001](../architecture/001-errno-message-policy.md) commits to in writing. That note
-    is where the decision belongs; `src/lib/quote.cyr` already exists.
-
-- **1.6.8 — `ls -C`, `-w`, and the 128-operand refusal.** Two unrelated items that both landed here
-  from a release that found them.
-  - ⚠ **`ls` has no `-C`, and `-w` forces columns off a tty where GNU's does not.** 1.6.5 stopped
-    `$COLUMNS` from choosing the output format (ADR 0017) and left `-w` alone, because `-w` is
-    currently the only way to ask for columns off a tty and removing that without adding `-C` would
-    delete the capability. Add `-C`, then make `-w` a width-only flag as GNU has it. The divergence
-    is asserted in `smoke-ls.sh` today, so the change is a test edit.
-
-- **1.6.8b — 128 operands is a REFUSAL now, and it should be a non-issue.** ⛔ 1.6.3 turned the
+- **1.6.12 — 128 operands is a REFUSAL now, and it should be a non-issue.** ⛔ 1.6.3 turned the
   stdlib flag table's silent truncation into an honest error, because `kriya rm *` on 200 files was
   deleting 128 and exiting 0. ⚠ **A refusal is the safe stopgap, not the destination**: `rm *` on a
   directory with 200 files is an ordinary thing to do, GNU has no such limit, and kriya now says no.
@@ -644,17 +182,6 @@ than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path
     release and not a patch inside 1.6.3.
   - ⭐ Keep the overflow guard until then, and keep its `smoke-rm.sh` assertion afterwards: the test
     that says "200 operands must not silently become 128" stays true whichever way it is satisfied.
-
-- **1.6.7 — What `sleep` does when something interrupts it.** GNU's `sleep` is DEADLINE-based: a
-  process SIGSTOPped for a second still returns at its original deadline rather than sleeping an
-  extra second. kriya's `_sleep_total_ms` calls `sleep_ms` with RELATIVE durations in a loop, so it
-  is structurally at risk of re-sleeping after any interruption — and 1.6.3's chunking multiplied the
-  number of places that can happen. ⚠ Untested today because
-  [architecture 002](../architecture/002-signal-handling-model.md) classes `sleep` as bounded and
-  gives it no handler. Decide whether the deadline is part of the contract, then either compute one
-  from a monotonic clock or record the divergence.
-
----
 
 ## 1.7.x — Traversal, exec & filesystem reporting
 
@@ -680,6 +207,18 @@ than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path
   and a joined path per entry and frees neither, which is why `kriya du -s /usr` peaks at **68 MB
   against GNU's 7.7 MB** with the dedup switched off entirely. ⚠ That is the bigger number of the two
   and it predates 1.6.0.
+
+- **1.7.4 — The aarch64 syscall-number sweep.** kriya's raw `syscall(N, …)` numbers are x86_64-only:
+  `openat` 257 vs **56**, `mkdirat` 258 vs **34**, `unlinkat` 263 vs **35**, `write` 1 vs **64**,
+  `exit` 60 vs **93**, `fcntl` 72 vs **25**, `getdents64` 217 vs **61**. ⚠ Not a bug today — kriya
+  builds x86_64 Linux and agnos only — but an aarch64 Linux build would **compile clean and call
+  entirely wrong syscalls**, which is the worst failure shape available. The stdlib already defines
+  the named constants per target (`syscalls_aarch64_linux.cyr`), so the sweep is mechanical; do it as
+  one reviewable pass, not opportunistically. `k_getdents` was converted at 1.3.3 as the worked
+  example. ⛔ **Do not "fix" `k_getdents` by switching to stdlib `io.cyr`'s `xgetdents`**, which is
+  what cyrlint suggests: `xgetdents` returns the RAW agnos record on agnos, while `k_getdents`
+  translates it into `linux_dirent64` so every caller sees one format. The swap would silently
+  mis-parse every directory entry on agnos. The reason is written at the call site.
 
 ---
 
@@ -719,20 +258,48 @@ implementing floats before that pin would have inherited it. The pin is past it 
 
 The named gaps in [`docs/benchmarks.md`](../benchmarks.md), each with a measured cost.
 
-- **`wc -c` fast path** — detect a regular-file fd and return `st_size` without reading. ~20 LOC,
-  closes a 200× gap.
-- **`tail` seek-from-end** — `lseek(SEEK_END)` + backward scan in 8 KiB chunks for seekable input.
-  Removes the 16 MiB cap and closes most of a 12× gap.
-- **niyama regex memory + speed** — ⚠ upstream Cyrius. ⛔ **This is still a crash, not just a slow
+- **1.9.0 — `wc -c` fast path** — detect a regular-file fd and return `st_size` without reading.
+  ~20 LOC, closes a 200× gap.
+- **1.9.1 — `tail` seek-from-end** — `lseek(SEEK_END)` + backward scan in 8 KiB chunks for seekable
+  input. Removes the 16 MiB cap and closes most of a 12× gap. (`src/cmd/tail.cyr` points here.)
+- **1.9.2 — niyama regex memory + speed** — ⚠ upstream Cyrius. ⛔ **This is still a crash, not just a slow
   path:** `grep 'line.*005'` over 13.6 MB segfaults under `ulimit -v 1048576`, because the NFA retains
   roughly 320 bytes per input byte. 1.2.6 fixed the half that needed no upstream — metacharacter-free
   patterns now take the byte scanner (6.7 s → 115 ms, no crash) — but any pattern with a
   metacharacter still compiles an NFA and still blows up. A literal Boyer-Moore path would also close
   the remaining ~23× gap on the fast path.
-- **`cp` `copy_file_range(2)`** — accelerated copy with reflink where the filesystem supports it.
-  Speculative; check AGNOS kernel availability before committing.
-- **`find` predicate JIT** — compile the predicate AST to a flat eval loop. ⚠ Not committed; revisit
-  only if benchmark pressure rises after the consumer burn.
+- **1.9.3 — `cp` `copy_file_range(2)`** — accelerated copy with reflink where the filesystem
+  supports it. Speculative; check AGNOS kernel availability before committing.
+- **1.9.4 — `find` predicate JIT** — compile the predicate AST to a flat eval loop. ⚠ Not committed;
+  revisit only if benchmark pressure rises after the consumer burn.
+
+---
+
+## Non-goals — settled by measurement, do not re-open as unfinished work
+
+⚠ These are not deferrals. Each was measured against GNU and decided; re-adding any of them to an
+arc means re-opening a decision, which needs an ADR rather than a roadmap line.
+
+- ⛔ **Multibyte `tr` and `uniq -i` are NON-GOALS, not pending work** — settled at 1.4.2 by measuring
+  GNU. `tr` is byte-based in every locale (`tr 'é' 'e'` on `café` yields `cafee`, two e's, because
+  SET1 is two bytes) and `uniq -i` does not fold non-ASCII. kriya matches both. Changing either would
+  **diverge from GNU and silently alter existing scripts**, so it is sovereign design needing its own
+  ADR — not a gap. ⚠ Do not re-add them to this arc as if they were unfinished.
+- ⛔ **`nl -b pBRE`'s GNU-only operators are a NON-GOAL here — the gap is upstream.** Shipped at
+  1.4.4 with `\+ \? \| \b \B \w \W \s \S` REFUSED at parse time, because niyama compiles them
+  clean and then matches nothing: the failure mode is a wrong line number, not an error. The fix
+  belongs to niyama (**M11**, third item), and closing it there deletes `_nl_rx_unsupported` rather
+  than growing it. ⚠ Do not re-implement these inside `nl`.
+- **Users who exist only in LDAP / SSSD / systemd-homed.** They have no line in `/etc/passwd` and
+  resolve to numeric ids. Closing that means NSS, which means dynamic linking — a **No-Go** for a
+  static tool, not a deferral.
+- **UTF-8-locale quoting.** kriya is byte-oriented and escapes every high byte, matching GNU under
+  `LC_ALL=C`; GNU under a UTF-8 locale renders valid multi-byte bare. More verbose, never wrong —
+  the escaped form round-trips identically. Changing it means decoding UTF-8 in the quoter (the
+  `cut`/`wc` precedent exists) and wants an ADR.
+- **`QUOTING_STYLE`.** GNU lets it override the tty/pipe default in both directions; kriya declines
+  it for the reason [ADR 0011](../adr/0011-echo-matches-the-non-xsi-binary-not-the-shell-builtin.md)
+  gave for `echo`. Revisit only with an ADR.
 
 ---
 
@@ -794,15 +361,8 @@ zero-behaviour-change; the third is a correctness gap and is not filed yet.
   where the shell placed an unrelated variable. ⚠ It gates `ls --color` (1.5.2), because a real
   `LS_COLORS` is ~1.9 KB; and it already affects `COLUMNS` today. Not filed upstream yet.
 
-⛔ **Related and NOT gated: kriya has 46 raw numeric syscalls, and every number is x86_64-only.**
-Found at 1.3.3 while resolving cyrlint's raw-`getdents` note. The numbers genuinely differ:
-`openat` 257 vs **56**, `mkdirat` 258 vs **34**, `unlinkat` 263 vs **35**, `write` 1 vs **64**,
-`exit` 60 vs **93**, `fcntl` 72 vs **25**, `getdents64` 217 vs **61** (x86_64 vs aarch64). ⚠ Not a
-bug today — kriya builds x86_64 Linux and agnos only — but **an aarch64 Linux build would compile
-clean and call entirely wrong syscalls**, which is the worst failure shape available. The stdlib
-already defines the named constants per target (`syscalls_aarch64_linux.cyr`), so the sweep is
-mechanical; do it as one reviewable pass, not opportunistically. `k_getdents` was converted at 1.3.3
-as the worked example.
+⛔ **Related and NOT gated: kriya's raw syscall numbers are x86_64-only.** Pinned at **1.7.4** and
+described under M16 — an aarch64 Linux build would compile clean and call entirely wrong syscalls.
 
 ⚠ **Do not "fix" `k_getdents` by switching to stdlib `io.cyr`'s `xgetdents`**, which is what cyrlint
 suggests. `xgetdents` returns the RAW agnos record on agnos; `k_getdents` translates it into
@@ -819,113 +379,40 @@ stack buffer. When upstream fixes it, the workaround comes out. Pure cleanup, ze
 `date` local-time and `ls -l` locale-aware mtime need tzfile parsing (`chrono_tz.cyr`). ⚠ This is the
 **genuine** chrono gate — verified absent at pin 6.5.35 — and the trigger [ADR 0007](../adr/0007-date-utc-only-at-v0-7-0.md) already names.
 
-### M16 — AGNOS as a build target (design-first)
+### M16 — AGNOS as a build target ✅ DONE as a build; the CONSUMER is what is gated
 
-Make kriya the sovereign, **shell-independent** coreutils for AGNOS — the canonical home for the FS tools (any shell execs it, the Unix way; agnsh's 1.4.2 builtin verbs are a shell-bound convenience that this supersedes once 1.43.x `execwait` lands). **Prep done:** pin 5.11.61 → 6.0.56, lib re-vendored, VERSION → 1.1.0.
+⭐ **`cyrius build --agnos src/main.cyr` builds a complete kriya today** — 1,117,016 bytes at 1.6.6,
+built by CI on every push alongside the host target. `src/lib/fs.cyr` carries 32 `CYRIUS_TARGET_AGNOS`
+branches; the sovereign dirent/stat translation, the `*at`→basic mapping and the per-command
+degradations all landed.
 
-**Why it's a real refactor (not a gate-the-blockers port like bannermanor/commandress):** kriya hardcodes **Linux syscall numbers** (`syscall(82,…)`=rename, `217`=getdents64, `257`=openat — ~610 numeric-syscall sites) instead of the target-aware `SYS_*` constants, parses **Linux `getdents64`/`stat` struct formats** (the sovereign agnos formats differ — see `agnos-userland-abi.md` §4.1/§4.2), and uses modern **`*at` syscalls** (openat/renameat/linkat/newfstatat/utimensat) that agnos doesn't define (agnos has the basic forms with different numbers + the explicit-length ABI).
+⚠ **This entry described that work as ahead of it for several releases after it shipped.** Its
+"Why it's a real refactor" paragraph counted "~610 numeric-syscall sites" — there are **38 distinct
+raw `syscall(N` numbers** in `src/` now, all behind the target-aware layer it proposed building. The
+plan is done; the paragraph outlived it.
 
-**Plan:** make the central `src/lib/fs.cyr` syscall layer target-aware (`#ifdef CYRIUS_TARGET_AGNOS`: agnos numbers + sovereign dirent/stat structs + `*at`→basic mapping; Linux path unchanged) — most commands flow through it, so it's the leverage point. Then gate the per-command stragglers: `ln` (linkat/newfstatat), `touch` (utimensat → degrade timestamps), `tail` (lseek → degrade), `pwd` + path resolution (getcwd → degrade; CWD is userland-owned on agnos), `rm`/`cp`/`mv` (TTY `ioctl` TCGETS → non-interactive). Validate with `cyrius build --agnos` per command + the Linux `.tcyr` regression. Analogous to the agnosys-core repair, scaled to the coreutils FS surface.
+**What remains is not a build problem:** making kriya the sovereign, shell-independent coreutils for
+AGNOS — kriya symlinks in the init userland, agnoshi `$PATH` resolving to them, and the first green
+boot with kriya in init. ⛔ **That is M10, not this entry**, and it is gated on AGNOS's keyboard
+work rather than on anything in this repo.
+
+⚠ **One genuine portability gap survives and it is NOT agnos**: kriya's raw syscall numbers are
+x86_64-only, so an **aarch64 Linux** build would compile clean and call entirely wrong syscalls
+(`openat` 257 vs 56, `write` 1 vs 64, `exit` 60 vs 93). Not a bug today — kriya builds x86_64 Linux
+and agnos only — but it is the worst failure shape available. The stdlib already defines the named
+constants per target, so the sweep is mechanical; do it as one reviewable pass. `k_getdents` was
+converted at 1.3.3 as the worked example. **Pinned at 1.7.4.**
 
 ---
 
 ## Standing
 
-### M15 — Codegen / toolchain-interaction watchlist (standing)
+### The compiler watchlist
 
-Not a milestone that closes: a **standing list of the ways the Cyrius compiler and kriya interact
-badly**, kept because every entry here has already cost real time at least once, and because the
-failure mode is always the same — the code reads correctly, compiles clean, passes lint, and is wrong
-anyway. Opened at v1.1.11 out of the P-1 sweep.
-
-Each entry names the rule, how to detect it **mechanically**, and what happened the last time it bit.
-Re-run the detections at every toolchain pin bump; the 6.5.x line is the codegen-quality line and a
-pin move is exactly when a latent instance stops being latent.
-
-**M15a — A function-local `var X[N]` is N BYTES. At module scope it is N×8.**
-The single most expensive rule in this list. Re-measured at pin 6.5.35 with a two-local probe:
-`|&b - &a|` = **8 / 32 / 144** for `var x[4]` / `var x[32]` / `var x[144]`.
-- *Detection*: for every `var X[N]` in `src/`, take the maximum byte offset actually accessed
-  (`store8`/`store16`/`store64`/`load*`/`memcpy`/a syscall buffer arg) and require it `< N`. Sizes are
-  a strong smell on their own: a buffer holding k 64-bit fields must be `[k*8]`, and every `struct stat`
-  buffer must be `[144]`.
-- *Note*: kriya currently has **zero** module-scope arrays — all 136 are function-local — so the
-  N-bytes reading always applies here. A future module-scope array would silently flip the rule.
-- *Bit us at v1.1.9*: `find`'s `var ctx[4]` held four i64 fields. Silent for a year because the old
-  register allocator left dead space where the overflow landed; the 6.5.18 bump repacked the frame
-  onto live state and `find` went 40/40 → 8/40.
-- *Bit us again at v1.1.11*: `k_access`'s agnos arm declared `var st[48]` for `k_stat`'s **output**,
-  confusing agnos's 48-byte wire struct with the canonical 144-byte layout `_k_agnos_stat` actually
-  writes. A 96-byte frame smash on every PATH probe, reachable from `which`, `env`, `xargs` and
-  `find -exec`. Reproduced on the host with the same shape: SIGSEGV.
-
-**M15b — The register allocator can turn a latent frame bug into a live one.**
-6.5.35 fixed two defects that had prevented linear-scan from ever reusing a register, so frame layout
-repacks tree-wide. A buffer overrun that previously landed in dead space starts landing on live state.
-- *Detection*: there is none in advance — that is the point. Run M15a's scan and the full smoke suite
-  after every pin bump.
-- *Bisection lever*: rebuild with `CYRIUS_REGALLOC_PICKER_CAP=5` to reproduce pre-6.5.35 register
-  assignment. **If the symptom disappears, the defect is kriya's, not the compiler's.**
-
-**M15c — Two `var` of the same name in one function are ONE slot.**
-Cyrius hoists a branch-local `var` to the nearest enclosing loop or function, so declarations in
-different arms of an `if`/`elif`/`else` collide rather than shadow.
-- *Detection*: group `var` declarations by name within each function. Scalars reused sequentially are
-  fine; the dangerous shape is a duplicate **array** (a scratch buffer), where stale bytes from one arm
-  can be read by another.
-- *Status at v1.1.11*: scanned clean. Three duplicate-array sites exist — `cut.cyr` `tb[2]`,
-  `touch.cyr` `ts[32]`, `uniq.cyr` `klen_box[8]` — and all three are mutually exclusive arms that fill
-  before they read.
-- *Bit us at v1.1.6*: `grep`'s one-byte line-terminator scratch was redeclared at all five emit sites;
-  two in the same `if`/`elif`/`else` chain collided and broke `cyrius build --agnos` outright.
-
-**M15d — `break` inside a `while` that declares a `var` is unreliable.**
-Use a flag plus `continue`, per CLAUDE.md.
-- *Detection*: for each `while` body containing a `var` declaration, flag any `break;`.
-- *Status at v1.1.11*: **zero instances**. The four `break;` in `src/cmd/find.cyr` are in loops with no
-  `var` declaration.
-
-**M15e — Include order in `src/main.cyr` is load-bearing, and so is the dependency direction.**
-A global must be declared before its use, so the 46-line include list is a dependency order, not a
-style choice. The subtler half is directional: adding a function to a `src/lib/` file that calls into a
-**later**-included module breaks every consumer that includes only a subset — and it breaks quietly,
-because cyrius only rejects *reachable* undefined functions, so an unused one is dead-code-eliminated
-and the build stays green until someone calls it.
-- *Detection*: after adding a cross-module call in `src/lib/`, build `tests/*.tcyr` and `tests/*.fcyr`
-  too — they include subsets of `src/lib/`, not `src/main.cyr`.
-- *Bit us at v1.1.11*: `fs_path_absolute` was first written into `path.cyr`, where it both violated that
-  file's documented "nothing here touches the filesystem" commitment and introduced a `path.cyr` →
-  `sys.cyr` dependency that `tests/kriya.tcyr` did not satisfy. It built green only because nothing
-  called it yet. Moved to `fs.cyr`, which is filesystem-aware and already ordered after `sys.cyr`.
-
-**M15f — A syscall returns a NEGATIVE ERRNO, and nothing forces you to look.**
-- *Detection*: enumerate `syscall(` and `sys_*` call sites and check each result is tested, with the
-  right predicate — `r < 0`, not `r == (0 - 1)`, since the kernel answers `-ENOENT` (−2), not −1.
-- *Status at v1.1.11*: all write traffic goes through `k_write`, which now records a sticky failure the
-  dispatcher consults at exit — the ~540 call sites still ignore the return, and that is now safe by
-  construction rather than by luck. All read traffic goes through `k_read`. No raw `syscall(1, …)` or
-  `syscall(0, …)` remains outside `src/lib/sys.cyr`.
-
-**M15g — Language shapes that compile to something other than what they read as.**
-Standing, low-drama: no negative literals (write `(0 - N)`), no mixed `&&`/`||` in one expression
-(nest the `if`s), enum members are const-folded and consume no `gvar_toks` slot, and a top-level
-`var x = 42;` takes the static-init fast path while `var x = f();` consumes one of the 4,096
-initialized-globals slots.
-
-**M15h — `>>` is an ARITHMETIC shift, so one multiply into the sign bit poisons every mask below it.**
-Opened at v1.6.0, writing the `(st_dev, st_ino)` hash. The shape is `h = a * K; idx = (h >> S) & MASK`
-— which reads as "take some middle bits" and, the moment `a * K` overflows into bit 63, produces a
-NEGATIVE `h` whose masked index addresses off the FRONT of the array rather than into it.
-- *Detection*: for every `>>` in `src/`, ask whether the left operand can have bit 63 set. Two sources
-  do it: an unsigned kernel value read with `load64` (`st_dev`, `st_ino`, `st_size` on a sparse file),
-  and any multiply whose operands are not individually bounded. Size the multipliers so the running
-  sum cannot pass 2^62, or mask the operand down before multiplying.
-- *Note*: `& MASK` does not save you — masking a negative gives a positive, so the bug surfaces as a
-  wrong bucket (harmless) right up until the shift count and mask happen to keep the sign bit, and then
-  it is an out-of-bounds load. It will never fail a test that uses small inode numbers.
-- *Status at v1.6.0*: `_fs_inoset_hash` is sized so the widest input (a 32-bit half of `st_ino`) cannot
-  push the sum past 2^56, and `tests/kriya.tcyr` pins it non-negative at four extremes including
-  `st_ino = 2^63 - 1`. No other `>>` in `src/` takes an unbounded left operand.
+⭐ **Moved to [`lessons.md`](lessons.md) § The compiler watchlist** at 1.6.6. It is not a milestone
+that closes and it is not open work — it is the standing list of ways the Cyrius compiler and kriya
+interact badly, and it belongs with the other durable process knowledge. ⚠ **Re-run every detection
+in it at each toolchain pin bump**; a pin move is exactly when a latent instance stops being latent.
 
 ---
 
@@ -939,15 +426,16 @@ What actually gates the arcs. Ship the enabler and everything under it becomes s
 | Repeatable-option collector | `src/lib/args.cyr` | `grep -e`×N, `sort -k`×N, `grep --include/--exclude` | ✅ 1.2.1 (as `kriya_argv_collect`) |
 | Spawn helper | `src/lib/spawn.cyr` | child stderr, `find -exec +`, `xargs -P`/`-p` | ✅ 1.2.2 |
 | Duration parser | `src/lib/args.cyr` | `sleep` fractions + suffixes | ✅ 1.2.5 |
-| Spec-renderer on `flags.cyr` | `src/lib/args.cyr` | `--help`, `--help=json`, `kriya --list` | 1.3.x |
-| UTF-8 decoder | stdlib `unicode/_decode` (already vendored) | `cut -c`, `tr` fold, `uniq -i` multi-byte | 1.4.x |
-| Shared glob matcher | lift `_f_glob_match` into `src/lib/` | `grep --include/--exclude`, `find -name` reuse | 1.4.x |
-| passwd/group parser | new `src/lib/` module | `ls -l` names, `stat %U/%G`, `find -user/-group` | 1.5.x |
-| Quoting helper | `src/lib/` | `stat %N`, `ls` quoting | 1.5.x |
+| Spec-renderer on `flags.cyr` | `src/lib/args.cyr` | `--help`, `--help=json`, `kriya --list` | ✅ 1.3.x |
+| UTF-8 decoder | stdlib `unicode/_decode` (already vendored) | `cut -c`, `tr` fold, `uniq -i` multi-byte | ✅ 1.4.x |
+| Shared glob matcher | `src/lib/glob.cyr` | `grep --include/--exclude`, `find -name` reuse | ✅ 1.4.x |
+| passwd/group parser | `src/lib/userdb.cyr` | `ls -l` names, `stat %U/%G`, `find -user/-group` | ✅ 1.5.x |
+| Quoting helper | `src/lib/quote.cyr` | `stat %N`, `ls` quoting, **diagnostics** | ✅ 1.5.3, extended 1.6.6 |
+| Comparator-by-flag indirection | `src/cmd/ls.cyr` | `ls -t`, `-S`, `--color` table | ✅ 1.5.x |
 | `(st_dev, st_ino)` set | `src/lib/fs.cyr` (as `fs_inoset_*`) | `cp --preserve=links`, `du` dedup, `du -L` cycle detection | ✅ 1.6.0 |
-| Comparator-by-flag indirection | `src/cmd/ls.cyr` | `ls -t`, `-S`, `--color` table | 1.5.x |
-| Inode-set helper | `src/lib/fs.cyr` | `cp --preserve=links`, `du` hardlink dedup | 1.6.x |
-| fd-anchored xattr API | `src/lib/fs.cyr` | `cp`/`mv` xattr preservation | 1.6.x |
+| fd-anchored xattr API | `src/lib/fs.cyr` | `cp`/`mv` xattr preservation | ✅ 1.6.1 |
+| Backup control helper | `src/lib/backup.cyr` | `-b`/`--backup`/`-S` for `cp`, `mv`, `ln` | ✅ 1.6.5 |
+| One error-line implementation | `src/lib/report.cyr` | every diagnostic in every utility | ✅ 1.6.6 |
 | ARG_MAX argv chunking | `src/lib/` | `find -exec +`, `xargs -L`/`-x` | 1.7.x |
 | Float formatting | `src/cmd/printf.cyr` | `printf %e/%f/%g/%a`, `seq -f` | 1.8.x |
 | Byte-suffix parser | `src/lib/args.cyr` | `head -c 1K`, `tail -c 1K`, `sort -S` | 1.8.x |

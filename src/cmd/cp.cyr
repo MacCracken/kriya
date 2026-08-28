@@ -623,7 +623,7 @@ fn _cp_create_mode(src_st, preserve): i64 {
     # restored when `--preserve=mode` is set — so masking there would drop the
     # bit permanently on a plain recursive copy. GNU withholds the group and
     # other WRITE bits on directories instead and adds them back unconditionally
-    # at the end; kriya does not have that unconditional restore (roadmap 1.6.2).
+    # at the end; kriya does not have that unconditional restore (roadmap 1.6.9).
     return fs_perms(src_st) & 511;
 }
 

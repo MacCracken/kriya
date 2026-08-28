@@ -32,7 +32,7 @@
 #
 # ⭐ `-t` / `-S` shipped at 1.5.1 (and the insertion sort became a merge sort in
 # the same pass), `--color` at 1.5.2 and quoting at 1.5.3. What is left is small
-# and listed under roadmap 1.5.4 — the `-d`-with-no-operand bug, TAB column
+# and listed under roadmap 1.6.10 — the `-d`-with-no-operand bug, TAB column
 # padding, the `no=` prefix position, and the remaining `--quoting-style` styles.
 #
 # ⭐ Owner/group NAMES shipped at 1.5.0 on `src/lib/userdb.cyr`, and `-n` with
@@ -643,7 +643,7 @@ fn _ls_color_load(): i64 {
                     var ki = _ls_ckey_index(load8(key), load8(key + 1));
                     # ⚠ An unknown two-letter key is IGNORED rather than fatal.
                     # GNU prints a diagnostic and disables colour entirely; kriya
-                    # ignores the item and colours the rest (roadmap 1.5.4).
+                    # ignores the item and colours the rest (roadmap 1.6.10).
                     if (ki >= 0) {
                         if (load8(key + 2) == 0) { store64(_ls_ckey + ki * 8, val); }
                     }
@@ -1618,7 +1618,7 @@ fn cmd_ls(start: i64): i64 {
     # turns it on.
     # ⚠ Only the three styles kriya's helper actually implements are accepted.
     # The rest (`shell`, `c`, `escape`, `locale`, `clocale`) are REFUSED by name
-    # rather than silently treated as the default (roadmap 1.6.x).
+    # rather than silently treated as the default (roadmap 1.6.10).
     var qs = flags_get_str(_ls_spec, _ls_qs_idx);
     if (qs != 0) {
         if (load8(qs) != 0) {

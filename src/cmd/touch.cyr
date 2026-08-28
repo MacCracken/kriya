@@ -14,8 +14,8 @@
 #
 # Symlink policy (informative): touch follows symlinks by default,
 # updating the target's times. This matches POSIX and is outside the
-# ADR 0003 cp/mv/rm/ln matrix. GNU `-h` (no-dereference) lands when
-# we need it; documented in `--help` as deferred. (roadmap 1.6.2)
+# ADR 0003 cp/mv/rm/ln matrix. ⚠ `-h`/`--no-dereference` SHIPPED at 1.6.2 — this
+# comment went on calling it a follow-up for four releases afterwards.  #skip-lint
 #
 # Root protection (ADR 0004): touch is non-destructive; no protected_paths
 # check. Touching `/` is a "directory exists, time update succeeds" no-op

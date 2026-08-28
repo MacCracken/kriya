@@ -71,10 +71,15 @@ if [ ! -w /dev/full ]; then
 else
     printf 'alpha\nbeta\ngamma\n' > "$WORK/f"
 
-    # ⚠ `head -n 2` / `cut -c 1-3` are spelled with a SEPARATE value on purpose.
-    # kriya's option parser does not yet take attached short values (`-n2`) or
-    # the obsolescent bare-digit form (`head -2`) — both are named follow-ups
-    # under roadmap M12b. Using them here would test the parser, not the writer.
+    # ⚠ `head -n 2` / `cut -c 1-3` are spelled with a SEPARATE value on purpose:
+    # this file is about the WRITER, and the separated form is the one spelling
+    # that needs nothing from the parser.
+    #
+    # ⚠ The comment here used to justify that by saying attached short values
+    # (`-n2`) and the obsolescent bare-digit form (`head -2`) were "named
+    # follow-ups under roadmap M12b". **All three spellings work today** —
+    # measured at 1.6.6 — and M12b is a retired bucket. The reason survived the
+    # thing it was reasoning about by several releases.
 
     expect_full "echo"    echo hello
     expect_full "printf"  printf 'hi\n'

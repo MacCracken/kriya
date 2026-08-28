@@ -145,6 +145,7 @@ Standard first-party checklist (see [first-party-standards § Security Hardening
 - [`docs/guides/`](docs/guides/) — task-oriented how-tos (adding a new utility, running benchmarks)
 - [`docs/examples/`](docs/examples/) — runnable examples
 - [`docs/development/state.md`](docs/development/state.md) — **live state snapshot**, refreshed every release; includes per-utility status table
+- [`docs/development/lessons.md`](docs/development/lessons.md) — **durable process knowledge**: what has already cost time and how not to pay it again, including the compiler watchlist. ⚠ Re-run its detections at every toolchain pin bump
 - [`docs/development/roadmap.md`](docs/development/roadmap.md) — milestone plan with per-utility ship order
 - [`CHANGELOG.md`](CHANGELOG.md) — source of truth for all changes
 

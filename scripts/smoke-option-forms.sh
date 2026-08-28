@@ -177,9 +177,10 @@ expect_exit "cp --preserve=timestamps"      0 "$BIN" cp --preserve=timestamps pv
 expect_exit "cp --preserve=mode,timestamps" 0 "$BIN" cp --preserve=mode,timestamps pv.txt pv3
 # ⛔ `links` FLIPPED FROM REFUSED TO IMPLEMENTED AT v1.6.0. It was exit 2 for
 # five releases because refusing by name beats accepting and quietly making
-# independent copies; now it does the thing. `all` is still a refusal — it
-# implies ownership and xattrs, which kriya does not preserve (roadmap 1.6.1) —
-# so the "refused preserve copied nothing" check moved onto it.
+# independent copies; now it does the thing. ⚠ `all` IS STILL A REFUSAL, and the
+# reason moved: it was ownership and xattrs until 1.6.1 implemented both, and it
+# is `context` (SELinux) now — the one attribute in GNU's `all` that kriya does
+# not carry. The "refused preserve copied nothing" check rides on it.
 expect_exit "cp --preserve=links accepted"  0 "$BIN" cp --preserve=links pv.txt pv4
 expect_exit "cp --preserve=all refused"     2 "$BIN" cp --preserve=all pv.txt pv5
 expect_exit "cp --preserve bare"            0 "$BIN" cp --preserve pv.txt pv6

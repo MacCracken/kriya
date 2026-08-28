@@ -53,7 +53,7 @@ done
 #
 # ⚠ M-numbers are checked too, and were NOT until 1.4.4. A deferral that outlives
 # its release has to be repointed at something durable, and the gated sections are
-# where it goes — `nl -b pBRE` moved from `roadmap 1.4.4` to `roadmap M11` the
+# where it goes — `nl -b pBRE` moved from a 1.4.x entry to `roadmap M11` the
 # moment 1.4.4 shipped. Leaving M-numbers unchecked would have made "repoint it at
 # an M-number" the way to launder a reference past this very check.
 #
@@ -63,17 +63,25 @@ done
 # documented shapes all count: a `###` header for an open bucket, a TABLE ROW for
 # a retired one, and a BOLD paragraph lead for an M15 watchlist item.
 missing=$(
-  grep -rhoE 'roadmap [0-9]+\.[0-9]+\.[0-9]+' src/ 2>/dev/null \
+  # ⚠ scripts/ AND tests/ TOO, not just src/. A stale reference to a SHIPPED
+  # version sat in `smoke-option-forms.sh` claiming kriya did not preserve
+  # ownership five releases after it did — invisible because the scan only
+  # ever read `src/`.
+  grep -rhoE 'roadmap [0-9]+\.[0-9]+\.[0-9]+' src/ scripts/ tests/ 2>/dev/null \
     | sed 's/^roadmap //' | sort -u \
     | while read -r ver; do
         grep -q "\*\*$ver —" docs/development/roadmap.md || echo "$ver"
       done
-  grep -rhoE 'roadmap M[0-9]+[a-z]?' src/ 2>/dev/null \
+  grep -rhoE 'roadmap M[0-9]+[a-z]?' src/ scripts/ tests/ 2>/dev/null \
     | sed 's/^roadmap //' | sort -u \
     | while read -r m; do
+        # ⚠ BOTH FILES. The M15 watchlist moved to lessons.md at 1.6.6; an
+        # M-number is a durable identifier and may live in either.
         grep -q "^### $m —" docs/development/roadmap.md && continue
         grep -q "\*\*$m —" docs/development/roadmap.md && continue
-        grep -q "^| $m " docs/development/roadmap.md || echo "$m"
+        grep -q "^| $m " docs/development/roadmap.md && continue
+        grep -q "\*\*$m —" docs/development/lessons.md && continue
+        grep -q "$m —" docs/development/lessons.md || echo "$m"
       done
 )
 if [ -n "$missing" ]; then

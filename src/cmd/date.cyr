@@ -205,8 +205,9 @@ fn _date_wint(buf, pos, v): i64 {
 var _date_bad: i64 = 0;
 
 # strftime specifiers GNU defines that kriya does not render yet. All of them
-# want either locale data or ISO-week arithmetic, which is the chrono work in
-# roadmap M12a.
+# want either locale data or ISO-week arithmetic. ⚠ The ISO-week ones are pure
+# arithmetic on a broken-down time and need no tzfile, so they are roadmap
+# 1.8.4 rather than the Gated chrono item local time waits on.
 fn _date_is_deferred_spec(c): i64 {  #skip-lint
     if (c == 86) { return 1; }   # V  ISO week number
     if (c == 71) { return 1; }   # G  ISO week-based year
@@ -325,7 +326,7 @@ fn _date_render_spec(buf, pos, c, parts, wkday, epoch): i64 {
         var eb[8];
         store8(&eb, c);
         k_write( 2, &eb, 1);
-        k_write( 2, ": specifier not implemented (see roadmap M12a)\n", 47);
+        k_write( 2, ": specifier not implemented (see roadmap 1.8.4)\n", 48);
         _date_bad = 1;
         return pos;
     }
