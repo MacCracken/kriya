@@ -85,10 +85,36 @@ quoting table says — it now passes `--quoting-style=shell-escape` explicitly. 
 `:` quoting at all. ⚠ **Third release running that the fixture, not the code, was the thing that
 needed fixing first.**
 
+### Fixed — ⛔ green here, red on CI: `POSIXLY_CORRECT` and `readlink` is version-dependent
+
+⚠ **Second time a dev-box-versus-runner coreutils difference has cost a release cycle**, after
+`realpath -E` at 1.6.3 — and this time I had already written the rule and not applied it.
+
+| | `POSIXLY_CORRECT=1 readlink plain` |
+|---|---|
+| coreutils **9.4** (the runner) | silent — the variable is ignored entirely |
+| coreutils **9.11** (this box) | `readlink: plain: Invalid argument` |
+
+9.4's `--help` describes `-q`/`-s` as *"suppress most error messages (on by default)"* with no
+mention of the variable; 9.11's adds *"(on by default if POSIXLY_CORRECT is not set)"*. The
+comparison is probed now, kriya's own answer is asserted either way, and `check-oracles.sh` prints
+the capability alongside `realpath -E`.
+
+⭐ **And the whole suite now runs against the runner's coreutils before a release is called green** —
+`docker run -v "$PWD":/w -w /w ubuntu:24.04 sh -c 'for s in scripts/smoke-*.sh; …'`. It found this in
+one pass. ⚠ Seven other failures in that container are its own missing tooling (`python3`) and its
+root uid bypassing DAC, not version differences; the runner passes all of them.
+
+⛔ **ADR 0018 was version-specific where it read as general.** It claimed "GNU reaches its verbose
+mode through `POSIXLY_CORRECT`" as a property of GNU. Corrected to name both versions — which
+strengthens the decision rather than weakening it: *"as GNU does"* is not a fixed target here, so
+copying the mechanism would mean picking a GNU version to be compatible with.
+
 ### Release totals
 
-**5,354 smoke cases across 41 scripts** (from 5,322) — `smoke-readlink.sh` 33 → **54** and
-`smoke-ls.sh` 128 → **131**. **453 unit**, 18 POSIX; fuzz green under poison; four lints clean; both
+**5,356 smoke cases across 41 scripts** (from 5,322) — `smoke-readlink.sh` 33 → **56** and
+`smoke-ls.sh` 128 → **131**. ⚠ **54 passed / 1 skipped on coreutils 9.4**, where the
+`POSIXLY_CORRECT` contrast cannot be measured. **453 unit**, 18 POSIX; fuzz green under poison; four lints clean; both
 targets build; `vet` reports **56 deps** (`src/lib/report.cyr` is the new one).
 
 ⭐ Binary 1,129,504 → **1,121,208** bytes — **8,296 SMALLER**, because 23 copies of one function

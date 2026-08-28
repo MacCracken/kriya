@@ -121,6 +121,17 @@ if realpath -E . >/dev/null 2>&1; then
 else
     note "realpath -E" "ABSENT — smoke-realpath.sh asserts kriya alone for those cases"
 fi
+# ⚠ SECOND TIME A VERSION DIFFERENCE COST A RELEASE CYCLE, and this is the one
+# that did it: `POSIXLY_CORRECT` makes `readlink` verbose on 9.11 and is IGNORED
+# on 9.4. The un-probed assertion was green on the dev box and red on the runner.
+_ocp=$(mktemp -d)
+echo x > "$_ocp/plain"
+if [ -n "$(POSIXLY_CORRECT=1 readlink "$_ocp/plain" 2>&1)" ]; then
+    note "readlink \$POSIXLY_CORRECT" "honoured (9.11-style)"
+else
+    note "readlink \$POSIXLY_CORRECT" "IGNORED (9.4-style) — smoke-readlink.sh skips that contrast"
+fi
+rm -rf "$_ocp"
 
 if [ "$fail" -gt 0 ]; then
     printf '\ncheck-oracles: %s problem(s). The smoke suite would compare kriya against\n' "$fail" >&2

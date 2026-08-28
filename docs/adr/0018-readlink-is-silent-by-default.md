@@ -16,18 +16,22 @@ $ realpath plain            realpath: plain: … exit 1
 kriya's `readlink` printed `kriya readlink: plain: invalid argument`, matching neither GNU's
 `readlink` nor any stated policy — it matched `realpath`, which is the utility next door.
 
-⛔ **GNU reaches its verbose mode through `POSIXLY_CORRECT`, and that variable BEATS AN EXPLICIT
-`-q`.** Measured:
+⛔ **Newer GNU reaches its verbose mode through `POSIXLY_CORRECT`, and that variable BEATS AN
+EXPLICIT `-q`** — but ⚠ **which GNU you have decides whether it does anything at all.** Measured on
+two versions:
 
-```
-$ POSIXLY_CORRECT=1 readlink -q plain
-readlink: plain: Invalid argument
-```
+| | `readlink plain` | `POSIXLY_CORRECT=1 readlink plain` | `POSIXLY_CORRECT=1 readlink -q plain` |
+|---|---|---|---|
+| coreutils **9.4** | silent | **silent** — the variable is ignored | silent |
+| coreutils **9.11** | silent | `readlink: plain: Invalid argument` | **still prints** |
+
+9.4's own `--help` describes `-q`/`-s` as *"suppress most error messages (on by default)"* with no
+mention of the variable; 9.11's adds *"(on by default if POSIXLY_CORRECT is not set)"*.
 
 An environment variable overriding a flag the caller wrote is exactly what
-[ADR 0017](0017-environment-variables-configure-features-the-caller-turned-on.md) forbids, so kriya
-cannot copy GNU's mechanism even if it wanted GNU's default. The choice is therefore which of GNU's
-two behaviours to be, with `-v` as the only door between them.
+[ADR 0017](0017-environment-variables-configure-features-the-caller-turned-on.md) forbids — and one
+that appeared between two GNU releases is not a mechanism to copy in either case. The choice is
+therefore which of GNU's two *default* behaviours to be, with `-v` as the only door between them.
 
 ## Decision
 
@@ -66,9 +70,11 @@ two behaviours to be, with `-v` as the only door between them.
 
 - **Keep the verbose default and add `-q`-family flags only.** Rejected: it leaves kriya diverging
   from GNU on the common invocation, in the direction that adds output to a pipeline.
-- **Honour `POSIXLY_CORRECT` as GNU does.** Rejected twice over: ADR 0017 forbids a variable that
-  changes behaviour with no flag present, and this particular variable additionally beats an explicit
-  `-q`, which is worse than the general case the rule was written for.
+- **Honour `POSIXLY_CORRECT` as GNU does.** Rejected three times over: ADR 0017 forbids a variable
+  that changes behaviour with no flag present; this particular variable additionally beats an
+  explicit `-q`, which is worse than the general case the rule was written for; and ⚠ **"as GNU
+  does" is not a fixed target** — 9.4 ignores it and 9.11 honours it, so copying the behaviour would
+  mean picking a GNU version to be compatible with.
 - **Be silent only when stdout is not a tty.** Rejected: a tty test changes behaviour between an
   interactive run and the same command in a script, which is the failure mode `-i` already has to
   guard against elsewhere (ADR 0002). A flag the caller writes is legible; a tty test is not.

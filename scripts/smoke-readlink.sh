@@ -26,6 +26,12 @@ WORK_REAL=$(readlink -f "$WORK")
 
 PASS=0
 FAIL=0
+SKIP=0
+
+skip() {
+    SKIP=$((SKIP + 1))
+    echo "skip: $1"
+}
 
 expect_eq() {
     if [ "$2" = "$3" ]; then
@@ -195,11 +201,26 @@ expect_eq "...and -v alone still speaks"    "1" \
 # POSIXLY_CORRECT overrides -q, which is what ADR 0017 forbids.
 expect_eq "-v -q is quiet"              "" "$("$BIN" readlink -v -q rlq/plain 2>&1)"
 expect_eq "-q -v is quiet"              "" "$("$BIN" readlink -q -v rlq/plain 2>&1)"
-# ⚠ And POSIXLY_CORRECT changes nothing here, unlike GNU.
+# ⚠ AND POSIXLY_CORRECT CHANGES NOTHING HERE. ⛔ Whether it changes anything in
+# GNU is VERSION-DEPENDENT, which is why the comparison is probed rather than
+# asserted: coreutils **9.4 ignores it entirely** for `readlink` (its `--help`
+# says `-q`/`-s` are "on by default" with no mention of the variable), while
+# **9.11 honours it AND lets it override an explicit `-q`**. This box has 9.11
+# and the CI runner has 9.4, so the un-probed version of this assertion was
+# green here and red there. **Second time a dev-box-versus-runner coreutils
+# difference has cost a release cycle** — see `check-oracles.sh`.
 expect_eq "POSIXLY_CORRECT does not flip it" "" \
           "$(POSIXLY_CORRECT=1 "$BIN" readlink rlq/plain 2>&1)"
-expect_eq "...where GNU's does"              "1" \
-          "$(POSIXLY_CORRECT=1 readlink rlq/plain 2>&1 | grep -c 'Invalid argument')"
+expect_eq "...nor does it override -q"       "" \
+          "$(POSIXLY_CORRECT=1 "$BIN" readlink -q rlq/plain 2>&1)"
+if [ -n "$(POSIXLY_CORRECT=1 readlink rlq/plain 2>&1)" ]; then
+    expect_eq "...where this GNU's does"     "1" \
+              "$(POSIXLY_CORRECT=1 readlink rlq/plain 2>&1 | grep -c 'Invalid argument')"
+    expect_eq "...and overrides its own -q"  "1" \
+              "$(POSIXLY_CORRECT=1 readlink -q rlq/plain 2>&1 | grep -c 'Invalid argument')"
+else
+    skip "this GNU readlink ignores POSIXLY_CORRECT (pre-9.11) — the contrast is unverified"
+fi
 
 # --- 1.6.6: the operand is shell-quoted when it needs to be ---------------
 # ⛔ A NAME CONTAINING A NEWLINE USED TO SPLIT THE DIAGNOSTIC IN TWO, breaking
@@ -230,6 +251,10 @@ expect_eq "...and GNU quotes it too"         "1" \
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))
-printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"
+if [ "$SKIP" -gt 0 ]; then
+    printf "%d passed, %d failed, %d skipped (%d total)\n" "$PASS" "$FAIL" "$SKIP" "$TOTAL"
+else
+    printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"
+fi
 if [ "$FAIL" -gt 0 ]; then exit 1; fi
 exit 0

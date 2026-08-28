@@ -599,6 +599,14 @@ than reinvented — `fgetxattr`/`fsetxattr` on the two descriptors, never a path
     default is already silent, so the test stayed green against a build that ignored `-s` entirely.
     ⭐ **Test a flag against its OPPOSITE, not against the default** — `-v -s` discriminates where
     `-s` alone cannot. **Third release running.**
+  - ⛔ *SECOND release cycle lost to a dev-box-versus-runner coreutils difference, and this time the
+    rule was already written.* 1.6.3 established "probe the oracle's option surface, skip the
+    comparison, still assert kriya's own answer" after `realpath -E`; 1.6.6 then added three
+    un-probed GNU-dependent assertions and one of them — `POSIXLY_CORRECT` making `readlink`
+    verbose — is honoured on 9.11 and **ignored entirely on 9.4**. ⭐ **The fix is a habit, not a
+    patch: run the suite against the runner's coreutils in a container before calling a release
+    green.** `docker run -v "$PWD":/w -w /w ubuntu:24.04 sh -c '…'` found it in one pass, and
+    `check-oracles.sh` now prints the capability so a future log carries its own explanation.
   - ⚠ *A piped listing prints literally whatever the quoting table says.* The `ls` half of the same
     assertion needed `--quoting-style=shell-escape` explicitly; without it, the test could not fail.
 
