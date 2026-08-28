@@ -6,6 +6,90 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.7] - 2026-08-28 — toolchain pin 6.5.36, a sleep that is a deadline, and a watchlist that was wrong
+
+### Changed — toolchain pin 6.5.35 → **6.5.36**
+
+`cyrius.cyml`'s `[package].cyrius` is the source of truth; `lib/` re-synced with `cyrius lib sync
+--full` (108 files). ⚠ **`cyrius deps` alone was not enough** — it resolved without re-vendoring, and
+the build then warned that three bundled libs were behind the pin (`sigil` 3.12.9 vs 3.12.14,
+`sandhi` 1.9.10 vs 1.9.14, `sankoch` 2.7.8 vs 2.7.10). None is in kriya's dependency closure, but a
+vendored tree that does not match the pin is a claim that is not true.
+
+Both targets build; every suite green on the new pin before any other change.
+
+### Fixed — ⛔ the compiler watchlist said "zero instances" and there were four
+
+[`lessons.md`](docs/development/lessons.md) § The compiler watchlist exists to be re-run at every pin
+bump, and **M15d** — *`break` inside a `while` that declares a `var` is unreliable* — recorded:
+
+> *Status at v1.1.11*: **zero instances**. The four `break;` in `src/cmd/find.cyr` are in loops with
+> no `var` declaration.
+
+⛔ **That loop declares `var t` AND `var c0`, and breaks four times.** It is `find`'s start-path/
+expression split, it had been correct since 6.5.18, and it violates CLAUDE.md's hard rule outright.
+⚠ **The status had been established by reading rather than by running a detection** — which is the
+lesson inside the lesson, and it is now written down next to the entry.
+
+Converted to flag + continue. ⭐ **The detections are a script now** —
+`scripts/watchlist-scan.py`, covering M15a (stat buffers must be `[144]`), M15c (duplicate array
+declarations in one function) and M15d, exiting non-zero on a hit. ⚠ Its first run reported two false
+M15c hits from comment text (`# var st[48]`) — **strip comments before scanning**, which is also now
+in the entry.
+
+Results at 6.5.36: 176 declarations scanned, **0** off-size stat buffers, **3** duplicate arrays (the
+three known and cleared), **0** `break`-in-var-loop. M15a's premise re-measured and unchanged:
+`|&b - &a|` is 8 / 32 / 144 for `var x[4]` / `var x[32]` / `var x[144]`.
+
+### Changed — ⭐ `sleep` waits on a DEADLINE, not a countdown
+
+⛔ **The dangerous direction is SHORT, not long.** `sleep_ms` returns 0 whether `poll` timed out or
+came back early, so a loop that subtracts the chunk it *asked for* sleeps less than requested and
+exits 0. Demonstrated by mutation — a `sleep_ms` returning at 10% of its argument:
+
+| loop | `kriya sleep 2` |
+|---|---|
+| deadline (now) | **2.00 s** |
+| countdown (before) | **0.20 s** |
+
+⚠ **kriya was already exact before this change**, and that is the point: measured against GNU, both
+return in 2.00 s through a 1 s `SIGSTOP`, and both survive 36 hammered `SIGWINCH` / `SIGCONT` /
+`SIGURG` / `SIGCHLD` unchanged. But the correctness came from an **absence** — kriya installs no
+handler, so `poll` is never interrupted — not from a property of the code, and
+[architecture 002](docs/architecture/002-signal-handling-model.md)'s trigger table plans flag-based
+handlers for the destructive utilities.
+
+⭐ The deadline reads `clock_now_ms()`, which is `CLOCK_MONOTONIC`, so it does not move when the wall
+clock is stepped by NTP or `date -s` — which an epoch-based deadline would.
+
+### Fixed — ⚠ a one-in-eight flake in `smoke-ownership-xattr.sh`
+
+One full-suite run reported `109 passed, 1 failed`; seven re-runs were green. ⛔ **It is a
+same-second race by construction**: `--preserve=mode` deliberately does not carry timestamps, so the
+GNU copy and the kriya copy both get "now" — and the two `cp` calls straddling a second boundary make
+`%Y` differ on a difference that means nothing.
+
+The 1.6.1 `cp` fuzz already solved this by collapsing anything within a minute of now to `NOW`; this
+script compared the raw `%Y`. ⚠ **A preserved mtime is an OLD stamp** — the fixtures are stamped in
+the past — so the collapse only merges the case where the value carries no information. Proven by
+mutation: with `-p`'s timestamp restore removed, the normalised comparison still goes red in 7 cases.
+
+### ⭐ How it was checked
+
+⭐ **Two mutations on the sleep loop, both red**: reverting to a countdown under an early return
+(17 failures) and reading the deadline once instead of per iteration (7). ⭐ **Four new assertions**
+pin the timing directly — a `SIGSTOP` for half the duration must not extend it, and hammered
+`SIGWINCH`/`SIGCONT`/`SIGCHLD` must not shorten it — each bounded on **both** sides, because a
+one-sided bound cannot see the failure the countdown loop produces.
+
+### Release totals
+
+**5,360 smoke cases across 41 scripts** (from 5,356) — `smoke-sleep.sh` 48 → **52**. **453 unit**,
+18 POSIX; fuzz green under poison; four lints clean; `watchlist-scan.py` clean; both targets build;
+`vet` reports 56 deps.
+
+Binary 1,121,208 → **1,121,224** bytes on host, 1,117,016 → **1,117,048** on agnos.
+
 ## [1.6.6] - 2026-08-27 — one error line, one implementation of it, and `readlink` stops talking
 
 ### Breaking — ⛔ `readlink` is silent on failure; add `-v` to keep the diagnostics

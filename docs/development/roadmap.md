@@ -93,15 +93,6 @@ because they were sitting under `✅ CLOSED` headings with no version to ship in
 of them ended up cited from `src/` as `roadmap 1.5.4` and `roadmap 1.4.x`, versions that can never
 arrive. Every open item now names a release it can land in.
 
-- **1.6.7 — What `sleep` does when something interrupts it.** GNU's `sleep` is DEADLINE-based: a
-  process SIGSTOPped for a second still returns at its original deadline rather than sleeping an
-  extra second. kriya's `_sleep_total_ms` calls `sleep_ms` with RELATIVE durations in a loop, so it
-  is structurally at risk of re-sleeping after any interruption — and 1.6.3's chunking multiplied the
-  number of places that can happen. ⚠ Untested today because
-  [architecture 002](../architecture/002-signal-handling-model.md) classes `sleep` as bounded and
-  gives it no handler. Decide whether the deadline is part of the contract, then either compute one
-  from a monotonic clock or record the divergence.
-
 - **1.6.8 — `ls -C`, and `-w` as a width-only flag.**
     ⚠ **`ls` has no `-C`, and `-w` forces columns off a tty where GNU's does not.** 1.6.5 stopped
     `$COLUMNS` from choosing the output format (ADR 0017) and left `-w` alone, because `-w` is
@@ -406,6 +397,19 @@ converted at 1.3.3 as the worked example. **Pinned at 1.7.4.**
 ---
 
 ## Standing
+
+### The toolchain pin-bump checklist
+
+⛔ **Run these, do not recall them.** M15d was recorded as "zero instances" for five releases while
+four sat in `find.cyr`, because the status had been established by reading.
+
+1. `cyrius.cyml` `[package].cyrius` — the source of truth, never the CI YAML.
+2. **`cyrius lib sync --full`**, not `cyrius deps`. ⚠ `deps` resolves without re-vendoring, and the
+   build then warns that bundled libs are behind the pin.
+3. `python3 scripts/watchlist-scan.py` — M15a / M15c / M15d, exits non-zero on a hit.
+4. Re-measure M15a's premise: a two-local probe must still give `|&b - &a|` = 8 / 32 / 144.
+5. Build **both** targets, plus every `tests/*.tcyr` and `tests/*.fcyr` subset (M15e).
+6. Full smoke suite, both lints, `vet`, fuzz under poison.
 
 ### The compiler watchlist
 

@@ -23,6 +23,12 @@ fi
 
 PASS=0
 FAIL=0
+SKIP=0
+
+skip() {
+    SKIP=$((SKIP + 1))
+    echo "skip: $1"
+}
 
 expect_eq() {
     if [ "$2" = "$3" ]; then
@@ -207,8 +213,55 @@ for huge in 9999999999999999 4294968 4294967.4 4294968.5 8589935 200000000000d; 
     expect_eq "a huge duration actually sleeps ($huge)" "124" "$rc"
 done
 
+# --- 1.6.7: the sleep is a DEADLINE, not a countdown ----------------------
+# ⛔ THE DANGEROUS DIRECTION IS SHORT, NOT LONG. `sleep_ms` returns 0 whether
+# `poll` timed out or came back early, so a loop that subtracts the chunk it
+# ASKED for sleeps less than requested and exits 0. Demonstrated by mutation: a
+# `sleep_ms` returning at 10% of its argument leaves the deadline loop at 2.00 s
+# and the countdown loop at **0.20 s**.
+#
+# ⚠ kriya was already exact before this — but only because it installs NO
+# handler, so `poll` is never interrupted. That is an absence, not a property of
+# the code, and architecture 002 plans handlers for the destructive utilities.
+sig_elapsed() {   # sig_elapsed <signal> <count> <duration>
+    python3 - "$BIN" "$1" "$2" "$3" <<'PYEOF' 2>/dev/null || echo "unavailable"
+import os, signal, subprocess, sys, time
+b, sig, n, dur = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
+t0 = time.time()
+p = subprocess.Popen([b, "sleep", str(dur)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+if sig == "STOP":
+    time.sleep(dur * 0.25); os.kill(p.pid, signal.SIGSTOP)
+    time.sleep(dur * 0.5);  os.kill(p.pid, signal.SIGCONT)
+else:
+    end = t0 + dur * 0.9
+    while time.time() < end and p.poll() is None:
+        try: os.kill(p.pid, getattr(signal, "SIG" + sig))
+        except ProcessLookupError: break
+        time.sleep(dur / n)
+p.wait()
+print(int((time.time() - t0) * 1000))
+PYEOF
+}
+_se=$(sig_elapsed WINCH 20 1)
+if [ "$_se" = "unavailable" ]; then
+    skip "no python3 — the signal-timing cases are unverified"
+else
+    # ⛔ A SIGSTOP FOR HALF THE DURATION MUST NOT EXTEND IT. GNU is deadline-based
+    # and returns at its original deadline; a relative implementation returns late.
+    in_range "SIGSTOP mid-sleep does not extend it" 950 1400 "$(sig_elapsed STOP 1 1)"
+    # ⚠ And a hammered non-fatal signal must not SHORTEN it, which is the half a
+    # countdown loop gets wrong.
+    in_range "hammered SIGWINCH does not shorten it" 950 1400 "$_se"
+    in_range "...nor SIGCONT"                        950 1400 "$(sig_elapsed CONT 20 1)"
+    in_range "...nor SIGCHLD"                        950 1400 "$(sig_elapsed CHLD 20 1)"
+fi
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
-printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"
+if [ "$SKIP" -gt 0 ]; then
+    printf "%d passed, %d failed, %d skipped (%d total)\n" "$PASS" "$FAIL" "$SKIP" "$TOTAL"
+else
+    printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"
+fi
 if [ "$FAIL" -gt 0 ]; then exit 1; fi
 exit 0

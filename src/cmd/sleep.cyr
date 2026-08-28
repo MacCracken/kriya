@@ -26,13 +26,32 @@ enum SleepChunk {
 }
 
 # Sleep `total` milliseconds in chunks small enough for `poll`'s int timeout.
+# ⛔ A DEADLINE, NOT A COUNTDOWN, AND THE DIFFERENCE IS THE DANGEROUS DIRECTION.
+# The obvious loop subtracts the chunk it ASKED for; `sleep_ms` returns 0 whether
+# `poll` timed out or came back early, so an early return would make the loop
+# sleep LESS than requested and report success.
+#
+# ⚠ Measured against GNU at 1.6.7: kriya was already exact — 2.00 s through a 1 s
+# SIGSTOP, and 2.00 s under 36 hammered SIGWINCH / SIGCONT / SIGURG / SIGCHLD —
+# but only because kriya installs NO HANDLER, so `poll` is never interrupted.
+# That is an ABSENCE, not a property of this code, and architecture 002's trigger
+# table plans flag-based handlers for the destructive utilities.
+#
+# ⭐ A monotonic deadline makes it correct by construction: an early return costs
+# one extra loop iteration instead of the remainder of the sleep. `clock_now_ms`
+# is CLOCK_MONOTONIC, so the deadline does not move when the wall clock is
+# stepped by NTP or `date -s` — which an epoch-based one would.
 fn _sleep_total_ms(total: i64): i64 {
-    var left = total;
-    while (left > 0) {
-        var chunk = left;
-        if (chunk > SLEEP_CHUNK_MS) { chunk = SLEEP_CHUNK_MS; }
-        sleep_ms(chunk);
-        left = left - chunk;
+    var deadline = clock_now_ms() + total;
+    var going: i64 = 1;
+    while (going == 1) {
+        var left = deadline - clock_now_ms();
+        if (left < 1) { going = 0; }
+        else {
+            var chunk = left;
+            if (chunk > SLEEP_CHUNK_MS) { chunk = SLEEP_CHUNK_MS; }
+            sleep_ms(chunk);
+        }
     }
     return 0;
 }

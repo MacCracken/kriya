@@ -389,9 +389,16 @@ different arms of an `if`/`elif`/`else` collide rather than shadow.
 
 **M15d — `break` inside a `while` that declares a `var` is unreliable.**
 Use a flag plus `continue`, per CLAUDE.md.
-- *Detection*: for each `while` body containing a `var` declaration, flag any `break;`.
-- *Status at v1.1.11*: **zero instances**. The four `break;` in `src/cmd/find.cyr` are in loops with no
-  `var` declaration.
+- *Detection*: for each `while` body containing a `var` declaration, flag any `break;`. ⚠ **Strip
+  comments first** — an explanatory `# var st[48]` reads as a declaration and produces false hits.
+- ⛔ *Status at 6.5.36*: **the recorded status was wrong, and the pin bump is what caught it.** This
+  entry said "zero instances. The four `break;` in `src/cmd/find.cyr` are in loops with no `var`
+  declaration" — that loop declares `var t` AND `var c0`, and breaks four times. It had been correct
+  since 6.5.18 and the detection had evidently been run by eye rather than mechanically. Converted to
+  flag + continue at the 6.5.36 bump; the scan now reports zero for real.
+- ⭐ *The lesson inside the lesson*: **a watchlist entry whose status was established by reading is
+  not a status.** Every detection here should be a script you can run, and the run should be part of
+  the pin-bump checklist rather than a memory of having looked.
 
 **M15e — Include order in `src/main.cyr` is load-bearing, and so is the dependency direction.**
 A global must be declared before its use, so the 46-line include list is a dependency order, not a

@@ -1189,15 +1189,28 @@ fn cmd_find(start: i64): i64 {
     # Split start paths vs expression. Start paths are leading argv
     # tokens that don't look like predicates / operators. Once we hit
     # an arg starting with `-`, `!`, or `(`, the expression begins.
+    # ⛔ FLAG + CONTINUE, NOT `break` — this loop declares `var t` and `var c0`,
+    # and CLAUDE.md's hard rule is that `break` inside a `while` that declares a
+    # `var` is unreliable: Cyrius hoists the declaration to the enclosing loop,
+    # and whether the exit path is correct depends on frame layout. ⚠ It WORKED
+    # at every pin up to 6.5.36 — measured — which is exactly why it survived:
+    # the watchlist recorded "zero instances" while four sat here, because the
+    # detection had been run by eye rather than mechanically.
     var expr_start: i64 = head;
-    while (expr_start < _f_argv_n) {
-        var t = load64(_f_argv_flat + expr_start * 8);
-        var c0 = load8(t);
-        if (c0 == 45) { break; }
-        if (c0 == 33 && load8(t + 1) == 0) { break; }
-        if (c0 == 40 && load8(t + 1) == 0) { break; }
-        if (c0 == 41 && load8(t + 1) == 0) { break; }
-        expr_start = expr_start + 1;
+    var scanning: i64 = 1;
+    while (scanning == 1) {
+        if (expr_start >= _f_argv_n) { scanning = 0; }
+        else {
+            var t = load64(_f_argv_flat + expr_start * 8);
+            var c0 = load8(t);
+            var stop: i64 = 0;
+            if (c0 == 45) { stop = 1; }
+            if (c0 == 33) { if (load8(t + 1) == 0) { stop = 1; } }
+            if (c0 == 40) { if (load8(t + 1) == 0) { stop = 1; } }
+            if (c0 == 41) { if (load8(t + 1) == 0) { stop = 1; } }
+            if (stop == 1) { scanning = 0; }
+            else { expr_start = expr_start + 1; }
+        }
     }
 
     var start_paths = vec_new();

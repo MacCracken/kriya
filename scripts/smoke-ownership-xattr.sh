@@ -67,7 +67,29 @@ skip() {
 }
 
 # owner/group/mode/mtime of a path, as one comparable string.
-meta() { stat -c '%u:%g %a %Y' "$1" 2>/dev/null; }
+#
+# ⛔ AN UNPRESERVED MTIME IS "NOW", AND THE TWO IMPLEMENTATIONS RUN SECONDS
+# APART. `--preserve=mode` deliberately does not carry timestamps, so `n_k` and
+# `n_g` both get the current second — and when the two `cp` calls straddle a
+# second boundary the comparison fails on a difference that means nothing.
+# ⚠ Caught as a ONE-IN-EIGHT FLAKE at 1.6.7: one full-suite run reported
+# `109 passed, 1 failed` and seven re-runs were green. The 1.6.1 `cp` fuzz
+# already solved this by collapsing anything within a minute of now to "NOW";
+# this script compared the raw `%Y` instead.
+#
+# ⚠ A preserved mtime is an OLD stamp — the fixtures are stamped in the past —
+# so collapsing the near-now case only merges the unpreserved one, which is
+# exactly the case where the value carries no information.
+meta() {
+    _m=$(stat -c '%u:%g %a %Y' "$1" 2>/dev/null) || return
+    _mt=${_m##* }
+    _now=$(date +%s)
+    if [ $((_now - _mt)) -lt 60 ] && [ $((_now - _mt)) -gt -60 ]; then
+        printf '%s NOW' "${_m% *}"
+    else
+        printf '%s' "$_m"
+    fi
+}
 
 # Sorted attribute names, or the empty string. ⚠ python3 rather than getfattr:
 # it is always present, it needs no parsing, and it reports an unsupported
