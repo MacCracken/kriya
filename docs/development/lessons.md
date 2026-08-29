@@ -32,6 +32,19 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   `cp -R -f` plus an `rm -r` and inherits nothing. **Where one arm is implemented by a syscall and
   the other by hand, list what the syscall was enforcing.**
 
+- ⛔ *A fuzz varies the axes you thought of, and is blind along the rest.* `ls`'s format fuzz drew
+  name LENGTHS per entry — the axis that moves column boundaries on and off a tab stop — and capped
+  the entry COUNT at 26. Both are inputs to the layout, and the second one was fixed. It reported
+  0/560 against a column-fit model that gets a whole column wrong on 52 short names; widened to 120
+  entries it reports 15/560 against the same build. **List the inputs the code reads, then check
+  which of them the generator actually moves.** ⚠ The tell is a generator whose comment explains
+  why ONE variable is varied: that comment is also the record of what was not considered.
+
+- ⛔ *Three plausible models can pass every case you would think to write.* GNU's column separator
+  had three candidate rules; each matched every hand-built fixture, and only a 560-case randomised
+  differential separated them. **When a rule is inferred rather than read, hand-written cases
+  confirm the inference instead of testing it** — the cases and the model come from the same guess.
+
 - ⛔ *Widening a fuzz's fixtures finds what the fixtures never contained.* Adding ACLs found the
   ACL gap in one run; adding setuid/setgid/sticky modes found a plain-`cp` divergence older than
   the release. **The corpus is the coverage.**
@@ -47,6 +60,15 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   it for mount namespaces; ownership needs the user-namespace half. It makes the
   ownership-SUCCEEDS path testable on an unprivileged runner, which is the half that no amount of
   care with `id` shims can reach.
+
+- ⛔ *A fixture whose entries are all short cannot see a rule about width.* Three mutations survived
+  1.6.8's first pass — a tab-stop off-by-one, a wrap boundary, and the default terminal width — and
+  all three survived for one reason: every existing `ls` fixture holds 2-character names, and at
+  that size the right answer and the wrong one agree. ⚠ **Fourth release running that the first
+  mutation pass found holes in the TESTS rather than defects in the code.** The fixtures added to
+  kill them each name the mutant they kill, because a fixture whose purpose is not written down
+  gets "simplified" back to the shape that killed nothing — ⚠ one of them did exactly that in
+  draft, holding 3-character names at width 12, which reads like a boundary case and is not one.
 
 - ⚠ *The "simulated root" release condition shims `id` to answer 0 and cannot make a chown
   succeed.* Guarding a privileged assertion on `[ "$(id -u)" = 0 ]` would skip it in exactly the

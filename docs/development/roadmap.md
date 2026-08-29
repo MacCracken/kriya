@@ -60,7 +60,7 @@ Two rules hold across the arcs, both learned the hard way:
 
 | Arc | Theme | Enabler | Next up |
 |---|---|---|---|
-| **1.6.x** | File-op completeness, then the parity leftovers | inode-set ✅, xattr API ✅, backup helper ✅, one error line ✅ | **1.6.7** — `sleep` under interruption |
+| **1.6.x** | File-op completeness, then the parity leftovers | inode-set ✅, xattr API ✅, backup helper ✅, one error line ✅, `ls` format group ✅ | **1.6.9** — `cp` mode-restore parity |
 | **1.7.x** | Traversal, exec & FS reporting | spawn helper ✅, ARG_MAX chunking | ready |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | ready |
 | **1.9.x** | Performance | niyama literal fast path (upstream, partial) | partly gated |
@@ -93,13 +93,6 @@ because they were sitting under `✅ CLOSED` headings with no version to ship in
 of them ended up cited from `src/` as `roadmap 1.5.4` and `roadmap 1.4.x`, versions that can never
 arrive. Every open item now names a release it can land in.
 
-- **1.6.8 — `ls -C`, and `-w` as a width-only flag.**
-    ⚠ **`ls` has no `-C`, and `-w` forces columns off a tty where GNU's does not.** 1.6.5 stopped
-    `$COLUMNS` from choosing the output format (ADR 0017) and left `-w` alone, because `-w` is
-    currently the only way to ask for columns off a tty and removing that without adding `-C` would
-    delete the capability. Add `-C`, then make `-w` a width-only flag as GNU has it. The divergence
-    is asserted in `smoke-ls.sh` today, so the change is a test edit.
-
 - **1.6.9 — `cp` mode-restore parity.** GNU withholds the group and other WRITE bits on directories
   during a recursive copy and adds them back unconditionally at the end; kriya has no such restore,
   so a `cp -R` into a directory tree can leave modes that GNU would have repaired. ⚠ Measured and
@@ -111,10 +104,29 @@ arrive. Every open item now names a release it can land in.
   - **`ls -d` with no operand lists the directory's CONTENTS**; GNU lists `.`. Pre-existing (confirmed
     against the 1.4.4 binary), small and clearly wrong. ⚠ It needs a test that would have caught it,
     not just the fix.
-  - ⛔ **Multi-column padding uses spaces where GNU uses a TAB** — the LAST known `ls` output
-    divergence on a terminal. Column POSITIONS are identical, so only a byte-exact tty comparison sees
-    it, which is why every piped smoke comparison passed. ⚠ GNU's own rule switches on whether colour
-    is active, so the two interact.
+  - ⛔ **`ls -l` omits the `total N` line entirely.** GNU prints `total 8` before a directory's
+    entries — 1K blocks, and absent for a plain FILE operand. Found at 1.6.8 while asserting the
+    format group; a script doing `ls -l | head -1` or counting lines gets a different answer.
+  - ⚠ **The `-l` mtime format differs**: GNU writes `Aug 28 20:53` (and `Mon DD  YYYY` past six
+    months), kriya writes `2026-08-29 03:53`. Distinct from
+    [ADR 0007](../adr/0007-date-utc-only-at-v0-7-0.md)'s UTC-only decision, which is about the
+    VALUE; this is the rendering. Decide whether to match GNU's or keep ISO-8601 — and if the
+    latter, record it, because it is currently neither chosen nor documented.
+  - ✅ **Multi-column padding** — DONE at 1.6.8, when `-C`/`-x`/`-m` landed and the whole format
+    group went byte-exact. The rule turned out to be GNU's `indent()`: a tab when
+    `to / 8 > (from + 1) / 8`. ⚠ The colour interaction this entry warned about does not exist —
+    `--color=always` output is byte-identical.
+  - **GNU WARNS on an invalid `$COLUMNS` and kriya is silent.** `ls: ignoring invalid width in
+    environment variable COLUMNS: 'abc'` — the fallback to 80 already matches; only the diagnostic is
+    missing. ⚠ It is a NEW stderr shape (not the operand/message pair), so it has to answer to
+    [architecture 001](../architecture/001-one-write-per-error-line.md) before it lands.
+  - **`-g`, `-o`, `--full-time` and `--dired` are unimplemented** (`-n` shipped at 1.6.8, and its
+    format-group membership with it). All four imply LONG format and behave as ordinary last-wins
+    members of the group (measured), so `_ls_scan_format` already has the shape to hold them.
+    ⚠ `-g` omits the OWNER column and `-o` omits the GROUP one — they are not synonyms, and the
+    difference is invisible unless owner != group.
+  - **`-T`/`--tabsize` is unimplemented.** The column separator hard-codes 8. ⚠ `-T 0` disables tab
+    packing entirely, which is the same switch `-w 0` already flips internally.
   - **`no=` positions its colour prefix at the START OF THE LINE** — before the `-l` columns and before
     the `-i` inode — where kriya emits it before the NAME. 140 of 2,500 pathological comparisons and
     **zero** on realistic input, because a real `dircolors -b` never emits `no=`. Closing it means

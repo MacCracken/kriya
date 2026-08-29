@@ -790,6 +790,13 @@ fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
 #
 # ⚠ A value-taking option's VALUE is skipped, so `ls -w -t` cannot be read as a
 # `-t` that the parser consumed as the width.
+# ⭐ THE PARSER'S OWN VIEW OF ARGV, for callers that need ORDER. Clusters are
+# already split, long forms normalised, `--` honoured and permutation resolved —
+# which is why a scanner built on this sees `-lC` while one built on the raw argv
+# does not. `ls` uses it to resolve its last-wins format group.
+fn kriya_expanded_argv(): i64 { return _kriya_expanded; }
+fn kriya_expanded_argc(): i64 { return _kriya_expanded_n; }
+
 fn kriya_short_seq(spec, short_ch): i64 {
     var av = _kriya_expanded;
     var n  = _kriya_expanded_n;

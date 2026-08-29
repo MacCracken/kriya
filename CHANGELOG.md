@@ -6,6 +6,196 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.8] - 2026-08-28 — `ls` gets the rest of its formats, the layout stops being quadratic, and the width stops being a guess
+
+### Added — `-C`, `-x`, `-m` and `--format=WORD`
+
+`ls` had one multi-column layout and no way to ask for it. It now has the full GNU format group:
+
+| Selector | Format |
+|---|---|
+| `-1`, `--format=single-column` | one name per line |
+| `-C`, `--format=vertical` | columns, filled DOWN then across |
+| `-x`, `--format=across` | columns, filled ACROSS then down |
+| `-m`, `--format=commas` | comma-separated, wrapped to the width |
+| `-l`, `-n`, `--format=long`, `--format=verbose` | long listing |
+
+⚠ **The selectors are LAST-WINS and the walk is over the EXPANDED argv**, not over the flag table.
+The table keeps a bool per flag with no ordering, so `-x -m` and `-m -x` would be indistinguishable
+from it — and a walk over the raw argv would miss `-lC`, where the cluster has already been split.
+
+⛔ **`-1` is the ONE conditional member**, and its long spelling is not. Every other selector
+overwrites the format unconditionally; `-1` sets one-per-line only when the current format is not
+LONG, so it never overrides `-l` in either order — while **`--format=single-column` does**. Two
+spellings of the same request that are not equivalent, and both are pinned. ⭐ The rule composes:
+`-l -C -1` is single (the `-C` cleared long, so `-1` applies) and `-C -l -1` is long.
+
+⚠ `--format=` **requires its value and has no short form of its own**, per
+[ADR 0002](docs/adr/0002-argument-parsing-is-agent-safe.md) rule 3 — the same split `tee` got at
+1.6.4 and `--backup` at 1.6.5. There is **no prefix matching**: GNU accepts `--format=vert`, kriya
+takes the six exact spellings and refuses the rest by name.
+
+### Changed — ⛔ BREAKING: `-w` sets a WIDTH; it no longer forces columns
+
+`ls -w 200 | cat` was multi-column here and one-per-line under GNU. `-C` is what asks for columns;
+`-w` only says how wide they may be. This was left alone deliberately at 1.6.5 — removing it before
+`-C` existed would have deleted the only way to get columns off a tty — and 1.6.5's note said so.
+
+⭐ **[ADR 0019](docs/adr/0019-the-line-width-is-a-number-not-a-format.md) states the rule the whole
+release obeys**: `-w`, `$COLUMNS` and the `TIOCGWINSZ` ioctl each supply a NUMBER, and none of them
+chooses a format —
+[ADR 0017](docs/adr/0017-environment-variables-configure-features-the-caller-turned-on.md) applied to
+a flag as well as to a variable. ⚠ **`$COLUMNS` is no longer gated on `isatty`**: it is honoured
+wherever it is set, which is safe precisely because it can no longer turn columns on.
+
+⚠ **Off a tty, with no `-w` and no `$COLUMNS`, the width is 80 — not unlimited.** Measured: GNU's
+`ls -C | cat` wraps at 80.
+
+### Fixed — ⛔ `-n` implied long OUTSIDE the last-wins group
+
+`ls -n -C` is vertical under GNU and was long here. `-n` set the long format directly, after the
+selector walk had already decided, so a later `-C` could not clear it. ⚠ **`-n` is a member of the
+format group, not a modifier of one** — it takes its turn like `-l`, and the numeric-uid column is
+all it owns now. The same held for `--numeric-uid-gid`, and `-1`'s conditional rule composes with it
+correctly: `-n -C -1` is single, `-n -1` is long.
+
+### Fixed — ⛔ `$COLUMNS` beat the live terminal, and it is the other way round
+
+Measured on a pty: `stty cols 40; COLUMNS=20 ls -C` is **eight columns** under GNU — the terminal's
+real width — and was four here. The precedence is `-w` > **ioctl** > `$COLUMNS` > 80. A live terminal
+knows its own size; an exported `COLUMNS` is a guess that survives a resize, so the variable is the
+fallback for when the ioctl cannot answer, which is exactly when it is the only source there is.
+
+⚠ **Still ADR 0017 working, not a retreat from it**: `$COLUMNS` supplies a WIDTH for a format the
+command line already chose. Losing to a better source of the same number does not change what it is
+allowed to do. ⚠ A tty reporting **zero** columns still falls back to `$COLUMNS`, which is asserted
+separately — it is the one case where the ioctl exists and cannot answer.
+
+⚠ **Only a pty can see any of this**, so these four assertions sit behind the same `script(1)` probe
+`smoke-ls.sh` already used for quoting; without util-linux they are skipped with a note rather than
+silently passing.
+
+### Fixed — ⛔ `--width 32` failed, with a diagnostic naming `--format`
+
+Two options take a separated value and **one shared "skip the next token" flag** decided what to do
+with it, so `--width 32` sent `32` through the format parser:
+
+```
+kriya ls: error: unknown --format value (want vertical, across, ...)
+```
+
+⚠ A valid width, refused by the name of an option the caller never typed. All four spellings
+(`-w 32`, `-w32`, `--width 32`, `--width=32`) are now asserted to agree with each other and with GNU.
+
+### Fixed — ⛔ `COLUMNS=0` means unlimited and `atoi` could not say so
+
+`atoi` returns 0 for `0`, for the empty string and for `abc` alike, so the one spelling that means
+"no limit" was indistinguishable from the two that mean "unusable" and all three fell through to 80.
+Measured: 40 names under `COLUMNS=0 ls -C` are **one line** for GNU and were three here.
+`kriya_parse_nonneg_int` makes the distinction. ⚠ An invalid `$COLUMNS` still falls back to 80 as
+GNU's does; GNU additionally WARNS and kriya is silent — a diagnostic-only gap, filed at roadmap
+1.6.10 because a new stderr shape has to answer to architecture 001 first.
+
+### Fixed — ⛔ `ls -w -5` printed a listing and exited 0
+
+GNU exits 2 with *invalid line width*. ⚠ The same missing guard let the i64 parse **wrap**:
+`-w 9223372036854775808` came back negative and collapsed the layout, which made the flag
+**non-monotonic** — a larger number giving a narrower listing. Rejecting everything below zero covers
+both, because no legitimate width is.
+
+⚠ **Two deliberate divergences remain, and both are refusals rather than silent substitutions.** GNU
+parses the width with a base-0, unsigned, saturating reader: it takes `0x20` as 32, **`040` as 32**,
+and clamps past 2^64 instead of refusing. kriya reads decimal only — `-w 040` is FORTY — and exits 2
+on what it cannot represent. ⭐ It never silently uses a different width than the one written, which
+is precisely what `040` does under GNU.
+
+### Fixed — ⛔ the column layout was O(n²), and `-x` paid it in full
+
+Each candidate column count ran an O(n) scan and the candidate loop was uncapped at `c <= n`.
+
+⚠ **`-C` hid it.** The degenerate-column skip — a vertical-fill property, and one that must NOT
+apply to `-x` — prunes almost every large candidate; `-x` disables it by design, so every candidate
+ran.
+
+Measured on 20,000 entries at `-w 80`, `-x`:
+
+| n | before | after |
+|---|---|---|
+| 2,500 | 81 ms | — |
+| 5,000 | 304 ms | — |
+| 10,000 | 1,179 ms | — |
+| 20,000 | **4,628 ms** | **73 ms** |
+
+⭐ **63× at 20,000 entries**, against GNU's 16 ms, and the growth is linear rather than quadratic —
+the 4× per doubling above is textbook. ⭐ **The cap is exact, not a heuristic**: every column
+reserves at least `MIN_COLUMN_WIDTH` (3), and a layout is valid only when its total is strictly less
+than the width, so no candidate with `3c >= width` can ever win. Under an unlimited width (`-w 0`)
+there is nothing to search at all — every candidate fits, so the widest wins outright, which is why
+GNU prints ONE LINE for both `-C -w 0` and `-x -w 0`.
+
+### Fixed — ⛔ the column separator was spaces where GNU emits a TAB
+
+Column POSITIONS were already identical, so every whitespace-normalising comparison passed over it.
+⚠ **Three plausible models of GNU's rule each passed every hand-written case**, and only a
+560-case randomised differential separated them. The rule is GNU's `indent()`: a tab when
+`to / 8 > (from + 1) / 8`, spaces otherwise.
+
+### Fixed — ⛔ the column-fit test was arithmetic and GNU's is not
+
+52 one-character names at `-x -w 80` are **27 columns under GNU and were 26 here** — a whole column,
+not a rounding difference. GNU seeds every column at 3 and re-tests the fit ONLY when a column grows
+past that seed, so a layout whose columns all fit in 3 is never re-tested and stays valid even
+though `3c` may exceed the width. ⭐ The seed over-charges the last column by its absent 2-space
+gutter, and skipping the re-test is exactly what cancels it: the row really is 79 columns wide, not
+the 81 the running length claims. ⚠ **The candidate cap rounds UP** for the same reason — 40
+one-character names give 25 columns at `-w 75` and 26 at `-w 76`, where a floor says 25 for both.
+
+⚠ **The fuzz missed this for one reason: it capped fixtures at 26 entries.** Widened to 120, plus a
+uniform-short-name mode that keeps every column inside the 3-wide seed, it reports **15/560** against
+the old model. Name LENGTH was already a fuzz variable; name COUNT was not.
+
+### Added — `scripts/difffuzz-ls-format.py`
+
+The differential harness is committed rather than discarded. ⚠ **Not part of `cyrius test` or
+`scripts/fuzz.sh`** — those run kriya against itself under the poisoned allocator; this runs it
+against the host's GNU binary, so it is only as authoritative as the coreutils installed and wants a
+container run too. ⭐ It earned its keep twice in one release: it derived the separator rule, and it
+caught the fit model on the pass that widened its entry counts.
+
+### Tests
+
+⭐ **Three mutations survived the first pass and ALL THREE WERE TEST GAPS** — the tab rule's
+off-by-one, the commas wrap boundary, and the off-a-tty default width all stayed green, because every
+existing fixture holds 2-character names and at that size the right answer and the wrong one agree.
+⚠ **Fourth release running that the fixture, not the code, needed fixing first.** Four fixtures now
+exist for no other purpose than to kill a specific mutant, each naming the one it kills:
+
+- `gapw` — 7-character names, so the pad straddles a tab stop without reaching the next one
+- `wrapm` — 2-character names at `-w 10`; ⚠ 3-character names at `-w 12` **agree**, and that is what
+  this fixture held first, reading like a boundary case and killing nothing
+- `widew` — 19-character names, where 80 and any larger guess disagree on the column count
+- `tiny` — 52 one-character names, for the fit test and the cap's rounding
+
+⭐ **5,466 smoke across 41 scripts** (from 5,360; `smoke-ls.sh` 131 → **219**), **453 unit**, 18
+POSIX; **3,920 differential comparisons across seven seeds, 0 divergences**; fuzz green under poison;
+four lints clean; `watchlist-scan.py` clean; both targets build; `vet` 56 deps.
+
+⭐ **Sixteen mutations die**: the fit model, the cap's rounding, a tighter cap, a gutter on the last
+column, the tab rule, the commas boundary, the default width, the unlimited-width shortcut, the
+shared skip flag, `COLUMNS=0`, the negative-width guard, `$COLUMNS` ahead of the ioctl, an
+unconditional `-1`, a conditional `--format=single-column`, and `-n` leaving the group by either
+spelling. ⚠ Three of the conditional-`-1`
+assertions had to CLASSIFY the format rather than compare `-l`'s bytes, because those still differ
+from GNU's for two pre-existing reasons out of scope here (no `total N` line, a different mtime
+rendering) — both newly filed at roadmap 1.6.10.
+
+⭐ Verified in the `ubuntu:24.04` container (coreutils **9.4**) as a non-root user — 39 of 41 scripts
+green, 3,026 cases, `smoke-ls.sh` **219/219**. ⚠ **The two exceptions need `python3`, which the image
+does not have** (`smoke-help-json.sh`, `smoke-list.sh`); Docker cannot reach the network on this box
+to add it, so they are covered on the host and in CI only.
+
+Binary 1,121,224 → **1,125,912** bytes host, 1,117,048 → **1,121,736** agnos.
+
 ## [1.6.7] - 2026-08-28 — toolchain pin 6.5.36, a sleep that is a deadline, and a watchlist that was wrong
 
 ### Changed — toolchain pin 6.5.35 → **6.5.36**
