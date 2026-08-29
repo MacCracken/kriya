@@ -60,7 +60,7 @@ Two rules hold across the arcs, both learned the hard way:
 
 | Arc | Theme | Enabler | Next up |
 |---|---|---|---|
-| **1.6.x** | File-op completeness, then the parity leftovers | inode-set ✅, xattr API ✅, backup helper ✅, one error line ✅, `ls` format group ✅ | **1.6.9** — `cp` mode-restore parity |
+| **1.6.x** | File-op completeness, then the parity leftovers | inode-set ✅, xattr API ✅, backup helper ✅, one error line ✅, `ls` format group ✅, `cp` mode protocol ✅ | **1.6.10** — `ls` / `stat` output fidelity |
 | **1.7.x** | Traversal, exec & FS reporting | spawn helper ✅, ARG_MAX chunking | ready |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | ready |
 | **1.9.x** | Performance | niyama literal fast path (upstream, partial) | partly gated |
@@ -93,11 +93,41 @@ because they were sitting under `✅ CLOSED` headings with no version to ship in
 of them ended up cited from `src/` as `roadmap 1.5.4` and `roadmap 1.4.x`, versions that can never
 arrive. Every open item now names a release it can land in.
 
-- **1.6.9 — `cp` mode-restore parity.** GNU withholds the group and other WRITE bits on directories
-  during a recursive copy and adds them back unconditionally at the end; kriya has no such restore,
-  so a `cp -R` into a directory tree can leave modes that GNU would have repaired. ⚠ Measured and
-  documented at `src/cmd/cp.cyr`'s `_cp_create_mode`, which points here. Small, and it interacts with
-  `--preserve=mode` — decide the ordering before writing it.
+- **1.6.11 — `cp` completeness, from the 1.6.9 audit.** All measured against GNU while fixing the
+  mode protocol, all out of scope there because each is a different mechanism:
+  - ⛔ **`cp -R` cannot descend into a pre-existing destination subdirectory that has write and
+    search but no READ** (0300, 0311, 0333). kriya opens every destination directory
+    `O_RDONLY|O_DIRECTORY`, which needs the read bit; GNU only ever creates entries in it and needs
+    write+search. Measured: GNU exits 0 with the file copied, kriya exits 1 with nothing copied.
+    ⚠ The fix is an open-flags change on the hottest path in `cp -R` (an `O_PATH` descriptor is a
+    valid `dirfd` but cannot be `fchmod`ed), so it wants its own release and its own measurement.
+  - **`cp -f` has no unlink-and-retry.** GNU's `--force` removes a destination it cannot open for
+    writing and creates it afresh; kriya reports EACCES and exits 1. Measured on a mode-0400
+    destination: GNU exits 0, kriya exits 1. ⚠ kriya's `-f` already unlinks an existing SYMLINK, so
+    the gap is specifically the EACCES-on-open path for a regular file. ⚠ It DELETES a file the
+    caller could not otherwise write — that deserves an ADR, not just a patch.
+  - **`-a`, `--preserve=all` and `--no-preserve=` are unimplemented** — all three are refused by
+    name, which is the right failure, but `-a` is the spelling most scripts reach for.
+
+- **1.6.12 — `head` / `tail` count forms, from the 1.6.9 audit.**
+  - **Negative counts are refused**: `head -n -5` (all but the last five lines) and `head -c -3` are
+    GNU-supported and kriya requires a non-negative integer. ⚠ The 1.6.9 expander fix means the
+    diagnostic is now the right one — it names the count rather than blaming a trailing option — so
+    what is left is the feature itself.
+  - **`tail -n +N`** (start FROM line N) is unimplemented, same message.
+  - **The obsolescent unit suffix `-5c` / `-5l`** is refused where GNU accepts it.
+  - ⚠ All three are refusals, never wrong answers, which is why none of them blocked 1.6.9.
+
+- **1.6.13 — the leftovers nothing else claims.**
+  - **`xargs` treats an unrecognised numeric short as the COMMAND.** `echo hi | xargs -5 echo` is
+    *invalid option* / exit 1 under GNU and `-5: command not found` / **exit 127** here. ⚠ 127 is
+    "command not found", so a caller cannot tell a typo'd flag from a missing binary.
+  - ⚠ **`src/lib/env.cyr` redefines `_env_len` and `_env_load`**, which `lib/io.cyr` already
+    defines — the compiler warns *duplicate symbol … last definition wins* on every build. Nothing
+    is observably broken, but "last definition wins" is not a design.
+  - **Four doc blocks in `src/lib/args.cyr` sit 100–190 lines above the functions they document**
+    (`kriya_parse_nonneg_int`, `kriya_argv_collect`, `kriya_parse_octal_mode`). Pre-existing, not
+    merge damage — confirmed against the merge base.
 
 - **1.6.10 — `ls` / `stat` output fidelity** (the leftovers, roughly in priority order). Small,
   well-bounded, and none of it blocks another arc:

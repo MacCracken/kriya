@@ -229,13 +229,31 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
         oi = 1;
     }
     var passthrough: i64 = 0;      # set once `--` is seen
+    # ⛔ THE TOKEN AFTER A SEPARATED VALUE-TAKING OPTION IS A VALUE, NOT AN
+    # OPTION, and the expander used to interpret it anyway. `realpath
+    # --relative-base -Ps dlink` names a DIRECTORY called `-Ps`; the cluster
+    # splitter turned it into `-P -s`, realpath's own scan skipped exactly one
+    # token after the long option, and the orphaned `-s` switched the resolution
+    # mode. GNU prints the resolved path; kriya printed the symlink.
+    #
+    # ⛔ AND IT COULD FABRICATE ONE. `realpath --relative-base -em nodir/leaf`
+    # leaked an `-m`, so a path with a missing middle component came back as a
+    # confident absolute path at EXIT 0 where GNU exits 1 — a wrong answer that
+    # reports success, on a value the user chose.
+    #
+    # ⚠ Fixed HERE rather than in realpath, because the leak is the expander's:
+    # every utility with a value-taking option had it, and a per-utility scan
+    # that skips "one token" cannot be right when the expander has already turned
+    # that one token into two.
+    var pass_one: i64 = 0;
     var i: i64 = 1;
     while (i < n) {
         var tok  = load64(av + i * 8);
         var tlen = strlen(tok);
         var handled: i64 = 0;
+        var want_value: i64 = 0;
 
-        if (passthrough == 0) {
+        if (passthrough + pass_one == 0) {
             # `--` terminator: copy it and stop interpreting.
             if (tlen == 2) {
                 if (load8(tok) == 45) {
@@ -296,6 +314,41 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
                         }
                     }
                 }
+                # ⛔ A TWO-BYTE SHORT NEVER REACHES THE CLUSTER SPLITTER — that
+                # branch is guarded by `tlen > 2` — so `-n` was the one spelling
+                # of a value-taking option whose value stayed interpreted. It is
+                # also the COMMON one: `head -n -5` reported *invalid trailing
+                # option -- 5* about the count it was given, blaming the value
+                # for being an option, which is the same mistake `--width 32`
+                # made in the other direction.
+                if (handled == 0) {
+                    if (tlen == 2) {
+                        if (load8(tok) == 45) {
+                            if (load8(tok + 1) != 45) {
+                                if (kriya_short_type(spec, load8(tok + 1)) > 0) { want_value = 1; }
+                            }
+                        }
+                    }
+                }
+                # A bare `--name` (no `=`) that takes a value claims the next
+                # token. The attached spelling was already consumed above.
+                if (handled == 0) {
+                    if (tlen > 2) {
+                        if (load8(tok) == 45) {
+                            if (load8(tok + 1) == 45) {
+                                var has_eq: i64 = 0;
+                                var q: i64 = 2;
+                                while (q < tlen) {
+                                    if (load8(tok + q) == 61) { has_eq = 1; }
+                                    q = q + 1;
+                                }
+                                if (has_eq == 0) {
+                                    if (kriya_long_type(spec, tok + 2, tlen - 2) > 0) { want_value = 1; }
+                                }
+                            }
+                        }
+                    }
+                }
                 if (tlen > 2) {
                     if (handled == 0) {
                     if (load8(tok) == 45) {
@@ -325,6 +378,11 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
                                             if (k + 1 < tlen) {
                                                 store64(out + oi * 8, tok + k + 1);
                                                 oi = oi + 1;
+                                            } else {
+                                                # Nothing attached: the value is the NEXT
+                                                # token, and it is a value whatever it looks
+                                                # like — `head -n -5`, `realpath -e -s`.
+                                                want_value = 1;
                                             }
                                             stop = 1;
                                         }
@@ -381,6 +439,9 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
             store64(out + oi * 8, tok);
             oi = oi + 1;
         }
+        # ⚠ Cleared by assignment rather than by a reset: a value token sets no
+        # `want_value` of its own, so one pass-through never chains into a second.
+        pass_one = want_value;
         i = i + 1;
     }
     return oi;

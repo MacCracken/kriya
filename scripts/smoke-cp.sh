@@ -298,6 +298,51 @@ expect_exit "an abbreviation is not a control name" 2 "$BIN" cp --backup=num src
 rc=0; ( cd bk && env -u SIMPLE_BACKUP_SUFFIX VERSION_CONTROL=numb "$BIN" cp -b src dst >/dev/null 2>&1 ) || rc=$?
 expect_eq "...in the variable either" "2" "$rc"
 
+# --- 1.6.9: the ownership window on a regular file ---------------------------
+#
+# ⛔ UNTIL THE `fchown` LANDS, THE DESTINATION IS OWNED BY WHOEVER RAN `cp`. So a
+# 0777 source copied with `-p` used to spend its entire write group- and
+# other-readable under an owner it is not supposed to end up with. GNU creates
+# the file with the group and other triads stripped and chmods up at the end.
+#
+# ⚠ MEASURED, and the condition is narrower than it looks — polling `stat`
+# against a 300 MB copy at umask 000 from a source at 0777:
+#
+#     cp big out                       during 0777   final 0777
+#     cp -p big out                    during 0700   final 0777
+#     cp --preserve=mode big out       during 0777   final 0777
+#     cp --preserve=ownership big out  during 0700   final 0777
+#
+# The withhold is for OWNERSHIP and for nothing else.
+#
+# ⚠ THE ASSERTIONS BELOW ARE ON THE FINAL MODE, NOT ON THE WINDOW. The window is
+# a race by construction and any test of it is timing-dependent; the final mode
+# is not, and it is what a withhold-without-a-restore breaks — which is the
+# realistic way to get this wrong. A `--preserve=ownership` copy that ends at
+# 0700 instead of 0777 is exactly that bug, and this goes red on it.
+cpw_clean() { chmod -R u+rwX cpw 2>/dev/null || true; rm -rf cpw; }
+cpw_case() {
+    _n=$1; _um=$2; _sm=$3; shift 3
+    cpw_clean; mkdir cpw; printf 'contents\n' > cpw/src; chmod "$_sm" cpw/src
+    _grc=0; ( cd cpw && umask "$_um" && cp    "$@" src g >/dev/null 2>&1 ) || _grc=$?
+    _krc=0; ( cd cpw && umask "$_um" && "$BIN" cp "$@" src k >/dev/null 2>&1 ) || _krc=$?
+    expect_eq "$_n" "$(stat -c %a cpw/g 2>/dev/null || echo ABSENT)|$_grc" \
+                    "$(stat -c %a cpw/k 2>/dev/null || echo ABSENT)|$_krc"
+    cpw_clean
+}
+for _um in 022 077 000; do
+    for _sm in 777 755 644 600 400; do
+        cpw_case "cp --preserve=ownership umask=$_um src=$_sm" "$_um" "$_sm" --preserve=ownership
+        cpw_case "cp -p umask=$_um src=$_sm"                   "$_um" "$_sm" -p
+        cpw_case "cp plain umask=$_um src=$_sm"                "$_um" "$_sm"
+    done
+done
+# ⚠ A source with NO owner-write is the shape that catches a withhold which
+# forgets that 0700 is a floor and not a target.
+cpw_case "cp --preserve=ownership of a 0444 source" 022 444 --preserve=ownership
+cpw_case "cp -p of a 0444 source"                   022 444 -p
+cpw_case "cp -p of a 0000 source"                   022 000 -p
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

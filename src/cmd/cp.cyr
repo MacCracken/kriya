@@ -621,9 +621,11 @@ fn _cp_create_mode(src_st, preserve): i64 {
     # ⚠ DIRECTORIES ARE NOT MASKED, and that is measured: `cp -R` of a 1777
     # directory keeps the sticky bit under GNU, and a directory's mode is only
     # restored when `--preserve=mode` is set — so masking there would drop the
-    # bit permanently on a plain recursive copy. GNU withholds the group and
-    # other WRITE bits on directories instead and adds them back unconditionally
-    # at the end; kriya does not have that unconditional restore (roadmap 1.6.9).
+    # bit permanently on a plain recursive copy. ⭐ The directory path has its own
+    # withhold-and-restore now — see `_cp_dir_descend_at` — so the two sides of
+    # this function are no longer asymmetric: files start narrower and are
+    # restored by `_cp_restore_fd`, directories start narrower and are restored
+    # at the end of the descend.
     return fs_perms(src_st) & 511;
 }
 
@@ -784,6 +786,27 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
         return dst_fd;
     }
 
+    # ⛔ TWO HOOK SITES, AND THIS IS THE OTHER ONE. `_cp_one` handles a single
+    # file operand and `_cp_file_at` each entry of a `-R` walk; the ownership
+    # withhold wired into one alone would close the window for `cp -pR` and
+    # leave it open for `cp -p`. ⚠ 1.6.5's backup work recorded this exact trap
+    # and it caught this change anyway — the first version withheld only in the
+    # recursive path, and a top-level `cp -p big out` still spent the whole copy
+    # world-readable. See `_cp_file_at` for the measurement.
+    var file_restore_mode: i64 = 0;
+    if ((preserve & CP_PRES_OWNER) != 0) {
+        var fmade[144];
+        if (fs_fstatat(dst_fd, "", &fmade, 4096) == 0) {              # AT_EMPTY_PATH
+            var fmode = fs_perms(&fmade) & 4095;
+            var fwork = fmode & 448;                                  # 0o700
+            if (fwork != fmode) {
+                if (k_fchmod(dst_fd, fwork) == 0) {
+                    if ((preserve & CP_PRES_MODE) == 0) { file_restore_mode = fmode; }
+                }
+            }
+        }
+    }
+
     var r = _cp_copy_loop(src_fd, dst_fd, src, dst);
 
     # ⛔ THE RESTORE RUNS BEFORE THE CLOSES, and that ordering is the M8 audit's
@@ -796,6 +819,7 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
             restore_failed = 1;
         }
     }
+    if (file_restore_mode != 0) { k_fchmod(dst_fd, file_restore_mode); }
 
     k_close( src_fd);
     k_close( dst_fd);
@@ -1049,6 +1073,42 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
         }
     }
 
+    # ⛔ THE SAME WINDOW THE DIRECTORY WITHHOLD CLOSES, ON THE FILE ITSELF, AND
+    # IT IS OPEN EXACTLY WHEN OWNERSHIP IS BEING PRESERVED. Until the `fchown`
+    # in `_cp_restore_fd` lands, the destination is owned by whoever ran `cp` —
+    # so a 0777 source copied with `-p` spends the whole write group- and
+    # other-readable under an owner it is not supposed to end up with.
+    #
+    # ⚠ MEASURED, and the condition is narrower than it looks. Polling `stat`
+    # against a 300 MB copy at umask 000, source 0777:
+    #
+    #     cp big out                       during 0777   final 0777
+    #     cp -p big out                    during 0700   final 0777
+    #     cp --preserve=mode big out       during 0777   final 0777
+    #     cp --preserve=ownership big out  during 0700   final 0777
+    #
+    # GNU withholds for OWNERSHIP and for nothing else — `--preserve=mode` alone
+    # opens no window, because no chown is coming and the file is already owned
+    # by the only person it will ever belong to.
+    #
+    # ⚠ The final mode is read back from the kernel rather than computed, for the
+    # reason the directory path gives: `open(O_CREAT)` has already applied the
+    # umask, and an existing destination under `-f` keeps its own mode. Reading
+    # it means the restore puts back what would have stood anyway, in both cases.
+    var file_restore_mode: i64 = 0;
+    if ((preserve & CP_PRES_OWNER) != 0) {
+        var fmade[144];
+        if (fs_fstatat(dst_fd, "", &fmade, 4096) == 0) {              # AT_EMPTY_PATH
+            var fmode = fs_perms(&fmade) & 4095;
+            var fwork = fmode & 448;                                  # 0o700
+            if (fwork != fmode) {
+                if (k_fchmod(dst_fd, fwork) == 0) {
+                    if ((preserve & CP_PRES_MODE) == 0) { file_restore_mode = fmode; }
+                }
+            }
+        }
+    }
+
     var r = _cp_copy_loop(src_fd, dst_fd, src_display, dst_display);
 
     var restore_failed: i64 = 0;
@@ -1057,6 +1117,11 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
             restore_failed = 1;
         }
     }
+    # ⚠ Runs whether or not the copy succeeded, and whether or not the restore
+    # above did: a half-written file left at 0700 when the user asked for 0777 is
+    # a mode nobody chose. Unreachable under `--preserve=mode`, which owns the
+    # last word there.
+    if (file_restore_mode != 0) { k_fchmod(dst_fd, file_restore_mode); }
 
     fs_close(src_fd);
     fs_close(dst_fd);
@@ -1091,6 +1156,108 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
 # symlink fails ELOOP per ADR 0003.
 fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, policy, allow_follow, force,
                       interactive, preserve, verbose, src_st): i64 {
+    # ⛔ THE DESTINATION IS CREATED BEFORE THE SOURCE IS OPENED, and the order is
+    # GNU's rather than the obvious one. Measured on a source directory with no
+    # owner READ — 0300, 0333, 0111 — GNU leaves `dst/sub` behind at
+    # `src & ~umask` (0300, 0311, 0111) and reports the error; kriya opened the
+    # source first, returned early, and left NOTHING. Both exit 1, so nothing is
+    # silently wrong either way, but a caller inspecting the tree after a partial
+    # copy sees a different shape, and the shape GNU leaves is the more useful
+    # one: the directory that could not be read is still visibly there.
+    #
+    # Ensure destination exists as a directory.
+    var perms = fs_perms(src_st);
+    var mr = fs_mkdirat(dst_dirfd, dst_name, perms);
+    # ⭐ 1 only when THIS call created it. A destination directory that already
+    # existed is NOT ours to widen or to restore — measured, GNU leaves an
+    # existing `dst/sub` at 0777 and at 0700 alike, and fails on an existing
+    # 0500 exactly as kriya does. The withhold below applies to directories cp
+    # makes, and to nothing else.
+    var we_made_it: i64 = 0;
+    if (mr == 0) { we_made_it = 1; }
+    if (mr != 0) {
+        var derrno = 0 - mr;
+        if (derrno == 17) {
+            # Already exists — must be a directory.
+            var dst_check[144];
+            # ⚠ NO `fs_close(src_fd)` ON ANY OF THESE PATHS ANY MORE — the
+            # source is not open yet. That is the whole point of the reorder
+            # above, and closing a descriptor this function has not taken would
+            # be closing someone else's.
+            var dchk = fs_lstat_at(dst_dirfd, dst_name, &dst_check);
+            if (dchk != 0) {
+                _cp_report(dst_display, 0 - dchk);
+                return dchk;
+            }
+            if (fs_is_dir(&dst_check) == 0) {
+                _cp_report(dst_display, 20);  # ENOTDIR
+                return 0 - 20;
+            }
+        } else {
+            _cp_report(dst_display, derrno);
+            return mr;
+        }
+    }
+
+    var dst_fd = fs_opendir_nofollow(dst_dirfd, dst_name);
+    if (dst_fd < 0) {
+        _cp_report(dst_display, 0 - dst_fd);
+        return dst_fd;
+    }
+
+    # ⛔ A SOURCE DIRECTORY WITHOUT OWNER-WRITE LOST EVERYTHING INSIDE IT.
+    # `cp -R` created `dst/sub` at the source's 0500 and then could not write a
+    # single entry into the directory it had just made: measured, GNU copies the
+    # whole subtree and ends at 0500, kriya produced an EMPTY 0500 directory and
+    # exited 1. A four-deep chain of 0500 directories is a complete copy under
+    # GNU and one empty directory here. This is the roadmap's 1.6.9 entry, and
+    # the defect is larger than the entry said — it called the modes unrepaired,
+    # and the contents were missing.
+    #
+    # ⭐ GNU'S DANCE, OBSERVED RATHER THAN INFERRED. There is no strace on this
+    # box, so the transient mode was caught by polling `stat` from a second
+    # process against a 4,000-file copy:
+    #
+    #     src 0500, umask 022 → during: 0700, final: 0500
+    #     src 0777, umask 000 → during: 0755, final: 0777
+    #
+    # Two rules in one: **owner rwx is forced on** so cp can populate what it
+    # made, and **group/other WRITE is withheld** so nobody else can drop a file
+    # into a directory that is not finished yet. The restore puts both back.
+    #
+    # ⚠ THE WORKING MODE IS NEVER MORE PERMISSIVE THAN THE FINAL ONE — it only
+    # ever adds OWNER bits and only ever removes group/other ones. So there is no
+    # instant at which the directory is more exposed than it will be when cp is
+    # done, which is the property that makes the withhold worth having.
+    #
+    # ⚠ The final mode is READ BACK FROM THE KERNEL rather than computed. The
+    # mkdir above already applied the umask and the kernel's own set-id rules —
+    # `cp -R` of a 2755 directory ends at 0755 and of a 1777 one at 1755, both
+    # matching GNU — and re-deriving that by hand would be a second
+    # implementation of a rule that is already right, wrong in a way nothing
+    # would notice.
+    # ⚠ THE WIDENING IS UNCONDITIONAL AND THE RESTORE IS NOT. `-p` needs the
+    # working mode just as badly — a `cp -pR` of a 0500 tree failed here for the
+    # identical reason — but under `--preserve=mode` it is `_cp_restore_fd` above
+    # that owns the last word, so `dir_restore_mode` stays 0 and the block at the
+    # end of this function does nothing rather than overwriting it.
+    var dir_restore_mode: i64 = 0;
+    var dir_widened: i64 = 0;
+    if (we_made_it == 1) {
+        var dmade[144];
+        if (fs_fstatat(dst_fd, "", &dmade, 4096) == 0) {              # AT_EMPTY_PATH
+            var made_mode = fs_perms(&dmade) & 4095;
+            # 0o700 = 448 forced on, 0o022 = 18 withheld.
+            var working = (made_mode + 0 - (made_mode & 18)) | 448;
+            if (working != made_mode) {
+                if (k_fchmod(dst_fd, working) == 0) {
+                    dir_widened = 1;
+                    if ((preserve & CP_PRES_MODE) == 0) { dir_restore_mode = made_mode; }
+                }
+            }
+        }
+    }
+
     var src_fd: i64 = 0;
     if (allow_follow == 1) {
         # O_RDONLY | O_DIRECTORY = 65536. No NOFOLLOW: policy-driven follow.
@@ -1100,40 +1267,20 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
     }
     if (src_fd < 0) {
         _cp_report(src_display, 0 - src_fd);
-        return src_fd;
-    }
-
-    # Ensure destination exists as a directory.
-    var perms = fs_perms(src_st);
-    var mr = fs_mkdirat(dst_dirfd, dst_name, perms);
-    if (mr != 0) {
-        var derrno = 0 - mr;
-        if (derrno == 17) {
-            # Already exists — must be a directory.
-            var dst_check[144];
-            var dchk = fs_lstat_at(dst_dirfd, dst_name, &dst_check);
-            if (dchk != 0) {
-                fs_close(src_fd);
-                _cp_report(dst_display, 0 - dchk);
-                return dchk;
-            }
-            if (fs_is_dir(&dst_check) == 0) {
-                fs_close(src_fd);
-                _cp_report(dst_display, 20);  # ENOTDIR
-                return 0 - 20;
-            }
+        # ⚠ THE WIDEN HAS TO COME BACK OFF ON THIS PATH TOO. We may have just
+        # chmod'd the directory to the working mode; returning here without
+        # undoing it would leave a mode nobody asked for on a copy that visibly
+        # failed. `_cp_restore_fd` cannot help — it needs the source descriptor
+        # that is precisely what we could not get — so the two cases are undone
+        # by hand: the recorded final mode, or the source's own under
+        # `--preserve=mode`.
+        if (dir_restore_mode != 0) {
+            k_fchmod(dst_fd, dir_restore_mode);
         } else {
-            fs_close(src_fd);
-            _cp_report(dst_display, derrno);
-            return mr;
+            if (dir_widened == 1) { k_fchmod(dst_fd, fs_perms(src_st) & 4095); }
         }
-    }
-
-    var dst_fd = fs_opendir_nofollow(dst_dirfd, dst_name);
-    if (dst_fd < 0) {
-        fs_close(src_fd);
-        _cp_report(dst_display, 0 - dst_fd);
-        return dst_fd;
+        fs_close(dst_fd);
+        return src_fd;
     }
 
     # ⚠ `_cp_dir_top` zeroes this before each operand, and `_cp_dir_descend_at`
@@ -1278,6 +1425,24 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
     var dir_restore_failed: i64 = 0;
     if (_cp_restore_fd(dst_fd, src_fd, src_st, preserve, dst_display, src_display) != 0) {
         dir_restore_failed = 1;
+    }
+
+    # ⛔ UNCONDITIONAL, AND THAT INCLUDES AFTER A FAILURE. Measured: a `cp -R`
+    # that cannot read one source file exits 1 and still leaves the destination
+    # directory at the source's 0500 with the readable entries in it. A restore
+    # skipped on the error path would leave the tree at the WORKING mode — owner
+    # rwx, group/other write stripped — which is a mode the user never asked for
+    # on a copy they can see failed.
+    #
+    # ⚠ Only when `--preserve=mode` is off: with it, `_cp_restore_fd` above has
+    # already set the exact source mode, and the two must not both claim the last
+    # word. `dir_widened` is 0 in that case, so this is unreachable there rather
+    # than merely inert.
+    if (dir_restore_mode != 0) {
+        if (k_fchmod(dst_fd, dir_restore_mode) != 0) {
+            _cp_report(dst_display, 1);                # EPERM
+            dir_restore_failed = 1;
+        }
     }
 
     fs_close(src_fd);

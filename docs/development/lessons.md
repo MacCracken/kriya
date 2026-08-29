@@ -32,6 +32,26 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   `cp -R -f` plus an `rm -r` and inherits nothing. **Where one arm is implemented by a syscall and
   the other by hand, list what the syscall was enforcing.**
 
+- ⛔ *A green branch is a claim about its base, not about main.* Three branches merged at 1.6.9 were
+  each green in isolation and each written against an older base. The merge was clean, every
+  existing suite passed, and it still shipped a **wrong answer at exit 0**: an expander that split a
+  cluster sitting in a value position, so `realpath --relative-base -em nodir/leaf` returned a
+  fabricated absolute path where GNU exits 1. **Re-audit the merged whole, not the branches.**
+  ⚠ The tell is a branch that touches SHARED code — `src/lib/args.cyr` here — where "conflict-free"
+  and "compatible" are different properties.
+
+- ⛔ *A fix that stops one line short leaves the same bug wearing the same clothes.* The branch that
+  replaced `head`/`tail`'s `-n`/`-c` precedence ladder with a real last-wins rule left the `-q`/`-v`
+  ladder **twenty lines below it**, in the same function, in the same shape — and that one ran in
+  BOTH directions, so `head -q -v a b` concatenated two files with no delimiter at exit 0.
+  **When you fix an instance of a pattern, grep for the pattern.**
+
+- ⛔ *A probe that can abort the suite is worse than no probe.* The only test of `cp`'s group/other
+  withhold polls a running copy, because the withhold has no final-state signature at all. Under
+  `set -e` in the CI container it died silently and took **108 real assertions** with it, reporting
+  nothing — the suite printed no summary and the runner saw an empty result. Every step of a
+  best-effort probe needs `|| true`, and a miss has to SKIP WITH A NOTE rather than pass quietly.
+
 - ⛔ *A fuzz varies the axes you thought of, and is blind along the rest.* `ls`'s format fuzz drew
   name LENGTHS per entry — the axis that moves column boundaries on and off a tab stop — and capped
   the entry COUNT at 26. Both are inputs to the layout, and the second one was fixed. It reported

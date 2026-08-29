@@ -6,7 +6,79 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
-## [Unreleased]
+## [1.6.9] - 2026-08-28 — `cp` stops losing read-only trees, and four utilities stop pretending to be last-wins
+
+Three branches merged (`claude/brave-moore-fbef5b`, `claude/kind-shannon-27e1ea`,
+`claude/confident-bouman-b4ddd8`), then audited as a merged whole — which is where most of the rest
+of this entry came from. ⚠ **Each branch was green in isolation and against an older base**; the
+defects below were only reachable once they sat together on top of 1.6.8.
+
+### Fixed — ⛔ `cp -R` of a read-only directory copied NOTHING into it
+
+The roadmap's 1.6.9 entry said a recursive copy "can leave modes that GNU would have repaired."
+⛔ **The entry understated it.** Final modes already matched GNU everywhere a copy SUCCEEDED; the
+real failure was that a source directory the owner cannot write to — 0500, 0550, a `chmod -R a-w`
+archive, an exported release tree — produced an **empty destination directory and exit 1**. kriya
+`mkdir`ed the destination at the source's mode and then could not create a single entry inside the
+directory it had just made. A four-deep chain of 0500 directories is a complete copy under GNU and
+one empty directory here.
+
+⭐ **GNU's dance, observed rather than inferred.** There is no `strace` on this box, so the transient
+mode was caught by polling `stat` from a second process against a 4,000-file copy:
+
+| source | umask | during | final |
+|---|---|---|---|
+| 0500 | 022 | **0700** | 0500 |
+| 0777 | 000 | **0755** | 0777 |
+
+Two rules in one: **owner rwx is forced on** so cp can populate what it made, and **group/other
+WRITE is withheld** so nobody else can drop a file into a directory that is not finished yet.
+
+⚠ **The working mode is never more permissive than the final one** — it only ever adds OWNER bits
+and only ever removes group/other ones — so there is no instant at which the directory is more
+exposed than it will be when cp is done. That is the property that makes the withhold worth having.
+
+⚠ **The final mode is read back from the kernel rather than computed.** The `mkdir` has already
+applied the umask and the kernel's own set-id rules (`cp -R` of a 2755 directory ends at 0755, of a
+1777 one at 1755, both matching GNU); re-deriving that by hand would be a second implementation of a
+rule that is already right, wrong in a way nothing would notice.
+
+⚠ **The widen is unconditional and the restore is not.** `cp -pR` of a 0500 tree failed for the
+identical reason, but under `--preserve=mode` it is `_cp_restore_fd` that owns the last word.
+
+⭐ **The restore runs after a FAILURE too** — measured: a copy that cannot read one source file
+exits 1 and still leaves the directory at the source's mode with the readable entries in it.
+
+⚠ **An existing destination directory is not ours to widen**: measured, GNU leaves an existing
+`dst/sub` at 0777 and at 0700 alike, and fails on an existing 0500 exactly as kriya does.
+
+**All 34 measured combinations of umask × source mode × {none, -p} now match GNU**, where 12 of them
+previously lost their contents.
+
+### Fixed — ⛔ the destination is created BEFORE the source is opened
+
+Measured on a source directory with no owner READ — 0300, 0333, 0111 — GNU leaves `dst/sub` behind
+at `src & ~umask` (0300, 0311, 0111) and reports the error; kriya opened the source first, returned
+early, and left nothing. Both exit 1, so nothing was silently wrong, but the shape GNU leaves is the
+more useful one.
+
+### Fixed — ⛔ `cp -p` left a regular file group- and other-readable for the whole copy
+
+Until the `fchown` lands, the destination is owned by whoever ran `cp`. ⚠ **The condition is
+narrower than it looks** — polling a 300 MB copy at umask 000 from a 0777 source:
+
+```
+cp big out                       during 0777   final 0777
+cp -p big out                    during 0700   final 0777
+cp --preserve=mode big out       during 0777   final 0777
+cp --preserve=ownership big out  during 0700   final 0777
+```
+
+GNU withholds for **ownership** and for nothing else — `--preserve=mode` alone opens no window,
+because no chown is coming. ⛔ **And it needed TWO hook sites**: `_cp_one` handles a single file
+operand and `_cp_file_at` each entry of a `-R` walk. 1.6.5's backup work recorded that exact trap
+and it caught this change anyway — the first version withheld only in the recursive path, and a
+top-level `cp -p big out` still spent the whole copy world-readable.
 
 ### Fixed — ⛔ three utilities said "last-wins" and four of them did something else
 
@@ -67,9 +139,7 @@ and asks the spec — not a list of names — which options swallow a following 
 
 ### Fixed — ⛔ the tests only ever covered the order that agreed
 
-Every new assertion was verified RED against a pre-fix binary built from the previous commit, and
-green after: **13** new in `smoke-realpath.sh` (395 total), **18** in `smoke-readlink.sh` (95),
-**12** in `smoke-head-tail.sh` (67). All 41 smoke scripts and `cyrius test` (453) green.
+Every new assertion was verified RED against a pre-fix binary and green after.
 
 ⚠ **The gap was structural, not an oversight.** `readlink`'s block was headed *"canonicalize
 precedence: -m > -e > -f"* and asserted `-f -e -m` — the one order both rules answer identically.
@@ -77,6 +147,103 @@ Every new pair is asserted in BOTH orders and in clustered form, plus the long s
 non-mode flag between the pair, a repeated flag, and past a `--`. ⭐ `head`/`tail` gained a fixture
 whose line answer and byte answer differ at both ends (`abcdefghij\nklmnop\n`); on the existing
 `seq 1 50` fixture a mode mix-up still looks plausible.
+
+### Changed — ⛔ BREAKING: the obsolescent `head -5` / `tail -5` is the FIRST argument only
+
+⛔ **It used to fire at any position, silently overriding the option in front of it.**
+`head -n 1 -5 f` expanded the trailing `-5` into `-n 5` and printed **five** lines with exit 0,
+where the command as written says one. GNU refuses the form anywhere but `argv[1]`
+(*invalid trailing option -- 5*), because a digit that far from the front is a typo far more often
+than an intent. ⚠ The position is the ARGUMENT's, not "the first option": `head f -5` is refused too.
+
+**Migration**: write `head -n 5` (or put the digit first). ⚠ kriya names the offender rather than
+reporting a generic bad option.
+
+⚠ **Known deviation, deliberate**: `tail -5 -c 3` is accepted here and refused by GNU, whose `tail`
+takes the obsolescent form only when it is the ONLY option. kriya applies one first-argument rule to
+both utilities rather than reproducing that asymmetry — it accepts where GNU refuses, never the
+other way round.
+
+### Fixed — ⛔ MERGE REGRESSION: a separated option VALUE was interpreted as options
+
+`realpath --relative-base -Ps dlink` names a DIRECTORY called `-Ps`. The argument expander split it
+into `-P -s` because it splits any cluster it can, realpath's order scan skipped exactly ONE token
+after the long option, and the orphaned `-s` switched the resolution mode: GNU printed the resolved
+path, kriya printed the symlink.
+
+⛔ **And it could fabricate one.** `realpath --relative-base -em nodir/leaf` leaked an `-m`, so a
+path with a missing middle component came back as a confident absolute path at **exit 0** where GNU
+exits 1 — a wrong answer that reports success, on a value the user chose. The mirror case,
+`--relative-to -se dlink`, failed on a path that resolves fine and blamed `'-s'` as a missing file.
+
+⭐ **Fixed in the expander, not in realpath** — every utility with a value-taking option had the
+leak, and a per-utility scan that skips "one token" cannot be right when the expander has already
+turned that one token into two. ⛔ **A two-byte short needed its own case**: the cluster splitter is
+guarded by `tlen > 2`, so `-n` was the one spelling whose value stayed interpreted, and
+`head -n -5` reported *invalid trailing option -- 5* about the count it was given.
+
+### Fixed — ⛔ `-q` / `-v` in `head` and `tail` was a precedence ladder twenty lines below the one this release replaced
+
+And it ran in **both directions**: quiet won unconditionally over operands, verbose won
+unconditionally on the stdin path. `head -q -v a b` dropped BOTH headers and concatenated two files
+with nothing marking the boundary, at exit 0 — a consumer cannot recover where one file ended — and
+`head -v -q < f` emitted a header GNU suppresses. GNU resolves the pair by LAST OCCURRENCE, exactly
+as it does `-n`/`-c`. ⚠ **36 cases now match GNU**, every spelling in both orders, with repetition
+and interleaving, on both paths.
+
+### Fixed — ⛔ an empty count value silently used the DEFAULT, at exit 0
+
+`head --lines=` printed ten lines and reported success: the empty value was skipped over and the
+option thrown away. GNU says *invalid number of lines: `''`* and exits 1, and
+[ADR 0002](docs/adr/0002-argument-parsing-is-agent-safe.md) names this case. ⚠ The parser already
+rejected the empty string; the bug was the guard that kept it from ever being asked. Same in `tail`,
+for both `--lines=` and `--bytes=`, because both were written from the same shape.
+
+### Fixed — `readlink -n` with two operands, and `-nz`
+
+⛔ **`-n` is ignored once there is more than one operand**, and honouring it dropped the final
+newline from a multi-line stream at exit 0 — `readlink -n a b` handed a reader `targetA\ntargetB`
+unterminated, so a `while read` loop silently dropped the last line. ⚠ GNU also warns; kriya does
+not, because [ADR 0018](docs/adr/0018-readlink-is-silent-by-default.md) made this utility silent.
+
+⛔ **`-z` does not override `-n`**, and the comment saying so was wrong: `-z` chooses WHICH
+terminator, `-n` chooses WHETHER there is one. `readlink -nz link` emits nothing after the target
+under GNU, in every order and spelling; kriya always wrote the NUL.
+
+⚠ **One assertion in `smoke-readlink.sh` encoded kriya's own behaviour and was wrong** — it expected
+"trailing newlines on all but the last". An expectation nobody measured is a record of the
+implementation, not a test of it.
+
+### Changed — CHANGELOG housekeeping
+
+The stray `[Unreleased]` block below the 1.1.8 entry (the `fuzz.sh --poison` change) is folded into
+1.1.8 where it belongs; this file is released-items-only by its own rule.
+
+### Tests
+
+⭐ **5,759 smoke across 41 scripts** (from 5,466 at 1.6.8) — `smoke-cp.sh` 70 → **118**,
+`smoke-cp-recursive.sh` 60 → **110**, `smoke-head-tail.sh` 42 → **133**, `smoke-realpath.sh` 357 →
+**415**, `smoke-readlink.sh` 56 → **102**. **453 unit**, 18 POSIX; fuzz green under poison; four
+lints clean; `watchlist-scan.py` clean; both targets build; `vet` 56 deps.
+
+⭐ **Eight mutations die**: the file withhold without its restore, the directory widen without its
+restore, a widen applied to existing directories, the value passthrough removed, head's `-q`/`-v`
+ladder restored, `readlink -n` honoured always, and the empty-value guard put back. ⛔ **One
+survives and is named rather than hidden**: a directory widen that forgets to withhold group/other
+has no final-state signature at all, so the only test of it polls a running copy and **skips with a
+note** when the copy finishes first — a silent pass there would be the same lie the missing test was.
+
+⛔ **AND THE PROBE ABORTED THE WHOLE SUITE ON ITS FIRST CONTAINER RUN.** Under `set -e` in
+`ubuntu:24.04` it died silently and took 108 real assertions with it, reporting nothing. ⚠ **A probe
+that can abort the suite is worse than no probe**; every step of it is `|| true` now. Third release
+running that the container check earned its place.
+
+⭐ Verified in the `ubuntu:24.04` container (coreutils **9.4**) as a non-root user — 39 of 41 scripts
+green, 3,315 cases. ⚠ The two exceptions need `python3`, which the image lacks and Docker cannot
+reach the network here to add.
+
+Binary 1,125,912 → **1,130,096** bytes host, 1,121,736 → **1,125,920** agnos.
+
 ## [1.6.8] - 2026-08-28 — `ls` gets the rest of its formats, the layout stops being quadratic, and the width stops being a guess
 
 ### Added — `-C`, `-x`, `-m` and `--format=WORD`

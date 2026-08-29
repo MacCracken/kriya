@@ -622,6 +622,37 @@ same_rp "empty operand under -s" -s ""
 same_rp "empty operand under -s -m" -s -m ""
 cd "$WORK"
 
+# --- a separated option VALUE is a value, not an option ----------------------
+#
+# ⛔ THIS WAS A MERGE REGRESSION AND IT COULD FABRICATE A PATH AT EXIT 0.
+# `realpath --relative-base -Ps dlink` names a DIRECTORY called `-Ps`. The
+# argument expander split it into `-P -s` because it splits any cluster it can,
+# realpath's order scan skipped exactly ONE token after the long option, and the
+# orphaned `-s` switched the resolution mode. Worse, `--relative-base -em
+# nodir/leaf` leaked an `-m`: a path with a missing middle component came back
+# as a confident absolute path at exit 0 where GNU exits 1.
+#
+# ⚠ FIXED IN THE EXPANDER, NOT HERE — every utility with a value-taking option
+# had the same leak, and a per-utility scan that skips "one token" cannot be
+# right when the expander has already turned that one token into two.
+mkdir -p vleak/realdir
+: > vleak/realfile
+( cd vleak && ln -sf realdir dlink && ln -sf realfile flink )
+cd vleak
+same_rp "--relative-base with a cluster value"  --relative-base -Ps dlink
+same_rp "--relative-to with a cluster value"    --relative-to -Ps dlink
+same_rp "...the -se spelling"                   --relative-to -se dlink
+same_rp "...and -sfoo, a plain name"            --relative-to -sfoo dlink
+same_rp "a leaked -m cannot fabricate a path"   --relative-base -em nodir/leaf
+same_rp "...nor through --relative-to"          --relative-to -em nodir/leaf
+# ⭐ The attached spelling never had the bug; asserted so a fix that breaks it
+# instead of fixing the separated one goes red.
+same_rp "the attached spelling still works"     --relative-to=-Ps dlink
+same_rp "a real cluster is still a cluster"     -Ps dlink
+same_rp "...in the other order"                 -sP dlink
+same_rp "a real value is still a value"         --relative-to . -Ps dlink
+cd ..
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 if [ "$SKIP" -gt 0 ]; then

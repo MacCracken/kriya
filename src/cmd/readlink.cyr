@@ -143,7 +143,11 @@ fn cmd_readlink(start: i64): i64 {
     if (seq_e > canon_at) { canon_at = seq_e; canon_mode = 2; }
     if (seq_m > canon_at) { canon_at = seq_m; canon_mode = 3; }
 
-    # Terminator selection. -z (NUL) overrides -n (no newline on last).
+    # ⛔ `-z` DID NOT OVERRIDE `-n`, AND THE COMMENT SAYING SO WAS WRONG.
+    # Measured: `readlink -nz link` emits the target and NOTHING after it under
+    # GNU, in every order and spelling; kriya always wrote the NUL. `-z` chooses
+    # WHICH terminator, `-n` chooses WHETHER there is one, and they are not the
+    # same question.
     var term_byte: i64 = 10;
     if (zero == 1) { term_byte = 0; }
     var term_buf[2];
@@ -187,11 +191,20 @@ fn cmd_readlink(start: i64): i64 {
             any_failed = 1;
         } else {
             k_write( 1, out_buf, n);
-            # Emit terminator: skip ONLY when -n is set, -z is not,
-            # and this is the final operand.
+            # ⛔ `-n` IS IGNORED WITH MORE THAN ONE OPERAND, and honouring it
+            # dropped the final newline from a multi-line stream at exit 0 —
+            # `readlink -n a b` handed a reader `targetA\ntargetB` with no
+            # terminator, so the last line arrives unterminated and a `while
+            # read` loop drops it. GNU ignores the flag outright there.
+            #
+            # ⚠ GNU also WARNS (*ignoring --no-newline with multiple
+            # arguments*); kriya does not, because
+            # [ADR 0018](../../docs/adr/0018-readlink-is-silent-by-default.md)
+            # made this utility silent and a warning nobody can turn off would
+            # undo that for the one case GNU happens to talk about.
             var emit: i64 = 1;
-            if (zero == 0) {
-                if (no_newline == 1) {
+            if (no_newline == 1) {
+                if (npos == 1) {
                     if (is_last == 1) { emit = 0; }
                 }
             }

@@ -240,6 +240,57 @@ esac
 expect_eq   "head -5 -- FILE"     "$(head -5 -- nums)"     "$($BIN head -5 -- nums)"
 expect_exit "head -- -5 is a file" 1 "$BIN" head -- -5
 
+# --- -q / -v is last-wins, on both the operand and the stdin path ------------
+#
+# ⛔ IT WAS A PRECEDENCE LADDER TWENTY LINES BELOW THE -n/-c ONE THIS RELEASE
+# REPLACED, and it ran in both directions: quiet won unconditionally over
+# operands and verbose won unconditionally on stdin. `head -q -v a b` dropped
+# BOTH headers and concatenated two files with nothing marking the boundary, at
+# exit 0 — a consumer cannot recover where one file ended.
+#
+# ⚠ Every pair is asserted in BOTH orders. `-vq` agreed with GNU under the old
+# rule too, which is exactly why one-order coverage saw nothing.
+printf 'abcdefghij\nklmnop\n' > qv1
+printf 'ZYXWVUTSRQ\nPONMLK\n' > qv2
+qv_case() {   # qv_case <util> <flags...>
+    _u=$1; shift
+    expect_eq "$_u $* (operands)" "$("$_u" "$@" qv1 qv2 2>&1)" "$("$BIN" "$_u" "$@" qv1 qv2 2>&1)"
+}
+for _u in head tail; do
+    qv_case "$_u" -q -v
+    qv_case "$_u" -v -q
+    qv_case "$_u" -qv -n 1
+    qv_case "$_u" -vq -n 1
+    qv_case "$_u" --quiet --verbose
+    qv_case "$_u" --verbose --quiet
+    qv_case "$_u" -qqv
+    qv_case "$_u" -vvq
+    qv_case "$_u" -v -q -v
+    qv_case "$_u" -q
+    qv_case "$_u" -v
+    # ⚠ The stdin path had its own copy of the ladder, with the winner reversed.
+    for _fl in "-v -q" "-q -v" "-v" "-q"; do
+        expect_eq "$_u $_fl <stdin" "$("$_u" $_fl < qv1 2>&1)" "$("$BIN" "$_u" $_fl < qv1 2>&1)"
+    done
+done
+
+# --- an empty count value is an error, not an absent option ------------------
+#
+# ⛔ `head --lines=` PRINTED TEN LINES AND EXITED 0. The empty value was skipped
+# over, the option thrown away, and the default used — a silently different
+# answer to the question actually asked, which is the case
+# [ADR 0002](../docs/adr/0002-argument-parsing-is-agent-safe.md) names.
+# ⚠ Exit 2 here against GNU's 1, per ADR 0008; what matters is that both refuse.
+for _u in head tail; do
+    for _a in "--lines=" "--bytes="; do
+        expect_exit "$_u $_a is a usage error" 2 "$BIN" "$_u" "$_a" qv1
+        _grc=0; $_u "$_a" qv1 >/dev/null 2>&1 || _grc=$?
+        expect_eq "...and GNU refuses it too" "yes" "$([ "$_grc" != 0 ] && echo yes || echo no)"
+    done
+    expect_exit "$_u -n '' is a usage error"        2 "$BIN" "$_u" -n "" qv1
+    expect_exit "$_u -n 5 --lines= still refuses"   2 "$BIN" "$_u" -n 5 --lines= qv1
+done
+
 # --- partial failure ---
 rc=0
 out=$($BIN head -n 2 short ghost nums 2>/dev/null) || rc=$?

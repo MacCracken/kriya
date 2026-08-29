@@ -252,6 +252,159 @@ mkdir -p fresh_src/sub && echo A > fresh_src/a && echo B > fresh_src/sub/b
 expect_exit "fresh recursive copy"    0 "$BIN" cp -R fresh_src fresh_dst
 expect_eq   "…copied both files"      "a sub/b" "$(cd fresh_dst && find . -type f | sed 's|^\./||' | sort | tr '\n' ' ' | sed 's/ $//')"
 
+# --- 1.6.9: the create / withhold / restore protocol on directories ----------
+#
+# ⛔ A SOURCE DIRECTORY WITHOUT OWNER-WRITE COPIED NOTHING INTO ITSELF, and
+# nothing in this file could see it: every fixture above builds its directories
+# at the default mode, and at 0755 the broken implementation and the correct one
+# produce identical trees. The distinguishing shape is a source directory the
+# OWNER cannot write to — a `chmod -R a-w` archive, an exported release tree —
+# where kriya used to make the destination at 0500 and then fail on every entry
+# it tried to put inside it.
+#
+# ⚠ EVERY CASE BELOW IS COMPARED TO GNU rather than to a mode written here by
+# hand: the answer depends on the umask, on the kernel's set-id rules for
+# `mkdir`, and on whether `-p` is in play, and a hand-written expectation would
+# be a fourth opinion about all three.
+cpm_clean() { chmod -R u+rwX cpm_s cpm_g cpm_k 2>/dev/null || true; rm -rf cpm_s cpm_g cpm_k; }
+
+# cpm_case <name> <umask> <srcmode> [flags...] — builds a three-deep chain at
+# <srcmode>, copies it with GNU and with kriya, and compares the modes of all
+# three levels, the presence of the deepest file, and the exit code.
+cpm_case() {
+    _n=$1; _um=$2; _sm=$3; shift 3
+    cpm_clean
+    mkdir -p cpm_s/a/b/c
+    : > cpm_s/a/b/c/f
+    : > cpm_s/a/f2
+    chmod "$_sm" cpm_s/a/b/c cpm_s/a/b cpm_s/a
+    chmod 755 cpm_s
+    _grc=0; ( umask "$_um"; cp    -R "$@" cpm_s cpm_g >/dev/null 2>&1 ) || _grc=$?
+    _krc=0; ( umask "$_um"; "$BIN" cp -R "$@" cpm_s cpm_k >/dev/null 2>&1 ) || _krc=$?
+    _gs=""; _ks=""
+    for _p in a a/b a/b/c; do
+        _gs="$_gs$(stat -c %a "cpm_g/$_p" 2>/dev/null || echo ABSENT)/"
+        _ks="$_ks$(stat -c %a "cpm_k/$_p" 2>/dev/null || echo ABSENT)/"
+    done
+    _gf=$([ -e cpm_g/a/b/c/f ] && echo y || echo n)
+    _kf=$([ -e cpm_k/a/b/c/f ] && echo y || echo n)
+    expect_eq "$_n" "$_gs|$_gf|$_grc" "$_ks|$_kf|$_krc"
+    cpm_clean
+}
+
+# ⭐ 0500 and 0550 ARE THE CASES THAT WERE BROKEN. The rest are here so a fix
+# that widens the wrong thing — or forgets to narrow it again — goes red too.
+for _um in 022 077 000; do
+    for _sm in 700 755 777 750 500 550 2755 1777; do
+        cpm_case "cp -R umask=$_um src=$_sm" "$_um" "$_sm"
+    done
+done
+# ⚠ `-p` needs the working mode just as badly, and it took a second wiring: the
+# widen is unconditional, only the restore is not.
+for _um in 022 077; do
+    for _sm in 700 755 500 550 1777 2755; do
+        cpm_case "cp -pR umask=$_um src=$_sm" "$_um" "$_sm" -p
+    done
+done
+cpm_case "cp -R --preserve=mode of a 0500 tree" 022 500 --preserve=mode
+
+# ⛔ THE RESTORE RUNS AFTER A FAILURE TOO. A copy that cannot read one source
+# file still leaves the directory at the source's mode with the readable entries
+# in it — anything else leaves the WORKING mode behind on a copy the user can
+# see failed.
+cpm_clean
+mkdir -p cpm_s/sub; : > cpm_s/sub/ok; : > cpm_s/sub/bad
+chmod 000 cpm_s/sub/bad; chmod 500 cpm_s/sub; chmod 550 cpm_s
+grc=0; ( umask 022; cp    -R cpm_s cpm_g >/dev/null 2>&1 ) || grc=$?
+krc=0; ( umask 022; "$BIN" cp -R cpm_s cpm_k >/dev/null 2>&1 ) || krc=$?
+expect_eq "partial failure: exit code"   "$grc" "$krc"
+expect_eq "partial failure: root mode"   "$(stat -c %a cpm_g)"     "$(stat -c %a cpm_k)"
+expect_eq "partial failure: dir mode"    "$(stat -c %a cpm_g/sub)" "$(stat -c %a cpm_k/sub)"
+expect_eq "partial failure: what landed" "$(ls -A cpm_g/sub | sort | tr '\n' ' ')" \
+                                         "$(ls -A cpm_k/sub | sort | tr '\n' ' ')"
+cpm_clean
+
+# ⛔ THE DESTINATION IS CREATED BEFORE THE SOURCE IS OPENED. With a source
+# directory that has no owner READ, GNU still leaves the mirroring destination
+# behind at `src & ~umask`; kriya opened the source first and left nothing.
+for _sm in 300 333 111; do
+    cpm_clean
+    mkdir -p cpm_s/sub; : > cpm_s/sub/f; chmod "$_sm" cpm_s/sub; chmod 755 cpm_s
+    grc=0; ( umask 022; cp    -R cpm_s cpm_g >/dev/null 2>&1 ) || grc=$?
+    krc=0; ( umask 022; "$BIN" cp -R cpm_s cpm_k >/dev/null 2>&1 ) || krc=$?
+    expect_eq "unreadable src=$_sm leaves the same shape" \
+      "$grc|$(stat -c %a cpm_g/sub 2>/dev/null || echo ABSENT)" \
+      "$krc|$(stat -c %a cpm_k/sub 2>/dev/null || echo ABSENT)"
+    cpm_clean
+done
+
+# ⚠ AN EXISTING DESTINATION DIRECTORY IS NOT OURS TO WIDEN. The withhold applies
+# to directories cp makes; one that was already there keeps its mode, and a 0500
+# one still fails — exactly as GNU's does.
+for _dm in 777 700 555 500; do
+    cpm_clean
+    mkdir -p cpm_s/sub; : > cpm_s/sub/f; chmod 755 cpm_s/sub cpm_s
+    mkdir -p cpm_g/sub cpm_k/sub; chmod "$_dm" cpm_g/sub; chmod "$_dm" cpm_k/sub
+    grc=0; ( umask 022; cp    -R cpm_s/. cpm_g >/dev/null 2>&1 ) || grc=$?
+    krc=0; ( umask 022; "$BIN" cp -R cpm_s/. cpm_k >/dev/null 2>&1 ) || krc=$?
+    expect_eq "existing dst=$_dm is left alone" \
+      "$grc|$(stat -c %a cpm_g/sub 2>/dev/null)" "$krc|$(stat -c %a cpm_k/sub 2>/dev/null)"
+    cpm_clean
+done
+
+# ⛔ THE GROUP/OTHER WITHHOLD HAS NO FINAL-STATE SIGNATURE, so nothing above can
+# see it: the directory ends at the same mode whether or not it was narrowed
+# while cp was writing into it. That is precisely why it is worth a test — a
+# change that keeps every final mode right and drops the withhold is invisible
+# otherwise, and it reopens the window another user races into.
+#
+# ⚠ BEST-EFFORT BY CONSTRUCTION. Catching a transient means polling against a
+# running copy, so a fast machine can finish before the poll sees anything. On a
+# miss this SKIPS with a note rather than passing quietly — a silent pass here
+# would be the same lie the missing test already was.
+#
+# ⭐ The expectation is GNU's OWN observed transient, not a mode written here.
+cpm_clean
+mkdir -p cpm_s/sub
+_i=0
+while [ "$_i" -lt 800 ]; do : > "cpm_s/sub/f$_i"; _i=$((_i + 1)); done
+chmod 777 cpm_s/sub; chmod 755 cpm_s
+
+cpm_watch() {   # cpm_watch <dest> <cmd...> — echoes every distinct mode seen
+    _d=$1; shift
+    ( umask 000
+      "$@" >/dev/null 2>&1 &
+      _p=$!; _seen=""
+      while kill -0 "$_p" 2>/dev/null; do
+          _m=$(stat -c %a "$_d" 2>/dev/null)
+          if [ -n "$_m" ]; then
+              case " $_seen " in *" $_m "*) ;; *) _seen="$_seen $_m" ;; esac
+          fi
+      done
+      wait "$_p" 2>/dev/null || true
+      echo "$_seen"
+      true )
+}
+# ⚠ EVERY STEP HERE IS `|| true`. This is a probe, not an assertion, and a probe
+# that can abort the suite is worse than no probe: it died silently under
+# `set -e` in the ubuntu:24.04 container on the FIRST run, taking 108 real
+# assertions with it and reporting nothing at all.
+g_seen=$(cpm_watch cpm_g/sub cp -R cpm_s cpm_g 2>/dev/null || true)
+k_seen=$(cpm_watch cpm_k/sub "$BIN" cp -R cpm_s cpm_k 2>/dev/null || true)
+# A "withheld" observation is any mode that is not the final 0777.
+g_with=$(printf '%s\n' $g_seen | grep -v '^777$' | grep . | head -1 || true)
+k_with=$(printf '%s\n' $k_seen | grep -v '^777$' | grep . | head -1 || true)
+if [ -n "$g_with" ]; then
+    expect_eq "the withheld mode matches GNU's" "$g_with" "${k_with:-NONE-OBSERVED}"
+else
+    echo "note: the copy finished before the poll saw a transient mode;"
+    echo "      the group/other withhold is unverified on this run"
+fi
+expect_eq "...and both end at the source mode" \
+  "$(stat -c %a cpm_g/sub 2>/dev/null || echo ABSENT)" \
+  "$(stat -c %a cpm_k/sub 2>/dev/null || echo ABSENT)"
+cpm_clean
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

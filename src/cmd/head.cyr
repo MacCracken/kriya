@@ -201,28 +201,30 @@ fn cmd_head(start: i64): i64 {
     var n_val: i64 = 0 - 1;
     var c_val: i64 = 0 - 1;
     if (n_arg != 0) {
-        if (load8(n_arg) != 0) {
-            n_val = kriya_parse_nonneg_int(n_arg);
-            if (n_val < 0) {
-                k_write( 2, "kriya head: error: --lines requires a non-negative integer\n", 59);
-                return EXIT_USAGE;
-            }
+        n_val = kriya_parse_nonneg_int(n_arg);
+        if (n_val < 0) {
+            k_write( 2, "kriya head: error: --lines requires a non-negative integer\n", 59);
+            return EXIT_USAGE;
         }
     }
     if (c_arg != 0) {
-        if (load8(c_arg) != 0) {
-            c_val = kriya_parse_nonneg_int(c_arg);
-            if (c_val < 0) {
-                k_write( 2, "kriya head: error: --bytes requires a non-negative integer\n", 59);
-                return EXIT_USAGE;
-            }
+        c_val = kriya_parse_nonneg_int(c_arg);
+        if (c_val < 0) {
+            k_write( 2, "kriya head: error: --bytes requires a non-negative integer\n", 59);
+            return EXIT_USAGE;
         }
     }
 
-    # ⚠ An option whose last occurrence carried NO value (`--lines=`) does not
-    # take part in the ordering — otherwise it would beat a `-c` that did carry
-    # one and leave neither in force, which is the default and not what either
-    # flag asked for.
+    # ⛔ AN EMPTY VALUE IS AN ERROR, NOT AN ABSENT OPTION. `--lines=` used to be
+    # skipped over — the option was thrown away and the DEFAULT ten lines
+    # printed, at exit 0 — so `head --lines= f` answered a question nobody asked
+    # and reported success. GNU says *invalid number of lines: ''* and exits 1,
+    # and [ADR 0002](../../docs/adr/0002-argument-parsing-is-agent-safe.md) names
+    # this case: an option given a value it cannot use is a usage error, because
+    # the alternative is a silently different answer.
+    #
+    # ⚠ `kriya_parse_nonneg_int` already rejects the empty string; the bug was
+    # the `if (load8(arg) != 0)` guard that kept it from ever being asked.
     var n_at: i64 = 0;
     var c_at: i64 = 0;
     if (n_val >= 0) { n_at = kriya_opt_seq(_head_spec, 110, "lines"); }
@@ -241,7 +243,12 @@ fn cmd_head(start: i64): i64 {
 
     if (npos < 1) {
         # Stdin.
-        if (verbose == 1) { _head_emit_header("standard input", 1); }
+        # ⚠ THE SAME PAIR DECIDES THE STDIN HEADER, and this line used to consult
+        # only `verbose` — so `head -v -q < f` printed a header where GNU prints
+        # none. One rule, both paths.
+        var sq_at = kriya_opt_seq(_head_spec, 113, "quiet");
+        var sv_at = kriya_opt_seq(_head_spec, 118, "verbose");
+        if (sv_at > sq_at) { _head_emit_header("standard input", 1); }
         var r = _head_emit(0, limit, count_lines);
         if (r != 0) {
             _head_report("(stdin)", 0 - r);
@@ -251,10 +258,23 @@ fn cmd_head(start: i64): i64 {
         return EXIT_SUCCESS;
     }
 
+    # ⛔ `-q` AND `-v` WERE A PRECEDENCE LADDER TWENTY LINES BELOW THE ONE THIS
+    # RELEASE REPLACED. Quiet won unconditionally here and verbose won
+    # unconditionally on the stdin path above, so the bug ran in both
+    # directions: `head -q -v a b` dropped BOTH headers and concatenated two
+    # files with nothing marking the boundary, at exit 0, and `head -v -q < f`
+    # emitted a header GNU suppresses. GNU resolves the pair by LAST
+    # OCCURRENCE, exactly as it does `-n`/`-c`.
+    #
+    # ⚠ The multi-file case is the one that costs something: `-q -v a b` is how
+    # a script forces headers back on after a wrapper injected `-q`, and the
+    # answer it got could not be split back into two files.
     var show_headers: i64 = 0;
     if (npos > 1) { show_headers = 1; }
-    if (verbose == 1) { show_headers = 1; }
-    if (quiet == 1)   { show_headers = 0; }
+    var q_at = kriya_opt_seq(_head_spec, 113, "quiet");
+    var v_at = kriya_opt_seq(_head_spec, 118, "verbose");
+    if (v_at > q_at) { show_headers = 1; }
+    if (q_at > v_at) { show_headers = 0; }
 
     var i: i64 = 0;
     var first: i64 = 1;

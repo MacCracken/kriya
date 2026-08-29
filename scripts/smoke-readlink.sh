@@ -110,14 +110,36 @@ expect_eq "-q silences -e"        "" "$err"
 err=$("$BIN" readlink -q a/b/file 2>&1 >/dev/null || true)
 expect_eq "-q silences POSIX"     "" "$err"
 
-# --- -n (no-newline) on final operand only ---
+# --- -n (no-newline), and what it does NOT apply to -----------------------
 # Single operand: no trailing newline at all.
 nl=$("$BIN" readlink -n linkfile | tr -dc '\n' | wc -c | tr -d ' ')
 expect_eq "-n single 0 newlines"  "0" "$nl"
 
-# Multi operands: trailing newlines on all but the last.
-nl=$("$BIN" readlink -n linkfile chain abs_link | tr -dc '\n' | wc -c | tr -d ' ')
-expect_eq "-n multi 2 newlines"   "2" "$nl"
+# ⛔ THIS ASSERTION USED TO ENCODE KRIYA'S OWN BEHAVIOUR AND IT WAS WRONG. It
+# expected "trailing newlines on all but the last" — 2 of them for 3 operands —
+# which is what kriya did and NOT what GNU does: GNU ignores `-n` outright once
+# there is more than one operand, so the stream ends terminated. Honouring it
+# handed a reader `targetA\ntargetB\ntargetC` with no final newline, so a
+# `while read` loop silently dropped the last line, at exit 0.
+#
+# ⚠ Written against GNU now, not against a number typed here. The lesson is the
+# one this repo keeps relearning: an expectation nobody measured is a record of
+# the implementation, not a test of it.
+expect_eq "-n is ignored with 2+ operands" \
+  "$(readlink -n linkfile chain abs_link 2>/dev/null | tr -dc '\n' | wc -c | tr -d ' ')" \
+  "$("$BIN" readlink -n linkfile chain abs_link | tr -dc '\n' | wc -c | tr -d ' ')"
+
+# ⛔ AND `-z` DOES NOT OVERRIDE `-n`. `-z` chooses WHICH terminator, `-n`
+# chooses WHETHER there is one; kriya wrote the NUL anyway. Compared as bytes,
+# because the whole difference is one invisible byte.
+for _fl in "-nz" "-zn" "-n -z" "-z -n" "-z" "-n"; do
+    expect_eq "readlink $_fl terminator" \
+      "$(readlink $_fl linkfile 2>/dev/null | od -An -c | tr -s ' ')" \
+      "$("$BIN" readlink $_fl linkfile | od -An -c | tr -s ' ')"
+done
+expect_eq "...and -nz with 2+ operands too" \
+  "$(readlink -nz linkfile chain 2>/dev/null | od -An -c | tr -s ' ')" \
+  "$("$BIN" readlink -nz linkfile chain | od -An -c | tr -s ' ')"
 
 # --- -z NUL terminator (overrides -n) ---
 nul=$("$BIN" readlink -z linkfile chain | tr -dc '\0' | wc -c | tr -d ' ')
