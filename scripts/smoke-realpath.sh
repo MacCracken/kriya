@@ -391,6 +391,38 @@ same_rp "-P then -L is logical"  -P -L nest/..
 same_rp "-L then -P, second operand shape" -L -P nest/../..
 same_rp "-P then -L, second operand shape" -P -L nest/../..
 
+# ⛔ AND EVERY ONE OF THOSE PAIRS IS WRITTEN SEPARATED, WHICH IS THE HALF THAT
+# WORKED. The scan answering them read the RAW argv, where `-Ps` is one
+# three-byte token it tested for a length of two and skipped entirely — so
+# `realpath -Ps flink` RESOLVED THE SYMLINK and `realpath -sP flink` did not,
+# out of a scan that is supposed to be reading the same two flags. Measured
+# against GNU 9.11; the separated spellings stayed green throughout.
+same_rp "-Ps clustered is -P then -s" -Ps base/link1/three
+same_rp "-sP clustered is -s then -P" -sP base/link1/three
+same_rp "-Ls clustered is -L then -s" -Ls base/link1/three
+same_rp "-sL clustered is -s then -L" -sL base/link1/three
+same_rp "-LP clustered is -L then -P" -LP nest/..
+same_rp "-PL clustered is -P then -L" -PL nest/..
+same_rp "-em clustered is -e then -m" -em base/nope
+same_rp "-me clustered is -m then -e" -me base/nope
+same_rp_e "-Em clustered is -E then -m" "$FX/nope/deeper" 0 -Em nope/deeper
+same_rp_e "-mE clustered is -m then -E" "" 1 -mE nope/deeper
+# ⚠ A CLUSTER SPANNING BOTH AXES. Reading only the first letter of the token is
+# enough to look right on one axis while silently dropping the other.
+same_rp "-sm crosses both axes" -sm base/link1/nope
+same_rp "-ms crosses both axes" -ms base/link1/nope
+same_rp "-Pe crosses both axes" -Pe base/link1/three
+same_rp "-eP crosses both axes" -eP base/link1/three
+# ⚠ A SEPARATED VALUE SITTING BETWEEN THE PAIR. `--relative-to`'s DIR is not an
+# option, and a scan that forgets to step over it reads the operand's leading
+# letters as flags.
+same_rp "a separated --relative-to value is stepped over" \
+        --relative-to "$FX" -Ps base/link1/three
+same_rp "...and the attached spelling is not" \
+        --relative-to="$FX" -Ps base/link1/three
+# ⚠ PAST `--` EVERY TOKEN IS AN OPERAND, including one whose name is a flag.
+same_rp "-- ends the option scan" -P -- base/link1/three
+
 # --- -s / --strip / --no-symlinks ---
 same_rp "-s leaves the last symlink"     -s flink
 same_rp "-s leaves an intermediate one"  -s base/link1/three

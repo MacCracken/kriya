@@ -804,53 +804,121 @@ fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
 # ⭐ Walks the EXPANDED argv, not the raw one, so every spelling has already been
 # normalised to `-e VALUE` — `-ealpha`, `-ie alpha` and `--regexp=alpha` all
 # arrive here in the same shape. Call after `kriya_args_parse*`.
-# Where did boolean short option `short_ch` LAST appear on the command line?
-# Returns a positive position, or 0 if it never did.
+# The expanded argv the last `kriya_args_parse*` handed to `flags_parse`, and
+# its length: clusters already split (`-Ps` → `-P -s`), attached values already
+# separated (`-n5` → `-n 5`), long forms normalised, `--` honoured, permutation
+# resolved, `[0]` the utility name. Zero before the first parse.
 #
-# ⛔ THIS EXISTS BECAUSE "WAS IT GIVEN" IS NOT ENOUGH FOR A PAIR THAT CONFLICTS.
-# `ls -tS` is a SIZE sort and `ls -St` a TIME sort, so the answer depends on
-# ORDER and `flags_get_bool` cannot supply it.
+# ⛔ EVERY ORDER-SENSITIVE QUESTION IS ASKED OF THIS ARRAY AND NOT OF `argv(i)`,
+# BECAUSE THREE UTILITIES ASKED THE RAW ONE AND ALL THREE WERE WRONG ON A
+# CLUSTER. `realpath -Ps slink` RESOLVED the symlink where GNU printed it
+# untouched: the raw token is `-Ps`, the scan only recognised two-byte shorts,
+# and the `-s` was invisible. The separated `-P -s` was right, so nothing went
+# red. Utilities read the parser's own view or they get a second opinion about
+# what the user wrote.
+#
+# ⚠ Two callers, two shapes: `kriya_opt_seq` below answers "where did THIS option
+# last appear", while `ls`'s `_ls_scan_format` walks this array itself because it
+# resolves a whole GROUP of selectors in one pass and needs their relative order,
+# not one option's position.
+fn kriya_expanded_argv(): i64 { return _kriya_expanded; }
+fn kriya_expanded_argc(): i64 { return _kriya_expanded_n; }
+
+# Where did the option spelled `-short_ch` / `--long_name` LAST appear on the
+# command line? Returns a positive index into the expanded argv, or 0 if it
+# never did. Either half may be 0 for an option that has only the other
+# spelling. Call after `kriya_args_parse*`.
+#
+# ⛔ THIS EXISTS BECAUSE "WAS IT GIVEN" IS NOT ENOUGH FOR A PAIR THAT CONFLICTS,
+# AND A PRECEDENCE RULE IS NOT AN ANSWER TO ONE. Measured against GNU coreutils
+# 9.11: `head -c 3 -n 1` is the first LINE and `head -n 1 -c 3` the first three
+# BYTES; `readlink -m -e nope` is exit 1 with no output and `readlink -e -m
+# nope` prints the path; `ls -tS` is a SIZE sort and `ls -St` a TIME sort. Not
+# one of those pairs can be expressed as "x beats y" — only the ORDER decides,
+# and the flag table keeps a value per flag with no order at all.
 #
 # ⛔ AND IT WALKS THE EXPANDED ARGV, WHICH IS THE WHOLE POINT. `ls` first
 # answered this by scanning the RAW argv up to `kriya_argv_option_end`, and that
 # window stops at the first operand while the parser happily permutes — so
 # `ls aa bb cc -rt` honoured the `-r` and SILENTLY DROPPED the `-t` from the
 # same cluster, giving name order with exit 0. Two independent notions of "the
-# option window", kept in sync by hand, is what produced that. The expanded argv
-# is the parser's own view: clusters already split, long forms normalised,
-# `--` already honoured, permutation already resolved.
+# option window", kept in sync by hand, is what produced that.
 #
 # ⚠ A value-taking option's VALUE is skipped, so `ls -w -t` cannot be read as a
-# `-t` that the parser consumed as the width.
-# ⭐ THE PARSER'S OWN VIEW OF ARGV, for callers that need ORDER. Clusters are
-# already split, long forms normalised, `--` honoured and permutation resolved —
-# which is why a scanner built on this sees `-lC` while one built on the raw argv
-# does not. `ls` uses it to resolve its last-wins format group.
-fn kriya_expanded_argv(): i64 { return _kriya_expanded; }
-fn kriya_expanded_argc(): i64 { return _kriya_expanded_n; }
-
-fn kriya_short_seq(spec, short_ch): i64 {
-    var av = _kriya_expanded;
-    var n  = _kriya_expanded_n;
+# `-t` that the parser consumed as the width, and `head --lines -c` cannot be
+# read as a `-c` that was really the line count. The question of which options
+# take a value is put to the caller's own spec, so it cannot drift.
+#
+# ⚠ `--` ENDS THE SCAN. Past it every token is an operand, and a file genuinely
+# named `-t` must not re-sort the listing.
+fn kriya_opt_seq(spec, short_ch, long_name): i64 {
+    var av = kriya_expanded_argv();
+    var n  = kriya_expanded_argc();
     if (av == 0) { return 0; }
+    var llen: i64 = 0;
+    if (long_name != 0) { llen = strlen(long_name); }
     var seen: i64 = 0;
+    var no_more: i64 = 0;
     var i: i64 = 1;
     while (i < n) {
-        var tok = load64(av + i * 8);
-        if (strlen(tok) == 2) {
-            if (load8(tok) == 45) {
-                var c = load8(tok + 1);
-                var ty = kriya_short_type(spec, c);
-                if (ty == FLAG_BOOL) {
-                    if (c == short_ch) { seen = i; }
-                } elif (ty > 0) {
-                    i = i + 1;              # skip this option's value
+        var tok  = load64(av + i * 8);
+        var tlen = strlen(tok);
+        var step: i64 = 1;
+        if (no_more == 0) {
+            if (tlen >= 2) {
+                if (load8(tok) == 45) {
+                    if (load8(tok + 1) == 45) {
+                        if (tlen == 2) { no_more = 1; }
+                        else {
+                            # `--name` or the attached `--name=VALUE`, which the
+                            # expander leaves whole for a value-taking long.
+                            var eq: i64 = 0;
+                            var e: i64 = 2;
+                            while (e < tlen) {
+                                if (eq == 0) {
+                                    if (load8(tok + e) == 61) { eq = e; }
+                                }
+                                e = e + 1;
+                            }
+                            var nlen = tlen - 2;
+                            if (eq > 0) { nlen = eq - 2; }
+                            if (nlen == llen) {
+                                var same: i64 = 1;
+                                var j: i64 = 0;
+                                while (j < nlen) {
+                                    if (load8(tok + 2 + j) != load8(long_name + j)) { same = 0; }
+                                    j = j + 1;
+                                }
+                                if (same == 1) { seen = i; }
+                            }
+                            if (eq == 0) {
+                                if (kriya_long_type(spec, tok + 2, nlen) > 0) { step = 2; }
+                            }
+                        }
+                    } else {
+                        # The expansion guarantees a registered short is its own
+                        # two-byte token with its value, if any, following.
+                        var c  = load8(tok + 1);
+                        var ty = kriya_short_type(spec, c);
+                        if (ty >= 0) {
+                            if (c == short_ch) { seen = i; }
+                            if (ty > 0) { step = 2; }
+                        }
+                    }
                 }
             }
         }
-        i = i + 1;
+        i = i + step;
     }
     return seen;
+}
+
+# The short-only spelling of `kriya_opt_seq`, kept for the callers that have no
+# long form to pass. ⚠ Not "boolean short" any more — the general scan skips a
+# value-taking option's value rather than ignoring the option itself, which is
+# what `head -c 3 -n 1` needs.
+fn kriya_short_seq(spec, short_ch): i64 {
+    return kriya_opt_seq(spec, short_ch, 0);
 }
 
 fn kriya_argv_collect(short_ch, long_name, out): i64 {

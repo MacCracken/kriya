@@ -139,21 +139,40 @@ fn realpath_help_declare(): i64 {
     return 0;
 }
 
-# ⛔ ORDER DECIDES, SO THE FLAG TABLE CANNOT ANSWER THIS. One pass over argv
-# picks the LAST of {-E,-e,-m} and the LAST of {-L,-P}, which is what GNU does.
+# ⛔ ORDER DECIDES, SO THE FLAG TABLE CANNOT ANSWER THIS. One pass over the
+# command line picks the LAST of {-E,-e,-m} and the LAST of {-L,-P,-s}, which is
+# what GNU does.
 #
-# ⚠ A long option taking a separated value swallows the next token, and missing
-# that would read `--relative-to -e` as a `-e` the user never wrote.
-fn _rp_scan_order(start: i64): i64 {
+# ⛔ THE PASS IS OVER THE EXPANDED ARGV, AND WALKING THE RAW ONE WAS A MEASURED
+# WRONG ANSWER. This scan read `argv(i)` on the claim that "bundled shorts are
+# rejected by the parser (ADR 0002), so a short option is exactly two bytes
+# here" — false since clusters shipped. The parser expands `-Ps` into `-P -s`;
+# the raw token is three bytes, matched the two-byte test not at all, and
+# `realpath -Ps slink` PRINTED THE RESOLVED PATH where GNU prints the symlink
+# untouched. `-sP` and both separated spellings were right, so the suite stayed
+# green over it.
+#
+# ⚠ EVERY LETTER of a single-dash token is read, not just a two-byte one. The
+# expansion has already split every cluster whose first letter is registered,
+# and a token that survives it unexpanded is one `flags_parse` has already
+# refused — so there is no assumption left here to go stale.
+#
+# ⚠ An option taking a SEPARATED value swallows the next token, and missing that
+# would read `--relative-to -e` as a `-e` the user never wrote. Which options
+# those are is asked of the spec rather than listed by name, so a value-taking
+# option added later cannot drift out of sync with this scan.
+fn _rp_scan_order(): i64 {
     _rp_mode = FS_REALPATH_REQUIRE_PARENT;
     _rp_how = RP_PHYSICAL;
-    var n = kriya_argv_count();
-    var i = start;
+    var av = kriya_expanded_argv();
+    var n  = kriya_expanded_argc();
+    if (av == 0) { return 0; }
+    var i: i64 = 1;
     var no_more: i64 = 0;
     while (i < n) {
-        var tok = argv(i);
+        var tok = load64(av + i * 8);
         var tlen = strlen(tok);
-        var skip_next: i64 = 0;
+        var step: i64 = 1;
         if (no_more == 0) {
             if (tlen >= 2) {
                 if (load8(tok) == 45) {
@@ -167,27 +186,28 @@ fn _rp_scan_order(start: i64): i64 {
                             if (streq(tok, "--physical") == 1)              { _rp_how = RP_PHYSICAL; }
                             if (streq(tok, "--strip") == 1)                 { _rp_how = RP_STRIP; }
                             if (streq(tok, "--no-symlinks") == 1)           { _rp_how = RP_STRIP; }
-                            if (streq(tok, "--relative-to") == 1)           { skip_next = 1; }
-                            if (streq(tok, "--relative-base") == 1)         { skip_next = 1; }
+                            # ⚠ `--relative-to=DIR` keeps its value in the token,
+                            # so only the bare spelling skips one.
+                            if (kriya_long_type(_rp_spec, tok + 2, tlen - 2) > 0) { step = 2; }
                         }
                     } else {
-                        # ⚠ Bundled shorts are rejected by the parser (ADR 0002),
-                        # so a short option is exactly two bytes here.
-                        if (tlen == 2) {
-                            var c = load8(tok + 1);
+                        var k: i64 = 1;
+                        while (k < tlen) {
+                            var c = load8(tok + k);
                             if (c == 69)  { _rp_mode = FS_REALPATH_REQUIRE_PARENT; }
                             if (c == 101) { _rp_mode = FS_REALPATH_REQUIRE_ALL; }
                             if (c == 109) { _rp_mode = FS_REALPATH_ALLOW_MISSING; }
                             if (c == 76)  { _rp_how = RP_LOGICAL; }
                             if (c == 80)  { _rp_how = RP_PHYSICAL; }
                             if (c == 115) { _rp_how = RP_STRIP; }
+                            if (kriya_short_type(_rp_spec, c) > 0) { step = 2; }
+                            k = k + 1;
                         }
                     }
                 }
             }
         }
-        i = i + 1;
-        if (skip_next == 1) { i = i + 1; }
+        i = i + step;
     }
     return 0;
 }
@@ -377,7 +397,7 @@ fn cmd_realpath(start: i64): i64 {
     if (flags_get_bool(_rp_spec, _rp_q_idx) == 1) { quiet = 1; }
     var zero: i64 = 0;
     if (flags_get_bool(_rp_spec, _rp_z_idx) == 1) { zero = 1; }
-    _rp_scan_order(start);
+    _rp_scan_order();
     var mode = _rp_mode;
 
     var rel_to   = flags_get_str(_rp_spec, _rp_relto_idx);

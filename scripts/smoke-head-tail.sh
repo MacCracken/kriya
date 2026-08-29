@@ -61,6 +61,10 @@ seq 1 5 > short            # 5 lines
 printf "no trailing nl"    > nonl
 printf ""                  > empty
 seq 1 1000 > big           # 1000 lines
+# ⚠ A LONG FIRST LINE AND A SHORT SECOND, so the -n answer and the -c answer
+# differ at BOTH ends. On `nums` the two happen to overlap enough that a
+# mode mix-up can still look plausible.
+printf 'abcdefghij\nklmnop\n' > mixed
 
 # --- head: default 10 ---
 expect_eq "head default"        "$(head nums)"           "$($BIN head nums)"
@@ -93,6 +97,36 @@ expect_eq "head -q multi"       "$(head -q -n 2 short nums)" "$($BIN head -q -n 
 # --- head -v single file ---
 expect_eq "head -v single"      "$(head -v -n 2 short)"  "$($BIN head -v -n 2 short)"
 
+# --- head: -n and -c are LAST-WINS ---------------------------------------
+# ⛔ THIS USED TO BE A PRECEDENCE RULE — "-c wins over -n" — under a comment
+# claiming it was last-wins. Only the order the two rules agree on was covered.
+# Measured against GNU coreutils 9.11 on `abcdefghij\nklmnop\n`:
+#
+#     $ head -c 3 -n 1 mixed      abcdefghij      (the -n answer)
+#     $ kriya head -c 3 -n 1      abc             (the -c answer)
+#
+# ⭐ Both orders, both attached spellings, the long forms, and a cluster mixing
+# a bool with a value-taking short — the shapes a generated command line
+# actually produces when a wrapper appends one flag to a base carrying the other.
+expect_eq "head -c then -n"        "$(head -c 3 -n 1 mixed)"        "$($BIN head -c 3 -n 1 mixed)"
+expect_eq "head -n then -c"        "$(head -n 1 -c 3 mixed)"        "$($BIN head -n 1 -c 3 mixed)"
+expect_eq "head -c3 -n1 attached"  "$(head -c3 -n1 mixed)"          "$($BIN head -c3 -n1 mixed)"
+expect_eq "head -n1 -c3 attached"  "$(head -n1 -c3 mixed)"          "$($BIN head -n1 -c3 mixed)"
+expect_eq "head -c 3 -n1 mixed"    "$(head -c 3 -n1 mixed)"         "$($BIN head -c 3 -n1 mixed)"
+expect_eq "head --bytes= --lines=" "$(head --bytes=3 --lines=1 mixed)" "$($BIN head --bytes=3 --lines=1 mixed)"
+expect_eq "head --lines= --bytes=" "$(head --lines=1 --bytes=3 mixed)" "$($BIN head --lines=1 --bytes=3 mixed)"
+expect_eq "head -c then --lines"   "$(head -c 3 --lines 1 mixed)"   "$($BIN head -c 3 --lines 1 mixed)"
+expect_eq "head --lines then -c"   "$(head --lines 1 -c 3 mixed)"   "$($BIN head --lines 1 -c 3 mixed)"
+# ⚠ A BOOL CLUSTERED ONTO THE VALUE-TAKING SHORT, which is where reading the
+# raw token instead of the expanded one stops seeing the second flag at all.
+expect_eq "head -qc3 then -n 1"    "$(head -qc3 -n 1 mixed)"        "$($BIN head -qc3 -n 1 mixed)"
+expect_eq "head -qn1 then -c 3"    "$(head -qn1 -c 3 mixed)"        "$($BIN head -qn1 -c 3 mixed)"
+# ⚠ A REPEATED FLAG: the LAST occurrence is the one that counts, not the first.
+expect_eq "head -c 3 -n 1 -c 5"    "$(head -c 3 -n 1 -c 5 mixed)"   "$($BIN head -c 3 -n 1 -c 5 mixed)"
+expect_eq "head -n 1 -c 3 -n 2"    "$(head -n 1 -c 3 -n 2 mixed)"   "$($BIN head -n 1 -c 3 -n 2 mixed)"
+# ⚠ PAST `--` EVERY TOKEN IS AN OPERAND.
+expect_eq "head -c 3 -- mixed"     "$(head -c 3 -- mixed)"          "$($BIN head -c 3 -- mixed)"
+
 # --- tail: default 10 ---
 expect_eq "tail default"        "$(tail nums)"           "$($BIN tail nums)"
 expect_eq "tail default short"  "$(tail short)"          "$($BIN tail short)"
@@ -123,6 +157,24 @@ expect_eq "tail -q multi"       "$(tail -q -n 2 short nums)" "$($BIN tail -q -n 
 
 # --- tail -v single file ---
 expect_eq "tail -v single"      "$(tail -v -n 2 short)"  "$($BIN tail -v -n 2 short)"
+
+# --- tail: -n and -c are LAST-WINS ---------------------------------------
+# ⛔ THE SAME DEFECT, IN THE SAME SHAPE, IN HEAD'S PAIR UTILITY. Measured
+# against GNU coreutils 9.11 on `abcdefghij\nklmnop\n`:
+#
+#     $ tail -c 3 -n 1 mixed      klmnop      (the -n answer)
+#     $ kriya tail -c 3 -n 1      op          (the -c answer)
+expect_eq "tail -c then -n"        "$(tail -c 3 -n 1 mixed)"        "$($BIN tail -c 3 -n 1 mixed)"
+expect_eq "tail -n then -c"        "$(tail -n 1 -c 3 mixed)"        "$($BIN tail -n 1 -c 3 mixed)"
+expect_eq "tail -c3 -n1 attached"  "$(tail -c3 -n1 mixed)"          "$($BIN tail -c3 -n1 mixed)"
+expect_eq "tail -n1 -c3 attached"  "$(tail -n1 -c3 mixed)"          "$($BIN tail -n1 -c3 mixed)"
+expect_eq "tail --bytes= --lines=" "$(tail --bytes=3 --lines=1 mixed)" "$($BIN tail --bytes=3 --lines=1 mixed)"
+expect_eq "tail --lines= --bytes=" "$(tail --lines=1 --bytes=3 mixed)" "$($BIN tail --lines=1 --bytes=3 mixed)"
+expect_eq "tail -c then --lines"   "$(tail -c 3 --lines 1 mixed)"   "$($BIN tail -c 3 --lines 1 mixed)"
+expect_eq "tail -qc3 then -n 1"    "$(tail -qc3 -n 1 mixed)"        "$($BIN tail -qc3 -n 1 mixed)"
+expect_eq "tail -qn1 then -c 3"    "$(tail -qn1 -c 3 mixed)"        "$($BIN tail -qn1 -c 3 mixed)"
+expect_eq "tail -c 3 -n 1 -c 5"    "$(tail -c 3 -n 1 -c 5 mixed)"   "$($BIN tail -c 3 -n 1 -c 5 mixed)"
+expect_eq "tail -c 3 -- mixed"     "$(tail -c 3 -- mixed)"          "$($BIN tail -c 3 -- mixed)"
 
 # --- errors ---
 expect_exit "head missing"      1 "$BIN" head ghost

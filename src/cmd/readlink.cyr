@@ -21,8 +21,9 @@
 #   -q / --quiet                   suppress error messages; the exit
 #                                  code still reflects failure.
 #
-# Canonicalize flags are mutually exclusive in spirit; if multiple are
-# given, last-wins precedence (L-style): `-m` > `-e` > `-f`. Matches GNU.
+# Canonicalize flags are mutually exclusive; if more than one is given
+# the LAST one on the command line wins, in any spelling. It is not a
+# precedence ladder — `-m -e` is the `-e` answer, as GNU's is.
 #
 # Each FILE is processed independently. The invocation exits with
 # EXIT_FAILURE if any FILE fails; the canonical/raw target paths for
@@ -116,11 +117,31 @@ fn cmd_readlink(start: i64): i64 {
     # Determine canonicalize mode.
     # 0 = no canonicalize (POSIX raw read-link).
     # 1 = -f (REQUIRE_PARENT), 2 = -e (REQUIRE_ALL), 3 = -m (ALLOW_MISSING).
-    # Precedence (matches GNU last-wins): m > e > f.
+    #
+    # ⛔ THE THREE ARE LAST-WINS, AND A FIXED PRECEDENCE IS NOT A WAY TO SPELL
+    # THAT. This block ranked them `m > e > f` under a comment that called the
+    # ranking "matches GNU last-wins" — two incompatible rules in one line, and
+    # the ranking is the one that ran. Measured against GNU coreutils 9.11:
+    #
+    #     $ readlink -m -e nope ; echo rc=$?     rc=1, nothing on stdout
+    #     $ kriya readlink -m -e nope            /abs/nope, rc=0
+    #
+    # A caller checking `readlink -e` for existence got a path back for a file
+    # that is not there, because a wrapper had appended `-m` earlier in the line.
+    # ⚠ `-e -m` and `-em` agree under BOTH rules, and those are the orders the
+    # suite covered.
+    #
+    # ⭐ The order comes from the parser's expanded argv, so the cluster `-me`
+    # answers exactly as the separated `-m -e` does, and each flag's long
+    # spelling counts as its own occurrence.
     var canon_mode: i64 = 0;
-    if (flags_get_bool(_rl_spec, _rl_f_idx) == 1) { canon_mode = 1; }
-    if (flags_get_bool(_rl_spec, _rl_e_idx) == 1) { canon_mode = 2; }
-    if (flags_get_bool(_rl_spec, _rl_m_idx) == 1) { canon_mode = 3; }
+    var canon_at: i64 = 0;
+    var seq_f = kriya_opt_seq(_rl_spec, 102, "canonicalize");
+    var seq_e = kriya_opt_seq(_rl_spec, 101, "canonicalize-existing");
+    var seq_m = kriya_opt_seq(_rl_spec, 109, "canonicalize-missing");
+    if (seq_f > canon_at) { canon_at = seq_f; canon_mode = 1; }
+    if (seq_e > canon_at) { canon_at = seq_e; canon_mode = 2; }
+    if (seq_m > canon_at) { canon_at = seq_m; canon_mode = 3; }
 
     # Terminator selection. -z (NUL) overrides -n (no newline on last).
     var term_byte: i64 = 10;
