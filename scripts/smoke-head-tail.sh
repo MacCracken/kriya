@@ -38,6 +38,23 @@ expect_exit() {
     expect_eq "$name" "$expected" "$rc"
 }
 
+# For the cases where kriya and GNU agree that a command is an ERROR but not on
+# which non-zero code says so — GNU's head/tail exit 1 on a usage error, kriya
+# exits 2 for every one of its 38 utilities. Asserting "GNU also refuses this"
+# rather than assuming it is the point: it is what makes the deviation a
+# deliberate one-field difference instead of an untested claim.
+expect_nonzero() {
+    name=$1
+    shift
+    rc=0
+    "$@" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        expect_eq "$name" "non-zero exit" "exit 0"
+    else
+        expect_eq "$name" "non-zero exit" "non-zero exit"
+    fi
+}
+
 # --- fixture ---
 seq 1 50 > nums            # 50 lines
 seq 1 5 > short            # 5 lines
@@ -112,6 +129,64 @@ expect_exit "head missing"      1 "$BIN" head ghost
 expect_exit "tail missing"      1 "$BIN" tail ghost
 expect_exit "head bad -n"       2 "$BIN" head -n abc
 expect_exit "tail bad -c"       2 "$BIN" tail -c xyz
+
+# --- obsolescent bare-digit count (`head -5`, `tail -5`) ---------------
+#
+# ⛔ IT USED TO FIRE AT ANY POSITION, WHICH SILENTLY OVERRODE THE OPTION IN
+# FRONT OF IT. `head -n 1 -5 nums` expanded the trailing `-5` into `-n 5` and
+# printed FIVE lines with exit 0, where the command as written says one. GNU
+# 9.11 refuses the form in every position but the first — `head: invalid
+# trailing option -- 5`, `tail: option used in invalid context -- 5` — because a
+# digit that far from the front is a typo far more often than an intent.
+#
+# ⚠ The position is the ARGUMENT's, not "the first option": GNU reads argv[1]
+# and nothing else, so `head nums -5` is refused too. Asserted below.
+#
+# ⚠ Known deviation, deliberate: `tail -5 -c 3` is accepted here and refused by
+# GNU, whose tail takes the obsolescent form only when it is the ONLY option
+# (its parse gives up once argc exceeds 3). kriya applies the same
+# first-argument rule to both utilities rather than reproducing that asymmetry.
+expect_eq "head -5 first arg"     "$(head -5 nums)"        "$($BIN head -5 nums)"
+expect_eq "tail -5 first arg"     "$(tail -5 nums)"        "$($BIN tail -5 nums)"
+expect_eq "head -1 first arg"     "$(head -1 nums)"        "$($BIN head -1 nums)"
+expect_eq "tail -1 first arg"     "$(tail -1 nums)"        "$($BIN tail -1 nums)"
+expect_eq "head -25 over-length"  "$(head -25 short)"      "$($BIN head -25 short)"
+# First position still composes with a later option — `-c` wins, as in GNU.
+expect_eq "head -5 then -c 3"     "$(head -5 -c 3 nums)"   "$($BIN head -5 -c 3 nums)"
+
+expect_exit    "head -c 3 -5 refused"     2 "$BIN" head -c 3 -5 nums
+expect_nonzero "gnu head -c 3 -5 refused"   head -c 3 -5 nums
+expect_exit    "head -n 1 -5 refused"     2 "$BIN" head -n 1 -5 nums
+expect_nonzero "gnu head -n 1 -5 refused"   head -n 1 -5 nums
+expect_exit    "head FILE -5 refused"     2 "$BIN" head nums -5
+expect_nonzero "gnu head FILE -5 refused"   head nums -5
+expect_exit    "head -5 -5 refused"       2 "$BIN" head -5 -5 nums
+expect_nonzero "gnu head -5 -5 refused"     head -5 -5 nums
+
+expect_exit    "tail -c 3 -5 refused"     2 "$BIN" tail -c 3 -5 nums
+expect_nonzero "gnu tail -c 3 -5 refused"   tail -c 3 -5 nums
+expect_exit    "tail -n 1 -5 refused"     2 "$BIN" tail -n 1 -5 nums
+expect_nonzero "gnu tail -n 1 -5 refused"   tail -n 1 -5 nums
+expect_exit    "tail FILE -5 refused"     2 "$BIN" tail nums -5
+expect_nonzero "gnu tail FILE -5 refused"   tail nums -5
+
+# A refusal has to NAME the offender, or the next person reads "bad option" and
+# goes looking at `-c`.
+err=$("$BIN" head -c 3 -5 nums 2>&1 >/dev/null | head -1)
+case "$err" in
+    *"invalid trailing option -- 5"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL head trailing-digit diagnostic:\ngot: '%s'\n" "$err" >&2 ;;
+esac
+err=$("$BIN" tail -c 3 -5 nums 2>&1 >/dev/null | head -1)
+case "$err" in
+    *"invalid trailing option -- 5"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL tail trailing-digit diagnostic:\ngot: '%s'\n" "$err" >&2 ;;
+esac
+
+# `--` still ends option parsing before any of this: a first-argument `-5` in
+# front of it is a count, and one behind it is a filename.
+expect_eq   "head -5 -- FILE"     "$(head -5 -- nums)"     "$($BIN head -5 -- nums)"
+expect_exit "head -- -5 is a file" 1 "$BIN" head -- -5
 
 # --- partial failure ---
 rc=0

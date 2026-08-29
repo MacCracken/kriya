@@ -58,7 +58,7 @@ var _kriya_optval_vals  = 0;   # captured values, parallel
 var _kriya_optval_n     = 0;
 var _kriya_optval_want = 0;    # first registered name — kept for kriya_long_value()
 var _kriya_optval_val  = 0;    # its captured value, or 0
-var _kriya_optval_bad  = 0;    # 1 once a bool long was given an argument
+var _kriya_expand_bad  = 0;    # 1 once the expander printed a fatal diagnostic
 
 fn _kriya_optval_reset(): i64 {
     if (_kriya_optval_names == 0) {
@@ -189,6 +189,29 @@ fn kriya_short_type(spec, ch): i64 {
     return 0 - 1;
 }
 
+# The obsolescent bare-digit count where it is not accepted: anywhere but the
+# first argument.
+#
+# ⛔ ACCEPTING IT ANYWHERE SILENTLY OVERRODE THE OPTION IN FRONT OF IT. `head -n 1
+# -5 f` expanded the trailing `-5` into `-n 5` and honoured it — FIVE lines, exit
+# 0, where the command says one. GNU 9.11 refuses the form outright in any but
+# the first position (`head: invalid trailing option -- 5`, and `tail: option
+# used in invalid context -- 5`, both non-zero), precisely because a digit that
+# far from the front is far more likely a typo than an intent. A wrong answer
+# that reports success is the failure mode this repo exists not to have.
+#
+# ⚠ The position is the argument's own, NOT "the first option": GNU reads only
+# argv[1], so `head f -5` is refused too even though nothing optional precedes
+# it. Measured against coreutils 9.11, not inferred.
+fn _kriya_obsnum_trailing(tok, tlen): i64 {
+    k_write( 2, "kriya ", 6);
+    if (_help_name != 0) { k_write( 2, _help_name, strlen(_help_name)); }
+    k_write( 2, ": error: invalid trailing option -- ", 36);
+    k_write( 2, tok + 1, tlen - 1);
+    k_write( 2, " (the bare-digit count is accepted only as the first argument)\n", 63);
+    return 0;
+}
+
 # Rewrite `av[0..n)` with clusters expanded, returning the new count. The
 # expanded array is written to `out` (caller-allocated, see the cap computed in
 # `kriya_args_parse`). `av[0]` is the program name and passes through untouched.
@@ -197,7 +220,8 @@ fn kriya_short_type(spec, ch): i64 {
 # maps to — `head -5` meaning `head -n 5` — or 0 for utilities with no such
 # form. It only fires on a token that is `-` followed by digits only, so a
 # registered numeric short (`ls -1`) is unaffected: that is matched as an
-# option first.
+# option first. ⚠ And only in the FIRST argument position — see
+# `_kriya_obsnum_trailing`.
 fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
     var oi: i64 = 0;
     if (n > 0) {
@@ -264,7 +288,7 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
                                         k_write( 2, ": option '--", 12);
                                         k_write( 2, tok + 2, nlen);
                                         k_write( 2, "' doesn't allow an argument\n", 28);
-                                        _kriya_optval_bad = 1;
+                                        _kriya_expand_bad = 1;
                                         handled = 1;
                                     }
                                 }
@@ -316,7 +340,8 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
                     }
                     }
                 }
-                # Obsolescent `head -5` / `tail -5` → `-n 5`.
+                # Obsolescent `head -5` / `tail -5` → `-n 5`, FIRST ARGUMENT
+                # ONLY (`_kriya_obsnum_trailing` has why the position matters).
                 if (handled == 0) {
                     if (obs_num != 0) {
                         if (tlen > 1) {
@@ -329,15 +354,21 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
                                     d = d + 1;
                                 }
                                 if (alldig == 1) {
-                                    var g = alloc(3);
-                                    store8(g, 45);
-                                    store8(g + 1, obs_num);
-                                    store8(g + 2, 0);
-                                    store64(out + oi * 8, g);
-                                    oi = oi + 1;
-                                    store64(out + oi * 8, tok + 1);
-                                    oi = oi + 1;
-                                    handled = 1;
+                                    if (i == 1) {
+                                        var g = alloc(3);
+                                        store8(g, 45);
+                                        store8(g + 1, obs_num);
+                                        store8(g + 2, 0);
+                                        store64(out + oi * 8, g);
+                                        oi = oi + 1;
+                                        store64(out + oi * 8, tok + 1);
+                                        oi = oi + 1;
+                                        handled = 1;
+                                    } else {
+                                        _kriya_obsnum_trailing(tok, tlen);
+                                        _kriya_expand_bad = 1;
+                                        handled = 1;
+                                    }
                                 }
                             }
                         }
@@ -693,7 +724,7 @@ fn _kriya_operand_overflow(): i64 {
 }
 
 fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
-    _kriya_optval_bad = 0;
+    _kriya_expand_bad = 0;
 
     # ⭐ `--help` RENDERS AND EXITS HERE rather than returning a sentinel. Every
     # one of the 28 call sites has the shape
@@ -741,9 +772,10 @@ fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
     _kriya_expanded   = out;
     _kriya_expanded_n = m;
     # The expander already printed the precise diagnostic ("option '--x' doesn't
-    # allow an argument"), so return a plain failure and let the caller's usage
-    # exit stand — a second, vaguer message on top would be noise.
-    if (_kriya_optval_bad == 1) { return 0 - 1; }
+    # allow an argument", "invalid trailing option -- 5"), so return a plain
+    # failure and let the caller's usage exit stand — it names the offender, and
+    # the caller's line supplies the exit code every call site already agrees on.
+    if (_kriya_expand_bad == 1) { return 0 - 1; }
     var pr = flags_parse(spec, m, out);
     if (pr != 0) { return pr; }
     # ⛔ EXITS RATHER THAN RETURNING, for the reason `--help` above does: every
