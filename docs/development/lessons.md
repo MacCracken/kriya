@@ -227,6 +227,21 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   specific enough to grep for**: a comment that says what GNU or POSIX does, with no measurement
   beside it, is the highest-yield place to look for a defect in this codebase.
 
+- ⛔ *A comment can be a claim about KRIYA'S OWN CODE, and those expire too.* `realpath`'s order
+  scan said "Bundled shorts are rejected by the parser (ADR 0002), so a short option is exactly two
+  bytes here" and had an `if (tlen == 2)` acting on it. The parser has accepted clusters since
+  1.4.0; `realpath -Ps slink` resolved the symlink GNU leaves alone, because neither letter of the
+  three-byte token was ever seen. ⚠ **The GNU/POSIX-claim grep does not find these** — the claim
+  names an internal ADR, and the code it described changed underneath it. **A comment that says
+  "X is impossible here, so this shortcut is safe" is the same shape and the same risk.**
+
+- ⛔ *A comment and the code under it can be two different rules, and the comment wins the review.*
+  `readlink` said "Precedence (matches GNU last-wins): m > e > f" and `head` said "Mode: -c wins
+  over -n (last-wins; GNU same)". Precedence is not last-wins; both sentences contradict themselves
+  in eight words, both were read as documentation of correct behaviour for releases, and in both
+  the ranking is what ran. ⚠ **When a comment names two rules, the code implements at most one of
+  them** — and the tests get written to agree with whichever half the author had in mind.
+
 - ⭐ *Twenty-four byte-identical copies of one function is a defect with twenty-four homes.* The
   error line could not change shape without 24 edits, so it never did — and the quoting bug lived
   in all of them. Collapsing them removed **401 lines** and made the binary **8 KiB smaller**.
@@ -281,6 +296,27 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   only; nothing paired `-s`/`-L` with a trailing slash; ADR 0015's recorded divergences had no
   assertion at all. ⭐ **"Which mutation would this test catch?" is a better review question than
   "is this test correct?"**
+
+- ⛔ *A SECOND SCANNER OF ARGV IS A SECOND OPINION ABOUT WHAT THE USER TYPED.* 1.5.1 learned this
+  once — `ls` bounded its sort-key scan with `kriya_argv_option_end` while the parser permuted, and
+  dropped `-t` from `-rt` after an operand. ⚠ **Three more utilities were still doing it**:
+  `realpath` walked the raw argv and could not see `-Ps`; `readlink` and `head`/`tail` did not walk
+  it at all and substituted a fixed precedence. The fix each time is the same — ask
+  `kriya_opt_seq()` where a flag last appeared in the parser's own EXPANDED argv, where clusters are
+  already split, values already separated and `--` already honoured. ⭐ **`kriya_short_seq` from
+  1.5.1 should have been generalised then rather than left as `ls`'s private helper**; a fix that
+  stays in one utility is an invitation for the next three to re-derive it wrong.
+
+- ⛔ *"Last-wins" and "x beats y" agree on exactly half the orders, and half the orders is what gets
+  tested.* Every conflicting pair in `realpath`, `readlink`, `head` and `tail` was asserted ONCE —
+  `-sP`, `-f -e -m`, `-n 1 -c 3` — and each of those is an order where the wrong rule and the right
+  one coincide. ⭐ **A pair whose members conflict needs BOTH orders and the clustered spelling, or
+  it proves nothing**: the assertion that catches the bug is the one nobody thought to write,
+  because writing it feels like testing the same thing twice.
+
+- ⚠ *The sibling utility has the same bug.* `head` was reported; `tail` had the identical block,
+  the identical comment and the identical divergence, and was not. **When a defect is found in one
+  of a pair — `head`/`tail`, `cp`/`mv`, `realpath`/`readlink` — grep the other before closing.**
 
 - ⛔ *An inode assertion does not prove a rename.* A hard link shares the inode, so the
   "is it a rename?" test passed a link-based mutation; only asserting the backup's CONTENT — and

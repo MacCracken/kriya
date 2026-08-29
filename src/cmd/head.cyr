@@ -172,34 +172,66 @@ fn cmd_head(start: i64): i64 {
     var verbose: i64 = 0;
     if (flags_get_bool(_head_spec, _head_v_idx) == 1) { verbose = 1; }
 
-    # Mode: -c wins over -n (last-wins; GNU same).
+    # ⛔ -n AND -c ARE LAST-WINS, AND "-c WINS" IS NOT THE SAME RULE. The comment
+    # here said "Mode: -c wins over -n (last-wins; GNU same)" and the code did
+    # the first half of that sentence. Measured against GNU coreutils 9.11 on
+    # `abcdefghij\nklmnop\n`:
+    #
+    #     $ head -c 3 -n 1 h.txt      abcdefghij      (the -n answer)
+    #     $ kriya head -c 3 -n 1      abc             (the -c answer)
+    #
+    # ⚠ `-n 1 -c 3` agrees under both rules, and that is the order the suite
+    # covered. The divergence shows up in generated command lines, where a
+    # wrapper appends `-n` to a base command that already carried `-c`.
+    #
+    # ⭐ The order comes from the parser's expanded argv, so the clustered
+    # `-c3 -n1`, the attached `--bytes=3`, and the obsolescent `head -5` (which
+    # expands to `-n 5`) all count as occurrences at their own position.
     var count_lines: i64 = 1;
     var limit: i64 = 10;
 
     var n_arg = flags_get_str(_head_spec, _head_n_idx);
     var c_arg = flags_get_str(_head_spec, _head_c_idx);
 
+    # ⚠ BOTH ARE VALIDATED EVEN THOUGH ONLY ONE IS USED. GNU refuses
+    # `head -c abc -n 1` rather than quietly taking the `-n`, and a bad count is
+    # a usage error whichever flag ends up losing.
+    var n_val: i64 = 0 - 1;
+    var c_val: i64 = 0 - 1;
     if (n_arg != 0) {
         if (load8(n_arg) != 0) {
-            var v = kriya_parse_nonneg_int(n_arg);
-            if (v < 0) {
+            n_val = kriya_parse_nonneg_int(n_arg);
+            if (n_val < 0) {
                 k_write( 2, "kriya head: error: --lines requires a non-negative integer\n", 59);
                 return EXIT_USAGE;
             }
-            limit = v;
-            count_lines = 1;
         }
     }
     if (c_arg != 0) {
         if (load8(c_arg) != 0) {
-            var v = kriya_parse_nonneg_int(c_arg);
-            if (v < 0) {
+            c_val = kriya_parse_nonneg_int(c_arg);
+            if (c_val < 0) {
                 k_write( 2, "kriya head: error: --bytes requires a non-negative integer\n", 59);
                 return EXIT_USAGE;
             }
-            limit = v;
-            count_lines = 0;
         }
+    }
+
+    # ⚠ An option whose last occurrence carried NO value (`--lines=`) does not
+    # take part in the ordering — otherwise it would beat a `-c` that did carry
+    # one and leave neither in force, which is the default and not what either
+    # flag asked for.
+    var n_at: i64 = 0;
+    var c_at: i64 = 0;
+    if (n_val >= 0) { n_at = kriya_opt_seq(_head_spec, 110, "lines"); }
+    if (c_val >= 0) { c_at = kriya_opt_seq(_head_spec, 99,  "bytes"); }
+    if (n_at > c_at) {
+        limit = n_val;
+        count_lines = 1;
+    }
+    if (c_at > n_at) {
+        limit = c_val;
+        count_lines = 0;
     }
 
     var npos = flags_positional_count(_head_spec);

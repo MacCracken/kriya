@@ -135,10 +135,57 @@ expected="$WORK_REAL/a/b/file
 $WORK_REAL/a/b/file"
 expect_eq "multi partial stdout"  "$expected" "$out"
 
-# --- canonicalize precedence: -m > -e > -f ---
-out=$("$BIN" readlink -f -e -m a/b/nope/deeper)
-# -m wins → allows missing → returns the canonical path
-expect_eq "-f -e -m: m wins"      "$WORK_REAL/a/b/nope/deeper" "$out"
+# --- canonicalize is LAST-WINS, in every spelling -------------------------
+# ⛔ THIS BLOCK USED TO ASSERT A PRECEDENCE LADDER (`-m` > `-e` > `-f`) AND
+# COVERED THE ONE ORDER THE LADDER AND LAST-WINS AGREE ON. They disagree the
+# other way round, and GNU is last-wins. Measured against GNU coreutils 9.11:
+#
+#     $ readlink -m -e nope ; echo rc=$?     rc=1, nothing on stdout
+#     $ kriya readlink -m -e nope            /abs/nope, rc=0
+#
+# A caller testing `readlink -e` for existence got a path back for a file that
+# is not there, because something earlier in a generated command line carried
+# `-m`. ⭐ Both orders and the clustered spelling are asserted now.
+same_rl() {   # same_rl <name> <arg...>
+    # ⚠ SHIFT THE NAME OFF, or GNU gets the description as an extra operand
+    # and fails everywhere — loudly, but for the wrong reason.
+    _n=$1; shift
+    _g=$(readlink "$@" 2>/dev/null || true)
+    _gr=0; readlink "$@" >/dev/null 2>&1 || _gr=$?
+    _k=$("$BIN" readlink "$@" 2>/dev/null || true)
+    _kr=0; "$BIN" readlink "$@" >/dev/null 2>&1 || _kr=$?
+    expect_eq "$_n [out]" "$_g" "$_k"
+    expect_eq "$_n [rc]"  "$_gr" "$_kr"
+}
+
+# ⚠ THE OPERAND HAS TO MAKE THE MODES DISAGREE. On a path that exists every
+# one of -f/-e/-m answers identically and the pair asserts nothing.
+MISS=a/b/nope/deeper
+same_rl "-m then -e is -e"  -m -e "$MISS"
+same_rl "-e then -m is -m"  -e -m "$MISS"
+same_rl "-me clustered is -e" -me "$MISS"
+same_rl "-em clustered is -m" -em "$MISS"
+same_rl "-m then -f is -f"  -m -f "$MISS"
+same_rl "-f then -m is -m"  -f -m "$MISS"
+same_rl "-mf clustered is -f" -mf "$MISS"
+same_rl "-fm clustered is -m" -fm "$MISS"
+same_rl "-e then -f is -f"  -e -f "$MISS"
+same_rl "-f then -e is -e"  -f -e "$MISS"
+same_rl "-ef clustered is -f" -ef "$MISS"
+same_rl "-fe clustered is -e" -fe "$MISS"
+same_rl "three flags, -m last"  -f -e -m "$MISS"
+same_rl "three flags, -f last"  -m -e -f "$MISS"
+# ⚠ THE LONG SPELLINGS COUNT AS OCCURRENCES AT THEIR OWN POSITION, and mixing
+# the two spellings is exactly how a wrapper appending to a base command writes it.
+same_rl "--canonicalize-missing then -e" --canonicalize-missing -e "$MISS"
+same_rl "-e then --canonicalize-missing" -e --canonicalize-missing "$MISS"
+same_rl "-m then --canonicalize-existing" -m --canonicalize-existing "$MISS"
+# ⚠ A NON-MODE FLAG BETWEEN THE PAIR MUST NOT DISTURB THE ORDER.
+same_rl "-m -z -e keeps -e"  -m -z -e "$MISS"
+same_rl "-mze clustered"     -mze "$MISS"
+# ⚠ PAST `--` EVERY TOKEN IS AN OPERAND — a file named `-e` does not re-mode
+# the run. GNU and kriya are compared on the same command line either way.
+same_rl "-- ends the option scan" -m -- "$MISS"
 
 # --- no operands ---
 expect_exit "no operands"         2 "$BIN" readlink

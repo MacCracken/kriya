@@ -6,6 +6,78 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [Unreleased]
+
+### Fixed — ⛔ three utilities said "last-wins" and four of them did something else
+
+**`realpath`, `readlink`, `head` and `tail` all resolved a conflicting flag pair by a rule that is
+not the one GNU uses.** Measured against GNU coreutils 9.11 on this box:
+
+    $ mkdir -p /tmp/rp/real && ln -s real /tmp/rp/slink
+    $ realpath -Ps /tmp/rp/slink          GNU: /tmp/rp/slink     kriya: /tmp/rp/real
+    $ readlink -m -e /tmp/rp/nope         GNU: rc=1, no output   kriya: /tmp/rp/nope, rc=0
+    $ printf 'abcdefghij\nklmnop\n' > h
+    $ head -c 3 -n 1 h                    GNU: abcdefghij        kriya: abc
+    $ tail -c 3 -n 1 h                    GNU: klmnop            kriya: op
+
+⚠ **In every case the OTHER order was right.** `-sP`, `-e -m`, `-n 1 -c 3` and `tail -n 1 -c 3` all
+agreed with GNU, which is why the suites were green: each pair was asserted once, in the order where
+the wrong rule and the right one happen to coincide.
+
+**1. `realpath` scanned the RAW argv and could not see a cluster.**
+
+`_rp_scan_order` walked `argv(i)` under a comment claiming *"Bundled shorts are rejected by the
+parser (ADR 0002), so a short option is exactly two bytes here"*, followed by an `if (tlen == 2)`
+that acted on it. ⛔ **kriya's parser has accepted clusters since 1.4.0** — `kriya ls -1C` resolves —
+so `-Ps` arrives as one three-byte token, fails the length test, and neither letter is seen at all.
+`realpath -Ps slink` printed the RESOLVED path where GNU prints the symlink untouched: `-s` was
+never applied and `_rp_how` stayed at its `RP_PHYSICAL` default. ⚠ A claim about *kriya's own
+parser*, not about GNU — the code the comment described had changed underneath it.
+
+**2. `readlink` implemented a PRECEDENCE LADDER under a comment calling it last-wins.**
+
+*"Precedence (matches GNU last-wins): m > e > f"* — the two halves of that sentence are different
+rules, and the ranking is the one that ran. ⛔ A caller testing `readlink -e` for existence got a
+path back for a file that is not there, because something earlier in a generated command line
+carried `-m`.
+
+**3. `head` and `tail` did the same thing to `-n` and `-c`.**
+
+*"Mode: -c wins over -n (last-wins; GNU same)"*, and the code did the first half. ⭐ **`tail` was not
+in the report and has the identical defect** — same block, same comment shape, same divergence. The
+two are a pair; fixing one and shipping the other would have left half the bug in place.
+
+### Changed — ⭐ order-sensitive questions are asked of the parser, not of `argv`
+
+`src/lib/args.cyr` gains `kriya_expanded_argv()` / `kriya_expanded_argc()` (accessors for the
+normalised argv the parser already builds — clusters split, attached values separated, long forms
+normalised, `--` honoured, permutation resolved) and **`kriya_opt_seq(spec, short_ch, long_name)`**,
+which answers *where did this option LAST appear* for any spelling: short, clustered, long, attached
+`--name=VALUE`, and the obsolescent `head -5`. `kriya_short_seq` — added in 1.5.1 for `ls -tS` — is
+now a two-line wrapper over it, so there is **one** implementation of the question instead of four
+partial ones.
+
+⚠ **The general scan skips a value-taking option's VALUE and stops at `--`**, both of which the
+`ls`-era version did not need and `head` does: `head --lines -c` must not read the `-c` as a byte
+count the parser consumed as the line count, and a file named `-n` after `--` is an operand.
+
+⚠ `_rp_scan_order` now reads every letter of a single-dash token rather than only a two-byte one,
+and asks the spec — not a list of names — which options swallow a following value, so
+`--relative-to DIR` cannot be re-read as flags. The stale ADR-0002 comment is gone.
+
+### Fixed — ⛔ the tests only ever covered the order that agreed
+
+Every new assertion was verified RED against a pre-fix binary built from the previous commit, and
+green after: **13** new in `smoke-realpath.sh` (395 total), **18** in `smoke-readlink.sh` (95),
+**12** in `smoke-head-tail.sh` (67). All 41 smoke scripts and `cyrius test` (453) green.
+
+⚠ **The gap was structural, not an oversight.** `readlink`'s block was headed *"canonicalize
+precedence: -m > -e > -f"* and asserted `-f -e -m` — the one order both rules answer identically.
+Every new pair is asserted in BOTH orders and in clustered form, plus the long spellings, a
+non-mode flag between the pair, a repeated flag, and past a `--`. ⭐ `head`/`tail` gained a fixture
+whose line answer and byte answer differ at both ends (`abcdefghij\nklmnop\n`); on the existing
+`seq 1 50` fixture a mode mix-up still looks plausible.
+
 ## [1.6.7] - 2026-08-28 — toolchain pin 6.5.36, a sleep that is a deadline, and a watchlist that was wrong
 
 ### Changed — toolchain pin 6.5.35 → **6.5.36**
