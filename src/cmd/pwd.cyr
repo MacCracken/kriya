@@ -29,7 +29,7 @@ fn _pwd_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn pwd_help_declare(): i64 {
     help_begin("pwd", "Print the working directory.",
-               "pwd [OPTIONS]");
+      "pwd [OPTIONS]");
     help_positional(0, 0, 0);
     help_example("pwd");
     help_example("pwd -P");

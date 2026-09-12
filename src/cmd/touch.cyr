@@ -51,7 +51,7 @@ fn _touch_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn touch_help_declare(): i64 {
     help_begin("touch", "Create files, or update their timestamps.",
-               "touch [OPTIONS] FILE...");
+      "touch [OPTIONS] FILE...");
     help_positional(1, HELP_POS_UNBOUNDED, "FILE");
     help_destructive(1);
     help_operands("With no time option the current time is used. ⚠ -r and -t are mutually exclusive; -t stamps are interpreted as UTC (ADR 0007).");  #skip-lint
@@ -111,7 +111,7 @@ fn _touch_create(path, no_create): i64 {
 # `explicit_sec >= 0` would have quietly meant "no explicit time" for 1969. The unselected side always gets
 # UTIME_OMIT so `-a`/`-m` still mean "only this one".
 fn _touch_update_times_at(path, update_atime, update_mtime, has_explicit, explicit_atime, explicit_mtime,
-                          nofollow): i64 {
+  nofollow): i64 {
     # 256 = AT_SYMLINK_NOFOLLOW — the flag that makes `-h` stamp the LINK.
     var atflags: i64 = 0;
     if (nofollow == 1) { atflags = 256; }
@@ -173,7 +173,7 @@ fn _touch_update_times(path, update_atime, update_mtime, nofollow): i64 {
 }
 
 fn _touch_one(path, update_atime, update_mtime, no_create, has_explicit, explicit_atime, explicit_mtime,
-              nofollow): i64 {
+  nofollow): i64 {
     if (strlen(path) == 0) {
         _touch_report(path, 2);
         return 0 - 2;
@@ -193,7 +193,7 @@ fn _touch_one(path, update_atime, update_mtime, no_create, has_explicit, explici
         return cr;
     }
     var ur = _touch_update_times_at(path, update_atime, update_mtime, has_explicit,
-                                    explicit_atime, explicit_mtime, nofollow);
+      explicit_atime, explicit_mtime, nofollow);
     if (ur != 0) {
         var errno = 0 - ur;
         # ⛔ WITH `-c`, A MISSING FILE IS NOT AN ERROR — and the comment that used
@@ -399,7 +399,7 @@ fn cmd_touch(start: i64): i64 {
     while (i < npos) {
         var p = flags_positional(_touch_spec, i);
         var r = _touch_one(p, update_atime, update_mtime, no_create, has_explicit,
-                           explicit_atime, explicit_mtime, nofollow);
+          explicit_atime, explicit_mtime, nofollow);
         if (r != 0) { any_failed = 1; }
         i = i + 1;
     }

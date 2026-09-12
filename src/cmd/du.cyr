@@ -605,46 +605,46 @@ fn cmd_du(start: i64): i64 {
                             if (c == 115) {                # -s
                                 _du_summarize = 1; p = p + 1;
                             } else { if (c == 97) {        # -a
-                                _du_all = 1; p = p + 1;
-                            } else { if (c == 99) {        # -c
-                                _du_total = 1; p = p + 1;
-                            } else { if (c == 104) {       # -h
-                                _du_human = 1; p = p + 1;
-                            } else { if (c == 107) {       # -k
-                                _du_bytes = 0; p = p + 1;
-                            } else { if (c == 98) {        # -b
-                                _du_bytes = 1; p = p + 1;
-                            } else { if (c == 76) {        # -L
-                                _du_follow = 1; p = p + 1;
-                            } else { if (c == 80) {        # -P
-                                _du_follow = 0; p = p + 1;
-                            } else { if (c == 83) {        # -S
-                                _du_sep_dirs = 1; p = p + 1;
-                            } else { if (c == 108) {       # -l
-                                _du_count_links = 1; p = p + 1;
-                            } else { if (c == 100) {       # -d N
-                                var dval: i64 = 0;
-                                if (p + 1 < tlen) {
-                                    dval = kriya_parse_nonneg_int(tok + p + 1);
-                                } else {
-                                    if (i + 1 >= n_argv) {
-                                        k_write( 2, "kriya du: error: -d requires an argument\n", 41);
-                                        return EXIT_USAGE;
-                                    }
-                                    dval = kriya_parse_nonneg_int(argv(i + 1));
-                                    consumed_next = 1;
-                                }
-                                if (dval < 0) {
-                                    k_write( 2, "kriya du: error: invalid -d value\n", 34);
-                                    return EXIT_USAGE;
-                                }
-                                _du_max_depth = dval;
-                                _du_have_depth = 1;
-                                loop = 0;
-                            } else {
-                                k_write( 2, "kriya du: error: unknown short option\n", 38);
-                                return EXIT_USAGE;
-                            } } } } } } } } } } }
+                                    _du_all = 1; p = p + 1;
+                                } else { if (c == 99) {        # -c
+                                        _du_total = 1; p = p + 1;
+                                    } else { if (c == 104) {       # -h
+                                            _du_human = 1; p = p + 1;
+                                        } else { if (c == 107) {       # -k
+                                                _du_bytes = 0; p = p + 1;
+                                            } else { if (c == 98) {        # -b
+                                                    _du_bytes = 1; p = p + 1;
+                                                } else { if (c == 76) {        # -L
+                                                        _du_follow = 1; p = p + 1;
+                                                    } else { if (c == 80) {        # -P
+                                                            _du_follow = 0; p = p + 1;
+                                                        } else { if (c == 83) {        # -S
+                                                                _du_sep_dirs = 1; p = p + 1;
+                                                            } else { if (c == 108) {       # -l
+                                                                    _du_count_links = 1; p = p + 1;
+                                                                } else { if (c == 100) {       # -d N
+                                                                        var dval: i64 = 0;
+                                                                        if (p + 1 < tlen) {
+                                                                            dval = kriya_parse_nonneg_int(tok + p + 1);
+                                                                        } else {
+                                                                            if (i + 1 >= n_argv) {
+                                                                                k_write( 2, "kriya du: error: -d requires an argument\n", 41);
+                                                                                return EXIT_USAGE;
+                                                                            }
+                                                                            dval = kriya_parse_nonneg_int(argv(i + 1));
+                                                                            consumed_next = 1;
+                                                                        }
+                                                                        if (dval < 0) {
+                                                                            k_write( 2, "kriya du: error: invalid -d value\n", 34);
+                                                                            return EXIT_USAGE;
+                                                                        }
+                                                                        _du_max_depth = dval;
+                                                                        _du_have_depth = 1;
+                                                                        loop = 0;
+                                                                    } else {
+                                                                        k_write( 2, "kriya du: error: unknown short option\n", 38);
+                                                                        return EXIT_USAGE;
+                                                                    } } } } } } } } } } }
                         }
                     }
                     if (consumed_next == 1) { i = i + 2; } else { i = i + 1; }
@@ -691,7 +691,7 @@ fn cmd_du(start: i64): i64 {
 # `--help=json` and `--list` alike.
 fn du_help_declare(): i64 {
     help_begin("du", "Summarise disk usage of files and directories.",
-               "du [OPTIONS] [FILE...]");
+      "du [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_operands("Reports 1024-byte blocks by default. A file reached under several names is counted once; -l counts it every time.");  #skip-lint
     help_exit(1, "a path could not be read");

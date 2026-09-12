@@ -80,7 +80,7 @@ fn _mv_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn mv_help_declare(): i64 {
     help_begin("mv", "Move or rename files and directories.",
-               "mv [OPTIONS] SOURCE... DEST");
+      "mv [OPTIONS] SOURCE... DEST");
     help_positional(2, HELP_POS_UNBOUNDED, "SOURCE,DEST");
     help_destructive(1);
     help_operands("A same-filesystem move is a rename; across filesystems it is a copy followed by a removal. ⚠ If the copy succeeds and the source removal fails, the destination is KEPT and the failure reported (ADR 0009). -b honours $VERSION_CONTROL and $SIMPLE_BACKUP_SUFFIX (ADR 0017); the command line wins.");  #skip-lint
@@ -389,8 +389,8 @@ fn cmd_mv(start: i64): i64 {
     # `VERSION_CONTROL=bogus cp -b src dst` exits 1 with the destination
     # unchanged. Resolving per operand would back some of them up and then fail.
     var _bk = backup_resolve(flags_get_bool(_mv_spec, _mv_b_idx),
-                             flags_get_str(_mv_spec, _mv_bk_idx),
-                             flags_get_str(_mv_spec, _mv_S_idx));
+      flags_get_str(_mv_spec, _mv_bk_idx),
+      flags_get_str(_mv_spec, _mv_S_idx));
     if (_bk == BACKUP_INVALID) {
         k_write( 2, "kriya mv: error: invalid backup control ", 40);
         k_write( 2, "(want none, off, numbered, t, existing, nil, simple or never)\n", 62);

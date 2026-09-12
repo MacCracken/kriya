@@ -137,7 +137,7 @@ fn _nl_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn nl_help_declare(): i64 {
     help_begin("nl", "Number lines of files.",
-               "nl [OPTIONS] [FILE...]");
+      "nl [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_exit(1, "a file could not be read");
     help_example("nl notes.txt");

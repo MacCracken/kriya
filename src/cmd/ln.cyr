@@ -55,13 +55,13 @@ fn _ln_init_spec(): i64 {
     _ln_f_idx = flags_add_bool(s, 102, "force",          0, "remove existing destination first");
     _ln_P_idx = flags_add_bool(s, 80,  "physical",       0, "hard-link the symlink itself, not its target");
     _ln_n_idx = flags_add_bool(s, 110, "no-dereference", 0,
-                               "treat symlink-to-directory destination as a name to replace");
+      "treat symlink-to-directory destination as a name to replace");
     _ln_v_idx = flags_add_bool(s, 118, "verbose",        0, "print each link as it is created");
     _ln_r_idx = flags_add_bool(s, 114, "relative",        0, "make the symlink target relative to the link");
     _ln_T_idx = flags_add_bool(s, 84,  "no-target-directory", 0,
-                               "treat the destination as a name, never as a directory");
+      "treat the destination as a name, never as a directory");
     _ln_t_idx = flags_add_str(s,  116, "target-directory",  0,
-                              "link every operand into this directory");
+      "link every operand into this directory");
     # ⭐ THE BACKUP TRIO, shared with the other two utilities via
     # `src/lib/backup.cyr`. ⛔ `-b` IS SHORT-ONLY AND `--backup` REQUIRES ITS
     # VALUE, because GNU's `--backup[=CONTROL]` is an optional-value flag and
@@ -80,7 +80,7 @@ fn _ln_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn ln_help_declare(): i64 {
     help_begin("ln", "Create hard links and symbolic links.",
-               "ln [OPTIONS] TARGET [LINKNAME]");
+      "ln [OPTIONS] TARGET [LINKNAME]");
     help_positional(1, HELP_POS_UNBOUNDED, "TARGET,LINKNAME");
     help_destructive(1);
     help_operands("Without -s a hard link is made. ⚠ Under -f the new link is created under a temporary name and renamed over the destination, so the destination is never lost when the link cannot be made. -b needs no -f and honours $VERSION_CONTROL and $SIMPLE_BACKUP_SUFFIX (ADR 0017); the command line wins.");  #skip-lint
@@ -401,8 +401,8 @@ fn cmd_ln(start: i64): i64 {
     # `VERSION_CONTROL=bogus cp -b src dst` exits 1 with the destination
     # unchanged. Resolving per operand would back some of them up and then fail.
     var _bk = backup_resolve(flags_get_bool(_ln_spec, _ln_b_idx),
-                             flags_get_str(_ln_spec, _ln_bk_idx),
-                             flags_get_str(_ln_spec, _ln_S_idx));
+      flags_get_str(_ln_spec, _ln_bk_idx),
+      flags_get_str(_ln_spec, _ln_S_idx));
     if (_bk == BACKUP_INVALID) {
         k_write( 2, "kriya ln: error: invalid backup control ", 40);
         k_write( 2, "(want none, off, numbered, t, existing, nil, simple or never)\n", 62);

@@ -80,7 +80,7 @@ fn _st_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn stat_help_declare(): i64 {
     help_begin("stat", "Print file metadata.",
-               "stat [OPTIONS] FILE...");
+      "stat [OPTIONS] FILE...");
     help_positional(1, HELP_POS_UNBOUNDED, "FILE");
     help_operands("⚠ Times render in UTC with a +0000 offset until tzfile support lands (ADR 0007). Specifiers kriya cannot render are refused by name rather than echoed back.");  #skip-lint
     help_exit(1, "a file could not be stat'd, or the format asked for something unimplemented");
@@ -328,78 +328,78 @@ fn _st_emit_spec(c, st, name): i64 {
     if (c == 115) {  # s
         n = _st_render_dec(load64(st + 48), &buf);
     } else { if (c == 97) {  # a (octal perms)
-        n = _st_render_oct(load64(st + 24) & 4095, &buf);
-    } else { if (c == 65) {  # A (symbolic perms)
-        n = _st_render_symperm(load64(st + 24), &buf);
-    } else { if (c == 102) {  # f (hex raw mode — st_mode is 4 bytes, mask)
-        n = _st_render_hex(load64(st + 24) & 4294967295, &buf);
-    } else { if (c == 70) {  # F (type name)
-        var t = _st_type_name(load64(st + 24));
-        k_write( 1, t, strlen(t));
-        return 0;
-    } else { if (c == 117) {  # u
-        n = _st_render_dec(load64(st + 28) & 4294967295, &buf);
-    } else { if (c == 103) {  # g
-        n = _st_render_dec(load64(st + 32) & 4294967295, &buf);
-    } else { if (c == 105) {  # i
-        n = _st_render_dec(load64(st + 8), &buf);
-    } else { if (c == 104) {  # h
-        n = _st_render_dec(load64(st + 16), &buf);
-    } else { if (c == 100) {  # d (decimal)
-        n = _st_render_dec(load64(st + 0), &buf);
-    } else { if (c == 68) {  # D (hex)
-        n = _st_render_hex(load64(st + 0), &buf);
-    } else { if (c == 116) {  # t (major of rdev, hex)
-        var rdev = load64(st + 40);
-        # Linux major/minor encoding: major = ((rdev >> 8) & 0xfff) | ((rdev >> 32) & ~0xfff)
-        # Simpler subset: major = (rdev >> 8) & 0xfff for typical devices.
-        n = _st_render_hex((rdev / 256) & 4095, &buf);
-    } else { if (c == 84) {  # T (minor of rdev, hex)
-        var rdev2 = load64(st + 40);
-        n = _st_render_hex(rdev2 & 255, &buf);
-    } else { if (c == 98) {  # b (blocks)
-        n = _st_render_dec(load64(st + 64), &buf);
-    } else { if (c == 66) {  # B (block size — always 512 on Linux)
-        n = _st_render_dec(512, &buf);
-    } else { if (c == 111) {  # o (st_blksize)
-        n = _st_render_dec(load64(st + 56), &buf);
-    } else { if (c == 88) {  # X (atime)
-        n = _st_render_dec(load64(st + 72), &buf);
-    } else { if (c == 89) {  # Y (mtime)
-        n = _st_render_dec(load64(st + 88), &buf);
-    } else { if (c == 90) {  # Z (ctime)
-        n = _st_render_dec(load64(st + 104), &buf);
-    } else { if (c == 87) {  # W (birth time — stat(2) can't see it; 0 matches GNU when unavailable)
-        n = _st_render_dec(0, &buf);
-    } else { if (c == 37) {  # literal %
-        store8(&buf, 37);
-        n = 1;
-    } elif (c == 120) {                                            # %x  atime
-        n = _st_render_time(load64(st + 72), load64(st + 80), &buf);
-    } elif (c == 121) {                                            # %y  mtime
-        n = _st_render_time(load64(st + 88), load64(st + 96), &buf);
-    } elif (c == 122) {                                            # %z  ctime
-        n = _st_render_time(load64(st + 104), load64(st + 112), &buf);
-    } else {
-        # ⚠ Two different failures, and they deserve different answers.
-        if (_st_is_deferred_spec(c) == 1) {  #skip-lint
-            # A REAL specifier kriya has not implemented. Emitting its source
-            # text would be a wrong answer dressed as output; say so instead.
-            k_write( 2, "kriya stat: %", 13);
-            var eb[8];
-            store8(&eb, c);
-            k_write( 2, &eb, 1);
-            k_write( 2, ": not implemented (see roadmap 1.6.10)\n", 39);
-            _st_bad = 1;
-            n = 0;
-        } else {
-            # Genuinely unknown. GNU prints '?' — verified against `stat -c %@`,
-            # which is what the previous "emit the source bytes, GNU behaviour"
-            # comment here got wrong.
-            store8(&buf, 63);
-            n = 1;
-        }
-    } } } } } } } } } } } } } } } } } } } } }
+            n = _st_render_oct(load64(st + 24) & 4095, &buf);
+        } else { if (c == 65) {  # A (symbolic perms)
+                n = _st_render_symperm(load64(st + 24), &buf);
+            } else { if (c == 102) {  # f (hex raw mode — st_mode is 4 bytes, mask)
+                    n = _st_render_hex(load64(st + 24) & 4294967295, &buf);
+                } else { if (c == 70) {  # F (type name)
+                        var t = _st_type_name(load64(st + 24));
+                        k_write( 1, t, strlen(t));
+                        return 0;
+                    } else { if (c == 117) {  # u
+                            n = _st_render_dec(load64(st + 28) & 4294967295, &buf);
+                        } else { if (c == 103) {  # g
+                                n = _st_render_dec(load64(st + 32) & 4294967295, &buf);
+                            } else { if (c == 105) {  # i
+                                    n = _st_render_dec(load64(st + 8), &buf);
+                                } else { if (c == 104) {  # h
+                                        n = _st_render_dec(load64(st + 16), &buf);
+                                    } else { if (c == 100) {  # d (decimal)
+                                            n = _st_render_dec(load64(st + 0), &buf);
+                                        } else { if (c == 68) {  # D (hex)
+                                                n = _st_render_hex(load64(st + 0), &buf);
+                                            } else { if (c == 116) {  # t (major of rdev, hex)
+                                                    var rdev = load64(st + 40);
+                                                    # Linux major/minor encoding: major = ((rdev >> 8) & 0xfff) | ((rdev >> 32) & ~0xfff)
+                                                    # Simpler subset: major = (rdev >> 8) & 0xfff for typical devices.
+                                                    n = _st_render_hex((rdev / 256) & 4095, &buf);
+                                                } else { if (c == 84) {  # T (minor of rdev, hex)
+                                                        var rdev2 = load64(st + 40);
+                                                        n = _st_render_hex(rdev2 & 255, &buf);
+                                                    } else { if (c == 98) {  # b (blocks)
+                                                            n = _st_render_dec(load64(st + 64), &buf);
+                                                        } else { if (c == 66) {  # B (block size — always 512 on Linux)
+                                                                n = _st_render_dec(512, &buf);
+                                                            } else { if (c == 111) {  # o (st_blksize)
+                                                                    n = _st_render_dec(load64(st + 56), &buf);
+                                                                } else { if (c == 88) {  # X (atime)
+                                                                        n = _st_render_dec(load64(st + 72), &buf);
+                                                                    } else { if (c == 89) {  # Y (mtime)
+                                                                            n = _st_render_dec(load64(st + 88), &buf);
+                                                                        } else { if (c == 90) {  # Z (ctime)
+                                                                                n = _st_render_dec(load64(st + 104), &buf);
+                                                                            } else { if (c == 87) {  # W (birth time — stat(2) can't see it; 0 matches GNU when unavailable)
+                                                                                    n = _st_render_dec(0, &buf);
+                                                                                } else { if (c == 37) {  # literal %
+                                                                                        store8(&buf, 37);
+                                                                                        n = 1;
+                                                                                    } elif (c == 120) {                                            # %x  atime
+                                                                                        n = _st_render_time(load64(st + 72), load64(st + 80), &buf);
+                                                                                    } elif (c == 121) {                                            # %y  mtime
+                                                                                        n = _st_render_time(load64(st + 88), load64(st + 96), &buf);
+                                                                                    } elif (c == 122) {                                            # %z  ctime
+                                                                                        n = _st_render_time(load64(st + 104), load64(st + 112), &buf);
+                                                                                    } else {
+                                                                                        # ⚠ Two different failures, and they deserve different answers.
+                                                                                        if (_st_is_deferred_spec(c) == 1) {  #skip-lint
+                                                                                            # A REAL specifier kriya has not implemented. Emitting its source
+                                                                                            # text would be a wrong answer dressed as output; say so instead.
+                                                                                            k_write( 2, "kriya stat: %", 13);
+                                                                                            var eb[8];
+                                                                                            store8(&eb, c);
+                                                                                            k_write( 2, &eb, 1);
+                                                                                            k_write( 2, ": not implemented (see roadmap 1.6.10)\n", 39);
+                                                                                            _st_bad = 1;
+                                                                                            n = 0;
+                                                                                        } else {
+                                                                                            # Genuinely unknown. GNU prints '?' — verified against `stat -c %@`,
+                                                                                            # which is what the previous "emit the source bytes, GNU behaviour"
+                                                                                            # comment here got wrong.
+                                                                                            store8(&buf, 63);
+                                                                                            n = 1;
+                                                                                        }
+                                                                                    } } } } } } } } } } } } } } } } } } } } }
     k_write( 1, &buf, n);
     return 0;
 }
@@ -439,21 +439,21 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
                     var emit: i64 = 1;
                     if (ec == 110)      { store8(&bb2, 10); }  # \n
                     else { if (ec == 116) { store8(&bb2, 9); }   # \t
-                    else { if (ec == 114) { store8(&bb2, 13); }  # \r
-                    else { if (ec == 92)  { store8(&bb2, 92); }  # \\
-                    else { if (ec == 48)  { store8(&bb2, 0); }   # \0
-                    else { if (ec == 39)  { store8(&bb2, 39); }  # \'
-                    else { if (ec == 34)  { store8(&bb2, 34); }  # \"
-                    else { if (ec == 0)   {
-                        # Trailing lone backslash — emit as-is.
-                        store8(&bb2, 92);
-                        emit = 1;
-                    } else {
-                        # Unknown — keep backslash + char.
-                        store8(&bb2, 92);
-                        k_write( 1, &bb2, 1);
-                        store8(&bb2, ec);
-                    } } } } } } } }
+                        else { if (ec == 114) { store8(&bb2, 13); }  # \r
+                            else { if (ec == 92)  { store8(&bb2, 92); }  # \\
+                                else { if (ec == 48)  { store8(&bb2, 0); }   # \0
+                                    else { if (ec == 39)  { store8(&bb2, 39); }  # \'
+                                        else { if (ec == 34)  { store8(&bb2, 34); }  # \"
+                                            else { if (ec == 0)   {
+                                                    # Trailing lone backslash — emit as-is.
+                                                    store8(&bb2, 92);
+                                                    emit = 1;
+                                                } else {
+                                                    # Unknown — keep backslash + char.
+                                                    store8(&bb2, 92);
+                                                    k_write( 1, &bb2, 1);
+                                                    store8(&bb2, ec);
+                                                } } } } } } } }
                     k_write( 1, &bb2, 1);
                     if (ec != 0) { i = i + 1; }
                 } else {

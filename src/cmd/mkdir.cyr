@@ -45,7 +45,7 @@ fn _mkdir_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn mkdir_help_declare(): i64 {
     help_begin("mkdir", "Create directories.",
-               "mkdir [OPTIONS] DIRECTORY...");
+      "mkdir [OPTIONS] DIRECTORY...");
     help_positional(1, HELP_POS_UNBOUNDED, "DIRECTORY");
     help_destructive(1);
     help_exit(1, "a directory could not be created");

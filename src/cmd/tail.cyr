@@ -66,7 +66,7 @@ fn _tail_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn tail_help_declare(): i64 {
     help_begin("tail", "Print the last part of files.",
-               "tail [OPTIONS] [FILE...]");
+      "tail [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_operands("Defaults to 10 lines. ⚠ -f follows a single file by polling its path; multi-file follow is not supported.");  #skip-lint
     help_exit(1, "a file could not be read");

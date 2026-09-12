@@ -140,7 +140,7 @@ fn cmd_sleep(start: i64): i64 {
 # `--help=json` and `--list` alike.
 fn sleep_help_declare(): i64 {
     help_begin("sleep", "Pause for a duration.",
-               "sleep DURATION...");
+      "sleep DURATION...");
     help_positional(1, HELP_POS_UNBOUNDED, "DURATION");
     help_no_options();
     help_operands("Each DURATION is a non-negative number with an optional s/m/h/d suffix; several are summed. Hex, exponents and inf are refused (ADR 0015).");  #skip-lint

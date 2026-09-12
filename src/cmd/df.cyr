@@ -637,14 +637,14 @@ fn cmd_df(start: i64): i64 {
                     var c = load8(tok + p);
                     if (c == 104)       { _df_human = 1; p = p + 1; }
                     else { if (c == 107) { p = p + 1; }                        # -k no-op
-                    else { if (c == 84)  { _df_show_type = 1; p = p + 1; }
-                    else { if (c == 105) { _df_inodes = 1; p = p + 1; }
-                    else { if (c == 97)  { _df_all = 1; p = p + 1; }
-                    else { if (c == 80)  { _df_portable = 1; p = p + 1; }
-                    else {
-                        ok = 0;
-                        p = tlen;
-                    } } } } } }
+                        else { if (c == 84)  { _df_show_type = 1; p = p + 1; }
+                            else { if (c == 105) { _df_inodes = 1; p = p + 1; }
+                                else { if (c == 97)  { _df_all = 1; p = p + 1; }
+                                    else { if (c == 80)  { _df_portable = 1; p = p + 1; }
+                                        else {
+                                            ok = 0;
+                                            p = tlen;
+                                        } } } } } }
                 }
                 if (ok == 0) {
                     k_write( 2, "kriya df: error: unknown short option\n", 38);
@@ -821,7 +821,7 @@ fn cmd_df(start: i64): i64 {
 # `--help=json` and `--list` alike.
 fn df_help_declare(): i64 {
     help_begin("df", "Report filesystem disk space usage.",
-               "df [OPTIONS] [FILE...]");
+      "df [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_operands("With no operand, every mounted filesystem is listed. An operand resolves to the filesystem CONTAINING it, by longest mountpoint prefix.");  #skip-lint
     help_exit(1, "an operand could not be resolved");

@@ -351,51 +351,51 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
                 }
                 if (tlen > 2) {
                     if (handled == 0) {
-                    if (load8(tok) == 45) {
-                        if (load8(tok + 1) != 45) {
-                            # ⚠ Only expand when the FIRST letter is a REGISTERED short.
-                            # That single condition is what keeps a non-option token that
-                            # merely starts with a dash — a `printf` format, a `tr` set,
-                            # a negative operand — byte-identical to what it is today.
-                            var t0 = kriya_short_type(spec, load8(tok + 1));
-                            if (t0 >= 0) {
-                                var k: i64 = 1;
-                                var stop: i64 = 0;
-                                while (k < tlen) {
-                                    if (stop == 0) {
-                                        var c  = load8(tok + k);
-                                        var ty = kriya_short_type(spec, c);
-                                        var f  = alloc(3);
-                                        store8(f, 45);          # '-'
-                                        store8(f + 1, c);
-                                        store8(f + 2, 0);
-                                        store64(out + oi * 8, f);
-                                        oi = oi + 1;
-                                        if (ty > 0) {
-                                            # INT or STR. Anything left in the token is the
-                                            # attached value — and it is already a valid
-                                            # cstring, so it needs no copy.
-                                            if (k + 1 < tlen) {
-                                                store64(out + oi * 8, tok + k + 1);
-                                                oi = oi + 1;
-                                            } else {
-                                                # Nothing attached: the value is the NEXT
-                                                # token, and it is a value whatever it looks
-                                                # like — `head -n -5`, `realpath -e -s`.
-                                                want_value = 1;
+                        if (load8(tok) == 45) {
+                            if (load8(tok + 1) != 45) {
+                                # ⚠ Only expand when the FIRST letter is a REGISTERED short.
+                                # That single condition is what keeps a non-option token that
+                                # merely starts with a dash — a `printf` format, a `tr` set,
+                                # a negative operand — byte-identical to what it is today.
+                                var t0 = kriya_short_type(spec, load8(tok + 1));
+                                if (t0 >= 0) {
+                                    var k: i64 = 1;
+                                    var stop: i64 = 0;
+                                    while (k < tlen) {
+                                        if (stop == 0) {
+                                            var c  = load8(tok + k);
+                                            var ty = kriya_short_type(spec, c);
+                                            var f  = alloc(3);
+                                            store8(f, 45);          # '-'
+                                            store8(f + 1, c);
+                                            store8(f + 2, 0);
+                                            store64(out + oi * 8, f);
+                                            oi = oi + 1;
+                                            if (ty > 0) {
+                                                # INT or STR. Anything left in the token is the
+                                                # attached value — and it is already a valid
+                                                # cstring, so it needs no copy.
+                                                if (k + 1 < tlen) {
+                                                    store64(out + oi * 8, tok + k + 1);
+                                                    oi = oi + 1;
+                                                } else {
+                                                    # Nothing attached: the value is the NEXT
+                                                    # token, and it is a value whatever it looks
+                                                    # like — `head -n -5`, `realpath -e -s`.
+                                                    want_value = 1;
+                                                }
+                                                stop = 1;
                                             }
-                                            stop = 1;
+                                            # A bool keeps walking. An UNKNOWN letter is emitted
+                                            # as its own `-X` on purpose, so the parser names the
+                                            # offending letter instead of the whole cluster.
                                         }
-                                        # A bool keeps walking. An UNKNOWN letter is emitted
-                                        # as its own `-X` on purpose, so the parser names the
-                                        # offending letter instead of the whole cluster.
+                                        k = k + 1;
                                     }
-                                    k = k + 1;
+                                    handled = 1;
                                 }
-                                handled = 1;
                             }
                         }
-                    }
                     }
                 }
                 # Obsolescent `head -5` / `tail -5` → `-n 5`, FIRST ARGUMENT

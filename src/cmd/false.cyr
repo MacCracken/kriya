@@ -11,7 +11,7 @@ fn cmd_false(start: i64): i64 {
 # `--help=json` and `--list` alike.
 fn false_help_declare(): i64 {
     help_begin("false", "Do nothing, unsuccessfully.",
-               "false [ignored...]");
+      "false [ignored...]");
     help_positional(0, HELP_POS_UNBOUNDED, "IGNORED");
     help_no_options();
     help_example("false || echo failed");

@@ -217,7 +217,7 @@ fn _ls_init_spec(): i64 {
     _ls_S_idx = flags_add_bool(s, 83,  "",                0, "sort by size, largest first");
     _ls_color_idx = flags_add_str(s, 0, "color", 0, "colourise output: always|auto|never");
     _ls_qs_idx = flags_add_str(s, 0, "quoting-style", 0,
-                               "literal|shell-escape|shell-escape-always");
+      "literal|shell-escape|shell-escape-always");
     _ls_d_idx = flags_add_bool(s, 100, "directory",       0, "list dir operands as entries, not contents");
     _ls_R_idx = flags_add_bool(s, 82,  "recursive",       0, "descend into subdirectories");
     # ⚠ `-w 0` MEANS UNLIMITED, NOT "auto". Measured: `ls -C -w 0` puts every
@@ -228,7 +228,7 @@ fn _ls_init_spec(): i64 {
     _ls_x_idx = flags_add_bool(s, 120, "",                0, "multi-column, sorted across then down");
     _ls_m_idx = flags_add_bool(s, 109, "",                0, "comma-separated, filling the width");
     _ls_fmt_idx = flags_add_str(s, 0, "format", 0,
-                                "vertical|across|horizontal|commas|long|verbose|single-column");
+      "vertical|across|horizontal|commas|long|verbose|single-column");
     _ls_spec = s;
     ls_help_declare();
     return 0;
@@ -239,7 +239,7 @@ fn _ls_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn ls_help_declare(): i64 {
     help_begin("ls", "List directory contents. With no operand, lists the current directory.",
-               "ls [OPTIONS] [FILE...]");
+      "ls [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_operands("Operands are files or directories. A directory is listed by its contents unless -d is given.");
     help_exit(1, "one or more operands could not be read");
@@ -879,7 +879,7 @@ fn _ls_ext_code(name): i64 {
 # An executable `run.c` takes `ex`; a non-executable `plain.c` takes `*.c`.
 fn _ls_color_for(rec): i64 {
     return _ls_color_for_stat(_ls_rec_st(rec), _ls_rec_name(rec),
-                              _ls_rec_bad(rec), _ls_rec_broken(rec));
+      _ls_rec_bad(rec), _ls_rec_broken(rec));
 }
 
 fn _ls_color_for_stat(st, name, bad, broken): i64 {

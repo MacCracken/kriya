@@ -1067,8 +1067,8 @@ fn _fs_inoset_grow(set): i64 {
         var s = old_slots + i * FS_INOSET_S_SZ;
         if (load64(s + FS_INOSET_S_STATE) == 1) {
             _fs_inoset_place(set, load64(s + FS_INOSET_S_DEV),
-                                  load64(s + FS_INOSET_S_INO),
-                                  load64(s + FS_INOSET_S_DATA));
+              load64(s + FS_INOSET_S_INO),
+              load64(s + FS_INOSET_S_DATA));
         }
         i = i + 1;
     }

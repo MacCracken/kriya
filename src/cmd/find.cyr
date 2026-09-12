@@ -961,7 +961,7 @@ fn _f_eval(n, ctx): i64 {
     }
     if (k == F_N_TYPE)   { return _f_eval_type_predicate(load64(n + 8), st); }
     if (k == F_N_SIZE)   { return _f_eval_size_predicate(load64(n + 8), load64(n + 16), load64(n + 24),
-        load64(st + 48)); }
+          load64(st + 48)); }
     if (k == F_N_MTIME)  { return _f_eval_mtime_predicate(load64(n + 8), load64(n + 16), load64(st + 88)); }
     if (k == F_N_MMIN)   { return _f_eval_mmin_predicate (load64(n + 8), load64(n + 16), load64(st + 88)); }
     if (k == F_N_EMPTY)  { return _f_eval_empty_predicate(path, st); }
@@ -1260,7 +1260,7 @@ fn cmd_find(start: i64): i64 {
 # `--help=json` and `--list` alike.
 fn find_help_declare(): i64 {
     help_begin("find", "Walk a file tree and evaluate predicates.",
-               "find [STARTPATH...] [EXPRESSION]");
+      "find [STARTPATH...] [EXPRESSION]");
     help_positional(0, HELP_POS_UNBOUNDED, "STARTPATH,EXPRESSION");
     help_destructive(1);
     help_operands("Predicates combine with ! , -a and -o; parentheses group. The default action is -print. Symlinks are not followed unless -L is given (ADR 0003). ⚠ -regex/-iregex match the WHOLE PATH as written (leading `./` included) and default to POSIX BRE — GNU defaults to EMACS regex, where an unescaped `+` is a quantifier rather than a literal. Use -regextype posix-extended for `+`/`?`; -regextype emacs is refused by name (ADR 0005).");  #skip-lint

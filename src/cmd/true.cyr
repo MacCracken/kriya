@@ -11,7 +11,7 @@ fn cmd_true(start: i64): i64 {
 # `--help=json` and `--list` alike.
 fn true_help_declare(): i64 {
     help_begin("true", "Do nothing, successfully.",
-               "true [ignored...]");
+      "true [ignored...]");
     help_positional(0, HELP_POS_UNBOUNDED, "IGNORED");
     help_no_options();
     help_example("true && echo ok");

@@ -92,7 +92,7 @@ fn _so_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn sort_help_declare(): i64 {
     help_begin("sort", "Sort lines of text.",
-               "sort [OPTIONS] [FILE...]");
+      "sort [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_destructive(1);
     help_operands("⚠ Sorts in memory with a 256 MiB cap; an external-sort fallback is a named follow-up.");  # roadmap 1.8.2  #skip-lint
@@ -257,7 +257,7 @@ fn _so_key_window(buf, line_off, line_len, ignore_blanks, has_key, key_field, ha
                 var b = load8(buf + pos);
                 if (b == 32) { pos = pos + 1; }
                 else { if (b == 9) { pos = pos + 1; }
-                else { pos = endp + 1; } }
+                    else { pos = endp + 1; } }
             }
             # Re-do as a flag-loop (the pseudo-break above set pos to
             # endp+1 just to terminate; reset).
@@ -269,7 +269,7 @@ fn _so_key_window(buf, line_off, line_len, ignore_blanks, has_key, key_field, ha
                     var b = load8(buf + pos);
                     if (b == 32) { pos = pos + 1; }
                     else { if (b == 9) { pos = pos + 1; }
-                    else { done = 1; } }
+                        else { done = 1; } }
                 }
             }
             # Walk to field key_field.
@@ -282,7 +282,7 @@ fn _so_key_window(buf, line_off, line_len, ignore_blanks, has_key, key_field, ha
                         var b = load8(buf + pos);
                         if (b == 32) { done_run = 1; }
                         else { if (b == 9) { done_run = 1; }
-                        else { pos = pos + 1; } }
+                            else { pos = pos + 1; } }
                     }
                 }
                 # Skip blanks (separators).
@@ -293,7 +293,7 @@ fn _so_key_window(buf, line_off, line_len, ignore_blanks, has_key, key_field, ha
                         var b = load8(buf + pos);
                         if (b == 32) { pos = pos + 1; }
                         else { if (b == 9) { pos = pos + 1; }
-                        else { done_blk = 1; } }
+                            else { done_blk = 1; } }
                     }
                 }
                 fnum = fnum + 1;
@@ -347,7 +347,7 @@ fn _so_key_window(buf, line_off, line_len, ignore_blanks, has_key, key_field, ha
                 var b = load8(buf + line_off);
                 if (b == 32) { line_off = line_off + 1; }
                 else { if (b == 9) { line_off = line_off + 1; }
-                else { done = 1; } }
+                    else { done = 1; } }
             }
         }
     }
@@ -399,10 +399,10 @@ fn _so_cmp_numeric(buf, a_off, a_len, b_off, b_len): i64 {
     while (ap < ae) {
         var c = load8(buf + ap);
         if (c >= 48) { if (c <= 57) {
-            a_val = a_val * 10 + (c - 48);
-            a_any = 1;
-            ap = ap + 1;
-        } else { ap = ae; } }
+                a_val = a_val * 10 + (c - 48);
+                a_any = 1;
+                ap = ap + 1;
+            } else { ap = ae; } }
         else { ap = ae; }
     }
     if (a_neg == 1) { a_val = 0 - a_val; }
@@ -415,10 +415,10 @@ fn _so_cmp_numeric(buf, a_off, a_len, b_off, b_len): i64 {
     while (bp < be) {
         var c = load8(buf + bp);
         if (c >= 48) { if (c <= 57) {
-            b_val = b_val * 10 + (c - 48);
-            b_any = 1;
-            bp = bp + 1;
-        } else { bp = be; } }
+                b_val = b_val * 10 + (c - 48);
+                b_any = 1;
+                bp = bp + 1;
+            } else { bp = be; } }
         else { bp = be; }
     }
     if (b_neg == 1) { b_val = 0 - b_val; }
@@ -450,11 +450,11 @@ fn _so_cmp_bytes(buf, a_off, a_len, b_off, b_len, fold): i64 {
 fn _so_compare(buf, a_rec, b_rec, numeric, reverse, fold, ignore_blanks, has_key, key_field, has_delim, delim): i64 {
     var a_len_box[8];
     var a_off = _so_key_window(buf, _so_rec_off(a_rec), _so_rec_len(a_rec), ignore_blanks, has_key, key_field,
-                               has_delim, delim, &a_len_box);
+      has_delim, delim, &a_len_box);
     var a_len = load64(&a_len_box);
     var b_len_box[8];
     var b_off = _so_key_window(buf, _so_rec_off(b_rec), _so_rec_len(b_rec), ignore_blanks, has_key, key_field,
-                               has_delim, delim, &b_len_box);
+      has_delim, delim, &b_len_box);
     var b_len = load64(&b_len_box);
 
     var r: i64 = 0;
@@ -465,7 +465,7 @@ fn _so_compare(buf, a_rec, b_rec, numeric, reverse, fold, ignore_blanks, has_key
         if (r == 0) {
             if (has_key == 0) {
                 r = _so_cmp_bytes(buf, _so_rec_off(a_rec), _so_rec_len(a_rec),
-                                       _so_rec_off(b_rec), _so_rec_len(b_rec), 0);
+                  _so_rec_off(b_rec), _so_rec_len(b_rec), 0);
             }
         }
     } else {
@@ -475,7 +475,7 @@ fn _so_compare(buf, a_rec, b_rec, numeric, reverse, fold, ignore_blanks, has_key
                 # GNU: after key compare equal, fall back to full-line
                 # lex (no fold).
                 r = _so_cmp_bytes(buf, _so_rec_off(a_rec), _so_rec_len(a_rec),
-                                       _so_rec_off(b_rec), _so_rec_len(b_rec), 0);
+                  _so_rec_off(b_rec), _so_rec_len(b_rec), 0);
             }
         }
     }
@@ -522,7 +522,7 @@ fn _so_merge_sort(records, buf, numeric, reverse, fold, ignore_blanks, has_key, 
                         var a = load64(src + l * 8);
                         var b = load64(src + r * 8);
                         var cmp = _so_compare(buf, a, b, numeric, reverse, fold, ignore_blanks, has_key, key_field,
-                                              has_delim, delim);
+                          has_delim, delim);
                         if (cmp <= 0) { take_left = 1; }
                     }
                 }
@@ -749,7 +749,7 @@ fn cmd_sort(start: i64): i64 {
             var a = vec_get(records, i - 1);
             var b = vec_get(records, i);
             var cmp = _so_compare(buf, a, b, numeric, reverse, fold, ignore_blanks, has_key, key_field, has_delim,
-                                  delim);
+              delim);
             if (cmp > 0) {
                 if (check_quiet == 1) { return EXIT_FAILURE; }
                 k_write( 2, "kriya sort: disorder at line ", 29);
@@ -811,7 +811,7 @@ fn cmd_sort(start: i64): i64 {
         if (unique == 1) {
             if (prev_rec != 0) {
                 var cmp = _so_compare(buf, prev_rec, rec, numeric, 0, fold, ignore_blanks, has_key, key_field,
-                                      has_delim, delim);
+                  has_delim, delim);
                 # Note: reverse=0 here so we test equality, not order.
                 if (cmp == 0) { emit = 0; }
             }

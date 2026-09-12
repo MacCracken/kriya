@@ -286,7 +286,7 @@ fn _date_render_spec(buf, pos, c, parts, wkday, epoch): i64 {
     if (c == 122) { return _date_wstr(buf, pos, "+0000"); }                                 # %z
     if (c == 115) { return _date_wint(buf, pos, epoch); }                                   # %s
     if (c == 78) { return _date_wstr(buf, pos,
-        "000000000"); }                              # %N (no ns sampling at v0.7.0)
+          "000000000"); }                              # %N (no ns sampling at v0.7.0)
     if (c == 84) {                                                                           # %T = %H:%M:%S
         var p = _date_w2(buf, pos, load64(parts + 24));
         store8(buf + p, 58); p = p + 1;
@@ -490,7 +490,7 @@ fn cmd_date(start: i64): i64 {
 # `--help=json` and `--list` alike.
 fn date_help_declare(): i64 {
     help_begin("date", "Print the current date and time.",
-               "date [OPTIONS] [+FORMAT]");
+      "date [OPTIONS] [+FORMAT]");
     help_positional(0, 1, "+FORMAT");
     help_operands("UTC only until tzfile parsing lands (ADR 0007); -u is accepted as a no-op. Specifiers kriya cannot render are refused rather than echoed back.");  #skip-lint
     help_example("date");

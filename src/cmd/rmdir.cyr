@@ -39,7 +39,7 @@ fn _rmdir_init_spec(): i64 {
     _rmdir_p_idx      = flags_add_bool(s, 112, "parents", 0, "remove empty parent directories too");
     _rmdir_v_idx      = flags_add_bool(s, 118, "verbose", 0, "print a line per removed directory");
     _rmdir_ignore_idx = flags_add_bool(s,   0, "ignore-fail-on-non-empty", 0,
-                                       "ENOTEMPTY is not an error (use with -p)");
+      "ENOTEMPTY is not an error (use with -p)");
     _rmdir_spec = s;
     rmdir_help_declare();
     return 0;
@@ -50,7 +50,7 @@ fn _rmdir_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn rmdir_help_declare(): i64 {
     help_begin("rmdir", "Remove empty directories.",
-               "rmdir [OPTIONS] DIRECTORY...");
+      "rmdir [OPTIONS] DIRECTORY...");
     help_positional(1, HELP_POS_UNBOUNDED, "DIRECTORY");
     help_destructive(1);
     help_operands("Only empty directories are removed; use `rm -r` for a populated tree.");

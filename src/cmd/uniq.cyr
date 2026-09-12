@@ -84,7 +84,7 @@ fn _uq_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn uniq_help_declare(): i64 {
     help_begin("uniq", "Report or filter repeated adjacent lines.",
-               "uniq [OPTIONS] [INPUT [OUTPUT]]");
+      "uniq [OPTIONS] [INPUT [OUTPUT]]");
     help_positional(0, 2, "INPUT,OUTPUT");
     help_destructive(1);
     help_operands("⚠ Only ADJACENT duplicates are considered — sort the input first if that is not already true. ⚠ --group and --all-repeated print every line of a group; their METHOD vocabularies differ (--group: separate|prepend|append|both; --all-repeated: none|prepend|separate). --group is mutually exclusive with -c/-d/-D/-u. ⛔ With -D, -u prints only the LATER lines of each repeat group and -d is a no-op, matching GNU.");  #skip-lint
@@ -170,7 +170,7 @@ fn _uq_key_window(line, len, skip_f, skip_s, cw, out_len_p): i64 {
                     var b = load8(line + pos);
                     if (b == 32)      { done_field = 1; }
                     else { if (b == 9) { done_field = 1; }
-                    else                { pos = pos + 1; } }
+                        else                { pos = pos + 1; } }
                 }
             }
             fields_skipped = fields_skipped + 1;
@@ -473,7 +473,7 @@ fn _uq_run(in_fd, out_fd, skip_f, skip_s, cw, ic, show_c, show_d, show_u, term_b
                         var ng2: i64 = 1;
                         if (count > 0) {
                             var equal = _uq_keys_equal(prev_buf + prev_key_off, prev_key_len, cur_buf + key_off, klen,
-                                                       ic);
+                              ic);
                             ng2 = 0;
                             if (equal == 1) {
                                 _uq_group_line(out_fd, cur_buf, cur_len, 0, term_byte);

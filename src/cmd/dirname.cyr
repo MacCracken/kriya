@@ -35,7 +35,7 @@ fn _dn_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn dirname_help_declare(): i64 {
     help_begin("dirname", "Strip the last component from a path.",
-               "dirname NAME...");
+      "dirname NAME...");
     help_positional(1, HELP_POS_UNBOUNDED, "NAME");
     help_example("dirname /usr/bin/cp");
     help_example("dirname -z a/b/c");

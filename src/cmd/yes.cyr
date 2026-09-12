@@ -49,7 +49,7 @@ fn cmd_yes(start: i64): i64 {
 # `--help=json` and `--list` alike.
 fn yes_help_declare(): i64 {
     help_begin("yes", "Print a string repeatedly until killed.",
-               "yes [STRING...]");
+      "yes [STRING...]");
     help_positional(0, HELP_POS_UNBOUNDED, "STRING");
     help_no_options();
     help_example("yes");

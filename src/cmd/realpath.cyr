@@ -129,7 +129,7 @@ fn _rp_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn realpath_help_declare(): i64 {
     help_begin("realpath", "Resolve a path to its canonical absolute form.",
-               "realpath [OPTIONS] PATH...");
+      "realpath [OPTIONS] PATH...");
     help_positional(1, HELP_POS_UNBOUNDED, "PATH");
     help_operands("Symlinks are followed and `.`/`..` resolved. -E (the default) requires all but the last component to exist, -e all of them, -m none.");  #skip-lint
     help_exit(1, "a path could not be resolved");

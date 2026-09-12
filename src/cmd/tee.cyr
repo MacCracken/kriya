@@ -96,7 +96,7 @@ fn _tee_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn tee_help_declare(): i64 {
     help_begin("tee", "Copy stdin to stdout and to each FILE.",
-               "tee [OPTIONS] [FILE...]");
+      "tee [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_destructive(1);
     help_exit(1, "a file could not be written");

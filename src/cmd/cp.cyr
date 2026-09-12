@@ -186,7 +186,7 @@ fn _cp_init_spec(): i64 {
     _cp_f_idx     = flags_add_bool(s, 102, "force",       0, "overwrite existing destination");
     _cp_i_idx     = flags_add_bool(s, 105, "interactive", 0, "prompt before overwrite");
     _cp_p_idx     = flags_add_bool(s, 112, "preserve",    0,
-                                   "preserve mode, ownership and timestamps (=links, =xattr for more)");
+      "preserve mode, ownership and timestamps (=links, =xattr for more)");
     _cp_v_idx     = flags_add_bool(s, 118, "verbose",     0, "print each copy");
     _cp_R_idx     = flags_add_bool(s, 82,  "recursive",   0, "copy directories recursively");
     _cp_r_idx     = flags_add_bool(s, 114, "",            0, "alias for -R");
@@ -211,7 +211,7 @@ fn _cp_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn cp_help_declare(): i64 {
     help_begin("cp", "Copy files and directory trees.",
-               "cp [OPTIONS] SOURCE... DEST");
+      "cp [OPTIONS] SOURCE... DEST");
     help_positional(2, HELP_POS_UNBOUNDED, "SOURCE,DEST");
     help_destructive(1);
     help_operands("With one SOURCE, DEST is the new name or an existing directory. With several, DEST must be a directory. Directories need -R/-r. Existing destinations are refused without -f — or without -b, which moves the old one aside instead of losing it (ADR 0003, ADR 0004). -b honours $VERSION_CONTROL and $SIMPLE_BACKUP_SUFFIX (ADR 0017); the command line wins.");  #skip-lint
@@ -909,7 +909,7 @@ fn _cp_symlink_meta(dst_dirfd, dst_name, src_st, preserve): i64 {
 # here for that: the caller has already stat'd the entry, and this needs its
 # (dev, ino) for the same map the regular-file path uses.
 fn _cp_symlink_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, verbose, src_st,
-                  preserve): i64 {
+  preserve): i64 {
     if (_cp_links != 0) {
         var lslot = fs_inoset_find(_cp_links, fs_dev(src_st), fs_ino(src_st));
         if (lslot != 0) {
@@ -960,7 +960,7 @@ fn _cp_symlink_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_dis
 # entry could be swapped for a symlink between classify and open
 # (M8 mitigation, see CVE-2026-35359 in uutils-coreutils).
 fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, interactive, preserve,
-               verbose, src_st, follow): i64 {
+  verbose, src_st, follow): i64 {
     var src_open_flags: i64 = 0;
     if (follow == 0) { src_open_flags = 131072; }     # O_NOFOLLOW
     var src_fd = fs_openat(src_dirfd, src_name, src_open_flags, 0);
@@ -1155,7 +1155,7 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
 # Under no-follow, the source open uses O_NOFOLLOW so a swapped-in
 # symlink fails ELOOP per ADR 0003.
 fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, policy, allow_follow, force,
-                      interactive, preserve, verbose, src_st): i64 {
+  interactive, preserve, verbose, src_st): i64 {
     # ⛔ THE DESTINATION IS CREATED BEFORE THE SOURCE IS OPENED, and the order is
     # GNU's rather than the obvious one. Measured on a source directory with no
     # owner READ — 0300, 0333, 0111 — GNU leaves `dst/sub` behind at
@@ -1352,8 +1352,8 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
                             var rr: i64 = 0;
                             if (fs_is_lnk(&child_st) == 1) {
                                 rr = _cp_symlink_at(src_fd, name, child_src_disp,
-                                                    dst_fd, name, child_dst_disp,
-                                                    force, verbose, &child_st, preserve);
+                                  dst_fd, name, child_dst_disp,
+                                  force, verbose, &child_st, preserve);
                             } else {
                                 if (fs_is_dir(&child_st) == 1) {
                                     # ⛔ A DIRECTORY WE ARE ALREADY INSIDE IS A
@@ -1365,7 +1365,7 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
                                     var is_dest: i64 = 0;
                                     if (follow == 1) {
                                         if (fs_dirstack_has(_cp_path, fs_dev(&child_st),
-                                                            fs_ino(&child_st)) == 1) { cyclic = 1; }
+                                            fs_ino(&child_st)) == 1) { cyclic = 1; }
                                         if (_cp_dst_root_ino != 0) {
                                             if (fs_dev(&child_st) == _cp_dst_root_dev) {
                                                 if (fs_ino(&child_st) == _cp_dst_root_ino) { is_dest = 1; }
@@ -1378,26 +1378,26 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
                                         k_write( 2, "'\n", 2);
                                         rr = 0 - 22;              # EINVAL
                                     } else {
-                                    if (cyclic == 1) {
-                                        k_write( 2, "kriya cp: cannot copy cyclic symbolic link '", 44);
-                                        k_write( 2, child_src_disp, strlen(child_src_disp));
-                                        k_write( 2, "'\n", 2);
-                                        rr = 0 - 40;              # ELOOP
-                                    } else {
-                                    # `follow` carries the lstat-vs-stat decision
-                                    # into the descend: if we stat'd to get here,
-                                    # the dir open must also follow.
-                                    rr = _cp_dir_descend_at(src_fd, name, child_src_disp,
-                                                            dst_fd, name, child_dst_disp,
-                                                            policy, follow, force, interactive,
-                                            preserve, verbose, &child_st);
-                                    }
+                                        if (cyclic == 1) {
+                                            k_write( 2, "kriya cp: cannot copy cyclic symbolic link '", 44);
+                                            k_write( 2, child_src_disp, strlen(child_src_disp));
+                                            k_write( 2, "'\n", 2);
+                                            rr = 0 - 40;              # ELOOP
+                                        } else {
+                                            # `follow` carries the lstat-vs-stat decision
+                                            # into the descend: if we stat'd to get here,
+                                            # the dir open must also follow.
+                                            rr = _cp_dir_descend_at(src_fd, name, child_src_disp,
+                                              dst_fd, name, child_dst_disp,
+                                              policy, follow, force, interactive,
+                                              preserve, verbose, &child_st);
+                                        }
                                     }
                                 } else {
                                     if (fs_is_reg(&child_st) == 1) {
                                         rr = _cp_file_at(src_fd, name, child_src_disp,
-                                                         dst_fd, name, child_dst_disp,
-                                                         force, interactive, preserve, verbose, &child_st, follow);
+                                          dst_fd, name, child_dst_disp,
+                                          force, interactive, preserve, verbose, &child_st, follow);
                                     } else {
                                         k_write( 2, "kriya cp: ", 10);
                                         k_write( 2, child_src_disp, strlen(child_src_disp));
@@ -1464,8 +1464,8 @@ fn _cp_dir_top(src_path, dst_path, policy, allow_follow_top, force, interactive,
     _cp_dst_root_dev = 0;
     _cp_dst_root_ino = 0;
     return _cp_dir_descend_at(0 - 100, src_path, src_path,
-                              0 - 100, dst_path, dst_path,
-                              policy, allow_follow_top, force, interactive, preserve, verbose, src_st);
+      0 - 100, dst_path, dst_path,
+      policy, allow_follow_top, force, interactive, preserve, verbose, src_st);
 }
 
 # Recursive entry from the per-operand loop. Classifies src and
@@ -1707,8 +1707,8 @@ fn cmd_cp(start: i64): i64 {
     # `VERSION_CONTROL=bogus cp -b src dst` exits 1 with the destination
     # unchanged. Resolving per operand would back some of them up and then fail.
     var _bk = backup_resolve(flags_get_bool(_cp_spec, _cp_b_idx),
-                             flags_get_str(_cp_spec, _cp_bk_idx),
-                             flags_get_str(_cp_spec, _cp_S_idx));
+      flags_get_str(_cp_spec, _cp_bk_idx),
+      flags_get_str(_cp_spec, _cp_S_idx));
     if (_bk == BACKUP_INVALID) {
         k_write( 2, "kriya cp: error: invalid backup control ", 40);
         k_write( 2, "(want none, off, numbered, t, existing, nil, simple or never)\n", 62);

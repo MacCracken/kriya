@@ -55,7 +55,7 @@ fn _wh_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn which_help_declare(): i64 {
     help_begin("which", "Locate a command on PATH.",
-               "which [OPTIONS] NAME...");
+      "which [OPTIONS] NAME...");
     help_positional(1, HELP_POS_UNBOUNDED, "NAME");
     help_operands("Searches $PATH in order. ⚠ A name containing a slash is used as given, with no search.");
     help_exit(1, "a name was not found on PATH");

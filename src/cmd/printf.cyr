@@ -72,7 +72,7 @@ fn _pf_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn printf_help_declare(): i64 {
     help_begin("printf", "Format and print arguments.",
-               "printf FORMAT [ARGUMENT...]");
+      "printf FORMAT [ARGUMENT...]");
     help_positional(1, HELP_POS_UNBOUNDED, "FORMAT,ARGUMENT");
     help_operands("The FORMAT is reused until the arguments are exhausted. ⚠ Floating-point conversions are not implemented and fail rather than printing the conversion letter.");  #skip-lint
     help_exit(1, "an invalid conversion or escape was found");
@@ -131,7 +131,7 @@ fn _pf_parse_int(s): i64 {
     if (load8(s + pos) == 48) {
         if (load8(s + pos + 1) == 120) { base = 16; pos = pos + 2; }
         else { if (load8(s + pos + 1) == 88) { base = 16; pos = pos + 2; }
-        else { if (load8(s + pos + 1) != 0) { base = 8; pos = pos + 1; } } }
+            else { if (load8(s + pos + 1) != 0) { base = 8; pos = pos + 1; } } }
     }
     while (load8(s + pos) != 0) {
         var c = load8(s + pos);
@@ -244,14 +244,14 @@ fn _pf_emit_int(v, base, upper, left, plus, space, hash, zero, width, prec, unsi
                 }
             }
         } else { if (base == 16) {
-            if (abs_v != 0) {
-                store8(&alt_buf, 48);  # '0'
-                if (upper == 1) { store8(&alt_buf + 1, 88); }
-                else            { store8(&alt_buf + 1, 120); }
-                alt_prefix = &alt_buf;
-                alt_prefix_len = 2;
-            }
-        } }
+                if (abs_v != 0) {
+                    store8(&alt_buf, 48);  # '0'
+                    if (upper == 1) { store8(&alt_buf + 1, 88); }
+                    else            { store8(&alt_buf + 1, 120); }
+                    alt_prefix = &alt_buf;
+                    alt_prefix_len = 2;
+                }
+            } }
     }
 
     var sign_len: i64 = 0;
@@ -433,10 +433,10 @@ fn _pf_process(fmt, arg_count): i64 {
                             var f = load8(fmt + i);
                             if (f == 45)      { left = 1; i = i + 1; }
                             else { if (f == 43) { plus = 1; i = i + 1; }
-                            else { if (f == 32) { space = 1; i = i + 1; }
-                            else { if (f == 35) { hash = 1; i = i + 1; }
-                            else { if (f == 48) { zero = 1; i = i + 1; }
-                            else { done_flags = 1; } } } } }
+                                else { if (f == 32) { space = 1; i = i + 1; }
+                                    else { if (f == 35) { hash = 1; i = i + 1; }
+                                        else { if (f == 48) { zero = 1; i = i + 1; }
+                                            else { done_flags = 1; } } } } }
                         }
                         # Width.
                         var width: i64 = 0 - 1;
@@ -460,11 +460,11 @@ fn _pf_process(fmt, arg_count): i64 {
                                 var wc = load8(fmt + i);
                                 if (wc < 48) { wdone = 1; }
                                 else { if (wc > 57) { wdone = 1; }
-                                else {
-                                    wv = wv * 10 + (wc - 48);
-                                    wany = 1;
-                                    i = i + 1;
-                                } }
+                                    else {
+                                        wv = wv * 10 + (wc - 48);
+                                        wany = 1;
+                                        i = i + 1;
+                                    } }
                             }
                             if (wany == 1) { width = wv; }
                         }
@@ -489,11 +489,11 @@ fn _pf_process(fmt, arg_count): i64 {
                                     var pc = load8(fmt + i);
                                     if (pc < 48) { pdone = 1; }
                                     else { if (pc > 57) { pdone = 1; }
-                                    else {
-                                        pv = pv * 10 + (pc - 48);
-                                        pany = 1;
-                                        i = i + 1;
-                                    } }
+                                        else {
+                                            pv = pv * 10 + (pc - 48);
+                                            pany = 1;
+                                            i = i + 1;
+                                        } }
                                 }
                                 prec = pv;
                                 if (pany == 0) { prec = 0; }
@@ -509,107 +509,107 @@ fn _pf_process(fmt, arg_count): i64 {
                             if (conv == 37) {
                                 _pf_putc(37);
                             } else { if (conv == 99) {
-                                # %c: first byte of next arg, padded.
-                                var s = "";
-                                if (args_idx < arg_count) {
-                                    s = flags_positional(_pf_spec, args_idx + 1);
-                                    args_idx = args_idx + 1;
-                                }
-                                var ch: i64 = 0;
-                                if (s != 0) { if (load8(s) != 0) { ch = load8(s); } }
-                                var ch_buf[2];
-                                store8(&ch_buf, ch);
-                                _pf_emit_str(&ch_buf, left, width, 1);
-                                any_conversion = 1;
-                            } else { if (conv == 115) {
-                                var s: i64 = 0;
-                                if (args_idx < arg_count) {
-                                    s = flags_positional(_pf_spec, args_idx + 1);
-                                    args_idx = args_idx + 1;
-                                }
-                                _pf_emit_str(s, left, width, prec);
-                                any_conversion = 1;
-                            } else { if (conv == 98) {
-                                var s: i64 = 0;
-                                if (args_idx < arg_count) {
-                                    s = flags_positional(_pf_spec, args_idx + 1);
-                                    args_idx = args_idx + 1;
-                                }
-                                if (_pf_emit_b(s) == 1) { stop = 1; }
-                                any_conversion = 1;
-                            } else { if (conv == 100) {
-                                var s = "0";
-                                if (args_idx < arg_count) {
-                                    s = flags_positional(_pf_spec, args_idx + 1);
-                                    args_idx = args_idx + 1;
-                                }
-                                var v = _pf_parse_int(s);
-                                _pf_emit_int(v, 10, 0, left, plus, space, hash, zero, width, prec, 0);
-                                any_conversion = 1;
-                            } else { if (conv == 105) {
-                                var s = "0";
-                                if (args_idx < arg_count) {
-                                    s = flags_positional(_pf_spec, args_idx + 1);
-                                    args_idx = args_idx + 1;
-                                }
-                                var v = _pf_parse_int(s);
-                                _pf_emit_int(v, 10, 0, left, plus, space, hash, zero, width, prec, 0);
-                                any_conversion = 1;
-                            } else { if (conv == 117) {
-                                var s = "0";
-                                if (args_idx < arg_count) {
-                                    s = flags_positional(_pf_spec, args_idx + 1);
-                                    args_idx = args_idx + 1;
-                                }
-                                var v = _pf_parse_int(s);
-                                _pf_emit_int(v, 10, 0, left, plus, space, hash, zero, width, prec, 1);
-                                any_conversion = 1;
-                            } else { if (conv == 111) {
-                                var s = "0";
-                                if (args_idx < arg_count) {
-                                    s = flags_positional(_pf_spec, args_idx + 1);
-                                    args_idx = args_idx + 1;
-                                }
-                                var v = _pf_parse_int(s);
-                                _pf_emit_int(v, 8, 0, left, plus, space, hash, zero, width, prec, 1);
-                                any_conversion = 1;
-                            } else { if (conv == 120) {
-                                var s = "0";
-                                if (args_idx < arg_count) {
-                                    s = flags_positional(_pf_spec, args_idx + 1);
-                                    args_idx = args_idx + 1;
-                                }
-                                var v = _pf_parse_int(s);
-                                _pf_emit_int(v, 16, 0, left, plus, space, hash, zero, width, prec, 1);
-                                any_conversion = 1;
-                            } else { if (conv == 88) {
-                                var s = "0";
-                                if (args_idx < arg_count) {
-                                    s = flags_positional(_pf_spec, args_idx + 1);
-                                    args_idx = args_idx + 1;
-                                }
-                                var v = _pf_parse_int(s);
-                                _pf_emit_int(v, 16, 1, left, plus, space, hash, zero, width, prec, 1);
-                                any_conversion = 1;
-                            } else {
-                                # ⛔ NOT A WARNING, AND NOTHING GOES TO STDOUT. This used to
-                                # write a warning to stderr, emit the bare conversion letter
-                                # to stdout (dropping the `%`) and exit 0 — so `printf '%f'
-                                # 1.5` produced the text "f" and reported success. GNU exits 1
-                                # on an invalid conversion and prints nothing.
-                                # The float conversions get their own message: they are a
-                                # named kriya gap, not a user typo.
-                                _pf_bad = 1;
-                                if (_pf_is_float_conv(conv) == 1) {
-                                    k_write( 2, "kriya printf: %", 15);
-                                    _pf_errc(conv);
-                                    k_write( 2, ": floating-point conversions are not implemented\n", 49);
-                                } else {
-                                    k_write( 2, "kriya printf: %", 15);
-                                    _pf_errc(conv);
-                                    k_write( 2, ": invalid conversion specification\n", 35);
-                                }
-                            } } } } } } } } } }
+                                    # %c: first byte of next arg, padded.
+                                    var s = "";
+                                    if (args_idx < arg_count) {
+                                        s = flags_positional(_pf_spec, args_idx + 1);
+                                        args_idx = args_idx + 1;
+                                    }
+                                    var ch: i64 = 0;
+                                    if (s != 0) { if (load8(s) != 0) { ch = load8(s); } }
+                                    var ch_buf[2];
+                                    store8(&ch_buf, ch);
+                                    _pf_emit_str(&ch_buf, left, width, 1);
+                                    any_conversion = 1;
+                                } else { if (conv == 115) {
+                                        var s: i64 = 0;
+                                        if (args_idx < arg_count) {
+                                            s = flags_positional(_pf_spec, args_idx + 1);
+                                            args_idx = args_idx + 1;
+                                        }
+                                        _pf_emit_str(s, left, width, prec);
+                                        any_conversion = 1;
+                                    } else { if (conv == 98) {
+                                            var s: i64 = 0;
+                                            if (args_idx < arg_count) {
+                                                s = flags_positional(_pf_spec, args_idx + 1);
+                                                args_idx = args_idx + 1;
+                                            }
+                                            if (_pf_emit_b(s) == 1) { stop = 1; }
+                                            any_conversion = 1;
+                                        } else { if (conv == 100) {
+                                                var s = "0";
+                                                if (args_idx < arg_count) {
+                                                    s = flags_positional(_pf_spec, args_idx + 1);
+                                                    args_idx = args_idx + 1;
+                                                }
+                                                var v = _pf_parse_int(s);
+                                                _pf_emit_int(v, 10, 0, left, plus, space, hash, zero, width, prec, 0);
+                                                any_conversion = 1;
+                                            } else { if (conv == 105) {
+                                                    var s = "0";
+                                                    if (args_idx < arg_count) {
+                                                        s = flags_positional(_pf_spec, args_idx + 1);
+                                                        args_idx = args_idx + 1;
+                                                    }
+                                                    var v = _pf_parse_int(s);
+                                                    _pf_emit_int(v, 10, 0, left, plus, space, hash, zero, width, prec, 0);
+                                                    any_conversion = 1;
+                                                } else { if (conv == 117) {
+                                                        var s = "0";
+                                                        if (args_idx < arg_count) {
+                                                            s = flags_positional(_pf_spec, args_idx + 1);
+                                                            args_idx = args_idx + 1;
+                                                        }
+                                                        var v = _pf_parse_int(s);
+                                                        _pf_emit_int(v, 10, 0, left, plus, space, hash, zero, width, prec, 1);
+                                                        any_conversion = 1;
+                                                    } else { if (conv == 111) {
+                                                            var s = "0";
+                                                            if (args_idx < arg_count) {
+                                                                s = flags_positional(_pf_spec, args_idx + 1);
+                                                                args_idx = args_idx + 1;
+                                                            }
+                                                            var v = _pf_parse_int(s);
+                                                            _pf_emit_int(v, 8, 0, left, plus, space, hash, zero, width, prec, 1);
+                                                            any_conversion = 1;
+                                                        } else { if (conv == 120) {
+                                                                var s = "0";
+                                                                if (args_idx < arg_count) {
+                                                                    s = flags_positional(_pf_spec, args_idx + 1);
+                                                                    args_idx = args_idx + 1;
+                                                                }
+                                                                var v = _pf_parse_int(s);
+                                                                _pf_emit_int(v, 16, 0, left, plus, space, hash, zero, width, prec, 1);
+                                                                any_conversion = 1;
+                                                            } else { if (conv == 88) {
+                                                                    var s = "0";
+                                                                    if (args_idx < arg_count) {
+                                                                        s = flags_positional(_pf_spec, args_idx + 1);
+                                                                        args_idx = args_idx + 1;
+                                                                    }
+                                                                    var v = _pf_parse_int(s);
+                                                                    _pf_emit_int(v, 16, 1, left, plus, space, hash, zero, width, prec, 1);
+                                                                    any_conversion = 1;
+                                                                } else {
+                                                                    # ⛔ NOT A WARNING, AND NOTHING GOES TO STDOUT. This used to
+                                                                    # write a warning to stderr, emit the bare conversion letter
+                                                                    # to stdout (dropping the `%`) and exit 0 — so `printf '%f'
+                                                                    # 1.5` produced the text "f" and reported success. GNU exits 1
+                                                                    # on an invalid conversion and prints nothing.
+                                                                    # The float conversions get their own message: they are a
+                                                                    # named kriya gap, not a user typo.
+                                                                    _pf_bad = 1;
+                                                                    if (_pf_is_float_conv(conv) == 1) {
+                                                                        k_write( 2, "kriya printf: %", 15);
+                                                                        _pf_errc(conv);
+                                                                        k_write( 2, ": floating-point conversions are not implemented\n", 49);
+                                                                    } else {
+                                                                        k_write( 2, "kriya printf: %", 15);
+                                                                        _pf_errc(conv);
+                                                                        k_write( 2, ": invalid conversion specification\n", 35);
+                                                                    }
+                                                                } } } } } } } } } }
                         }
                     } else {
                         _pf_putc(b);

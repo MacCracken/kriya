@@ -158,7 +158,7 @@ fn cmd_echo(start: i64): i64 {
 # `--help=json` and `--list` alike.
 fn echo_help_declare(): i64 {
     help_begin("echo", "Print arguments separated by spaces.",
-               "echo [-neE] [STRING...]");
+      "echo [-neE] [STRING...]");
     help_positional(0, HELP_POS_UNBOUNDED, "STRING");
     help_example("echo hello");
     help_example("echo -n no-newline");

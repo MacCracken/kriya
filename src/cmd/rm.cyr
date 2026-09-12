@@ -86,7 +86,7 @@ fn _rm_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn rm_help_declare(): i64 {
     help_begin("rm", "Remove files and directory trees.",
-               "rm [OPTIONS] FILE...");
+      "rm [OPTIONS] FILE...");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_destructive(1);
     help_operands("With -f, zero operands is a silent success (POSIX). ⚠ rm never follows symlinks and no flag opts in (ADR 0003). It refuses `/` with no escape hatch (ADR 0004), refuses a `.`/`..` final component, and refuses a symlink operand carrying a trailing slash (ADR 0010).");  #skip-lint

@@ -52,7 +52,7 @@ fn _head_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn head_help_declare(): i64 {
     help_begin("head", "Print the first part of files.",
-               "head [OPTIONS] [FILE...]");
+      "head [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_operands("Defaults to 10 lines. The obsolescent `head -5` form is accepted as `-n 5`, first argument only.");
     help_exit(1, "a file could not be read");

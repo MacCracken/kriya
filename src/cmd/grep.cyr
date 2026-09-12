@@ -150,7 +150,7 @@ fn _gr_init_spec(): i64 {
 # `--help=json` and `--list` alike.
 fn grep_help_declare(): i64 {
     help_begin("grep", "Search files for lines matching a pattern.",
-               "grep [OPTIONS] PATTERN [FILE...]");
+      "grep [OPTIONS] PATTERN [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "PATTERN,FILE");
     help_operands("PATTERN is an operand only when neither -e nor -f supplies it. BRE by default; -E for ERE, -F for fixed strings. ⚠ Context lines print with `-` where matching lines print `:`, and `--` separates non-adjacent groups. ⚠ -r skips symlinks (ADR 0003). -P is rejected (ADR 0005). GNU's -NUM shorthand is not implemented (roadmap 1.4.x). ⚠ --include/--exclude: the RIGHTMOST matching one wins, and a name matching neither is decided by the FIRST option's type — so `--exclude=X --include=*.c` searches everything while `--include=*.c --exclude=X` searches only .c files. Under -r the glob sees the BASE NAME (a pattern with `/` never matches); for a command-line operand it sees the path as typed and each `/`-suffix. Directories are never filtered.");  #skip-lint
     help_exit(0, "at least one line matched");
@@ -471,7 +471,7 @@ fn _gr_is_word_byte(c): i64 {
 # (start, end) into the out-pointers when non-zero. `from_ptr` may be
 # non-zero to continue iteration (used by -o multi-match emit).
 fn _gr_check_line(handles, n_handles, line, len, word_mode, xline_mode,
-                  match_start_ptr, match_end_ptr, from): i64 {
+  match_start_ptr, match_end_ptr, from): i64 {
     var h_i: i64 = 0;
     while (h_i < n_handles) {
         var handle = vec_get(handles, h_i);
@@ -981,7 +981,7 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                     var ms: i64 = 0;
                     var me: i64 = 0;
                     var matched = _gr_check_line(handles, n_handles, search_buf, line_len,
-                                                 word_mode, xline_mode, &ms, &me, 0);
+                      word_mode, xline_mode, &ms, &me, 0);
                     if (invert == 1) {
                         if (matched == 1) { matched = 0; } else { matched = 1; }
                     }
@@ -1036,8 +1036,8 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                                     var nm: i64 = 0;
                                     var ne: i64 = 0;
                                     var got = _gr_check_line(handles, n_handles, search_buf,
-                                                             line_len, word_mode, xline_mode,
-                                                             &nm, &ne, next_from);
+                                      line_len, word_mode, xline_mode,
+                                      &nm, &ne, next_from);
                                     if (got == 1) { cur_ms = nm; cur_me = ne; }
                                     else { more = 0; }
                                 }
@@ -1051,7 +1051,7 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                             while (ri < _gr_ring_n) {
                                 var sp = _gr_ring + ((_gr_ring_head + ri) % _gr_ring_cap) * _GR_CTX_SLOT;
                                 _gr_emit_prefix2(name, show_name, show_lineno,
-                                                 load64(sp + 24), 45, null_fname);
+                                  load64(sp + 24), 45, null_fname);
                                 var sl = load64(sp + 16);
                                 if (sl > 0) { k_write( 1, load64(sp), sl); }
                                 k_write( 1, &tb, 1);
@@ -1192,7 +1192,7 @@ fn _gr_walk_dir(parent_dirfd, dir_name, dir_path, handles, n_handles, opts, term
                         if (r == 0) {
                             if (fs_is_dir(&st) == 1) {
                                 if (_gr_walk_dir(dir_fd, name, sub, handles, n_handles,
-                         opts, term_byte, suppress) == 1) {
+                                    opts, term_byte, suppress) == 1) {
                                     found_any = 1;
                                 }
                             } elif (fs_is_reg(&st) == 1) {

@@ -385,20 +385,20 @@ fn main() {
 
     test_group("mode constants still encode what they claim");
     assert_eq(STR_ESC_ALLOW_C | STR_ESC_ALLOW_X | STR_ESC_DQUOTE,
-              MODE_FMT, "MODE_FMT == printf FORMAT mode");
+      MODE_FMT, "MODE_FMT == printf FORMAT mode");
     assert_eq(MODE_B, MODE_FMT | STR_ESC_OCTAL_PREFIX, "MODE_B adds the octal prefix");
     assert_eq(STR_ESC_ALLOW_C | STR_ESC_ALLOW_X | STR_ESC_OCTAL_PREFIX,
-              MODE_ECHO, "MODE_ECHO == echo -e mode");
+      MODE_ECHO, "MODE_ECHO == echo -e mode");
     assert_eq(MODE_ECHO & STR_ESC_DQUOTE, 0, "echo does NOT take the DQUOTE bit");
 
     # ⛔ The one place echo and printf genuinely disagree on a named escape.
     # Measured against GNU: `printf '\"'` emits `"`, `echo -e '\"'` emits `\"`.
     test_group("str_escape_decode — \\\" is mode-gated");
     assert_eq(_t_esc("\\\"", MODE_FMT, &esc), STR_ESC_BYTE,
-              "printf drops the backslash");
+      "printf drops the backslash");
     assert_eq(load64(&esc + STR_ESC_O_BYTE), 34, "...leaving a plain quote");
     assert_eq(_t_esc("\\\"", MODE_ECHO, &esc), STR_ESC_LITERAL,
-              "echo keeps the backslash");
+      "echo keeps the backslash");
     assert_eq(load64(&esc + STR_ESC_O_LEN), 2, "...consuming both bytes");
 
     test_group("echo option clusters");
@@ -475,14 +475,14 @@ fn main() {
     test_group("icase — the case classes both become [:alpha:]");
     var ie = alloc(8);
     assert_eq(streq(_t_rw("[[:upper:]]", ICASE_MODE_FOLD, ie), "[[:alpha:]]"), 1,
-              "[:upper:] -> [:alpha:]");
+      "[:upper:] -> [:alpha:]");
     assert_eq(streq(_t_rw("[[:lower:]]", ICASE_MODE_FOLD, ie), "[[:alpha:]]"), 1,
-              "[:lower:] -> [:alpha:]");
+      "[:lower:] -> [:alpha:]");
     # ⚠ Every OTHER class is untouched by -i.
     assert_eq(streq(_t_rw("[[:digit:]]", ICASE_MODE_FOLD, ie), "[[:digit:]]"), 1,
-              "[:digit:] is unchanged");
+      "[:digit:] is unchanged");
     assert_eq(streq(_t_rw("[[:punct:]]", ICASE_MODE_FOLD, ie), "[[:punct:]]"), 1,
-              "[:punct:] is unchanged");
+      "[:punct:] is unchanged");
 
     test_group("icase — literals and escapes");
     assert_eq(streq(_t_rw("ABC", ICASE_MODE_FOLD, ie), "abc"), 1, "literals fold");
@@ -490,12 +490,12 @@ fn main() {
     # `\W` into `\w` — a different operator in the dialects that have one.
     assert_eq(streq(_t_rw("\\W", ICASE_MODE_FOLD, ie), "\\W"), 1, "escapes survive");
     assert_eq(streq(_t_rw("A[B-C]D", ICASE_MODE_FOLD, ie), "a[bc]d"), 1,
-              "a range folds to its members");
+      "a range folds to its members");
     # CLOSED mode leaves literals for niyama's `(?i)` and closes the SET.
     assert_eq(streq(_t_rw("[a]", ICASE_MODE_CLOSED, ie), "[Aa]"), 1,
-              "closed mode emits both cases");
+      "closed mode emits both cases");
     assert_eq(streq(_t_rw("A", ICASE_MODE_CLOSED, ie), "A"), 1,
-              "closed mode leaves literals alone");
+      "closed mode leaves literals alone");
 
     # ⛔ The gate is the UPPER-case fold, not the lower-case one, and the
     # difference is load-bearing: `[A-_]` is accepted where `[B-a]` is refused,
@@ -637,11 +637,11 @@ fn main() {
     assert_eq(load64(ue + UDB_E_ID), 7101, "...and the gid is field 2");
     # Extra trailing fields are fine.
     assert_eq(_t_udb_line("f8:x:7006:7006::/tmp:/sh:extra", UDB_PW_FIELDS, ue), 1,
-              "extra fields are accepted");
+      "extra fields are accepted");
     # ⛔ A `#` line IS skipped, which is widely called a myth and is not one:
     # this line has seven good fields and a valid uid, and glibc still ignores it.
     assert_eq(_t_udb_line("#hash:x:7201:7201::/tmp:/sh", UDB_PW_FIELDS, ue), 0,
-              "a # comment is skipped");
+      "a # comment is skipped");
     assert_eq(_t_udb_line("", UDB_PW_FIELDS, ue), 0, "an empty line yields nothing");
     # ⛔ NIS/compat forms are refused BY PREFIX, not by field count. The short
     # forms happen to fail the field and id rules, which made "no special case
@@ -649,22 +649,22 @@ fn main() {
     assert_eq(_t_udb_line("+@netgroup", UDB_PW_FIELDS, ue), 0, "+@netgroup has too few fields");
     assert_eq(_t_udb_line("+user::::::", UDB_PW_FIELDS, ue), 0, "+user:::::: has an empty id");
     assert_eq(_t_udb_line("+plus:x:8102:8102::/h:/s", UDB_PW_FIELDS, ue), 0,
-              "+plus is refused despite four good fields");
+      "+plus is refused despite four good fields");
     assert_eq(_t_udb_line("-minus:x:8103:8103::/h:/s", UDB_PW_FIELDS, ue), 0,
-              "-minus likewise (it means EXCLUDE under compat)");
+      "-minus likewise (it means EXCLUDE under compat)");
     assert_eq(_t_udb_line("badid:x:notanumber:5::/tmp:/sh", UDB_PW_FIELDS, ue), 0,
-              "a non-numeric uid is skipped");
+      "a non-numeric uid is skipped");
     # ⛔ The GID field is validated too, though nothing reads it: glibc rejects
     # the whole line, so checking only the uid resolves users GNU does not.
     assert_eq(_t_udb_line("badgid:x:8300:notanumber::/h:/s", UDB_PW_FIELDS, ue), 0,
-              "a non-numeric gid rejects the line");
+      "a non-numeric gid rejects the line");
     assert_eq(_t_udb_line("emptygid:x:8301:::/h:/s", UDB_PW_FIELDS, ue), 0,
-              "an empty gid rejects the line");
+      "an empty gid rejects the line");
     assert_eq(_t_udb_line("negid:x:8302:-5::/h:/s", UDB_PW_FIELDS, ue), 0,
-              "a negative gid rejects the line");
+      "a negative gid rejects the line");
     # ⚠ A group line has no second id field, so the same shape is fine there.
     assert_eq(_t_udb_line("g:x:8400:notanumber", UDB_GR_FIELDS, ue), 1,
-              "a group's 4th field is a member list, not an id");
+      "a group's 4th field is a member list, not an id");
 
     # ⛔ LEADING blanks are STRIPPED and TRAILING blanks are not — and the strip
     # happens BEFORE the prefix test, so `  #x` is a comment. Getting the order
@@ -674,7 +674,7 @@ fn main() {
     assert_eq(_t_udb_line("\t\ttabbed:x:8110:8110", UDB_PW_FIELDS, ue), 1, "tabs strip too");
     assert_eq(streq(load64(ue + UDB_E_NAME), "tabbed"), 1, "...leaving a bare name");
     assert_eq(_t_udb_line("  #indent:x:8101:8101", UDB_PW_FIELDS, ue), 0,
-              "an INDENTED # is still a comment");
+      "an INDENTED # is still a comment");
     assert_eq(_t_udb_line("   ", UDB_PW_FIELDS, ue), 0, "a whitespace-only line yields nothing");
     assert_eq(_t_udb_line("trail :x:8105:8105", UDB_PW_FIELDS, ue), 1, "trailing blanks do NOT strip");
     assert_eq(streq(load64(ue + UDB_E_NAME), "trail "), 1, "...they are part of the name");
@@ -861,7 +861,7 @@ fn main() {
     # `/usr/lib` and `/usr/libexec` common through `lib` and emit a path into the
     # wrong directory — this is the case that decides the whole algorithm.
     assert_eq(streq(path_relative("/usr/lib", "/usr/libexec/x"), "../libexec/x"), 1,
-              "lib and libexec are NOT a common prefix");
+      "lib and libexec are NOT a common prefix");
     assert_eq(streq(path_relative("/usr/libexec", "/usr/lib/x"), "../lib/x"), 1, "...and back");
     assert_eq(streq(path_relative("/a/bb", "/a/b/c"), "../b/c"), 1, "bb and b are distinct");
     # Nothing in common but the root.
