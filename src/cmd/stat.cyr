@@ -351,7 +351,8 @@ fn _st_emit_spec(c, st, name): i64 {
                                                 n = _st_render_hex(load64(st + 0), &buf);
                                             } else { if (c == 116) {  # t (major of rdev, hex)
                                                     var rdev = load64(st + 40);
-                                                    # Linux major/minor encoding: major = ((rdev >> 8) & 0xfff) | ((rdev >> 32) & ~0xfff)
+                                                    # Linux major/minor encoding: major = ((rdev >> 8) & 0xfff) | ((rdev
+                                                    # >> 32) & ~0xfff)
                                                     # Simpler subset: major = (rdev >> 8) & 0xfff for typical devices.
                                                     n = _st_render_hex((rdev / 256) & 4095, &buf);
                                                 } else { if (c == 84) {  # T (minor of rdev, hex)
@@ -368,24 +369,37 @@ fn _st_emit_spec(c, st, name): i64 {
                                                                     } else { if (c == 89) {  # Y (mtime)
                                                                             n = _st_render_dec(load64(st + 88), &buf);
                                                                         } else { if (c == 90) {  # Z (ctime)
-                                                                                n = _st_render_dec(load64(st + 104), &buf);
-                                                                            } else { if (c == 87) {  # W (birth time — stat(2) can't see it; 0 matches GNU when unavailable)
+                                                                                n = _st_render_dec(load64(st + 104),
+                                                                                  &buf);
+                                                                                # W (birth time — stat(2) can't see it; 0
+                                                                                # matches GNU when unavailable)
+                                                                            } else { if (c == 87) {
                                                                                     n = _st_render_dec(0, &buf);
                                                                                 } else { if (c == 37) {  # literal %
                                                                                         store8(&buf, 37);
                                                                                         n = 1;
-                                                                                    } elif (c == 120) {                                            # %x  atime
+                                                                                        # %x atime
+                                                                                    } elif (c == 120) {
                                                                                         n = _st_render_time(load64(st + 72), load64(st + 80), &buf);
-                                                                                    } elif (c == 121) {                                            # %y  mtime
+                                                                                        # %y mtime
+                                                                                    } elif (c == 121) {
                                                                                         n = _st_render_time(load64(st + 88), load64(st + 96), &buf);
-                                                                                    } elif (c == 122) {                                            # %z  ctime
+                                                                                        # %z ctime
+                                                                                    } elif (c == 122) {
                                                                                         n = _st_render_time(load64(st + 104), load64(st + 112), &buf);
                                                                                     } else {
-                                                                                        # ⚠ Two different failures, and they deserve different answers.
+                                                                                        # ⚠ Two different failures, and
+                                                                                        # they deserve different
+                                                                                        # answers.
                                                                                         if (_st_is_deferred_spec(c) == 1) {  #skip-lint
-                                                                                            # A REAL specifier kriya has not implemented. Emitting its source
-                                                                                            # text would be a wrong answer dressed as output; say so instead.
-                                                                                            k_write( 2, "kriya stat: %", 13);
+                                                                                            # A REAL specifier kriya has
+                                                                                            # not implemented. Emitting
+                                                                                            # its source
+                                                                                            # text would be a wrong
+                                                                                            # answer dressed as output;
+                                                                                            # say so instead.
+                                                                                            k_write(2, "kriya stat: %",
+                                                                                              13);
                                                                                             var eb[8];
                                                                                             store8(&eb, c);
                                                                                             k_write( 2, &eb, 1);
@@ -393,13 +407,18 @@ fn _st_emit_spec(c, st, name): i64 {
                                                                                             _st_bad = 1;
                                                                                             n = 0;
                                                                                         } else {
-                                                                                            # Genuinely unknown. GNU prints '?' — verified against `stat -c %@`,
-                                                                                            # which is what the previous "emit the source bytes, GNU behaviour"
+                                                                                            # Genuinely unknown. GNU
+                                                                                            # prints '?' — verified
+                                                                                            # against `stat -c %@`,
+                                                                                            # which is what the previous
+                                                                                            # "emit the source bytes,
+                                                                                            # GNU behaviour"
                                                                                             # comment here got wrong.
                                                                                             store8(&buf, 63);
                                                                                             n = 1;
                                                                                         }
-                                                                                    } } } } } } } } } } } } } } } } } } } } }
+                                                                                    } } } } } } } } } } } } } } } } } }
+            } } }
     k_write( 1, &buf, n);
     return 0;
 }

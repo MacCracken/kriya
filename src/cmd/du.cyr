@@ -635,14 +635,18 @@ fn cmd_du(start: i64): i64 {
                                                                             consumed_next = 1;
                                                                         }
                                                                         if (dval < 0) {
-                                                                            k_write( 2, "kriya du: error: invalid -d value\n", 34);
+                                                                            k_write( 2,
+                                                                              "kriya du: error: invalid -d value\n",
+                                                                              34);
                                                                             return EXIT_USAGE;
                                                                         }
                                                                         _du_max_depth = dval;
                                                                         _du_have_depth = 1;
                                                                         loop = 0;
                                                                     } else {
-                                                                        k_write( 2, "kriya du: error: unknown short option\n", 38);
+                                                                        k_write( 2,
+                                                                          "kriya du: error: unknown short option\n",
+                                                                          38);
                                                                         return EXIT_USAGE;
                                                                     } } } } } } } } } } }
                         }
