@@ -628,7 +628,7 @@ fn cmd_du(start: i64): i64 {
                                                                             dval = kriya_parse_nonneg_int(tok + p + 1);
                                                                         } else {
                                                                             if (i + 1 >= n_argv) {
-                                                                                k_write( 2, "kriya du: error: -d requires an argument\n", 41);
+                                                                                k_write( 2, "kriya du: error: -d requires an argument\n", 41);  #skip-lint
                                                                                 return EXIT_USAGE;
                                                                             }
                                                                             dval = kriya_parse_nonneg_int(argv(i + 1));

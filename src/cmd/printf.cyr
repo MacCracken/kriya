@@ -597,7 +597,8 @@ fn _pf_process(fmt, arg_count): i64 {
                                                                       zero, width, prec, 1);
                                                                     any_conversion = 1;
                                                                 } else {
-                                                                    # ⛔ NOT A WARNING, AND NOTHING GOES TO STDOUT. This
+                                                                    # # ⛔ NOT A WARNING, AND NOTHING GOES TO STDOUT.
+                                                                    # This
                                                                     # used to
                                                                     # write a warning to stderr, emit the bare
                                                                     # conversion letter
@@ -613,7 +614,7 @@ fn _pf_process(fmt, arg_count): i64 {
                                                                     if (_pf_is_float_conv(conv) == 1) {
                                                                         k_write( 2, "kriya printf: %", 15);
                                                                         _pf_errc(conv);
-                                                                        k_write( 2, ": floating-point conversions are not implemented\n", 49);
+                                                                        k_write( 2, ": floating-point conversions are not implemented\n", 49);  #skip-lint
                                                                     } else {
                                                                         k_write( 2, "kriya printf: %", 15);
                                                                         _pf_errc(conv);
