@@ -497,6 +497,20 @@ PY2
                     expect_eq "...and still MOVES the file"                 "moved" \
                               "$([ -e bigmv.txt ] && echo LEFT || echo moved)"
                     expect_eq "...and the file arrives"                     "bigmv" "$(cat "$bigdir/mv_k")"
+
+                    # ⭐ AND `-a` / `--preserve=all` (1.6.13) sit between the two:
+                    # `all` carries xattrs without naming them, so a failure is
+                    # REPORTED and not fatal — `mv`'s rule — while `-a`, GNU's
+                    # "reduced failure diagnostics", says nothing at all. Naming
+                    # xattr after `-a` restores the full report and the exit 1.
+                    for _xo in "-a" "--preserve=all" "-a --preserve=xattr" "-p"; do
+                        rm -f "$bigdir/xo_k" "$bigdir/xo_g"
+                        _xk=0; "$BIN" cp $_xo big.txt "$bigdir/xo_k" 2>xoerr_k || _xk=$?
+                        _xg=0; cp $_xo big.txt "$bigdir/xo_g" 2>xoerr_g || _xg=$?
+                        expect_eq "cp $_xo onto a smaller xattr limit: exit and report match GNU" \
+                          "$_xg|$([ -s xoerr_g ] && echo reported || echo silent)" \
+                          "$_xk|$([ -s xoerr_k ] && echo reported || echo silent)"
+                    done
                 else
                     skip "the second filesystem accepted the oversized attribute — failure path unverified"
                 fi
@@ -779,8 +793,10 @@ expect_eq "the xattr diagnostic never ends in a bare colon" "0" \
           "$("$BIN" cp --preserve=nosuch own.txt zz2 2>&1 | grep -c ": $")"
 
 # --- the introspection interface knows about the new attributes ------
+# ⚠ The `-p` line specifically: since 1.6.13 `--no-preserve` names ownership
+# too, so a bare count of the word is 2.
 expect_eq "cp --help names ownership" "1" \
-          "$("$BIN" cp --help 2>&1 | grep -c -- 'ownership')"
+          "$("$BIN" cp --help 2>&1 | grep -c -- '--preserve .*ownership')"
 expect_eq "the refusal message lists all five" "1" \
           "$("$BIN" cp --preserve=nosuch own.txt zz 2>&1 | grep -c 'mode, ownership, timestamps, links, xattr')"
 

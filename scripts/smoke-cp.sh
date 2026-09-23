@@ -343,6 +343,85 @@ cpw_case "cp --preserve=ownership of a 0444 source" 022 444 --preserve=ownership
 cpw_case "cp -p of a 0444 source"                   022 444 -p
 cpw_case "cp -p of a 0000 source"                   022 000 -p
 
+# --- 1.6.13: `-f` removes a destination it cannot open (ADR 0021) ------------
+#
+# ⛔ GNU'S `--force`: an existing destination that cannot be OPENED for writing —
+# a read-only file in a writable directory, a running executable — is unlinked
+# and created afresh. kriya reported EACCES / ETXTBSY and exited 1. ⚠ A NEW
+# INODE, so a hard link to the old destination keeps the OLD bytes, and the
+# directory's permissions — not the file's — decide whether it can go.
+# ⭐ Every case is compared to GNU: exit status, the bytes, the mode, stdout.
+cpf_case() {   # cpf_case <name> <setup-cmd> <cp-args...> — cp-args end with the dst
+    _n=$1; _setup=$2; shift 2
+    for _w in g k; do
+        chmod -R u+rwx "cpf_$_w" 2>/dev/null || true
+        rm -rf "cpf_$_w"; mkdir "cpf_$_w"
+        ( cd "cpf_$_w" && printf 'new\n' > src && chmod 0640 src && eval "$_setup" )
+    done
+    _grc=0; ( cd cpf_g && umask 022 && cp    "$@" > ../cpf_gout 2>/dev/null ) || _grc=$?
+    _krc=0; ( cd cpf_k && umask 022 && "$BIN" cp "$@" > ../cpf_kout 2>/dev/null ) || _krc=$?
+    chmod -R u+rwx cpf_g cpf_k 2>/dev/null || true
+    _dst=$(eval "printf '%s' \"\${$#}\"")
+    expect_eq "$_n" \
+      "$_grc|$(cat "cpf_g/$_dst" 2>/dev/null)|$(stat -c %a "cpf_g/$_dst" 2>/dev/null)|$(tr '\n' ' ' < cpf_gout)" \
+      "$_krc|$(cat "cpf_k/$_dst" 2>/dev/null)|$(stat -c %a "cpf_k/$_dst" 2>/dev/null)|$(tr '\n' ' ' < cpf_kout)"
+}
+cpf_case "-f onto a 0400 file"             'printf old > dst; chmod 0400 dst'                -f src dst
+cpf_case "-fv prints removed, after ->"    'printf old > dst; chmod 0400 dst'                -fv src dst
+cpf_case "-fp onto a 0400 file"            'printf old > dst; chmod 0400 dst'                -fp src dst
+cpf_case "-f onto a symlink to a 0400 file" 'printf old > tgt; chmod 0400 tgt; ln -s tgt dst' -f src dst
+cpf_case "-f in a directory it cannot write" 'printf old > dst; chmod 0400 dst; chmod 0500 .'  -f src dst
+cpf_case "-Rf onto a 0400 file in a tree" \
+  'mkdir -p s/sub d/sub; printf new > s/sub/f; printf old > d/sub/f; chmod 0400 d/sub/f' -Rf s/. d
+expect_eq "...the file in the tree was replaced" "new" "$(cat cpf_k/d/sub/f 2>/dev/null)"
+# ⚠ The hard link: GNU and kriya both leave the OTHER name on the old inode.
+cpf_case "-f onto a hard-linked 0400 file"  'printf old > dst; chmod 0400 dst; ln dst other' -f src dst
+expect_eq "...the other name keeps the old bytes" "$(cat cpf_g/other)" "$(cat cpf_k/other)"
+# ⛔ `-f` never turns a directory into a file: no unlink is even attempted.
+cpf_case "-f onto a directory"              'mkdir -p dst/src'                              -f src dst
+expect_eq "...the directory is still there" "dir" "$([ -d cpf_k/dst/src ] && echo dir || echo GONE)"
+# ⚠ Without `-f` kriya still refuses — its own rule (CLAUDE.md), where GNU fails
+# on the open instead. Same exit, same untouched destination.
+cpf_case "no -f: refused, destination untouched" 'printf old > dst; chmod 0400 dst'           src dst
+# ⛔ A RUNNING EXECUTABLE: the open fails ETXTBSY, and GNU replaces it. Needs a
+# binary that can execute from $WORK, so it is probed rather than assumed.
+cp "$(command -v sleep)" busy_probe 2>/dev/null || true
+if [ -x busy_probe ] && ./busy_probe 0 2>/dev/null; then
+    for _w in g k; do
+        rm -f "busy_$_w"; cp busy_probe "busy_$_w"; printf 'new\n' > busy_src
+    done
+    ./busy_g 3 & _bg=$!
+    ./busy_k 3 & _bk=$!
+    sleep 0.3
+    _grc=0; cp -f busy_src busy_g 2>/dev/null || _grc=$?
+    _krc=0; "$BIN" cp -f busy_src busy_k 2>/dev/null || _krc=$?
+    expect_eq "-f onto a running executable" "$_grc|$(cat busy_g)" "$_krc|$(cat busy_k)"
+    wait "$_bg" 2>/dev/null || true
+    wait "$_bk" 2>/dev/null || true
+else
+    echo "note: \$WORK cannot run a binary — the ETXTBSY case is unverified here"
+fi
+chmod -R u+rwx cpf_g cpf_k 2>/dev/null || true
+
+# --- 1.6.13: -P / -d without -R copy a symlink OPERAND as a symlink ---------
+# ⛔ Only the `-R` walk ever read the policy, so `cp -P link out` followed the
+# link — where GNU makes `out` a symlink. A plain `cp link out` still follows
+# (POSIX's non-`-R` rule), and so do -H and -L.
+printf 'body\n' > pl_target; ln -s pl_target pl_link
+for _o in -P -d --no-dereference "" -H -L; do
+    rm -f pl_g pl_k
+    cp $_o pl_link pl_g 2>/dev/null || true
+    "$BIN" cp $_o pl_link pl_k 2>/dev/null || true
+    expect_eq "cp ${_o:-(no flag)} of a symlink operand" \
+      "$(readlink pl_g 2>/dev/null || stat -c %F pl_g 2>/dev/null)" \
+      "$(readlink pl_k 2>/dev/null || stat -c %F pl_k 2>/dev/null)"
+done
+# ⛔ `--no-dereference` IS GNU'S SPELLING, and it was a usage error here: kriya
+# registered `--no-deref`, which GNU accepts only as an abbreviation.
+expect_exit "--no-dereference is accepted"     0 "$BIN" cp --no-dereference pl_link pl_nd
+expect_exit "--no-preserve=bogus is refused"   2 "$BIN" cp --no-preserve=bogus pl_target pl_np
+expect_exit "--no-preserve with no list"       2 "$BIN" cp pl_target pl_np2 --no-preserve
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

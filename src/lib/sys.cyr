@@ -596,6 +596,19 @@ fn k_fchmod(fd, mode): i64 {
     #endif
 }
 
+# `fchmodat2` (Linux 6.6+) — the one chmod that honours AT_EMPTY_PATH, so it can
+# act on an O_PATH descriptor, which `fchmod` refuses with EBADF. ⚠ 452 on every
+# architecture: syscalls added since 5.1 share one number. An older kernel
+# answers -ENOSYS and the caller falls back (`fs_fd_chmod`).
+fn k_fchmodat2(dirfd, path, mode, flags): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;                                         # no mode bits on agnos
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(452, dirfd, path, mode, flags);         # linux fchmodat2 #452
+    #endif
+}
+
 # --- extended attributes --------------------------------------------
 #
 # All three fd-anchored, for the reason above. ⚠ The size protocol is the
@@ -653,5 +666,17 @@ fn k_fsetxattr(fd, name, value, size, flags): i64 {
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     return syscall(190, fd, name, value, size, flags);     # linux fsetxattr #190
+    #endif
+}
+
+# By PATH. ⚠ Used for exactly one path, `/proc/self/fd/N` — the route to an
+# O_PATH descriptor, which has no xattr call of its own — so it still names the
+# open file rather than re-resolving a name (see `fs_fd_setxattr`).
+fn k_setxattr(path, name, value, size, flags): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(188, path, name, value, size, flags);   # linux setxattr #188
     #endif
 }

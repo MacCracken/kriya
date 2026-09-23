@@ -38,7 +38,7 @@ watchlist in [`lessons.md`](lessons.md). The rest are shipped or dissolved into 
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.6.x** | GNU-parity leftovers and cleanup | — | **1.6.13** — `cp` completeness |
+| **1.6.x** | GNU-parity leftovers and cleanup | — | **1.6.14** — `grep` parity leftovers |
 | **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | ARG_MAX argv chunking | **1.7.0** — batched exec |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.8.0** — floats |
 | **1.9.x** | Performance | niyama regex speed (upstream) | **1.9.0** — `wc -c` fast path |
@@ -54,22 +54,6 @@ test-first. **1.7.x onward is new capability**, a different kind of risk: it cha
 
 What the closed arcs and the release audits left open. One release per entry; every item was
 measured against GNU when it was filed and re-confirmed open at 1.6.11.
-
-- **1.6.13 — `cp` completeness.** All measured against GNU while fixing the 1.6.9 mode protocol, and
-  each a different mechanism:
-  - ⛔ **`cp -R` cannot descend into a pre-existing destination subdirectory that has write and
-    search but no READ** (0300, 0311, 0333). kriya opens every destination directory
-    `O_RDONLY|O_DIRECTORY`, which needs the read bit; GNU only ever creates entries in it and needs
-    write+search. GNU exits 0 with the file copied, kriya exits 1 with nothing copied. ⚠ The fix is
-    an open-flags change on the hottest path in `cp -R` (an `O_PATH` descriptor is a valid `dirfd`
-    but cannot be `fchmod`ed), so it wants its own measurement.
-  - **`cp -f` has no unlink-and-retry.** GNU's `--force` removes a destination it cannot open for
-    writing and creates it afresh; kriya reports EACCES and exits 1 (mode-0400 destination: GNU 0,
-    kriya 1). ⚠ kriya's `-f` already unlinks an existing SYMLINK, so the gap is specifically the
-    EACCES-on-open path for a regular file. ⚠ It DELETES a file the caller could not otherwise
-    write — that deserves an ADR, not just a patch.
-  - **`-a`, `--preserve=all` and `--no-preserve=` are unimplemented** — all three are refused by
-    name, which is the right failure, but `-a` is the spelling most scripts reach for.
 
 - **1.6.14 — `grep` parity leftovers.** Two deliberate omissions and two divergences a fuzz found:
   - **`grep -NUM` shorthand** (`grep -3` for `-C 3`) needs a bare `-DIGIT` to parse as an OPTION
@@ -112,6 +96,14 @@ measured against GNU when it was filed and re-confirmed open at 1.6.11.
     `find` and `xargs` cache PATH at startup to dodge a stack clobber in that same old buffer.
     ⚠ Not a drop-in swap: the stdlib copies every hit to a fresh heap buffer where `kriya_getenv`
     returns a pointer into its cached block. Pure cleanup either way.
+  - **`mv`'s diagnostics from a cross-filesystem move say `kriya cp:`**, because the move runs `cp`'s
+    copy and `cp`'s reporter hard-codes its name. GNU says `mv:`. Measured at 1.6.13 on a read-only
+    destination; the fix is the utility name as a parameter of the reporter, not a second reporter.
+  - **`cp -fi` never prompts**, and GNU's does: measured under a pty at 1.6.13, `cp -fi src dst`
+    asks *overwrite 'dst'?* and declining exits 1 with the destination unchanged, while kriya
+    overwrites and exits 0. kriya's `-f` skips the prompt in either order — CLAUDE.md's "`-f`
+    overrides" read broadly. ⚠ Decide before changing: GNU's `mv` makes `-f`/`-i`/`-n` last-wins
+    while its `cp` keeps `-i` whatever `-f` says, so "match GNU" is two different rules.
   - **`stat %C`** — the SELinux context — prints `?` and exits 0, as an unknown specifier does.
     GNU reads `security.selinux` and, where there is none, prints `?` too but exits **1** with
     *failed to get security context*, so a script cannot tell "no context" from "not asked".
@@ -401,8 +393,13 @@ four-criteria gate can land as a 1.x.y, but the list below does not move.
 If a single utility crosses **~400 lines of code** or grows a non-trivial dependency surface,
 propose extracting it into its own repo. ⚠ **Fifteen already exceed it** (non-blank, non-comment
 lines at 1.6.12); the largest are `ls` (**2,201**, up from 1,479 at 1.6.11), `grep` (1,124), `cp`
-(1,068) and `find` (956), and none has been split. ⛔ **`ls` is the one to decide first**: 1.6.12's
-GNU output surface — dates, `--dired`, tab stops, nine quoting styles, the full colour table — made
-it twice the next utility, and most of that growth is rendering `src/lib/` does not share. The threshold is a **prompt to decide**, not an automatic trigger: the
-multi-tool is the right home while they share `src/lib/`, and the question is whether a given
-utility has stopped sharing. Revisit at each arc boundary.
+(1,068) and `find` (956), and none has been split. The threshold is a **prompt to decide**, not an
+automatic trigger: the multi-tool is the right home while they share `src/lib/`, and the question is
+whether a given utility has stopped sharing.
+
+⛔ **Decided 2026-09-22: no split-outs until AGNOS is running fully, and then only as time permits.**
+Until then the threshold is recorded, not acted on — measure the figures at each arc boundary so the
+eventual decision starts from numbers, but do not propose an extraction in a release. `ls` will be
+first in line when it comes: 1.6.12's GNU output surface (dates, `--dired`, tab stops, nine quoting
+styles, the full colour table) made it twice the next utility, and most of that growth is rendering
+`src/lib/` does not share.

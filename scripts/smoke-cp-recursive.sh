@@ -341,7 +341,11 @@ done
 # ⚠ AN EXISTING DESTINATION DIRECTORY IS NOT OURS TO WIDEN. The withhold applies
 # to directories cp makes; one that was already there keeps its mode, and a 0500
 # one still fails — exactly as GNU's does.
-for _dm in 777 700 555 500; do
+# ⛔ 300, 311, 333 AND 100 JOINED AT 1.6.13. A directory with write and search
+# but no READ is one its owner can fill and not list, and GNU merges into it —
+# exit 0, every file copied — where kriya opened it O_RDONLY, got EACCES and
+# copied nothing. 100 (search only) must still FAIL, on the file inside it.
+for _dm in 777 700 555 500 300 311 333 100; do
     cpm_clean
     mkdir -p cpm_s/sub; : > cpm_s/sub/f; chmod 755 cpm_s/sub cpm_s
     mkdir -p cpm_g/sub cpm_k/sub; chmod "$_dm" cpm_g/sub; chmod "$_dm" cpm_k/sub
@@ -404,6 +408,84 @@ expect_eq "...and both end at the source mode" \
   "$(stat -c %a cpm_g/sub 2>/dev/null || echo ABSENT)" \
   "$(stat -c %a cpm_k/sub 2>/dev/null || echo ABSENT)"
 cpm_clean
+
+# --- 1.6.13: -p onto an existing destination cp cannot read -----------------
+# ⚠ The fallback descriptor for such a directory is O_PATH, which refuses
+# fchmod, fchown, futimens and fsetxattr — and GNU still applies the source's
+# mode and times to it under -p. `fs_fd_*` routes each call through a form that
+# takes an O_PATH descriptor; these fail if one of them does not.
+for _pv in -p --preserve=mode --preserve=timestamps --preserve=ownership; do
+    cpm_clean
+    mkdir -p cpm_s/sub; : > cpm_s/sub/f; chmod 750 cpm_s/sub; chmod 755 cpm_s
+    touch -d '2020-01-02 03:04:05' cpm_s/sub
+    mkdir -p cpm_g/sub cpm_k/sub; chmod 300 cpm_g/sub cpm_k/sub
+    grc=0; ( umask 022; cp    -R "$_pv" cpm_s/. cpm_g >/dev/null 2>&1 ) || grc=$?
+    krc=0; ( umask 022; "$BIN" cp -R "$_pv" cpm_s/. cpm_k >/dev/null 2>&1 ) || krc=$?
+    expect_eq "cp -R $_pv into an existing 0300 directory" \
+      "$grc|$(stat -c %a:%Y cpm_g/sub)|$([ -e cpm_g/sub/f ] && echo y || echo n)" \
+      "$krc|$(stat -c %a:%Y cpm_k/sub)|$([ -e cpm_k/sub/f ] && echo y || echo n)"
+done
+cpm_clean
+
+# ⛔ A DIRECTORY cp MADE, UNDER A UMASK THAT STRIPS OWNER READ. `umask 0477`
+# makes every new directory 0300; GNU copies the whole tree through them and
+# kriya stopped at the first. Same fallback, other door.
+for _um in 477 377 277; do
+    cpm_case "cp -R umask=$_um src=755" "$_um" 755
+done
+
+# --- 1.6.13: -a, --preserve=all and --no-preserve, in command-line order -------
+#
+# ⛔ GNU APPLIES THESE IN ORDER, and kriya's flag table has no order. Measured:
+# `-p --no-preserve=mode` is 0644, `--no-preserve=mode -p` is 0741 — and
+# `--no-preserve=mode` is not merely "do not copy the mode": a NEW file is made
+# at 0666 and a new directory at 0777, under the umask, instead of at the
+# source's bits. `all` and `-a` are mode, ownership, timestamps, links and xattr.
+# ⚠ ON AN SELINUX HOST `-a` IMPLIES CONTEXT, which kriya refuses rather than
+# drop, so the comparison would measure that refusal instead; it is skipped there.
+if [ -e /sys/fs/selinux/enforce ]; then
+    echo "note: SELinux is on — the -a / --preserve=all matrix is skipped (kriya refuses)"
+else
+    rm -rf pa_s; mkdir -p pa_s/d
+    printf 'hi\n' > pa_s/f; chmod 0741 pa_s/f; chmod 0750 pa_s/d
+    ln pa_s/f pa_s/hl; ln -s f pa_s/ln
+    touch -h -d '2020-01-02 03:04:05' pa_s/f pa_s/d pa_s/ln
+    PA_T=$(stat -c %Y pa_s/f)
+    pa_sig() {   # mode:time:links for f and d, and whether ln stayed a link
+        for _e in f d; do
+            printf '%s:%s:%s ' "$(stat -c %a "$1/$_e" 2>/dev/null)" \
+              "$([ "$(stat -c %Y "$1/$_e" 2>/dev/null)" = "$PA_T" ] && echo kept || echo new)" \
+              "$(stat -c %h "$1/$_e" 2>/dev/null)"
+        done
+        [ -L "$1/ln" ] && printf 'ln=link' || printf 'ln=%s' "$(stat -c %F "$1/ln" 2>/dev/null)"
+    }
+    for _o in "-a" "-R --preserve=all" "-a --no-preserve=mode" "-a --no-preserve=all" \
+              "-R --no-preserve=mode" "-R -p --no-preserve=mode" "-R --no-preserve=mode -p" \
+              "-a --no-preserve=links" "-a --no-preserve=timestamps" "-R --preserve=links,all" \
+              "-R --no-preserve=mode,links -a" "-a --no-preserve=context" "-R -p --preserve=links" \
+              "-dR" "-R --preserve=all --no-preserve=xattr" "-aL" "-La"; do
+        rm -rf pa_g pa_k
+        _grc=0; ( umask 022; cp    $_o pa_s pa_g >/dev/null 2>&1 ) || _grc=$?
+        _krc=0; ( umask 022; "$BIN" cp $_o pa_s pa_k >/dev/null 2>&1 ) || _krc=$?
+        expect_eq "cp $_o" "$_grc|$(pa_sig pa_g)" "$_krc|$(pa_sig pa_k)"
+    done
+    rm -rf pa_s pa_g pa_k
+fi
+
+# --- 1.6.13: -P / -H / -L are LAST-WINS, not a precedence ---------------------
+# ⛔ kriya resolved them as "L > H > P", under a comment saying that matched GNU.
+# It did not: `-R -L -P` keeps the symlinks under GNU and dereferenced here, and
+# `-R -L -H` likewise. `-a` and `-d` join the group as `-P`.
+for _o in "-R -L -P" "-R -P -L" "-R -L -H" "-R -H -P" "-R -H -L" "-R -d -L" "-R -L -d" \
+          "-R --no-dereference" "-R --dereference" "-R --dereference --no-dereference"; do
+    rm -rf dg dk
+    cp $_o tree dg 2>/dev/null || true
+    "$BIN" cp $_o tree dk 2>/dev/null || true
+    expect_eq "cp $_o: the in-tree symlink" \
+      "$(readlink dg/sub/link_to_a 2>/dev/null || echo FILE)" \
+      "$(readlink dk/sub/link_to_a 2>/dev/null || echo FILE)"
+done
+rm -rf dg dk
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

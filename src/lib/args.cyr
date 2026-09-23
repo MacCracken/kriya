@@ -32,6 +32,15 @@ var _kriya_argv_n    = 0;
 # `flags_get_str` cannot do — it keeps only the last.
 var _kriya_expanded   = 0;
 var _kriya_expanded_n = 0;
+# ⛔ PARALLEL TO `_kriya_expanded`: the `=VALUE` stripped from an opted-in bool
+# long at the SAME index, or 0 (1.6.13). The expander rewrites `--preserve=links`
+# to a bare `--preserve` so `flags_parse` accepts it, and the registry below keeps
+# only the LAST value per name — so a utility whose options are ORDER-dependent
+# (`cp -p --preserve=links --no-preserve=mode`) saw a bare flag where a list
+# stood, and lost every value but the last. Reading it here keeps ONE notion of
+# the option window — the expanded argv — rather than a second walk over the raw
+# one (see `kriya_opt_seq`).
+var _kriya_expanded_val = 0;
 
 # ⚠ ONE SLOT WAS NOT ENOUGH. The note above used to end "no utility has two" —
 # `uniq` has two (`--group` and `--all-repeated`), so the single slot became a
@@ -288,6 +297,9 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
                                     if (opted == 1) {
                                         store64(_kriya_optval_vals + ovi * 8, tok + eq + 1);
                                         if (ovi == 0) { _kriya_optval_val = tok + eq + 1; }
+                                        if (_kriya_expanded_val != 0) {
+                                            store64(_kriya_expanded_val + oi * 8, tok + eq + 1);
+                                        }
                                         var bare = alloc(nlen + 3);
                                         store8(bare, 45);
                                         store8(bare + 1, 45);
@@ -736,6 +748,13 @@ fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
         i = i + 1;
     }
     var out = alloc(cap * 8);
+    # Zeroed, one slot per possible output token — see `_kriya_expanded_val`.
+    _kriya_expanded_val = alloc(cap * 8);
+    var zi: i64 = 0;
+    while (zi < cap) {
+        store64(_kriya_expanded_val + zi * 8, 0);
+        zi = zi + 1;
+    }
     var m = kriya_expand_shorts(spec, slice_argc, slice_argv, out, obs_num);
     _kriya_expanded   = out;
     _kriya_expanded_n = m;
@@ -786,6 +805,15 @@ fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
 # not one option's position.
 fn kriya_expanded_argv(): i64 { return _kriya_expanded; }
 fn kriya_expanded_argc(): i64 { return _kriya_expanded_n; }
+
+# The `=VALUE` an opted-in bool long carried at expanded index `i`, or 0 when it
+# was given bare (or `i` is anything else). See `_kriya_expanded_val`.
+fn kriya_expanded_optval(i): i64 {
+    if (_kriya_expanded_val == 0) { return 0; }
+    if (i < 0) { return 0; }
+    if (i >= _kriya_expanded_n) { return 0; }
+    return load64(_kriya_expanded_val + i * 8);
+}
 
 # Where did the option spelled `-short_ch` / `--long_name` LAST appear on the
 # command line? Returns a positive index into the expanded argv, or 0 if it

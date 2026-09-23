@@ -1081,6 +1081,18 @@ fn main() {
     assert_eq(fs_dev_major(0x000120006783459A), 0x12345, "a 20-bit major");
     assert_eq(fs_dev_minor(0x000120006783459A), 0x6789A, "...and a 20-bit minor, untouched by it");
 
+    test_group("fs_proc_fd_path — the path that names an open descriptor");
+    # ⚠ The route to an O_PATH descriptor for the calls that have no
+    # AT_EMPTY_PATH form (1.6.13); a wrong digit here chmods a different file.
+    var pfd[32];
+    assert_eq(fs_proc_fd_path(0, &pfd), 15, "fd 0 is fifteen bytes");
+    assert_eq(streq(&pfd, "/proc/self/fd/0"), 1, "...spelled /proc/self/fd/0");
+    fs_proc_fd_path(7, &pfd);
+    assert_eq(streq(&pfd, "/proc/self/fd/7"), 1, "a single digit");
+    fs_proc_fd_path(1030, &pfd);
+    assert_eq(streq(&pfd, "/proc/self/fd/1030"), 1, "digits in order, with a zero inside");
+    assert_eq(fs_proc_fd_path(65535, &pfd), 19, "and the length is returned");
+
     test_group("fs_is_dev — character and block, nothing else");
     var dsb[144];
     store64(&dsb + 24, 8192 + 438);

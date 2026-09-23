@@ -6,6 +6,160 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.13] - 2026-09-22 — `cp` completeness: unreadable destinations, `-f`, `-a`, and the order options arrive in
+
+The 1.6.13 roadmap slot: three `cp` gaps, each measured against GNU first. Measuring them turned up
+five more: a dereference "precedence" that GNU does not have, `-P` ignored without `-R`, GNU's
+`--no-dereference` rejected by name, restore failures `cp -p` never reported, and a shared-parser
+defect that hid `--preserve=LIST` from any order-aware reader.
+
+### Fixed — ⛔ `cp -R` into a destination it can write but not read
+
+A directory at 0300 — write and search, no read — is one its owner can fill and not list. GNU
+merges into it: exit 0, every file copied. kriya opened every destination directory
+`O_RDONLY | O_DIRECTORY`, got EACCES, and copied **nothing**, exit 1. Also 0311 and 0333. 0100 (search
+only) and 0500 (no write) still fail, as GNU's do, now on the file inside.
+
+`fs_opendir_dest` (`src/lib/fs.cyr`) makes the same `O_RDONLY` open first — the common path pays
+nothing — and falls back to `O_PATH | O_DIRECTORY | O_NOFOLLOW` on EACCES alone. That descriptor
+creates entries like any other, and on a symlink it is ENOTDIR (measured), so ADR 0003 holds.
+
+⛔ **With `-p`, GNU also applies the source's mode and times to that unreadable directory**, and an
+`O_PATH` descriptor refuses `fchmod`, `fchown`, `futimens` and `fsetxattr` (EBADF). The new `fs_fd_*`
+helpers try the plain call and, on EBADF, forms that take an `O_PATH` descriptor. Measured on Linux
+7.2: `fchmodat2`, `fchownat` and `utimensat`, all with AT_EMPTY_PATH, plus `/proc/self/fd/N` for
+xattrs and for kernels before 6.6. Every route still names the open file rather than a path that
+could be re-resolved (M8 audit row 35354).
+
+⭐ **The same fallback closes a second case**: a directory cp *made*, under a umask that strips owner
+read. `umask 0477` makes every new directory 0300. GNU copies the whole tree through them, ending at
+300/300/300/200, while kriya stopped at the first. `cp -R` over 20,200 entries takes 247–255 ms on
+1.6.12 and 252–258 ms here (GNU 259–262): no measurable cost.
+
+### Changed — ⛔ `cp -f` replaces a destination it cannot open ([ADR 0021](docs/adr/0021-cp-force-replaces-a-destination-it-cannot-open.md))
+
+This is GNU's `--force`. An existing destination that cannot be opened for writing is unlinked and
+re-created with `O_CREAT | O_EXCL` (plus `O_NOFOLLOW` in `-R`). Before 1.6.13 kriya exited 1 in every
+one of these cases:
+
+| destination | GNU and now kriya |
+|---|---|
+| a 0400 file | exit 0, replaced |
+| a running executable (ETXTBSY) | exit 0, replaced |
+| a symlink to a 0400 file | exit 0, the link replaced by a regular file |
+| a 0400 file inside a `-R` copy | exit 0, replaced |
+| a 0400 file in a directory cp cannot write | `cannot remove 'dst'`, exit 1, untouched |
+
+Never for ENOENT, and never for a directory. `-v` adds GNU's `removed 'dst'` *after* the
+`'src' -> 'dst'` line, GNU's order. ⚠ **A new inode**: another name hard-linked to the old destination
+keeps the old bytes, as under GNU. ⭐ **`mv` across filesystems onto a read-only destination now
+moves**: it runs this copy, and it exited 1 with the source left in place.
+
+### Added — `-a` / `--archive`, `-d`, `--preserve=all`, `--no-preserve=LIST`
+
+- **`-a`** is `-dR --preserve=all`. **`-d`** is `--no-dereference --preserve=links`.
+- **`--preserve=all`** is mode, ownership, timestamps, links and xattr. ⛔ It was refused because
+  "`all` implies SELinux `context`". Measured, GNU includes context **only where SELinux is
+  enabled**; without it, `all` is exactly those five. So kriya accepts it where GNU would carry no
+  label, and **refuses `-a` / `--preserve=all` where SELinux is on**, rather than silently dropping one.
+  `--no-preserve=context` is the explicit way through. An explicit `--preserve=context` is still
+  refused; GNU refuses it too without SELinux.
+- **`--no-preserve=LIST`** turns attributes back off. ⛔ **`--no-preserve=mode` is not merely "don't copy
+  the mode"**: GNU creates a new file at 0666 and a new directory at 0777 under the umask, not at the
+  source's bits, even without `-p`. A 0741 file comes out 0644.
+- ⚠ **Three xattr reporting modes, as GNU has them**, measured against a 64 KiB attribute that ext4
+  refuses:
+  - `-a` says nothing and exits 0 (GNU's "reduced failure diagnostics");
+  - `--preserve=all` reports and exits 0;
+  - `--preserve=xattr`, alone or after `-a`, reports and exits 1.
+
+### Fixed — ⛔ the options apply in command-line order, and `-P` / `-H` / `-L` were a precedence
+
+GNU applies `-p`, `--preserve[=LIST]`, `--no-preserve=LIST`, `-a`, `-d` and the dereference group in
+argv order, last one winning. Measured:
+- `-R -p --no-preserve=mode` gives 0644 and `-R --no-preserve=mode -p` gives 0741;
+- `-aL` dereferences and `-La` does not.
+
+⛔ **kriya resolved `-P`/`-H`/`-L` as "L > H > P", under a comment that said "matches GNU cp"**, so
+`cp -R -L -P` and `cp -R -L -H` dereferenced where GNU keeps the symlinks. One walk over the expanded
+argv (`_cp_scan_order`) now decides all of it, the shape `ls`'s format group uses.
+
+### Fixed — `-P` without `-R` copies a symlink operand as a symlink
+
+GNU's `cp -P link out` makes `out -> target`; kriya followed the link, because only the `-R` walk read
+the policy. `-P`, `--no-dereference`, `-d` and `-a` do so now. A plain `cp link out` still follows,
+POSIX's non-`-R` rule, and so do `-H` and `-L`.
+
+### Fixed — `--no-dereference` is GNU's spelling
+
+kriya registered `-P`'s long form as `--no-deref`. GNU accepts that only as an abbreviation, which
+ADR 0002 does not take, so GNU's own spelling was a usage error here. **Migration:** `--no-deref` is
+gone; use `-P` or `--no-dereference`.
+
+### Fixed — a mode or timestamp that did not stick is reported
+
+`_cp_restore_fd` never read the results of its `fchmod` and `utimensat`, so a filesystem refusing
+either left the copy wrong and `cp -p` silent. GNU says `preserving permissions for 'dst'` or
+`preserving times for 'dst'`, and fails the copy when the attribute was asked for (`--preserve=LIST`,
+`-a`). kriya does both now.
+
+### Changed — `src/lib/args.cyr` keeps each stripped `=VALUE` in the expanded argv
+
+For a bool long that opted into a value, the shared expander rewrote `--preserve=links` to a bare
+`--preserve` so `flags_parse` accepts it, and its registry kept only the LAST value. ⛔ So an
+order-aware reader saw a bare flag where a list stood: the first version of `_cp_scan_order` read
+`--preserve=ownership` as `-p` and preserved the mode too. `kriya_expanded_optval(i)` returns the value
+stripped at expanded index `i`, so there is still one notion of the option window, not a second walk
+over the raw argv.
+
+### Deliberate divergences
+
+- **`-a` and `--preserve=all` are refused where SELinux is enabled**, where GNU would carry the context.
+- **A bad attribute name is exit 2** ([ADR 0008](docs/adr/0008-posix-exit-code-policy.md)); GNU's
+  argmatch exits 1. `--no-preserve` with no list is exit 2 as well.
+- **`cp` without `-f` still refuses an existing destination**, kriya's own rule. GNU fails on a
+  read-only one's open instead. Same exit status, same untouched file.
+
+### Documentation
+
+- **[ADR 0021](docs/adr/0021-cp-force-replaces-a-destination-it-cannot-open.md)**: `cp -f` replaces a
+  destination it cannot open.
+- **Roadmap**: 1.6.13 retired, next up 1.6.14. ⛔ **Utility split-outs are deferred until AGNOS runs
+  fully, and then only as time permits** — recorded in § Splitting policy, so a release does not
+  propose one. 1.6.16 gains two measured items: `mv`'s cross-filesystem diagnostics say `kriya cp:`,
+  and `cp -fi` never prompts where GNU's does.
+
+### Tests
+
+- `smoke-cp.sh` **118 → 140**: `-f` case by case against GNU, including the running executable (probed:
+  it needs a `$WORK` that can execute), a hard-linked destination and the unwritable directory, plus
+  `-P`/`-d`/`--no-dereference` without `-R`.
+- `smoke-cp-recursive.sh` **110 → 148**:
+  - merges into 0300/0311/0333/0100 against GNU, and `-p`, `--preserve=mode|timestamps|ownership`
+    into a 0300 destination;
+  - umasks 477/377/277;
+  - a 17-case `-a` / `--preserve=all` / `--no-preserve` matrix, skipped where SELinux is on;
+  - ten dereference orderings.
+- `smoke-ownership-xattr.sh` **109 → 113** (the three xattr reporting modes), `smoke-mv.sh`
+  **66 → 69** (the cross-filesystem read-only destination), `smoke-option-forms.sh` **55 → 56**.
+- ⚠ **Four assertions pinned the old refusal of `--preserve=all`**, in `smoke-hardlinks.sh` and
+  `smoke-option-forms.sh`, and were rewritten: `all` is expected accepted, or refused where SELinux is
+  on, and `context` carries the "a refused attribute copies nothing" check.
+- ⭐ **Run against the 1.6.12 binary, the new assertions fail 47 times** across the four suites, so
+  they cannot pass by accident.
+- `kriya.tcyr` 512 → 517 (`fs_proc_fd_path`).
+
+### Release totals
+
+**6,042 smoke cases across 41 scripts** (from 5,963; `smoke-help-json.sh` 1,816 → 1,827 with the four
+new options), **517 unit**, 18 POSIX; fuzz green under poison (1,127 / 201 / 201); `cyrius lint`,
+`lint-deferrals.sh`, `lint-help-schema.sh` and `check-oracles.sh` clean; `watchlist-scan.py` clean
+(189 declarations; M15a 0, M15c the 3 known, M15d 0, M15i 0); `vet` 56 deps; both targets build
+warning-free. ⭐ Verified in the `ubuntu:24.04` container (coreutils **9.4**) as a non-root user — 39
+of 41 scripts green, **3,555** cases; the two exceptions need `python3`, which the image lacks.
+
+Binary 1,182,232 → **1,191,096** bytes on host (+8,864), 1,177,944 → **1,186,816** on agnos (+8,872).
+
 ## [1.6.12] - 2026-09-22 — `ls` and `stat` print what GNU prints
 
 The 1.6.12 roadmap slot — every open `ls` / `stat` output gap — closed in one release and then

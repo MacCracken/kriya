@@ -177,12 +177,15 @@ expect_exit "cp --preserve=timestamps"      0 "$BIN" cp --preserve=timestamps pv
 expect_exit "cp --preserve=mode,timestamps" 0 "$BIN" cp --preserve=mode,timestamps pv.txt pv3
 # ⛔ `links` FLIPPED FROM REFUSED TO IMPLEMENTED AT v1.6.0. It was exit 2 for
 # five releases because refusing by name beats accepting and quietly making
-# independent copies; now it does the thing. ⚠ `all` IS STILL A REFUSAL, and the
-# reason moved: it was ownership and xattrs until 1.6.1 implemented both, and it
-# is `context` (SELinux) now — the one attribute in GNU's `all` that kriya does
-# not carry. The "refused preserve copied nothing" check rides on it.
+# independent copies; now it does the thing. ⛔ `all` FLIPPED AT 1.6.13: GNU's
+# `all` includes SELinux `context` only where SELinux is on, so off it `all` is
+# exactly what kriya carries — and kriya refuses it where SELinux is on.
+# `context` is the refusal now, and "refused preserve copied nothing" rides on it.
 expect_exit "cp --preserve=links accepted"  0 "$BIN" cp --preserve=links pv.txt pv4
-expect_exit "cp --preserve=all refused"     2 "$BIN" cp --preserve=all pv.txt pv5
+if [ -e /sys/fs/selinux/enforce ]; then _all_rc=2; else _all_rc=0; fi
+expect_exit "cp --preserve=all: accepted, unless SELinux is on" "$_all_rc" \
+            "$BIN" cp --preserve=all pv.txt pv7
+expect_exit "cp --preserve=context refused" 2 "$BIN" cp --preserve=context pv.txt pv5
 expect_exit "cp --preserve bare"            0 "$BIN" cp --preserve pv.txt pv6
 expect_eq   "refused preserve copied nothing" "no" "$([ -e pv5 ] && echo yes || echo no)"
 

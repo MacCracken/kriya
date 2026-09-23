@@ -219,16 +219,20 @@ expect_eq "order-independent: time"     "$CUM_T" "$(stat -c %Y c6b/f)"
 
 # --- attributes kriya does not preserve are still refused BY NAME ----
 # ⛔ `ownership` and `xattr` FLIPPED FROM REFUSED TO IMPLEMENTED AT v1.6.1 —
-# their own coverage lives in scripts/smoke-ownership-xattr.sh. `all` and
-# `context` stay refusals: `all` implies the SELinux `context`, and a
-# `--preserve=all` that quietly skipped the security label would be the same lie
-# in a more dangerous place.
+# their own coverage lives in scripts/smoke-ownership-xattr.sh. ⛔ `all` FLIPPED
+# AT 1.6.13: GNU's `all` includes SELinux `context` only where SELinux is on
+# (measured: without it, `all` is exactly the five kriya carries), so kriya
+# accepts it there and REFUSES it where SELinux is on — the lie this block used
+# to guard against. `context` itself stays a refusal, as it is under GNU on a
+# kernel without SELinux.
 expect_exit "--preserve=ownership accepted" 0 "$BIN" cp --preserve=ownership attr/src attr/own
 expect_exit "--preserve=xattr accepted"     0 "$BIN" cp --preserve=xattr attr/src attr/xa
-expect_exit "--preserve=all refused"        2 "$BIN" cp --preserve=all attr/src attr/all
+if [ -e /sys/fs/selinux/enforce ]; then _all_rc=2; else _all_rc=0; fi
+expect_exit "--preserve=all: accepted, unless SELinux is on" "$_all_rc" \
+            "$BIN" cp --preserve=all attr/src attr/all
 expect_exit "--preserve=context refused"    2 "$BIN" cp --preserve=context attr/src attr/ctx
 expect_eq "a refused attribute copies nothing" "no" \
-          "$([ -e attr/all ] && echo yes || echo no)"
+          "$([ -e attr/ctx ] && echo yes || echo no)"
 
 # --- symlinks: hard links TO a symlink, and -L folding two symlinks ---
 rm -rf sl; mkdir sl
@@ -547,7 +551,7 @@ expect_eq "-l is advertised in --help" "1" \
 expect_eq "-l is advertised in --help=json" "1" \
           "$("$BIN" du --help=json 2>&1 | grep -c '"count-links"')"
 expect_eq "cp --help names the extra attributes" "1" \
-          "$("$BIN" cp --help=json 2>&1 | grep -c -- '=links, =xattr for more')"
+          "$("$BIN" cp --help=json 2>&1 | grep -c -- '=LIST: mode,ownership,timestamps,links,xattr,all')"
 
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$((PASS + FAIL))"
 [ "$FAIL" -eq 0 ]

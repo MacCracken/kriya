@@ -299,6 +299,9 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   in eight words, both were read as documentation of correct behaviour for releases, and in both
   the ranking is what ran. ⚠ **When a comment names two rules, the code implements at most one of
   them** — and the tests get written to agree with whichever half the author had in mind.
+  ⛔ **Third instance, 1.6.13**: `cp`'s "last-one-wins by precedence L > H > P (matches GNU cp)".
+  `cp -R -L -P` dereferenced where GNU keeps the symlinks. Found only because `-a` had to join the
+  group and its ORDER against `-L` was measured first. **Grep for "precedence" beside "wins".**
 
 - ⭐ *Twenty-four byte-identical copies of one function is a defect with twenty-four homes.* The
   error line could not change shape without 24 edits, so it never did — and the quoting bug lived
@@ -306,6 +309,18 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   ⚠ **Duplication is not just a tidiness problem; it is why the bug was unfixable.**
 
 ### Shape of the code, shape of the bug
+
+- ⛔ *The expanded argv is the one option window, but it had a hole.* A bool long that opts into a
+  value (`cp --preserve=LIST`) reached it as a bare `--preserve`: the expander strips the value so
+  `flags_parse` accepts the token, and keeps only the LAST value per name. The first order-aware
+  reader (`cp`'s option walk) therefore treated `--preserve=ownership` as a bare `-p` and preserved
+  the mode as well. `kriya_expanded_optval(i)` now carries the value beside its token. ⚠ **Whatever
+  the expander rewrites, an order-aware reader has to be able to read back.**
+- ⚠ *An `O_PATH` descriptor is a dirfd, not a file descriptor.* It creates entries like any other
+  (`openat`, `mkdirat`, `symlinkat`, `unlinkat` all work), and it is the only descriptor a directory
+  without the read bit will give. But `fchmod`, `fchown`, `futimens` and `fsetxattr` refuse it with
+  EBADF. The route in is AT_EMPTY_PATH (`fchmodat2` from Linux 6.6, `fchownat`, `utimensat`), else
+  `/proc/self/fd/N`, and `fs_fd_*` does it once. Measured on Linux 7.2, not read.
 
 - ⛔ *A fallback that returns the operand text changes the FRAME OF REFERENCE.* `ln -sr`'s fallback
   returned what the user typed, which resolves against the CWD — but a symlink's stored text

@@ -158,6 +158,17 @@ if [ -d /dev/shm ] && [ "$TMP_DEV" != "$SHM_DEV" ]; then
     echo "cross-fs-content" > "$XFS_SRC"
     XFS_INODE_SRC=$(stat -c %i "$XFS_SRC")
     expect_exit "cross-FS regular file" 0 "$BIN" mv "$XFS_SRC" "$XFS_DST"
+    # ⛔ ONTO A READ-ONLY DESTINATION (1.6.13). A cross-filesystem move is a
+    # copy, and the copy could not open a 0400 destination: kriya exited 1 and
+    # left the source, where GNU replaces the destination and exits 0. `-f`'s
+    # remove-and-recreate (ADR 0021) is what `mv`'s copy runs under.
+    XFS_RO=$(mktemp -p /dev/shm kriya-mv-ro.XXXXXX)
+    echo "ro-new" > "$XFS_RO"
+    echo "ro-old" > ro_dst; chmod 0400 ro_dst
+    expect_exit "cross-FS onto a 0400 destination" 0 "$BIN" mv "$XFS_RO" ro_dst
+    expect_eq "...replaces it"                     "ro-new" "$(cat ro_dst 2>/dev/null)"
+    expect_eq "...and moves, not copies"           "gone" "$([ -e "$XFS_RO" ] && echo LEFT || echo gone)"
+    rm -f "$XFS_RO" ro_dst
     expect_absent "src gone after xfs"  "$XFS_SRC"
     expect_present "dst arrived"        "$XFS_DST"
     content=$(cat "$XFS_DST")

@@ -7,19 +7,29 @@
 #   cp -R [opts] SRC... DIRECTORY    — recursive multi-source-into-dir
 #
 # Flags:
-#   -f / --force        overwrite existing destination without prompt.
+#   -f / --force        overwrite an existing destination without prompt —
+#                       and, as GNU's `--force`, remove one that cannot be
+#                       opened for writing and create it afresh (ADR 0021).
 #   -i / --interactive  prompt before overwrite. Per ADR 0002, on
 #                       non-tty stdin this is a usage error (exit 2),
 #                       not a hang.
-#   -p / --preserve     preserve mode + atime/mtime (POSIX subset).
+#   -p / --preserve     mode, ownership and timestamps; --preserve=LIST
+#                       names them: mode, ownership, timestamps, links,
+#                       xattr, all. `context` is refused by name.
+#   --no-preserve=LIST  turn the listed attributes back off.
+#   -a / --archive      -dR --preserve=all.
+#   -d                  --no-dereference --preserve=links.
 #   -v / --verbose      print "'src' -> 'dst'" per file.
 #   -R / -r             recursive copy of directory contents.
-#   -P / --no-deref     preserve all symlinks (DEFAULT under -R per
+#   -P / --no-dereference  never follow symlinks (DEFAULT under -R per
 #                       ADR 0003 — kriya choice closing the POSIX
-#                       implementation-defined gap in the safer direction).
+#                       implementation-defined gap in the safer direction);
+#                       without -R, copy a symlink operand as a symlink.
 #   -H                  follow only command-line symlinks during -R;
 #                       preserve those discovered by the walk.
 #   -L / --dereference  follow all symlinks during -R.
+#   The preserve options, and -P/-H/-L/-a/-d, apply in command-line order,
+#   last one winning (`_cp_scan_order`).
 #
 # Symlink policy (ADR 0003):
 #   - Non-R single source: follow (POSIX). `cp link file` copies the
@@ -70,6 +80,9 @@ var _cp_r_idx = 0;
 var _cp_BIG_P_idx = 0;
 var _cp_BIG_H_idx = 0;
 var _cp_BIG_L_idx = 0;
+var _cp_a_idx  = 0;
+var _cp_d_idx  = 0;
+var _cp_np_idx = 0;
 
 # ⛔ A DECLINED `-i` PROMPT IS EXIT 1, NOT 0. GNU returns 1 when you answer `n`
 # — verified across three pty runs — and a script testing `cp -i ... && next`
@@ -110,8 +123,22 @@ enum CpPreserve {
     # returned before the unlink, and left the file in BOTH places — a move that
     # did not move. Measured against a ramfs destination.
     CP_PRES_XREQ  = 32;
+    # ⚠ `-a` REPORTS NOTHING ABOUT XATTRS (1.6.13) — GNU's "reduced failure
+    # diagnostics" — unless `--preserve=xattr` names them, which XREQ says.
+    CP_PRES_QUIET = 64;
+    # "Preservation was ASKED FOR" — `--preserve=LIST` or `-a`, not bare `-p`.
+    # GNU's `require_preserve`: a mode or timestamp that cannot be carried is
+    # reported either way and FAILS the copy only under this bit.
+    CP_PRES_REQ   = 128;
+    # ⛔ `--no-preserve=mode` IS NOT JUST "DON'T COPY THE MODE". Measured: a
+    # 0741 file comes out 0644 and a 0750 directory 0755 — GNU creates them at
+    # 0666 / 0777 under the umask instead of at the SOURCE's bits, which is what
+    # a plain `cp` does. Only a NEW destination; an overwritten file keeps its own.
+    CP_PRES_NOMODE = 256;
     CP_PRES_P     = 11;     # `-p` = mode | timestamps | OWNERSHIP
     CP_PRES_MV    = 27;     # cross-filesystem `mv`: all four, xattrs best-effort
+    # `-a` and `--preserve=all`: mode, timestamps, links, ownership, xattr.
+    CP_PRES_ALL   = 31;
 }
 
 # (st_dev, st_ino) -> the first destination path written for that inode.
@@ -186,13 +213,20 @@ fn _cp_init_spec(): i64 {
     _cp_f_idx     = flags_add_bool(s, 102, "force",       0, "overwrite existing destination");
     _cp_i_idx     = flags_add_bool(s, 105, "interactive", 0, "prompt before overwrite");
     _cp_p_idx     = flags_add_bool(s, 112, "preserve",    0,
-      "preserve mode, ownership and timestamps (=links, =xattr for more)");
+      "preserve mode, ownership, timestamps; =LIST: mode,ownership,timestamps,links,xattr,all");
     _cp_v_idx     = flags_add_bool(s, 118, "verbose",     0, "print each copy");
     _cp_R_idx     = flags_add_bool(s, 82,  "recursive",   0, "copy directories recursively");
     _cp_r_idx     = flags_add_bool(s, 114, "",            0, "alias for -R");
-    _cp_BIG_P_idx = flags_add_bool(s, 80,  "no-deref",    0, "preserve all symlinks (-R default)");
+    # ⛔ `--no-dereference`, GNU's name. kriya registered `--no-deref`, which GNU
+    # accepts only as an ABBREVIATION — and ADR 0002 takes none — so the real
+    # spelling was a usage error here until 1.6.13.
+    _cp_BIG_P_idx = flags_add_bool(s, 80,  "no-dereference", 0, "never follow symlinks (the -R default)");
     _cp_BIG_H_idx = flags_add_bool(s, 72,  "",            0, "follow command-line symlinks only (-R)");
     _cp_BIG_L_idx = flags_add_bool(s, 76,  "dereference", 0, "follow all symlinks (-R)");
+    _cp_a_idx     = flags_add_bool(s, 97,  "archive",     0, "same as -dR --preserve=all");
+    _cp_d_idx     = flags_add_bool(s, 100, "",            0, "same as --no-dereference --preserve=links");
+    _cp_np_idx    = flags_add_str(s, 0, "no-preserve", 0,
+      "don't preserve the listed attributes (mode,ownership,timestamps,links,xattr,context,all)");
     # ⭐ THE BACKUP TRIO, shared with the other two utilities via
     # `src/lib/backup.cyr`. ⛔ `-b` IS SHORT-ONLY AND `--backup` REQUIRES ITS
     # VALUE, because GNU's `--backup[=CONTROL]` is an optional-value flag and
@@ -289,6 +323,45 @@ fn _cp_verbose(src_display, dst_display): i64 {
     k_write( 1, dst_display, strlen(dst_display));
     k_write( 1, "'\n", 2);
     return 0;
+}
+
+# `-v`'s note that `-f` removed a destination before re-creating it. ⚠ GNU prints
+# it AFTER the `'src' -> 'dst'` line, measured, so every caller does too.
+fn _cp_verbose_removed(dst_display): i64 {
+    k_write( 1, "removed '", 9);
+    k_write( 1, dst_display, strlen(dst_display));
+    k_write( 1, "'\n", 2);
+    return 0;
+}
+
+# GNU's wording for a destination `-f` could not remove — the directory's
+# permissions, not the file's, decide that.
+fn _cp_report_cannot_remove(dst_display, errno): i64 {
+    k_write( 2, "kriya cp: cannot remove '", 25);
+    k_write( 2, dst_display, strlen(dst_display));
+    k_write( 2, "': ", 3);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        k_write( 2, m, strlen(m));
+    } else {
+        _cp_write_errno(errno);
+    }
+    k_write( 2, "\n", 1);
+    return 0;
+}
+
+# ⛔ `-f` REMOVES A DESTINATION IT CANNOT OPEN, AND CREATES IT AFRESH (1.6.13,
+# ADR 0021) — GNU's `--force`. A read-only file in a writable directory, or a
+# running executable (ETXTBSY), cannot be opened for writing but can be
+# unlinked, and GNU replaces it and exits 0 where kriya exited 1. 1 when the
+# open failure `errno` qualifies: never ENOENT (nothing to remove) and never
+# EISDIR (a directory is not replaced by a file, `-f` or not).
+fn _cp_force_retries(force, dst_existed, errno): i64 {
+    if (force == 0) { return 0; }
+    if (dst_existed == 0) { return 0; }
+    if (errno == 2) { return 0; }
+    if (errno == 21) { return 0; }
+    return 1;
 }
 
 # Should this entry's inode take part in link preservation?
@@ -437,8 +510,29 @@ fn _cp_copy_loop(src_fd, dst_fd, src_display, dst_display): i64 {
 # behaviour rather than laziness: measured, `cp --preserve=ownership
 # /etc/hostname out` as a normal user exits 0 with no diagnostic. GNU only
 # complains when it had the privilege to succeed and still failed.
+# `kriya cp: preserving WHAT for 'DST': REASON` — GNU's wording for a mode or a
+# timestamp it could not carry across.
+fn _cp_report_preserving(what, dst_display, errno): i64 {
+    k_write( 2, "kriya cp: preserving ", 21);
+    k_write( 2, what, strlen(what));
+    k_write( 2, " for '", 6);
+    k_write( 2, dst_display, strlen(dst_display));
+    k_write( 2, "': ", 3);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        k_write( 2, m, strlen(m));
+    } else {
+        _cp_write_errno(errno);
+    }
+    k_write( 2, "\n", 1);
+    return 0;
+}
+
 fn _cp_restore_fd(dst_fd, src_fd, src_st, preserve, dst_display, src_display): i64 {
     var failed: i64 = 0;
+    # ⚠ `dst_fd` may be an O_PATH descriptor (a destination directory cp could
+    # write into but not read — see `fs_opendir_dest`), so every call below goes
+    # through an `fs_fd_*` helper that takes either kind.
 
     # ⛔ OWNERSHIP FIRST, AND NOT ONLY BECAUSE OF THE MODE. A chown sets
     # ATTR_KILL_PRIV on every non-directory, so the kernel strips
@@ -466,7 +560,7 @@ fn _cp_restore_fd(dst_fd, src_fd, src_st, preserve, dst_display, src_display): i
             if (same == 1) {
                 owner_kept = 1;
             } else {
-                var cr = k_fchown(dst_fd, uid, gid);
+                var cr = fs_fd_chown(dst_fd, uid, gid);
                 if (cr == 0) {
                     owner_kept = 1;
                 } else {
@@ -477,7 +571,7 @@ fn _cp_restore_fd(dst_fd, src_fd, src_st, preserve, dst_display, src_display): i
                     # confirmed by a syscall trace rather than by a fixture of our own:
                     # constructing the case needs a file owned by someone else whose
                     # group the tester is in, which needs root to create.
-                    k_fchown(dst_fd, 0 - 1, gid);
+                    fs_fd_chown(dst_fd, 0 - 1, gid);
                     # ⛔ REPORTED ONLY WHEN WE HAD THE PRIVILEGE TO SUCCEED. GNU
                     # draws the line at `geteuid() == 0`, not at whether the call
                     # could have worked: an unprivileged `cp -p` of a root-owned
@@ -525,6 +619,10 @@ fn _cp_restore_fd(dst_fd, src_fd, src_st, preserve, dst_display, src_display): i
                 var xreport: i64 = xreq;
                 if (xreport == 0) {
                     if (load64(&xr + FS_XR_ERRNO) != FS_XR_ENOTSUP) { xreport = 1; }
+                    # ⚠ ...and under `-a`, nothing at all: GNU's `-a` is "with
+                    # reduced failure diagnostics" and names xattrs only when
+                    # `--preserve=xattr` does, which is XREQ above.
+                    if ((preserve & CP_PRES_QUIET) != 0) { xreport = 0; }
                 }
                 if (xreport == 1) {
                     # ⚠ Printed HERE, before anything else can touch the shared
@@ -571,7 +669,15 @@ fn _cp_restore_fd(dst_fd, src_fd, src_st, preserve, dst_display, src_display): i
         # dropped at all. The fixture has to be foreign-owned for this line to
         # mean anything.
         if (owner_kept == 0) { mode = mode & 511; }
-        k_fchmod(dst_fd, mode);
+        # ⛔ A MODE THAT DID NOT STICK IS REPORTED (1.6.13). The result was never
+        # read, so a filesystem refusing the chmod left the destination at its
+        # creation mode and `cp -p` said nothing. GNU reports it, and fails the
+        # copy when the attribute was named (`--preserve=mode`, `-a`).
+        var mr = fs_fd_chmod(dst_fd, mode);
+        if (mr != 0) {
+            _cp_report_preserving("permissions", dst_display, 0 - mr);
+            if ((preserve & CP_PRES_REQ) != 0) { failed = 1; }
+        }
     }
 
     if ((preserve & CP_PRES_TIMES) != 0) {
@@ -583,7 +689,12 @@ fn _cp_restore_fd(dst_fd, src_fd, src_st, preserve, dst_display, src_display): i
             store64(&ts + 24, load64(src_st + 96));
             # ⚠ utimensat(fd, NULL, ...) IS futimens — the fd form, verified
             # against the kernel, so this restore never re-resolves the path.
-            k_utimensat(dst_fd, 0, &ts, 0);
+            # ⚠ Reported like the mode above, and for the same reason.
+            var tr = fs_fd_utimens(dst_fd, &ts);
+            if (tr != 0) {
+                _cp_report_preserving("times", dst_display, 0 - tr);
+                if ((preserve & CP_PRES_REQ) != 0) { failed = 1; }
+            }
         }
     }
 
@@ -626,6 +737,8 @@ fn _cp_create_mode(src_st, preserve): i64 {
     # this function are no longer asymmetric: files start narrower and are
     # restored by `_cp_restore_fd`, directories start narrower and are restored
     # at the end of the descend.
+    # `--no-preserve=mode`: GNU's default for a new file, 0666 under the umask.
+    if ((preserve & CP_PRES_NOMODE) != 0) { return 438; }
     return fs_perms(src_st) & 511;
 }
 
@@ -780,9 +893,27 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
 
     var perms = _cp_create_mode(&src_stat, preserve);
     var dst_fd = k_open(dst, 577, perms);
+    # ⚠ The retry is `O_CREAT | O_EXCL`: whatever reappears at the name between
+    # the unlink and the create is refused, never written through.
+    var removed: i64 = 0;
+    if (dst_fd < 0) {
+        if (_cp_force_retries(force, dst_existed, 0 - dst_fd) == 1) {
+            var ur = k_unlink(dst);
+            if (ur == 0) { removed = 1; }
+            if (ur != 0) {
+                if ((0 - ur) != 2) {
+                    k_close( src_fd);
+                    _cp_report_cannot_remove(dst, 0 - ur);
+                    return ur;
+                }
+            }
+            dst_fd = k_open(dst, 193, perms);                  # O_WRONLY | O_CREAT | O_EXCL
+        }
+    }
     if (dst_fd < 0) {
         k_close( src_fd);
         _cp_report(dst, 0 - dst_fd);
+        if (removed == 1) { if (verbose == 1) { _cp_verbose_removed(dst); } }
         return dst_fd;
     }
 
@@ -826,6 +957,7 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
 
     if (r != 0) {
         k_unlink(dst);
+        if (removed == 1) { if (verbose == 1) { _cp_verbose_removed(dst); } }
         return r;
     }
 
@@ -843,7 +975,10 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
     var made_stat[144];
     if (k_stat(dst, &made_stat) == 0) { _cp_created_record(&made_stat); }
 
-    if (verbose == 1) { _cp_verbose(src, dst); }
+    if (verbose == 1) {
+        _cp_verbose(src, dst);
+        if (removed == 1) { _cp_verbose_removed(dst); }
+    }
     # ⚠ The bytes are on disk and the destination is correct; only an ATTRIBUTE
     # could not be carried across. GNU reports and exits 1 without unwinding the
     # copy, and so does this.
@@ -1045,31 +1180,32 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
     # O_WRONLY=1, O_CREAT=64, O_TRUNC=512, O_NOFOLLOW=131072 → 131649.
     var dst_flags = 131649;
     var dst_fd = fs_openat(dst_dirfd, dst_name, dst_flags, perms);
+    # ⭐ ONE RULE FOR EVERY FAILED OPEN UNDER `-f` (1.6.13). This arm used to
+    # retry ELOOP alone — the destination was a symlink O_NOFOLLOW refused — and
+    # that case is still here, now beside the read-only file and the busy binary
+    # GNU's `--force` also replaces (`_cp_force_retries`, ADR 0021). ⚠ The retry
+    # is `O_CREAT | O_EXCL | O_NOFOLLOW`: the old one re-used O_TRUNC, so a name
+    # that reappeared between the unlink and the open was opened, not refused.
+    var removed: i64 = 0;
     if (dst_fd < 0) {
         var derrno = 0 - dst_fd;
-        # ELOOP (40) means dst was a symlink (O_NOFOLLOW refused). Under
-        # -f, replace it. Under EEXIST somehow (O_CREAT|O_TRUNC shouldn't
-        # but defensive), same path.
-        var recovered: i64 = 0;
-        if (force == 1) {
-            if (derrno == 40) {
-                fs_unlinkat(dst_dirfd, dst_name, 0);
-                dst_fd = fs_openat(dst_dirfd, dst_name, dst_flags, perms);
-                if (dst_fd >= 0) { recovered = 1; }
+        if (_cp_force_retries(force, dst_existed, derrno) == 1) {
+            var ur = fs_unlinkat(dst_dirfd, dst_name, 0);
+            if (ur == 0) { removed = 1; }
+            if (ur != 0) {
+                if ((0 - ur) != 2) {
+                    fs_close(src_fd);
+                    _cp_report_cannot_remove(dst_display, 0 - ur);
+                    return ur;
+                }
             }
-        } else {
-            if (derrno == 17) {
-                _cp_report(dst_display, 17);
-                fs_close(src_fd);
-                return dst_fd;
-            }
+            dst_fd = fs_openat(dst_dirfd, dst_name, 131265, perms);   # O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW
         }
-        if (recovered == 0) {
-            if (dst_fd < 0) {
-                fs_close(src_fd);
-                _cp_report(dst_display, 0 - dst_fd);
-                return dst_fd;
-            }
+        if (dst_fd < 0) {
+            fs_close(src_fd);
+            _cp_report(dst_display, 0 - dst_fd);
+            if (removed == 1) { if (verbose == 1) { _cp_verbose_removed(dst_display); } }
+            return dst_fd;
         }
     }
 
@@ -1128,6 +1264,7 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
 
     if (r != 0) {
         fs_unlinkat(dst_dirfd, dst_name, 0);
+        if (removed == 1) { if (verbose == 1) { _cp_verbose_removed(dst_display); } }
         return r;
     }
 
@@ -1138,7 +1275,10 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
     var made_st[144];
     if (fs_fstatat(dst_dirfd, dst_name, &made_st, 0) == 0) { _cp_created_record(&made_st); }
 
-    if (verbose == 1) { _cp_verbose(src_display, dst_display); }
+    if (verbose == 1) {
+        _cp_verbose(src_display, dst_display);
+        if (removed == 1) { _cp_verbose_removed(dst_display); }
+    }
     if (restore_failed == 1) { return 0 - 5; }
     return 0;
 }
@@ -1167,6 +1307,8 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
     #
     # Ensure destination exists as a directory.
     var perms = fs_perms(src_st);
+    # `--no-preserve=mode`: GNU's default for a new directory, 0777 under the umask.
+    if ((preserve & CP_PRES_NOMODE) != 0) { perms = 511; }
     var mr = fs_mkdirat(dst_dirfd, dst_name, perms);
     # ⭐ 1 only when THIS call created it. A destination directory that already
     # existed is NOT ours to widen or to restore — measured, GNU leaves an
@@ -1199,7 +1341,15 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
         }
     }
 
-    var dst_fd = fs_opendir_nofollow(dst_dirfd, dst_name);
+    # ⛔ A DESTINATION DIRECTORY cp CAN WRITE INTO BUT NOT READ (1.6.13). Merging
+    # into an existing 0300, 0311 or 0333 directory is exit 0 under GNU with every
+    # file copied, and was exit 1 here with none: this was `fs_opendir_nofollow`,
+    # which is O_RDONLY and needs the read bit that creating entries does not.
+    # `fs_opendir_dest` falls back to O_PATH on EACCES alone, so the common path
+    # still makes exactly the open it always made. ⭐ The same fallback fixes a
+    # directory cp MADE under a umask that strips owner read — `umask 0477` gives
+    # 0300 — which GNU copies in full (to 300/300/200) and kriya stopped at.
+    var dst_fd = fs_opendir_dest(dst_dirfd, dst_name);
     if (dst_fd < 0) {
         _cp_report(dst_display, 0 - dst_fd);
         return dst_fd;
@@ -1250,7 +1400,7 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
             # 0o700 = 448 forced on, 0o022 = 18 withheld.
             var working = (made_mode + 0 - (made_mode & 18)) | 448;
             if (working != made_mode) {
-                if (k_fchmod(dst_fd, working) == 0) {
+                if (fs_fd_chmod(dst_fd, working) == 0) {
                     dir_widened = 1;
                     if ((preserve & CP_PRES_MODE) == 0) { dir_restore_mode = made_mode; }
                 }
@@ -1275,9 +1425,9 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
         # by hand: the recorded final mode, or the source's own under
         # `--preserve=mode`.
         if (dir_restore_mode != 0) {
-            k_fchmod(dst_fd, dir_restore_mode);
+            fs_fd_chmod(dst_fd, dir_restore_mode);
         } else {
-            if (dir_widened == 1) { k_fchmod(dst_fd, fs_perms(src_st) & 4095); }
+            if (dir_widened == 1) { fs_fd_chmod(dst_fd, fs_perms(src_st) & 4095); }
         }
         fs_close(dst_fd);
         return src_fd;
@@ -1439,7 +1589,7 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
     # word. `dir_widened` is 0 in that case, so this is unreachable there rather
     # than merely inert.
     if (dir_restore_mode != 0) {
-        if (k_fchmod(dst_fd, dir_restore_mode) != 0) {
+        if (fs_fd_chmod(dst_fd, dir_restore_mode) != 0) {
             _cp_report(dst_display, 1);                # EPERM
             dir_restore_failed = 1;
         }
@@ -1565,69 +1715,108 @@ fn _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose): i
     return 0 - 22;
 }
 
-# Parse a `--preserve=` attribute list into a `CpPreserve` bitmask, or -1
-# (after reporting) when it names an attribute kriya does not preserve.
+# One `--preserve=` / `--no-preserve=` attribute LIST.
 #
 # ⚠ Accepting an attribute kriya does not implement is the bug v1.2.1 went
 # through cp to remove: `cp --preserve=links` exited 0 while making independent
-# copies of what the user asked to stay hard-linked. Five of GNU's seven
-# attributes now DO what they say. ⛔ `context` (SELinux) and `all` are still
-# refused BY NAME rather than silently dropped — `all` because it implies
-# `context`, and a `--preserve=all` that quietly skipped the security label
-# would be the same lie in a more dangerous place. ⚠ GNU's full accepted list,
-# read off its own error message, is: mode, timestamps, ownership, links,
-# context, xattr, all.
-fn _cp_parse_preserve_list(attrs): i64 {
+# copies of what the user asked to stay hard-linked. ⭐ Every name GNU accepts is
+# accepted now except one: `context` (SELinux) is still REFUSED BY NAME under
+# `--preserve`, where GNU itself refuses it on a kernel without SELinux
+# ("cannot preserve security context without an SELinux-enabled kernel").
+# `--no-preserve=context` is accepted and turns off what `-a` and `all` imply —
+# see `cmd_cp` for why that matters. GNU's list, read off its own error message:
+# mode, timestamps, ownership, links, context, xattr, all.
+#
+# Sets `_cp_l_bits` (the CpPreserve bits named — for `--no-preserve`, the bits
+# to CLEAR), `_cp_l_mode` (the list names `mode` or `all`) and `_cp_l_ctx` (it
+# names `context` or `all`). Returns 0, or -1 after reporting.
+var _cp_l_bits = 0;
+var _cp_l_mode = 0;
+var _cp_l_ctx  = 0;
+
+fn _cp_attr_list(attrs, on, optname): i64 {
+    _cp_l_bits = 0;
+    _cp_l_mode = 0;
+    _cp_l_ctx  = 0;
     var len = strlen(attrs);
     var seg_start: i64 = 0;
     var i: i64 = 0;
     var bad: i64 = 0;
-    var bits: i64 = 0;
     while (i <= len) {
         var at_end: i64 = 0;
         if (i == len) { at_end = 1; }
         else { if (load8(attrs + i) == 44) { at_end = 1; } }      # ','
         if (at_end == 1) {
+            var seg = attrs + seg_start;
             var slen = i - seg_start;
             var ok: i64 = 0;
             if (slen == 4) {
-                if (_cp_seg_eq(attrs + seg_start, "mode", 4) == 1) {
-                    bits = bits | CP_PRES_MODE;
+                if (_cp_seg_eq(seg, "mode", 4) == 1) {
+                    _cp_l_bits = _cp_l_bits | CP_PRES_MODE;
+                    _cp_l_mode = 1;
                     ok = 1;
                 }
             }
             if (slen == 10) {
-                if (_cp_seg_eq(attrs + seg_start, "timestamps", 10) == 1) {
-                    bits = bits | CP_PRES_TIMES;
+                if (_cp_seg_eq(seg, "timestamps", 10) == 1) {
+                    _cp_l_bits = _cp_l_bits | CP_PRES_TIMES;
                     ok = 1;
                 }
             }
             if (slen == 5) {
-                if (_cp_seg_eq(attrs + seg_start, "links", 5) == 1) {
-                    bits = bits | CP_PRES_LINKS;
+                if (_cp_seg_eq(seg, "links", 5) == 1) {
+                    _cp_l_bits = _cp_l_bits | CP_PRES_LINKS;
                     ok = 1;
                 }
                 # ⚠ SINGULAR. GNU rejects `--preserve=xattrs` and lists the valid
                 # arguments; the accepted spelling is `xattr`.
-                if (_cp_seg_eq(attrs + seg_start, "xattr", 5) == 1) {
-                    # ⚠ Naming it asks for the failures to be REPORTED; `mv`
-                    # carries the same attributes without the second bit.
-                    bits = bits | CP_PRES_XATTR;
-                    bits = bits | CP_PRES_XREQ;
+                # ⚠ Naming it asks for the failures to be REPORTED (XREQ); `mv`
+                # and `all` carry the same attributes without that bit.
+                if (_cp_seg_eq(seg, "xattr", 5) == 1) {
+                    _cp_l_bits = _cp_l_bits | CP_PRES_XATTR | CP_PRES_XREQ;
                     ok = 1;
                 }
             }
             if (slen == 9) {
-                if (_cp_seg_eq(attrs + seg_start, "ownership", 9) == 1) {
-                    bits = bits | CP_PRES_OWNER;
+                if (_cp_seg_eq(seg, "ownership", 9) == 1) {
+                    _cp_l_bits = _cp_l_bits | CP_PRES_OWNER;
                     ok = 1;
+                }
+            }
+            if (slen == 3) {
+                if (_cp_seg_eq(seg, "all", 3) == 1) {
+                    # ⚠ Not XREQ: GNU's `all` reports an xattr failure (other than
+                    # ENOTSUP) and does not fail the copy over it. `--no-preserve=all`
+                    # clears XREQ with the rest.
+                    _cp_l_bits = _cp_l_bits | CP_PRES_ALL;
+                    if (on == 0) { _cp_l_bits = _cp_l_bits | CP_PRES_XREQ; }
+                    _cp_l_mode = 1;
+                    _cp_l_ctx = 1;
+                    ok = 1;
+                }
+            }
+            if (slen == 7) {
+                if (_cp_seg_eq(seg, "context", 7) == 1) {
+                    _cp_l_ctx = 1;
+                    if (on == 0) { ok = 1; }
+                    if (on == 1) {
+                        if (bad == 0) {
+                            k_write( 2, "kriya cp: --preserve: 'context' is not preserved by kriya ", 58);
+                            k_write( 2, "(it has no SELinux support)\n", 28);
+                            bad = 1;
+                        }
+                        ok = 1;
+                    }
                 }
             }
             if (ok == 0) {
                 if (bad == 0) {
-                    k_write( 2, "kriya cp: --preserve: '", 23);
-                    k_write( 2, attrs + seg_start, slen);
-                    k_write( 2, "' is not preserved by kriya (mode, ownership, timestamps, links, xattr)\n", 72);
+                    k_write( 2, "kriya cp: ", 10);
+                    k_write( 2, optname, strlen(optname));
+                    k_write( 2, ": '", 3);
+                    k_write( 2, seg, slen);
+                    k_write( 2, "' is not an attribute ", 22);
+                    k_write( 2, "(mode, ownership, timestamps, links, xattr, context, all)\n", 58);
                     bad = 1;
                 }
             }
@@ -1636,7 +1825,7 @@ fn _cp_parse_preserve_list(attrs): i64 {
         i = i + 1;
     }
     if (bad == 1) { return 0 - 1; }
-    return bits;
+    return 0;
 }
 
 fn _cp_seg_eq(p, lit, n): i64 {
@@ -1648,47 +1837,193 @@ fn _cp_seg_eq(p, lit, n): i64 {
     return 1;
 }
 
-# Was a BARE `-p` / `--preserve` given, as distinct from `--preserve=LIST`?
+# Does `tok + 2` for `nlen` bytes spell `name`?
+fn _cp_long_is(tok, nlen, name): i64 {
+    if (nlen != strlen(name)) { return 0; }
+    return _cp_seg_eq(tok + 2, name, nlen);
+}
+
+# ── The order-dependent options, resolved in ONE walk (1.6.13)
 #
-# ⛔ THE FLAG TABLE CANNOT ANSWER THIS. `-p`, `--preserve` and `--preserve=LIST`
-# all set the same bool, and `kriya_long_value()` reports only the last `=VALUE`
-# seen — so `cp -p --preserve=links` and `cp --preserve=links` are
-# indistinguishable through the parser, while GNU treats the first as
-# mode+timestamps+links and the second as links alone. One argv walk settles it.
-#
-# ⚠ Any short cluster containing `p` counts, because cp has no value-taking
-# short option — there is no way for a `p` inside a cluster to be an option's
-# ARGUMENT rather than `-p` itself. `--` ends the scan, so a file literally
-# named `-p` after it is an operand and not a flag.
-fn _cp_bare_preserve_given(start: i64): i64 {
-    var n = kriya_argv_count();
-    var i = start;
-    var found:   i64 = 0;
+# ⛔ GNU APPLIES `-p`, `--preserve[=LIST]`, `--no-preserve=LIST`, `-a`, `-d` AND
+# THE DEREFERENCE GROUP IN COMMAND-LINE ORDER, and the flag table keeps one value
+# per flag with no order at all. Measured against GNU 9.11:
+#     -R -p --no-preserve=mode    0644 / 0755, times kept
+#     -R --no-preserve=mode -p    0741 / 0750
+#     -aL                         dereferences        -La   does not
+#     -R -L -P                    keeps the symlinks  — kriya DEREFERENCED
+# ⛔ The last row was a live bug under a comment reading "last-one-wins by
+# precedence L > H > P (matches GNU cp)": a precedence is not last-wins, and
+# `-L -P`, `-L -H` both came out wrong. One walk over the EXPANDED argv, the
+# shape `ls`'s format group uses — clusters split, values skipped, `--` ends it.
+var _cp_o_pres    = 0;   # CpPreserve bits
+var _cp_o_policy  = 0;   # CpPolicy
+var _cp_o_pexpl   = 0;   # 1 when -P was EXPLICIT (-P, --no-dereference, -d, -a)
+var _cp_o_archive = 0;   # 1 when -a was given — it implies -R
+var _cp_o_nomode  = 0;   # --no-preserve=mode|all, until a --preserve=mode|all
+var _cp_o_ctx     = 0;   # 1 when -a or `all` implied SELinux context
+
+fn _cp_opt_list(attrs, on): i64 {
+    var optname = "--no-preserve";
+    if (on == 1) { optname = "--preserve"; }
+    if (_cp_attr_list(attrs, on, optname) != 0) { return 0 - 1; }
+    if (on == 1) {
+        # `--preserve=LIST` ASKS for its attributes: GNU's `require_preserve`.
+        _cp_o_pres = _cp_o_pres | _cp_l_bits | CP_PRES_REQ;
+        if (_cp_l_mode == 1) { _cp_o_nomode = 0; }
+        if (_cp_l_ctx == 1) { _cp_o_ctx = 1; }
+    } else {
+        _cp_o_pres = _cp_o_pres & (0 - 1 - _cp_l_bits);
+        if (_cp_l_mode == 1) { _cp_o_nomode = 1; }
+        if (_cp_l_ctx == 1) { _cp_o_ctx = 0; }
+    }
+    return 0;
+}
+
+fn _cp_scan_order(): i64 {
+    _cp_o_pres    = 0;
+    _cp_o_policy  = CP_POLICY_P;
+    _cp_o_pexpl   = 0;
+    _cp_o_archive = 0;
+    _cp_o_nomode  = 0;
+    _cp_o_ctx     = 0;
+    var av = kriya_expanded_argv();
+    var n  = kriya_expanded_argc();
+    if (av == 0) { return 0; }
     var no_more: i64 = 0;
+    var i: i64 = 1;
     while (i < n) {
-        var tok = argv(i);
+        var tok  = load64(av + i * 8);
         var tlen = strlen(tok);
+        var step: i64 = 1;
+        var list = 0;
+        var list_on: i64 = 0;
         if (no_more == 0) {
             if (tlen >= 2) {
-                if (load8(tok) == 45) {                       # '-'
-                    if (load8(tok + 1) == 45) {               # '--'
+                if (load8(tok) == 45) {
+                    if (load8(tok + 1) == 45) {
                         if (tlen == 2) { no_more = 1; }
                         else {
-                            if (streq(tok, "--preserve") == 1) { found = 1; }
+                            var eq: i64 = 0;
+                            var e: i64 = 2;
+                            while (e < tlen) {
+                                if (eq == 0) { if (load8(tok + e) == 61) { eq = e; } }
+                                e = e + 1;
+                            }
+                            var nlen = tlen - 2;
+                            if (eq > 0) { nlen = eq - 2; }
+                            # ⚠ The expander hands `--preserve=LIST` over as a bare
+                            # `--preserve` (it is a bool with an opted-in value), so
+                            # the list comes from `kriya_expanded_optval`, not `=`.
+                            if (_cp_long_is(tok, nlen, "preserve") == 1) {
+                                var pv = kriya_expanded_optval(i);
+                                if (eq > 0) { pv = tok + eq + 1; }
+                                if (pv != 0) {
+                                    list = pv;
+                                    list_on = 1;
+                                } else {
+                                    _cp_o_pres = _cp_o_pres | CP_PRES_P;
+                                }
+                            }
+                            if (_cp_long_is(tok, nlen, "no-preserve") == 1) {
+                                if (eq > 0) { list = tok + eq + 1; }
+                                else {
+                                    if (i + 1 < n) { list = load64(av + (i + 1) * 8); }
+                                }
+                            }
+                            if (_cp_long_is(tok, nlen, "archive") == 1) {
+                                _cp_o_pres = _cp_o_pres | CP_PRES_ALL | CP_PRES_QUIET | CP_PRES_REQ;
+                                _cp_o_policy = CP_POLICY_P;
+                                _cp_o_pexpl = 1;
+                                _cp_o_archive = 1;
+                                _cp_o_ctx = 1;
+                            }
+                            if (_cp_long_is(tok, nlen, "no-dereference") == 1) {
+                                _cp_o_policy = CP_POLICY_P;
+                                _cp_o_pexpl = 1;
+                            }
+                            if (_cp_long_is(tok, nlen, "dereference") == 1) { _cp_o_policy = CP_POLICY_L; }
+                            if (eq == 0) {
+                                if (kriya_long_type(_cp_spec, tok + 2, nlen) > 0) { step = 2; }
+                            }
                         }
                     } else {
-                        var k: i64 = 1;
-                        while (k < tlen) {
-                            if (load8(tok + k) == 112) { found = 1; }   # 'p'
-                            k = k + 1;
+                        # The expansion leaves every registered short its own
+                        # two-byte token, with its value, if any, following.
+                        var c  = load8(tok + 1);
+                        var ty = kriya_short_type(_cp_spec, c);
+                        if (ty >= 0) {
+                            if (c == 112) { _cp_o_pres = _cp_o_pres | CP_PRES_P; }          # -p
+                            if (c == 97) {                                                  # -a
+                                _cp_o_pres = _cp_o_pres | CP_PRES_ALL | CP_PRES_QUIET | CP_PRES_REQ;
+                                _cp_o_policy = CP_POLICY_P;
+                                _cp_o_pexpl = 1;
+                                _cp_o_archive = 1;
+                                _cp_o_ctx = 1;
+                            }
+                            if (c == 100) {                                                 # -d
+                                _cp_o_pres = _cp_o_pres | CP_PRES_LINKS;
+                                _cp_o_policy = CP_POLICY_P;
+                                _cp_o_pexpl = 1;
+                            }
+                            if (c == 80) {                                                  # -P
+                                _cp_o_policy = CP_POLICY_P;
+                                _cp_o_pexpl = 1;
+                            }
+                            if (c == 72) { _cp_o_policy = CP_POLICY_H; }                   # -H
+                            if (c == 76) { _cp_o_policy = CP_POLICY_L; }                   # -L
+                            if (ty > 0) { step = 2; }
                         }
                     }
                 }
             }
         }
-        i = i + 1;
+        if (list != 0) {
+            if (_cp_opt_list(list, list_on) != 0) { return 0 - 1; }
+        }
+        i = i + step;
     }
-    return found;
+    # ⚠ `--no-preserve=mode` only decides anything when the mode ends up NOT
+    # preserved: `--no-preserve=mode -p` is the source's mode, measured.
+    if (_cp_o_nomode == 1) {
+        if ((_cp_o_pres & CP_PRES_MODE) == 0) { _cp_o_pres = _cp_o_pres | CP_PRES_NOMODE; }
+    }
+    return 0;
+}
+
+# 1 when SELinux is enabled — selinuxfs mounted where libselinux looks first.
+# ⚠ Consulted only when `-a` or `--preserve=all` asked for context implicitly.
+fn _cp_selinux_enabled(): i64 {
+    if (k_access("/sys/fs/selinux/enforce", 0) == 0) { return 1; }
+    return 0;
+}
+
+# 1 when `path` itself (not what it points at) is a symlink.
+fn _cp_is_symlink(path): i64 {
+    var st[144];
+    if (fs_lstat_at(0 - 100, path, &st) != 0) { return 0; }
+    return fs_is_lnk(&st);
+}
+
+# One command-line (SRC, DST) pair.
+#
+# ⛔ `-P` WITHOUT `-R` COPIES A SYMLINK AS A SYMLINK (1.6.13). GNU's `cp -P link
+# out` makes `out -> target`; kriya followed it and copied the target's bytes,
+# because only the `-R` walk ever read the policy. ⚠ Only an EXPLICIT `-P` —
+# `-P`, `--no-dereference`, `-d`, `-a` — and only for the operand itself: a
+# plain `cp link out` still follows, which is POSIX's non-`-R` rule.
+fn _cp_operand(src, dst, recursive, policy, force, interactive, preserve, verbose): i64 {
+    if (recursive == 1) {
+        return _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose);
+    }
+    if (_cp_o_pexpl == 1) {
+        if (policy == CP_POLICY_P) {
+            if (_cp_is_symlink(src) == 1) {
+                return _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose);
+            }
+        }
+    }
+    return _cp_one(src, dst, force, interactive, preserve, verbose);
 }
 
 fn cmd_cp(start: i64): i64 {
@@ -1715,6 +2050,24 @@ fn cmd_cp(start: i64): i64 {
         return EXIT_USAGE;
     }
 
+    # ⛔ The preserve set and the dereference policy, in command-line order —
+    # see `_cp_scan_order`. A bad attribute name is a usage error before any
+    # operand is touched, as GNU's is.
+    if (_cp_scan_order() != 0) { return EXIT_USAGE; }
+    # ⛔ `-a` AND `--preserve=all` IMPLY SELINUX CONTEXT WHERE SELINUX IS ON, and
+    # kriya cannot carry one. GNU includes context in both only when SELinux is
+    # enabled — measured, `cp -a` on a kernel without it is exactly mode,
+    # ownership, timestamps, links and xattr, which is what kriya does. On a
+    # system WITH it, doing the same would silently drop the label GNU keeps,
+    # so kriya refuses instead; `--no-preserve=context` is the explicit way on.
+    if (_cp_o_ctx == 1) {
+        if (_cp_selinux_enabled() == 1) {
+            k_write( 2, "kriya cp: -a / --preserve=all would preserve SELinux contexts here, and kriya cannot ", 85);
+            k_write( 2, "(add --no-preserve=context to copy without them)\n", 49);
+            return EXIT_USAGE;
+        }
+    }
+
     var npos = flags_positional_count(_cp_spec);
     if (npos < 2) {
         k_write( 2, "kriya cp: error: missing operand (need SRC and DST)\n", 52);
@@ -1725,31 +2078,10 @@ fn cmd_cp(start: i64): i64 {
     if (flags_get_bool(_cp_spec, _cp_f_idx) == 1) { force = 1; }
     var interactive: i64 = 0;
     if (flags_get_bool(_cp_spec, _cp_i_idx) == 1) { interactive = 1; }
-    # `-p` and a bare `--preserve` are mode+timestamps; `--preserve=LIST` is
-    # exactly the listed attributes. ⚠ GNU's forms are CUMULATIVE — `-p
-    # --preserve=links` preserves all three — so the list ORs onto whatever the
-    # bare form already set rather than replacing it.
-    # ⛔ THE `-p` BITS HAVE TO BE SET BEFORE THE LIST IS OR'd ONTO THEM. Written
-    # the other way round — the bare-form assignment inside the `attrs == 0` arm
-    # and the OR inside the `else` — the OR is always `0 | bits`, so
-    # `cp -p --preserve=links` preserves links and silently drops mode and
-    # timestamps. ⚠ The smoke case that was supposed to catch it compared the
-    # copy's mtime against a fixture created seconds earlier, so both were the
-    # current second and it passed against a value that never had to be
-    # preserved. Its replacement stamps the fixture in 2020.
-    var preserve: i64 = 0;
-    if (flags_get_bool(_cp_spec, _cp_p_idx) == 1) {
-        # `-p`, `--preserve` and `--preserve=LIST` all set the same bool, and
-        # GNU treats the forms as CUMULATIVE. A bare form contributes
-        # mode+timestamps; a list contributes exactly what it names.
-        if (_cp_bare_preserve_given(start) == 1) { preserve = preserve | CP_PRES_P; }
-        var attrs = kriya_long_value();
-        if (attrs != 0) {
-            var bits = _cp_parse_preserve_list(attrs);
-            if (bits < 0) { return EXIT_USAGE; }
-            preserve = preserve | bits;
-        }
-    }
+    # `-p`, `--preserve[=LIST]`, `--no-preserve=LIST`, `-a` and `-d`, resolved in
+    # order by `_cp_scan_order` above. ⚠ GNU's forms are CUMULATIVE — `-p
+    # --preserve=links` preserves all four — and the walk ORs each onto the last.
+    var preserve = _cp_o_pres;
     # One map for the whole invocation, so a hard link is preserved ACROSS
     # operands and not merely within one tree.
     _cp_links = 0;
@@ -1770,6 +2102,7 @@ fn cmd_cp(start: i64): i64 {
     var recursive: i64 = 0;
     if (flags_get_bool(_cp_spec, _cp_R_idx) == 1) { recursive = 1; }
     if (flags_get_bool(_cp_spec, _cp_r_idx) == 1) { recursive = 1; }
+    if (_cp_o_archive == 1) { recursive = 1; }
 
     # ADR 0002 hard rule #4: -i on a non-tty stdin is a usage error,
     # invocation-wide, even before any operand classification.
@@ -1780,13 +2113,9 @@ fn cmd_cp(start: i64): i64 {
         }
     }
 
-    # Policy resolution: -P / -H / -L are mutually exclusive in spirit
-    # but the parser accepts any subset; last-one-wins by precedence
-    # L > H > P (matches GNU cp).
-    var policy: i64 = CP_POLICY_P;
-    if (flags_get_bool(_cp_spec, _cp_BIG_P_idx) == 1) { policy = CP_POLICY_P; }
-    if (flags_get_bool(_cp_spec, _cp_BIG_H_idx) == 1) { policy = CP_POLICY_H; }
-    if (flags_get_bool(_cp_spec, _cp_BIG_L_idx) == 1) { policy = CP_POLICY_L; }
+    # -P / -H / -L (and -a, -d): LAST ONE WINS, in command-line order — see
+    # `_cp_scan_order`, which replaced a precedence that only claimed to be.
+    var policy = _cp_o_policy;
 
     var dst_arg = flags_positional(_cp_spec, npos - 1);
     var dst_is_dir = _cp_is_dir_path(dst_arg);
@@ -1798,12 +2127,7 @@ fn cmd_cp(start: i64): i64 {
             return EXIT_USAGE;
         }
         var src = flags_positional(_cp_spec, 0);
-        var r: i64 = 0;
-        if (recursive == 1) {
-            r = _cp_recursive_one(src, dst_arg, policy, force, interactive, preserve, verbose);
-        } else {
-            r = _cp_one(src, dst_arg, force, interactive, preserve, verbose);
-        }
+        var r = _cp_operand(src, dst_arg, recursive, policy, force, interactive, preserve, verbose);
         if (r != 0) { any_failed = 1; }
         if (r == (0 - 9999)) { return EXIT_USAGE; }
     } else {
@@ -1812,12 +2136,7 @@ fn cmd_cp(start: i64): i64 {
             var src = flags_positional(_cp_spec, i);
             var base = path_basename_ptr(src);
             var dst = path_join(dst_arg, base);
-            var r: i64 = 0;
-            if (recursive == 1) {
-                r = _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose);
-            } else {
-                r = _cp_one(src, dst, force, interactive, preserve, verbose);
-            }
+            var r = _cp_operand(src, dst, recursive, policy, force, interactive, preserve, verbose);
             if (r != 0) { any_failed = 1; }
             if (r == (0 - 9999)) { return EXIT_USAGE; }
             i = i + 1;

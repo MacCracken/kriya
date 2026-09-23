@@ -250,6 +250,30 @@ fn fs_opendir_nofollow(dirfd, name): i64 {
     #endif
 }
 
+# Open a DESTINATION directory — one that entries will be created in (1.6.13).
+#
+# ⛔ `O_RDONLY` NEEDS THE READ BIT, AND CREATING ENTRIES DOES NOT. A directory at
+# 0300 — write and search, no read — is one its owner can put files into and not
+# list, and GNU `cp -R` merges into it; kriya opened every destination
+# `O_RDONLY | O_DIRECTORY`, got EACCES, and copied nothing. So the read-only form
+# comes first — it is what every caller always had, it costs the common path
+# nothing, and it is a descriptor `fchmod` accepts — and on EACCES alone, the
+# `O_PATH` form, which needs no permission on the directory itself and is still
+# a `dirfd` for `openat`, `mkdirat`, `symlinkat` and `unlinkat`.
+# ⚠ `O_PATH | O_NOFOLLOW | O_DIRECTORY` on a symlink is ENOTDIR — measured, it
+# does not return a descriptor for the link — so ADR 0003 holds on this route.
+# ⚠ An `O_PATH` descriptor refuses `fchmod`, `fchown`, `futimens` and
+# `fsetxattr` with EBADF; the `fs_fd_*` helpers below take either kind.
+fn fs_opendir_dest(dirfd, name): i64 {
+    var fd = fs_opendir_nofollow(dirfd, name);
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (fd == (0 - 13)) {
+        fd = fs_openat(dirfd, name, 2293760, 0);      # O_PATH | O_DIRECTORY | O_NOFOLLOW
+    }
+    #endif
+    return fd;
+}
+
 fn fs_mkdirat(dirfd, path, mode): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     if (dirfd == k_at_fdcwd()) { return k_mkdir(path, mode); }
@@ -1132,6 +1156,83 @@ fn fs_dev_minor(dev): i64 {
     return (dev & 0xff) | ((dev >> 12) & 0xffffff00);
 }
 
+# --- metadata through a descriptor that may be O_PATH (1.6.13) ------
+#
+# Each helper makes the plain descriptor call first — the only one a normal
+# descriptor ever needs — and only on EBADF, which is how the kernel refuses an
+# O_PATH descriptor, the forms that accept one: AT_EMPTY_PATH on the descriptor,
+# then `/proc/self/fd/N`. ⭐ Both still name the OPEN FILE rather than a path that
+# could be re-resolved to another, so the M8 audit's rule (row 35354) holds on
+# this route too. Measured on Linux 7.2 against an O_PATH directory: fchmodat2,
+# fchownat and utimensat all accept AT_EMPTY_PATH; `fsetxattr` has no such form.
+# ⚠ `fchmodat2` is Linux 6.6+, hence the /proc fallback; `fchownat` has taken
+# AT_EMPTY_PATH since 2.6.39 and needs none.
+
+# `/proc/self/fd/<fd>`, NUL-terminated, into `buf` (32 bytes is enough). Returns
+# its length.
+fn fs_proc_fd_path(fd, buf): i64 {
+    var pre = "/proc/self/fd/";
+    var k: i64 = 0;
+    while (k < 14) {
+        store8(buf + k, load8(pre + k));
+        k = k + 1;
+    }
+    var tmp[24];
+    var n: i64 = 0;
+    var v = fd;
+    if (v == 0) {
+        store8(&tmp, 48);
+        n = 1;
+    }
+    while (v > 0) {
+        store8(&tmp + n, 48 + (v % 10));
+        v = v / 10;
+        n = n + 1;
+    }
+    while (n > 0) {
+        n = n - 1;
+        store8(buf + k, load8(&tmp + n));
+        k = k + 1;
+    }
+    store8(buf + k, 0);
+    return k;
+}
+
+fn fs_fd_chmod(fd, mode): i64 {
+    var r = k_fchmod(fd, mode);
+    if (r != (0 - 9)) { return r; }                       # not EBADF: a plain descriptor's answer
+    r = k_fchmodat2(fd, "", mode, 4096);                   # AT_EMPTY_PATH
+    if (r == 0) { return 0; }
+    var p[32];
+    fs_proc_fd_path(fd, &p);
+    return k_chmod(&p, mode);
+}
+
+fn fs_fd_chown(fd, uid, gid): i64 {
+    var r = k_fchown(fd, uid, gid);
+    if (r != (0 - 9)) { return r; }
+    return k_fchownat(fd, "", uid, gid, 4096);             # AT_EMPTY_PATH
+}
+
+# `ts` is the two-timespec array `utimensat` takes.
+fn fs_fd_utimens(fd, ts): i64 {
+    var r = k_utimensat(fd, 0, ts, 0);                     # NULL path: futimens
+    if (r != (0 - 9)) { return r; }
+    r = k_utimensat(fd, "", ts, 4096);                     # AT_EMPTY_PATH
+    if (r == 0) { return 0; }
+    var p[32];
+    fs_proc_fd_path(fd, &p);
+    return k_utimensat(0 - 100, &p, ts, 0);
+}
+
+fn fs_fd_setxattr(fd, name, value, size, flags): i64 {
+    var r = k_fsetxattr(fd, name, value, size, flags);
+    if (r != (0 - 9)) { return r; }
+    var p[32];
+    fs_proc_fd_path(fd, &p);
+    return k_setxattr(&p, name, value, size, flags);
+}
+
 # --- walk-ancestor stack --------------------------------------------
 #
 # The (dev, ino) of every directory on the path from the operand root to the
@@ -1430,7 +1531,7 @@ fn fs_xattr_copy(src_fd, dst_fd, out): i64 {
                                 }
                             }
                         } else {
-                            var sr = k_fsetxattr(dst_fd, name, val, vgot, 0);
+                            var sr = fs_fd_setxattr(dst_fd, name, val, vgot, 0);
                             if (sr != 0) {
                                 store64(out + FS_XR_FAILED, load64(out + FS_XR_FAILED) + 1);
                                 if (load64(out + FS_XR_ERRNO) == 0) {
