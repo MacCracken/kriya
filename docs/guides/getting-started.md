@@ -1,127 +1,115 @@
 # Getting started with kriya
 
-> **Status**: M0 scaffold — `kriya` has no utility implementations yet. This guide covers the build + dispatcher model. Real per-utility usage lands at M1 (v0.2.0).
+kriya ships thirty-eight utilities in one static binary. This guide covers building it, how the
+dispatcher routes a command, the shared library, and the loop for changing or adding a utility.
+The current version and per-utility status are in [`../development/state.md`](../development/state.md).
 
-## Build
-
-```sh
-cyrius deps                                    # resolve stdlib deps
-cyrius build src/main.cyr build/kriya          # compile dispatcher
-cyrius test                                    # run [build].test + tests/*.tcyr
-cyrius bench tests/kriya.bcyr                  # benchmarks
-```
-
-The output binary is `build/kriya` — a **dispatcher**. To use individual utilities, create symlinks:
+## Build and test
 
 ```sh
-# Per-utility commands as symlinks → dispatcher
-ln -s "$(pwd)/build/kriya" /usr/local/bin/cp
-ln -s "$(pwd)/build/kriya" /usr/local/bin/mv
-ln -s "$(pwd)/build/kriya" /usr/local/bin/rm
-# ... etc
+cyrius deps                                    # resolve the pinned stdlib into lib/
+cyrius build src/main.cyr build/kriya          # the dispatcher, for Linux x86-64
+cyrius build --agnos src/main.cyr build/kriya_agnos
+cyrius test                                    # tests/kriya.tcyr and tests/kriya-posix.tcyr
+cyrius bench tests/kriya.bcyr                  # in-process micro-benchmarks
+for s in scripts/smoke-*.sh; do sh "$s"; done  # behaviour, compared with the local GNU tools
+sh scripts/fuzz.sh                             # the *.fcyr harnesses under a poisoned allocator
 ```
 
-When you invoke `cp` (which is a symlink to `kriya`), the dispatcher reads `argv[0]`, sees `cp`, and routes to the `cp` utility code.
+⚠ The smoke scripts compare kriya against the GNU coreutils, findutils and grep on the host, byte
+for byte and exit status included, so those must be installed. `sh scripts/check-oracles.sh` prints
+which binary each comparison will really run; a `find` that is secretly `bfs`, or a `printf` that is
+the shell builtin, would make a wrong answer look right.
 
-This is the **BusyBox pattern**. ADR 0001 captures the decision (single binary + symlinks vs N independent binaries).
-
-## Conceptual model
-
-```
-shell ──exec(cp)─→ /usr/local/bin/cp (symlink → kriya)
-                       ↓
-                    dispatcher (src/main.cyr)
-                       ↓
-                    reads argv[0] = "cp"
-                       ↓
-                    looks up utility table → cmd_cp(argc, argv)
-                       ↓
-                    cp implementation in src/cmd/cp.cyr
-                       ↓
-                    exit
-```
-
-Each utility (`src/cmd/{util}.cyr`) is a self-contained function. Utilities share infrastructure from `src/lib/`:
-
-- `lib/path.cyr` — path normalization, traversal-safe join
-- `lib/exit.cyr` — POSIX exit-code constants
-- `lib/errmsg.cyr` — errno → human-readable message
-- `lib/args.cyr` — POSIX-style option parsing
-
-## Layout
-
-- `src/main.cyr` — dispatcher entry point. Reads `argv[0]`, dispatches to the named utility.
-- `src/lib/*.cyr` — shared primitives used by every utility.
-- `src/cmd/{util}.cyr` — one file per utility. Exports `cmd_{util}(argc, argv) -> i32`.
-- `src/test.cyr` — top-level test entry referenced by `cyrius.cyml [build].test`.
-- `tests/kriya.tcyr` — primary test suite (`cyrius test` auto-discovers).
-- `tests/kriya.bcyr` — benchmarks (`cyrius bench`).
-- `tests/kriya.fcyr` — fuzz harness (`cyrius fuzz`).
-
-## Adding a new utility
-
-The standard work loop (also captured in [`../../CLAUDE.md`](../../CLAUDE.md) § *Process*):
-
-1. **Roadmap check** — utility is on the roadmap, or an ADR justifies inclusion
-2. **POSIX research** — read the POSIX manual page for the utility. Capture any planned deviations in an ADR.
-3. **Scaffold** — create `src/cmd/{util}.cyr`:
-
-   ```cyrius
-   include "../lib/path.cyr"
-   include "../lib/exit.cyr"
-   include "../lib/errmsg.cyr"
-   include "../lib/args.cyr"
-
-   fn cmd_{util}(argc, argv) -> i32 {
-       // parse args, do the operation, return exit code
-       return EXIT_OK;
-   }
-   ```
-
-4. **Wire** — register in `src/main.cyr`'s dispatcher table:
-
-   ```cyrius
-   if (streq(util_name, "{util}")) { return cmd_{util}(argc, argv); }
-   ```
-
-5. **Tests** — `tests/kriya.tcyr` gains:
-   - happy path
-   - at least one error path (nonexistent input, permission denied, malformed args)
-   - POSIX-compliance check per documented option
-   - For destructive utilities (`rm`, `mv`, `cp -f`): TOCTOU test + symlink-safety test
-
-6. **Benchmark** — `tests/kriya.bcyr` gains a perf test for the utility's typical workload
-
-7. **Build + check** — `cyrius build`, `cyrius test`, `cyrius lint`, `cyrius vet` all clean
-
-8. **Documentation** —
-   - `CHANGELOG.md` `[Unreleased] / Added` — one-line entry with POSIX manual reference
-   - `docs/development/state.md` per-utility status table — mark as ✅
-   - If non-trivial: ADR for option-set decisions, behavior deviations, performance trade-offs
-
-9. **Version sync** — bump `VERSION`, `cyrius.cyml`, CHANGELOG header at release time
-
-## Running standalone (without symlinks)
-
-If you don't want to create symlinks:
+## The dispatcher
 
 ```sh
-./build/kriya echo hello world      # dispatcher form — first arg is the utility name
-./build/kriya cp foo bar
-./build/kriya rm -rf /tmp/scratch
+ln -s "$(pwd)/build/kriya" /usr/local/bin/cp   # a symlink per utility
+cp a b                                         # argv[0] is `cp`: the cp utility runs
+./build/kriya cp a b                           # or name it: argv[1] is the utility
+./build/kriya --list                           # every utility, as JSON
+./build/kriya cp --help                        # the page; --help=json for agents
 ```
 
-## Safety notes for destructive utilities
+```
+shell ──exec(cp)──→ cp (symlink → kriya)
+                        ↓
+                    src/main.cyr: dispatch("cp", start)
+                        ↓
+                    the utility table: _util_add("cp", &cmd_cp, &cp_help_declare)
+                        ↓
+                    cmd_cp(start) in src/cmd/cp.cyr
+```
 
-`rm`, `mv`, `cp` are the most dangerous tools in the toolbox. kriya's defaults are conservative:
+`start` is where the utility's own arguments begin in argv: 1 for the symlink form, 2 for
+`kriya cp`. This is the BusyBox pattern, [ADR 0001](../adr/0001-busybox-dispatcher-vs-n-binaries.md).
 
-- **No recursive without `-r`** — `rm directory/` is an error; `rm -r directory/` is the operation
-- **No force without `-f`** — `rm file` against a read-only file or `cp` to an existing target prompts (interactive) or errors (non-interactive) by default
-- **No following symlinks on destructive ops** — `cp /a /b` where `/a` is a symlink copies the symlink, not the target. `-L` opts in to follow.
-- **`rm` refuses to operate on `/`** — `rm -rf /` requires `--no-preserve-root`. Even then, an extra confirmation prompt fires in interactive contexts.
+## The shared library
 
-ADR 0003 (M2) captures these defaults; deviations require an ADR amendment.
+Each utility is one file in `src/cmd/`, and what they have in common lives in `src/lib/`:
+
+| Module | What it holds |
+|---|---|
+| `args.cyr` | the option parser around the stdlib's flags, and number parsers that never wrap |
+| `help.cyr` | `--help`, `--help=json` and `--version`, from each utility's declaration |
+| `exit.cyr` | `EXIT_SUCCESS` / `EXIT_FAILURE` / `EXIT_USAGE` ([ADR 0008](../adr/0008-posix-exit-code-policy.md)) |
+| `errmsg.cyr` | errno → message |
+| `report.cyr` | the one diagnostic line, `kriya <util>: <operand>: <message>` ([architecture 001](../architecture/001-errno-message-policy.md)) |
+| `quote.cyr` | GNU's shell-escape quoting, for `ls`, `stat %N` and every diagnostic |
+| `str.cyr` | backslash escapes, and unsigned digits |
+| `sys.cyr` | the syscall layer, both targets, and the write-failure net |
+| `fs.cyr` | `*at()` traversal, stat helpers, `fs_realpath` |
+| `path.cyr` | path primitives |
+| `glob.cyr` | fnmatch-style matching |
+| `icase.cyr` | ASCII case folding for BRE patterns |
+| `protected.cyr` | the `/` refusal ([ADR 0004](../adr/0004-rm-refuses-root.md)) |
+| `backup.cyr` | `-b` / `--backup=CONTROL` / `-S`, for `cp`, `mv` and `ln` |
+| `userdb.cyr` | `/etc/passwd` and `/etc/group`, parsed directly |
+| `spawn.cyr` | fork, exec and wait, keeping stderr and every exit outcome distinct |
+| `argbatch.cyr` | command lines that fit, counted as GNU counts ([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)) |
+
+## Adding or changing a utility
+
+The loop CLAUDE.md § *Process* describes, in the shape the code takes:
+
+1. **Roadmap check.** The work has a slot in the [roadmap](../development/roadmap.md), or an ADR
+   justifies it.
+2. **Measure first.** Read the POSIX page, then measure GNU — on the host and in the
+   `ubuntu:24.04` container, since GNU versions disagree — before writing anything.
+   [`lessons.md`](../development/lessons.md) is the list of ways this has gone wrong.
+3. **The utility.** `src/cmd/<util>.cyr` holds a flags spec (`flags_new()`, `flags_add_bool`,
+   `flags_add_str`), a `<util>_help_declare()` record (`help_begin`, `help_positional`,
+   `help_exit`, `help_example`) and `fn cmd_<util>(start: i64): i64`, which parses with
+   `kriya_args_parse(spec, start)` and reports through `errmsg_report` or `report_note`.
+4. **Wire it.** `include "src/cmd/<util>.cyr"` in `src/main.cyr`, and one `_util_add` line in
+   `util_table_init`.
+5. **Tests.** `tests/kriya.tcyr` for pure helpers, and `scripts/smoke-<util>.sh` comparing stdout
+   bytes and the exit status with GNU. ⚠ Run the new assertions against the previous release's
+   binary as well: an assertion that passes on both has proved nothing.
+6. **The gate.** Build both targets; `cyrius test`; `cyrius lint` on each touched file;
+   `cyrius vet src/main.cyr`; `sh scripts/lint-deferrals.sh`; `sh scripts/lint-help-schema.sh`; every
+   smoke script; `sh scripts/fuzz.sh`; `python3 scripts/watchlist-scan.py`.
+7. **Documentation.** An ADR for an option-set decision or a deviation from POSIX or GNU. At
+   release: the CHANGELOG entry (released items only), the `state.md` entry and rows, and the
+   roadmap slot removed.
+8. **Version.** `sh scripts/version-bump.sh X.Y.Z` writes `VERSION` and `src/version_str.cyr` and
+   inserts the `state.md` stub.
+
+## Safety defaults for destructive utilities
+
+- **`rm` refuses `/`, with no escape hatch.** There is no `--no-preserve-root`
+  ([ADR 0004](../adr/0004-rm-refuses-root.md)); `rm -r link/` on a symlink to a directory is refused
+  too ([ADR 0010](../adr/0010-rm-refuses-a-trailing-slash-symlink-operand.md)).
+- **No recursion without `-r`, no force without `-f`.**
+- **`cp` will not replace an existing file** unless `-f`, `-i`, `-n` or a backup says how
+  ([ADR 0024](../adr/0024-cp-and-mv-resolve-force-interactive-and-no-clobber-as-gnu-does.md)); `mv`
+  replaces, as POSIX says.
+- **Symlinks are not followed on destructive paths** unless `-L` asks
+  ([ADR 0003](../adr/0003-symlink-follow-policy.md)).
+- **`-i` needs a terminal.** With no tty on stdin it is a usage error rather than a hang
+  ([ADR 0002](../adr/0002-option-parsing-humans-and-agents.md)).
 
 ## Next
 
-See [`../development/roadmap.md`](../development/roadmap.md) for the milestone plan and [`../adr/template.md`](../adr/template.md) for writing decision records.
+The [roadmap](../development/roadmap.md) for what is open, and [`../adr/template.md`](../adr/template.md)
+for writing a decision record.

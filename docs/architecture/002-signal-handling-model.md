@@ -18,12 +18,15 @@ kriya utilities run as short-lived processes invoked from a shell or pipeline. T
 
 ## Triggers for installing handlers (later milestones)
 
-| Utility | Signal | What the handler does | Triggered by milestone |
+| Utility | Signal | What the handler does | Planned for |
 |---|---|---|---|
-| `cp`, `mv`, `rm` (destructive) | SIGINT, SIGTERM | Set a `_kriya_interrupted = 1` flag. Main loop checks the flag between operations and exits 130/143 cleanly without leaving a half-copied file. No mid-syscall `cleanup()` — the worst case is one partially-written destination file, which the user sees via the exit code and can resume. | M2 |
-| `find`, `xargs` (long-running) | SIGINT, SIGTERM | Same flag pattern, checked between directory entries / batched exec spawns. | M5 |
-| `ls --color`, `wc` on a tty | SIGINT | Restore ANSI defaults (`\x1b[0m`) to stderr before `_exit`. Without it, a ^C mid-output leaves the terminal in a coloured state. | M3 (`ls`), M4 (`wc` adds it on the same flag day to keep the policy uniform) |
-| `tail -f` | SIGINT | Cleanly close the watched file descriptor and exit 130. | M4 |
+| `cp`, `mv`, `rm` (destructive) | SIGINT, SIGTERM | Set a `_kriya_interrupted = 1` flag. Main loop checks the flag between operations and exits 130/143 cleanly without leaving a half-copied file. No mid-syscall `cleanup()` — the worst case is one partially-written destination file, which the user sees via the exit code and can resume. | unscheduled |
+| `find`, `xargs` (long-running) | SIGINT, SIGTERM | Same flag pattern, checked between directory entries / batched exec spawns. | unscheduled |
+| `ls --color`, `wc` on a tty | SIGINT | Restore ANSI defaults (`\x1b[0m`) to stderr before `_exit`. Without it, a ^C mid-output leaves the terminal in a coloured state. | unscheduled |
+| `tail -f` | SIGINT | Cleanly close the watched file descriptor and exit 130. | unscheduled |
+
+⚠ The milestones these rows first named (M2–M5) closed without them, and no roadmap slot holds them
+now; a row gains a slot when one is filed.
 
 When a handler lands, it gets its own ADR (the policy decision: "destructive utilities install a flag-based SIGINT handler") and the table here grows. The table is the running record, not the decision point.
 
@@ -46,6 +49,8 @@ Every M1 utility is bounded: it either does one syscall and returns (`true`, `fa
 
 ## Out of scope
 
-- **SIGCHLD reaping** — kriya utilities are not parents (yet). When `xargs -P` lands in M5, it gets its own SIGCHLD handler note.
+- **SIGCHLD reaping** — `find -exec` and `xargs` are parents, but each waits for its one child
+  before starting the next, so there is nothing to reap asynchronously. When `xargs -P` lands
+  (roadmap 1.7.2), it gets its own SIGCHLD note.
 - **Signal masking around `*at()` syscalls** — POSIX guarantees these are atomic with respect to signals; no masking needed. If a future utility nests `*at()` calls in a way that requires atomic windows, that's its own arch note, not a global policy.
 - **Real-time signals (SIGRTMIN..SIGRTMAX)** — not used by kriya.

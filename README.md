@@ -2,101 +2,129 @@
 
 > **क्रिया** (Sanskrit: *action, operation, verb*) — the small, single-purpose utilities of AGNOS. Each program is one kriya.
 
-A coreutils-equivalent repository for AGNOS, in [Cyrius](https://github.com/MacCracken/cyrius). One repo, one CHANGELOG, one toolchain pin — many small static binaries.
+A coreutils-equivalent for AGNOS, written in [Cyrius](https://github.com/MacCracken/cyrius): one repo,
+one CHANGELOG, one toolchain pin — and one static binary that is every utility.
 
-**Status**: pre-release scaffold (v0.1.0, 2026-05-15). **License**: GPL-3.0-only.
+**Status**: released. v1.0.0 froze on 2026-05-18; the current version is in [`VERSION`](VERSION), and
+[`docs/development/state.md`](docs/development/state.md) has the release-by-release record.
+**License**: GPL-3.0-only.
 
 ## What it is
 
-A collection of small POSIX-style command-line utilities — the `cp` / `mv` / `rm` / `mkdir` / `echo` / `wc` / `find` etc. that the rest of an OS expects to be present. Each utility is a separate binary; all share the kriya repo, build pipeline, and release cadence.
+Thirty-eight POSIX-style command-line utilities — `cp`, `mv`, `rm`, `ls`, `find`, `grep`, `sort` and
+the rest that an operating system expects to find — sharing one library of primitives:
 
-Think GNU coreutils, but:
+- **One binary, many names.** `kriya` is a dispatcher that reads `argv[0]`, so a symlink named `cp`
+  *is* the `cp` command, and `kriya cp a b` works as well. This is the BusyBox pattern
+  ([ADR 0001](docs/adr/0001-busybox-dispatcher-vs-n-binaries.md)).
+- **Shared infrastructure** in [`src/lib/`](src/lib/): argument parsing, errno messages, quoting,
+  paths, filesystem walks, process spawning, command-line batching.
+- **Static and zero-dependency.** No libc; a cold start costs about half a millisecond.
+- **POSIX as the floor, GNU where scripts rely on it.** Behaviour is measured against GNU coreutils,
+  findutils and grep, byte for byte, on two GNU versions. Every deliberate difference is an
+  [ADR](docs/adr/).
+- **Written for humans and agents alike.** Every utility answers `--help` and `--help=json`, and
+  `kriya --list` describes them all as JSON
+  ([ADR 0002](docs/adr/0002-option-parsing-humans-and-agents.md)).
+- **Destructive utilities are conservative.** `rm` refuses `/` with no escape hatch
+  ([ADR 0004](docs/adr/0004-rm-refuses-root.md)), `cp` will not replace a file unless told how,
+  and symlinks are not followed on destructive paths unless asked
+  ([ADR 0003](docs/adr/0003-symlink-follow-policy.md)).
 
-- Each utility is small (~50–400 LOC Cyrius)
-- All share infrastructure (path handling, output formatting, errno → message, argument parsing)
-- One repo, not 20 — saves CHANGELOG / CI / docs duplication
-- Static, zero-dep, fast cold start
-- Verbs in the user's hands — every kriya is one verb the user invokes
-
-## What's already covered elsewhere
-
-`kriya` deliberately avoids re-implementing what AGNOS already has a sovereign answer for:
-
-| If you want… | Use… | Not kriya |
-|---|---|---|
-| `cat` (file content viewer) | [owl](https://github.com/MacCracken/owl) | — |
-| `vim` / `nano` / `vi` (text editor) | [cyim](https://github.com/MacCracken/cyim) | — |
-| `git` (version control) | [sit](https://github.com/MacCracken/sit) | — |
-| `htop` / `top` / `btop` (process monitor) | [chakshu](https://github.com/MacCracken/chakshu) | — |
-| `cd`, `pwd`, `alias`, `export` (shell state) | [agnoshi](https://github.com/MacCracken/agnoshi) builtins | — |
-
-These are mature first-party tools. `kriya` fills the gaps between them.
-
-## In scope (planned)
-
-The initial utility set (M1–M4 of the roadmap):
+## Utilities
 
 | Category | Utilities |
 |---|---|
 | File operations | `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `touch`, `ln`, `stat` |
-| Path | `basename`, `dirname`, `realpath`, `readlink`, `which` |
+| Paths | `basename`, `dirname`, `realpath`, `readlink`, `which`, `pwd` |
 | Listing | `ls` |
 | Text streams | `echo`, `printf`, `head`, `tail`, `wc`, `cut`, `tr`, `tee`, `sort`, `uniq`, `nl` |
-| Filtering | `grep`, `find`, `xargs` |
-| Disk info | `df`, `du` |
-| Time/misc | `date`, `sleep`, `yes`, `true`, `false`, `env`, `seq` |
+| Search and exec | `grep`, `find`, `xargs` |
+| Disk usage | `df`, `du` |
+| Miscellaneous | `date`, `sleep`, `yes`, `true`, `false`, `env`, `seq` |
 
-Bigger utilities (`grep`, `find`, `sort` on giant inputs) may split into their own repos later — they start here; if a single one outgrows the "small, single-purpose" framing, it earns extraction. Until then, the per-repo overhead beats the splitting cost.
+The per-utility status table, with what each one implements and what is deferred to which release,
+is in [`state.md`](docs/development/state.md). What comes next is in the
+[roadmap](docs/development/roadmap.md).
 
-## Build
+## What's covered elsewhere
+
+kriya does not re-implement what AGNOS already has a first-party answer for:
+
+| If you want… | Use… |
+|---|---|
+| `cat` (file content viewer) | [owl](https://github.com/MacCracken/owl) |
+| `vim` / `nano` / `vi` (text editor) | [cyim](https://github.com/MacCracken/cyim) |
+| `git` (version control) | [sit](https://github.com/MacCracken/sit) |
+| `htop` / `top` (process monitor) | [chakshu](https://github.com/MacCracken/chakshu) |
+| `cd`, `alias`, `export`, `jobs` (shell state) | [agnoshi](https://github.com/MacCracken/agnoshi) builtins |
+
+`pwd` is both: a shell builtin in agnoshi, and a utility here, as `/bin/pwd` is beside the builtin
+elsewhere.
+
+## Build and test
 
 ```sh
-cyrius deps                                    # resolve stdlib deps
-cyrius build src/main.cyr build/kriya          # compile dispatch entry
-cyrius test                                    # run [build].test + tests/*.tcyr
+cyrius deps                                    # resolve the pinned stdlib into lib/
+cyrius build src/main.cyr build/kriya          # the dispatcher
+cyrius test                                    # unit + POSIX suites (tests/*.tcyr)
+for s in scripts/smoke-*.sh; do sh "$s"; done  # behaviour, compared with the local GNU tools
+sh scripts/fuzz.sh                             # fuzz harnesses under a poisoned allocator
 ```
 
-The `kriya` binary itself is a **dispatcher** — it reads `argv[0]` (or `argv[1]` when invoked directly) and routes to the requested utility. Symlinks `cp`, `mv`, `rm`, etc. → `kriya` make each utility a first-class command. This is the BusyBox pattern; ADR 0001 captures the decision and the alternatives considered.
+The smoke scripts compare kriya's output and exit status with the GNU tools installed on the host,
+so they need GNU coreutils, findutils and grep. `sh scripts/check-oracles.sh` confirms which binary
+each comparison will actually run. The agnos target builds with
+`cyrius build --agnos src/main.cyr build/kriya_agnos`.
+
+To install, put `kriya` on `PATH` and add a symlink per utility:
+
+```sh
+for u in cp mv rm ls find grep sort; do ln -s kriya "$u"; done   # …and the rest
+```
 
 ## Project layout
 
 ```
 kriya/
-├── VERSION
-├── cyrius.cyml
-├── CLAUDE.md, CHANGELOG.md, README.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE
+├── VERSION                  # the version, and the only place it is written
+├── cyrius.cyml              # the toolchain pin and build configuration
+├── CHANGELOG.md             # released changes only
+├── CLAUDE.md                # rules and process for agents working here
 ├── src/
-│   ├── main.cyr                              # dispatcher entrypoint
-│   ├── lib/
-│   │   ├── path.cyr                          # path manipulation primitives
-│   │   ├── exit.cyr                          # exit-code conventions
-│   │   ├── errmsg.cyr                        # errno → human message
-│   │   └── args.cyr                          # POSIX-ish argument parsing
-│   └── cmd/
-│       ├── cp.cyr, mv.cyr, rm.cyr, ...       # one file per utility
-│       └── ...
-├── tests/
-│   ├── kriya.tcyr                            # unit suite
-│   ├── kriya.bcyr                            # benchmark stub
-│   └── kriya.fcyr                            # fuzz stub
+│   ├── main.cyr             # the dispatcher: utility table, argv[0] routing, --list, --help
+│   ├── lib/                 # shared primitives, one module per concern
+│   └── cmd/                 # one file per utility: cmd_<util>(start)
+├── tests/                   # kriya.tcyr (unit), kriya-posix.tcyr, *.fcyr (fuzz), kriya.bcyr (bench)
+├── scripts/                 # smoke-*.sh, difffuzz-*.py, lints, benchmarks, version-bump.sh
 └── docs/
-    ├── adr/, architecture/, guides/, examples/
-    └── development/
-        ├── roadmap.md
-        └── state.md
+    ├── adr/                 # decisions and why
+    ├── architecture/        # non-obvious constraints
+    ├── audit/               # dated audit reports
+    ├── guides/              # how-tos
+    ├── benchmarks.md        # kriya against GNU, measured
+    └── development/         # roadmap.md, state.md, lessons.md
 ```
 
 ## Documentation
 
-- [`CLAUDE.md`](CLAUDE.md) — agent instructions for this repo
-- [`docs/development/roadmap.md`](docs/development/roadmap.md) — utility-by-utility milestone plan
-- [`docs/development/state.md`](docs/development/state.md) — current version, sizes, in-flight utilities
-- [`docs/guides/getting-started.md`](docs/guides/getting-started.md) — build, dispatcher model, adding a new utility
-- [`docs/adr/`](docs/adr/) — architectural decisions
+- [`docs/guides/getting-started.md`](docs/guides/getting-started.md) — building, the dispatcher, and
+  adding a utility
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — open work, by release
+- [`docs/development/state.md`](docs/development/state.md) — the current version, per-utility status
+  and test totals, refreshed every release
+- [`docs/development/lessons.md`](docs/development/lessons.md) — what has cost time before, and the
+  compiler watchlist
+- [`docs/adr/`](docs/adr/) — architecture decision records
+- [`docs/architecture/`](docs/architecture/) — errno messages, signals, the root-deletion defence
+- [`docs/benchmarks.md`](docs/benchmarks.md) — throughput and cold start against GNU
+- [`CHANGELOG.md`](CHANGELOG.md) — what changed in each release
 
 ## Place in the AGNOS ecosystem
 
-`kriya` sits below shells (agnoshi) and above the kernel + stdlib. The shell invokes kriya utilities the same way it invokes any other binary — `cp foo bar` works because there's a `cp` symlink in `$PATH` pointing at the kriya dispatcher.
+kriya sits below the shell (agnoshi) and above the kernel and the Cyrius stdlib. The shell runs a
+kriya utility the way it runs any program: `cp foo bar` works because a `cp` symlink on `$PATH`
+points at the dispatcher.
 
 Standards: [first-party-standards.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-standards.md) · [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md)
 

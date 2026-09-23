@@ -92,7 +92,7 @@ Each symlink is a separate command; the dispatcher reads `argv[0]` to determine 
 - Do not use `break` in while loops with `var` declarations — use flag + `continue`
 - **Match POSIX exit codes** — `0` success, `1` general failure, `2` usage error, plus utility-specific codes per the POSIX manual page; capture deviations in an ADR
 - **No silent file overwrites without `-f`** — `cp`, `mv` prompt or error by default; `-f` overrides
-- **`rm` is the most dangerous utility** — extra care: no recursive operation without `-r`, no force without `-f`, refuses to operate on `/` without `--no-preserve-root` even with `-rf`
+- **`rm` is the most dangerous utility** — extra care: no recursive operation without `-r`, no force without `-f`, and it refuses to operate on `/` even with `-rf` — there is no `--no-preserve-root` escape hatch (ADR 0004)
 - Do not hardcode toolchain version in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the source of truth
 - **If a utility grows past ~400 LOC**, propose splitting it out as its own repo. Don't let one utility dominate the multi-tool
 
@@ -102,14 +102,14 @@ Each symlink is a separate command; the dispatcher reads `argv[0]` to determine 
 
 1. **Roadmap check** — utility is on the roadmap or has an ADR justifying inclusion
 2. **POSIX research** — read the POSIX manual page for the utility being implemented. Capture deviations.
-3. **Scaffold** — `src/cmd/{util}.cyr` with `fn cmd_{util}(argc, argv) -> i32`
-4. **Wire** — add dispatch entry in `src/main.cyr`'s utility table
+3. **Scaffold** — `src/cmd/{util}.cyr` with `fn cmd_{util}(start: i64): i64` and a `{util}_help_declare()` record
+4. **Wire** — `include` the file and add a `_util_add` entry in `src/main.cyr`'s utility table
 5. **Tests** — `tests/kriya.tcyr` gains: happy path + at least one error path + one POSIX-compliance check per option
 6. **Benchmark** — `tests/kriya.bcyr` gains a perf test for the utility's typical workload
 7. **Build + check** — `cyrius build`, `cyrius test`, `cyrius lint`, `cyrius vet`
-8. **Documentation** — `CHANGELOG.md` `[Unreleased] / Added`, `docs/development/state.md` per-utility status table
+8. **Documentation** — at release, the `CHANGELOG.md` entry (released items only) and `docs/development/state.md`'s entry and per-utility status row
 9. **ADR if non-trivial** — option-set decisions, behavior deviations from POSIX, performance trade-offs
-10. **Version sync** — `VERSION`, `cyrius.cyml`, CHANGELOG
+10. **Version sync** — `sh scripts/version-bump.sh X.Y.Z` (`VERSION` is the source; `cyrius.cyml` reads it), then the CHANGELOG
 
 ### Task Sizing
 

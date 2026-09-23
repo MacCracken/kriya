@@ -25,14 +25,12 @@ Two rules hold across the arcs:
 - **An arc is defined by its enabler, not by its utility.** Most open work is blocked on a small
   number of shared capabilities (§ Enabler map). Shipping the enabler *is* the release; the features
   riding on it are the release notes, and one round of test work serves the whole batch.
-- **⚠ Re-check a gate before planning around it — it has been wrong in both directions.** At 1.6.11,
-  two of the three "upstream-gated" sweeps turned out to have been unblocked since June, and a
-  performance item recorded as a crash no longer crashed. Every gate below was re-verified at pin
-  6.6.6.
+- **⚠ Re-check a gate before planning around it — it has been wrong in both directions**
+  ([`lessons.md`](lessons.md)). Every gate below was re-verified at pin 6.6.6.
 
-**M-numbers** (`M0`–`M17`) are historical milestone identifiers that `CHANGELOG.md` entries use.
-Two are still live here — **M10** and **M11**, both under § Gated — and **M15** is the compiler
-watchlist in [`lessons.md`](lessons.md). The rest are shipped or dissolved into the arcs.
+**M-numbers** (`M0`–`M17`) are the milestone identifiers `CHANGELOG.md` entries use. Two are open,
+**M10** and **M11**, both under § Gated, and **M15** is the compiler watchlist in
+[`lessons.md`](lessons.md).
 
 ## Arc sequence
 
@@ -43,16 +41,16 @@ watchlist in [`lessons.md`](lessons.md). The rest are shipped or dissolved into 
 | **1.9.x** | Performance | niyama regex speed (upstream) | **1.9.0** — `wc -c` fast path |
 
 No arc depends on another; they can be resequenced by consumer demand, and the M10 boot-burn
-(§ Gated) is the signal most likely to do it. ⚠ **The repair arc, 1.6.x, closed at 1.6.17**: every
-GNU-parity leftover it held has shipped. What remains is **new capability**, a different kind of
-risk: it changes what kriya *does*, so expect an ADR and GNU-comparison work per item.
+(§ Gated) is the signal most likely to do it. ⚠ Every arc is **new capability**: it changes what
+kriya *does*, so expect an ADR and GNU-comparison work per item.
 
 ---
 
 ## 1.7.x — Traversal, exec, filesystem reporting & syscall portability
 
-**Enabler:** shipped at 1.7.0 — `src/lib/argbatch.cyr`, GNU's command-line accounting, beside the
-spawn helper (`src/lib/spawn.cyr`) everything here builds on.
+Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command-line builder
+(`src/lib/argbatch.cyr`), which counts as GNU's `buildcmd` does
+([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
 
 - **1.7.1 — `find` predicates.** `-prune`, `-depth` (DFS post-order), `-perm`, `-H` (operand-only
   follow — the one [ADR 0003](../adr/0003-symlink-follow-policy.md) mode still refused).
@@ -60,14 +58,14 @@ spawn helper (`src/lib/spawn.cyr`) everything here builds on.
     -type f -exec echo {} + , -print` is a usage error here. Measured at 1.7.0.
   - **`-uid` / `-gid` take `+N` and `-N`** in GNU (more than, less than), as `-mtime` and `-size`
     already do here through `_f_parse_signed_int`; kriya refuses them. And `-size Nw` (two-byte
-    words) is GNU's too. Both measured at 1.6.16, when `-size` learned GNU's rounding.
+    words) is GNU's too. Both measured at 1.6.16.
 - **1.7.2 — Destructive and parallel.** ⛔ `find -delete` **must inherit the
   [ADR-0004](../adr/0004-rm-refuses-root.md) `/` refusal and the
   [ADR-0010](../adr/0010-rm-refuses-a-trailing-slash-symlink-operand.md) trailing-slash-symlink
   refusal** — a second deletion path that does not is a hole in both. `xargs -P N` (job-table
   management) and `-p` (interactive prompt, which must honour ADR 0002's no-hang-on-non-tty rule).
-  - ⚠ **`-P` needs the 1.7.0 batch builder to hand out command lines while others run** — today
-    it is one buffer, reused per batch. `--show-limits` already prints GNU's ceiling for it.
+  - ⚠ **`-P` needs the batch builder to hand out command lines while others run** — it is one
+    buffer, reused per batch. `--show-limits` already prints GNU's ceiling for `-P`.
   - **The prompting and per-directory forms that share `-p`'s tty rule**: `find -ok` / `-okdir`
     (whose child gets `/dev/null` as stdin, since find reads the answers) and `-execdir`, which
     GNU refuses `{}` in the command name for. Not taken today; measured at 1.7.0.
@@ -82,28 +80,27 @@ spawn helper (`src/lib/spawn.cyr`) everything here builds on.
     4 KiB `getdents64` buffer per directory and a joined path per entry and frees neither, so
     `kriya du -s /usr` peaks at **68 MB against GNU's 7.7 MB** with dedup switched off entirely.
     Measure it in the same pass.
-- **1.7.4 — Raw syscalls to stdlib wrappers.** kriya issues **40 distinct raw `syscall(N, …)`
-  numbers across 56 sites** (re-counted at 1.6.12; 1.7.0 added `getrlimit`, 97, for ARG_MAX), in
-  x86-64 Linux numbering; 16 of those sites are
-  the `*at()` family
-  (`openat` 257, `mkdirat` 258, `newfstatat` 262, `unlinkat` 263, `utimensat` 280, …). ⭐ **The
-  wrappers kriya asked for exist**: the stdlib has exposed `sys_openat`, `sys_mkdirat`,
-  `sys_fstatat`, `sys_unlinkat`, `sys_linkat`, `sys_renameat`, `sys_fchmodat`, `sys_fchownat`,
-  `sys_utimensat` and `sys_execveat` since cyrius **6.1.3** — the at-family proposal filed on
-  2026-05-17, archived upstream as done. Converting the sites removes the magic numbers and puts the
-  per-target numbering where it belongs, in one reviewable pass.
+- **1.7.4 — Raw syscalls to stdlib wrappers.** kriya issues **44 distinct raw `syscall(N, …)`
+  numbers across 54 sites** (code lines, counted at 1.7.0), in x86-64 Linux numbering; 17 of those
+  sites are the `*at()` family (`openat` 257, `mkdirat` 258, `newfstatat` 262,
+  `unlinkat` 263, `utimensat` 280, …). ⭐ **The wrappers exist**: the stdlib has exposed
+  `sys_openat`, `sys_mkdirat`, `sys_fstatat`, `sys_unlinkat`, `sys_linkat`, `sys_renameat`,
+  `sys_fchmodat`, `sys_fchownat`, `sys_utimensat` and `sys_execveat` since cyrius **6.1.3**.
+  Converting the sites removes the magic numbers and puts the per-target numbering where it
+  belongs, in one reviewable pass.
   - ⚠ **Measure before scheduling it as a portability fix.** cyrius renumbers raw x86-64 syscalls
     per target (`ESYSXLAT`, `src/backend/aarch64/emit.cyr` in the cyrius repo), and its
     aarch64-Linux arm already maps at least `write` 1→64, `exit` 60→93, `fcntl` 72→25,
     `getdents64` 217→61 and `unlinkat` 263→35; 6.6.6 added `statfs` 137. `openat` and `mkdirat`
     were not checked. A `qemu-aarch64` run of the smoke suite says whether an aarch64 build is
     broken today or only hard to read.
-  - ⚠ **Three of them have no wrapper to convert to.** 1.6.12 added `statx` (332; **291** on
-    aarch64) for `stat %w`/`%W` and `getxattr` (191; **8** on aarch64) for `ls`'s `ca` colour, and
-    1.6.16 `lgetxattr` (192; **9**) for `stat %C`, as `k_statx` / `k_getxattr` / `k_lgetxattr` in
-    `src/lib/sys.cyr`; the 6.6.6 stdlib wraps none of them. Check both
-    against cyrius's aarch64 translation table in the same `qemu-aarch64` run; upstream wrappers are
-    the fix if either is missing. Both already decline with `-38` on agnos.
+  - ⚠ **Four of them have no wrapper to convert to**: `statx` (332; **291** on aarch64) for
+    `stat %w`/`%W`, `getxattr` (191; **8**) for `ls`'s `ca` colour and `lgetxattr` (192; **9**) for
+    `stat %C` — `k_statx` / `k_getxattr` / `k_lgetxattr` in `src/lib/sys.cyr` — and `getrlimit`
+    (97; **163**) for ARG_MAX in `src/lib/argbatch.cyr`. The 6.6.6 stdlib wraps none of them.
+    Check each against cyrius's aarch64 translation table in the same `qemu-aarch64` run; upstream
+    wrappers are the fix where one is missing. The xattr and `statx` arms already decline with
+    `-38` on agnos, and `getrlimit` is not called there.
   - ⚠ **agnos keeps its own arms.** The agnos syscall peer wraps only `sys_fchownat` of this set
     (plus the `stat` family), so kriya's `CYRIUS_TARGET_AGNOS` branches in `src/lib/sys.cyr` and
     `src/lib/fs.cyr` stay; the sweep is the Linux side.
@@ -127,7 +124,7 @@ spawn helper (`src/lib/spawn.cyr`) everything here builds on.
   today — plus positional `%N$s`. `seq -f FORMAT` rides directly on it.
   - ⚠ **`%N$s` is GNU 9.11's, not 9.4's** (measured at 1.6.17: 9.4 says *invalid conversion
     specification*, as kriya does), so the container's GNU cannot be its oracle.
-  - **GNU's `%q`** — the argument shell-quoted — is refused by name since 1.6.17. GNU uses
+  - **GNU's `%q`** — the argument shell-quoted — is refused by name today. GNU uses
     `shell_escape_quoting_style`, which `src/lib/quote.cyr` already renders for `ls`; ⚠ except
     that `ls` never quotes an empty name, and `%q ''` is `''`.
 - **1.8.1 — Sort keys.**
@@ -161,9 +158,8 @@ spawn helper (`src/lib/spawn.cyr`) everything here builds on.
   (`kriya_parse_octal_mode`) and refuses every symbolic one, exit 2, where GNU takes all of them.
   Measured at 1.6.16 with umask 022: `u=rwx,go=` is 700, `a+w` 777, `o-rx` 772, `g+s` 2777, `=` 0,
   and `+t` **1755**. ⚠ That last one is the rule to get right: a clause with no `u`/`g`/`o`/`a`
-  is filtered through the umask, and one that names them is not. The parser's doc comment used to
-  promise this "in M3", a milestone that closed at v0.4.0 without it. ⚠ One parser, then its
-  callers: `mkdir -m` today, and `install -m` / `chmod` if either is ever added.
+  is filtered through the umask, and one that names them is not. ⚠ One parser, then its callers:
+  `mkdir -m` first, and `install -m` / `chmod` if either is ever added.
 
 ---
 
@@ -181,33 +177,29 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
   fixes, and both are needed: seek from the end for seekable input (which also lifts the 16 MiB cap
   for regular files), and a ring buffer for pipes, which cannot seek. (`src/cmd/tail.cyr` points
   here.)
-  - **`head -n -N` wants the same backward scan.** Since 1.6.15 it holds the last N lines in memory
-    for every input, which is right for a pipe and unnecessary for a regular file, whose last N
+  - **`head -n -N` wants the same backward scan.** It holds the last N lines in memory for every
+    input, which is right for a pipe and unnecessary for a regular file, whose last N
     lines can be found from the end the way GNU's `elide_tail_lines_seekable` does. `head -c -N`
     already uses the file size and holds nothing. (`src/cmd/head.cyr` points here.)
   - **And the pipe's ring buffer should serve `head` too.** `_head_elide`'s hold grows by doubling
     and the bump allocator never frees the buffer it outgrew, so a pipe under
     `head -c -30000000` peaks at **64 MB against GNU's 33 MB** (measured at 1.6.15) — about twice
     the held bytes. A ring sized to what is held is the fix, and it is the structure `tail` needs.
-- **1.9.2 — niyama regex speed** — ⚠ upstream Cyrius. ⭐ **The crash is gone**: at pin 6.6.6,
-  `grep 'line.*005'` over the 13.6 MB fixture that used to segfault under `ulimit -v 1048576`
-  completes in constant memory (~8 MB peak) with GNU's count. What remains is speed — **5.2 s
-  against GNU's 33 ms** (~160×), and a bracket pattern 2.7 s against 7 ms. Literal patterns already
-  take the byte scanner (119 ms against 6 ms); a Boyer-Moore path would close that too.
-  ⚠ `smoke-grep.sh` pins only the literal path under the 1 GiB cap — pin the regex path as well, now
-  that it passes.
+- **1.9.2 — niyama regex speed** — ⚠ upstream Cyrius. `grep 'line.*005'` over a 13.6 MB fixture
+  takes **5.2 s against GNU's 33 ms** (~160×), in constant memory, and a bracket pattern 2.7 s
+  against 7 ms. Literal patterns take the byte scanner (119 ms against 6 ms); a Boyer-Moore path
+  would close that too. ⚠ `smoke-grep.sh` pins only the literal path under the 1 GiB memory cap —
+  pin the regex path as well.
 - **1.9.3 — `cp` `copy_file_range(2)`** — accelerated copy with reflink where the filesystem
   supports it. Speculative; check AGNOS kernel availability before committing.
 - **1.9.4 — `find` predicate JIT** — compile the predicate AST to a flat eval loop. ⚠ Not committed;
   revisit only if benchmark pressure rises after the consumer burn.
 - **1.9.5 — Buffered output for the line utilities.** `nl` writes each line in five system calls
-  (number, padding, separator, text, newline): **836 ms against GNU's 42 ms** on 500,000 lines,
-  measured at 1.6.16. That release buffered `nl`'s padding, which had been one call PER BYTE (a
-  20 MB `-w 1000000` run went 7,148 → 3 ms), but the per-line calls remain. `printf` and `stat`
-  share the shape: 1.6.17 gave them `nl`'s padding, now `k_write_fill` in `src/lib/sys.cyr` (a
-  100,000,000-column field went from about 50 s to 84 ms through a pipe, GNU's 98), but `printf`
-  still writes each literal byte of its FORMAT in its own call, and `stat` each literal character
-  of its format. One shared stdout buffer, flushed at exit and on a write error, serves all three.
+  (number, padding, separator, text, newline): **776 ms against GNU's 42 ms** on 500,000 lines,
+  measured at 1.7.0. `printf` writes each literal byte of its FORMAT in its own call, and `stat`
+  each literal character of its format; only their padding is buffered (`k_write_fill` in
+  `src/lib/sys.cyr`). One shared stdout buffer, flushed at exit and on a write error, serves all
+  three.
 
 ---
 
@@ -269,8 +261,8 @@ The only unchecked v1.0 criterion: one downstream consumer green. **Trigger sequ
 ⭐ **Boot-burn is a parallel signal, not a blocking gate.** It will tell us which utilities early
 boot actually hits, whether the [ADR-0003](../adr/0003-symlink-follow-policy.md)/0004/0005 policies
 hold up in practice, whether cold start matters in aggregate over a real init sequence, and **which
-features to promote** based on real script usage — which may resequence every arc above. The agnos
-build itself is done and CI builds it on every push; what is gated is the consumer.
+features to promote** based on real script usage — which may resequence every arc above. CI builds
+the agnos target on every push; what is gated is the consumer.
 
 ### M11 — niyama regex gaps (upstream)
 
@@ -287,15 +279,13 @@ Two regex-surface gaps whose fix belongs to niyama rather than kriya.
 - ⛔ **niyama is LEFTMOST-FIRST, where POSIX and GNU are leftmost-LONGEST.** It is a Pike VM that
   stops at the first alternative to match. Measured at 1.6.14: `grep -oE 'a|ab'` prints `a` where
   GNU prints `ab`, and `grep -oE 'x*|b'` loses the `b` because the empty alternative wins first.
-  Before 1.6.14 it was a **wrong LINE SELECTION** too — `grep -xE 'a|ab'` rejected `ab`, and
-  `grep -wE 'a|ab'` selected nothing — until `-x` and `-w` were built into the pattern
-  (`_gr_compile`), which a Pike VM honours on every alternative. ⚠ What is left is `-o`'s extent
-  inside ONE pattern. BRE has no alternation, and there the gap needs contrived repetition
+  Line selection is right — `-x` and `-w` are built into the pattern (`_gr_compile`), which a Pike
+  VM honours on every alternative — so what is open is `-o`'s extent inside ONE pattern. BRE has no alternation, and there the gap needs contrived repetition
   (`a*\(ab\)*`). `smoke-grep.sh` records the `-oE 'a|ab'` case as a gap, and it flips the day niyama
   is leftmost-longest.
 - **niyama reads the POSIX-literal `*` wrongly and `\(^` as a literal.** `^*` came out "zero or more
   anchors" (every line), and `\(*a\)` was refused. kriya works around it in
-  `icase_bre_literal_stars` since 1.6.14, for `grep`, `nl -b p` and `find -regex`: escaping exactly
+  `icase_bre_literal_stars`, for `grep`, `nl -b p` and `find -regex`: escaping exactly
   those stars, and hoisting a `^` that opens the leading groups. ⚠ A `^` opening a LATER group is
   POSIX's "may be an anchor": GNU makes it one and niyama a literal, so `x\(^a\)` matches `x^a` here
   and nothing under GNU. Closing that upstream deletes the workaround.
@@ -309,7 +299,7 @@ Two regex-surface gaps whose fix belongs to niyama rather than kriya.
 
 `date` local time, and local time in `ls -l` and `stat`'s dates, need tzfile parsing
 (`chrono_tz.cyr`). ⚠ What is gated is the VALUE — every kriya time is UTC — not the spelling:
-`ls -l` has printed POSIX's date form since 1.6.12
+`ls -l` already prints POSIX's date form
 ([ADR 0020](../adr/0020-ls-long-format-dates-are-posix.md)). ⚠ This is
 the **genuine** chrono gate — re-verified absent at pin 6.6.6 — and the trigger
 [ADR 0007](../adr/0007-date-utc-only-at-v0-7-0.md) already names.
@@ -320,19 +310,19 @@ the **genuine** chrono gate — re-verified absent at pin 6.6.6 — and the trig
 
 ### The toolchain pin-bump checklist
 
-⛔ **Run these, do not recall them.** M15d was recorded as "zero instances" for five releases while
-four sat in `find.cyr`, because the status had been established by reading.
+⛔ **Run these, do not recall them** — a status established by reading has been wrong before
+([`lessons.md`](lessons.md)).
 
 1. `cyrius.cyml` `[package].cyrius` — the source of truth, never the CI YAML.
 2. **`cyrius lib sync --full`**, not `cyrius deps`. ⚠ `deps` resolves without re-vendoring, and the
    build then warns that bundled libs are behind the pin. ⚠ `cyrius build` re-copies the modules
    `[deps].stdlib` DECLARES on every build and never the rest, so the undeclared bundled libs drift
-   silently without `--full` — eleven had, by the 1.6.11 bump.
+   silently without `--full`.
 3. `python3 scripts/watchlist-scan.py` — M15a / M15c / M15d / M15i, exits non-zero on a hit.
 4. Re-measure M15a's premise: a two-local probe must still give `|&b - &a|` = 8 / 32 / 144.
 5. Build **both** targets, plus every `tests/*.tcyr` and `tests/*.fcyr` subset (M15e). ⛔ **Read the
    build output**: a `duplicate symbol` / `duplicate fn` warning is a collision with the stdlib (M15i),
-   not noise — 1.6.7 to 1.6.10 shipped one that broke the stdlib `getenv`, unreached only by luck.
+   not noise.
 6. Full smoke suite, both lints, `vet`, fuzz under poison.
 7. **Re-verify every gate in this file** (§ Gated, and each arc item citing upstream) — a pin bump
    is when an upstream blocker quietly disappears.
@@ -380,15 +370,15 @@ four-criteria gate can land as a 1.x.y, but the list below does not move.
 ## Splitting policy
 
 If a single utility crosses **~400 lines of code** or grows a non-trivial dependency surface,
-propose extracting it into its own repo. ⚠ **Fifteen already exceed it** (non-blank, non-comment
-lines at 1.6.12); the largest are `ls` (**2,201**, up from 1,479 at 1.6.11), `grep` (1,124), `cp`
-(1,068) and `find` (956), and none has been split. The threshold is a **prompt to decide**, not an
+propose extracting it into its own repo. ⚠ **Seventeen exceed it** (non-blank, non-comment lines,
+measured at 1.7.0); the largest are `ls` (**2,201**), `grep` (1,475), `cp` (1,332) and `find`
+(1,006), and none has been split. The threshold is a **prompt to decide**, not an
 automatic trigger: the multi-tool is the right home while they share `src/lib/`, and the question is
 whether a given utility has stopped sharing.
 
 ⛔ **Decided 2026-09-22: no split-outs until AGNOS is running fully, and then only as time permits.**
 Until then the threshold is recorded, not acted on — measure the figures at each arc boundary so the
 eventual decision starts from numbers, but do not propose an extraction in a release. `ls` will be
-first in line when it comes: 1.6.12's GNU output surface (dates, `--dired`, tab stops, nine quoting
-styles, the full colour table) made it twice the next utility, and most of that growth is rendering
+first in line when it comes: its GNU output surface (dates, `--dired`, tab stops, nine quoting
+styles, the full colour table) makes it half again the next utility, and most of that is rendering
 `src/lib/` does not share.
