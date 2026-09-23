@@ -29,6 +29,8 @@
 #   -n   prefix each emit with `LINENO:`
 #   -q   quiet: exit on first match, no output
 #   -A N / -B N / -C N   trailing / leading / both context around each match
+#   -NUM same as -C NUM (1.6.14), anywhere on the line and inside clusters:
+#        `-2`, `-in2` — expanded by the shared parser (`kriya_set_digit_option`)
 #   -Z   NUL after each FILE NAME (pairs with `xargs -0`, like `find -print0`)
 #
 # Context rules, each verified against GNU rather than inferred:
@@ -42,14 +44,11 @@
 #   * an explicit -A or -B overrides the -C that set both.
 #   * -c / -l / -L / -q / -o ignore context (GNU ignores rather than erroring).
 #
-# ⚠ GNU's `-NUM` shorthand (`grep -3` for `-C 3`) is NOT implemented. It needs a
-# bare `-DIGIT` to be read as an option rather than an operand — the same shape
-# `seq -5` handles with a dedicated argv walk — and grep goes through the shared
-# parser, where a digit is not a registered short. Deferred, roadmap 1.6.14.
 #   -s   suppress filesystem-error messages
 #   -h / -H   filename header control (auto when 2+ operands or -r)
 #   -o   emit only the matched substring(s) on each matching line
 #   -r / -R   recurse into directory operands; never follow symlinks
+#   --include / --exclude / --exclude-dir   name filters (see `_gr_filter_init`)
 #   -z   NUL-separated input + output
 #
 # Exit codes:
@@ -88,6 +87,7 @@ var _gr_C_idx     = 0;
 var _gr_Z_idx     = 0;
 var _gr_inc_idx   = 0;
 var _gr_exc_idx   = 0;
+var _gr_xd_idx    = 0;
 
 var _gr_read_buf  = 0;
 var _gr_line_buf  = 0;
@@ -138,6 +138,8 @@ fn _gr_init_spec(): i64 {
     _gr_C_idx = flags_add_int(s,  67,  "context",           (0 - 1), "print NUM lines before and after");
     _gr_inc_idx = flags_add_str(s,  0, "include",  0, "admit files matching GLOB (rightmost --include/--exclude wins)");
     _gr_exc_idx = flags_add_str(s,  0, "exclude",  0, "skip files matching GLOB (rightmost --include/--exclude wins)");
+    _gr_xd_idx  = flags_add_str(s,  0, "exclude-dir", 0,
+      "skip directories matching GLOB (under -r the base name; an operand by any /-suffix)");
     _gr_Z_idx = flags_add_bool(s, 90,  "null",              0, "NUL after each file name (pairs with xargs -0)");
     _gr_f_idx = flags_add_str(s,  102, "file",              0, "read patterns from file, one per line");
     _grep_spec = s;
@@ -152,7 +154,7 @@ fn grep_help_declare(): i64 {
     help_begin("grep", "Search files for lines matching a pattern.",
       "grep [OPTIONS] PATTERN [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "PATTERN,FILE");
-    help_operands("PATTERN is an operand only when neither -e nor -f supplies it. BRE by default; -E for ERE, -F for fixed strings. ⚠ Context lines print with `-` where matching lines print `:`, and `--` separates non-adjacent groups. ⚠ -r skips symlinks (ADR 0003). -P is rejected (ADR 0005). GNU's -NUM shorthand is not implemented (roadmap 1.6.14). ⚠ --include/--exclude: the RIGHTMOST matching one wins, and a name matching neither is decided by the FIRST option's type — so `--exclude=X --include=*.c` searches everything while `--include=*.c --exclude=X` searches only .c files. Under -r the glob sees the BASE NAME (a pattern with `/` never matches); for a command-line operand it sees the path as typed and each `/`-suffix. Directories are never filtered.");  #skip-lint
+    help_operands("PATTERN is an operand only when neither -e nor -f supplies it. BRE by default; -E for ERE, -F for fixed strings. ⚠ Context lines print with `-` where matching lines print `:`, and `--` separates non-adjacent groups. ⚠ -r skips symlinks (ADR 0003). -P is rejected (ADR 0005). -NUM is -C NUM. ⚠ --include/--exclude: the RIGHTMOST matching one wins, and a name matching neither is decided by the FIRST option's type — so `--exclude=X --include=*.c` searches everything while `--include=*.c --exclude=X` searches only .c files. Under -r the glob sees the BASE NAME (a pattern with `/` never matches); for a command-line operand it sees the path as typed and each `/`-suffix. They never filter directories; --exclude-dir does, by the same two rules. -x and -w hold for EVERY alternative of an ERE, not only the one niyama tries first.");  #skip-lint
     help_exit(0, "at least one line matched");
     help_exit(1, "no line matched");
     help_exit(2, "an error occurred");
@@ -161,6 +163,7 @@ fn grep_help_declare(): i64 {
     help_example("grep -e a -e b file");
     help_example("grep -C 2 -n panic server.log");
     help_example("grep -r --include=*.c --exclude=*_test.c panic src/");
+    help_example("grep -rn --exclude-dir=.git -2 TODO .");  #skip-lint
     help_example("grep -rlZ TODO src/ | xargs -0 wc -l");  #skip-lint
     return 0;
 }
@@ -254,14 +257,23 @@ var _gr_icase_err = 0;
 
 # --- Engine compile + match --------------------------------------------
 
-# Allocate a 40-byte handle.
+# How a handle's NFA already enforces -x / -w (1.6.14) — see `_gr_compile`.
+enum GrWrap {
+    GR_WRAP_NONE = 0,   # checked after the search, the pre-1.6.14 way
+    GR_WRAP_LINE = 1,   # `^(PAT)$`: a match IS the whole line
+    GR_WRAP_WORD = 2,   # `(^|[^w])(PAT)([^w]|$)`: group 2 is the word
+}
+
+# Allocate a 48-byte handle: +0 kind, +8 nfa, +16 pat, +24 len, +32 fold,
+# +40 GrWrap.
 fn _gr_handle_new(kind, nfa, pat, pat_len, fold): i64 {
-    var h = alloc(40);
+    var h = alloc(48);
     store64(h + 0,  kind);
     store64(h + 8,  nfa);
     store64(h + 16, pat);
     store64(h + 24, pat_len);
     store64(h + 32, fold);
+    store64(h + 40, GR_WRAP_NONE);
     return h;
 }
 
@@ -307,9 +319,66 @@ fn _gr_is_literal(pat, pat_len): i64 {
     return 1;
 }
 
+# A BRE made to match the WHOLE line: `^\(PAT\)$`, with the pattern's own
+# leading `^` and trailing unescaped `$` taken off first — they are what -x
+# already says, and inside `\(` niyama reads a `^` as a LITERAL (GNU reads an
+# anchor), so wrapping them would change the pattern.
+fn _gr_bre_line_wrap(pat, plen, out_len_p): i64 {
+    var b: i64 = 0;
+    var e = plen;
+    if (e > 0) {
+        if (load8(pat) == 94) { b = 1; }
+    }
+    if (e > b) {
+        if (load8(pat + e - 1) == 36) {
+            # Unescaped only: an EVEN run of backslashes before the `$`.
+            var bs: i64 = 0;
+            var q = e - 2;
+            var counting: i64 = 1;
+            while (counting == 1) {
+                if (q < b) { counting = 0; }
+                elif (load8(pat + q) == 92) {
+                    bs = bs + 1;
+                    q = q - 1;
+                } else { counting = 0; }
+            }
+            if ((bs % 2) == 0) { e = e - 1; }
+        }
+    }
+    var inner = e - b;
+    var out = alloc(inner + 8);
+    memcpy(out, "^\\(", 3);
+    memcpy(out + 3, pat + b, inner);
+    memcpy(out + 3 + inner, "\\)$", 3);
+    store8(out + inner + 6, 0);
+    store64(out_len_p, inner + 6);
+    return out;
+}
+
+# `a + b + c` into a fresh NUL-terminated buffer.
+fn _gr_cat3(a, alen, b, blen, c, clen): i64 {
+    var out = alloc(alen + blen + clen + 1);
+    if (alen > 0) { memcpy(out, a, alen); }
+    if (blen > 0) { memcpy(out + alen, b, blen); }
+    if (clen > 0) { memcpy(out + alen + blen, c, clen); }
+    store8(out + alen + blen + clen, 0);
+    return out;
+}
+
 # Compile one pattern under the chosen engine flag set. Returns handle or 0.
 # `engine_flag`: 0=BRE, 1=RE2, 2=fixed. `ignore_case`: 1 if -i.
-fn _gr_compile(pat, engine_flag, ignore_case): i64 {
+#
+# ⛔ -x AND -w ARE BUILT INTO THE PATTERN FOR THE REGEX ENGINES (1.6.14), because
+# checking them after the search was a wrong answer. niyama is LEFTMOST-FIRST —
+# a Pike VM that stops at the first alternative to match — where POSIX and GNU
+# are leftmost-LONGEST. So `grep -xE 'a|ab'` found `a` inside the line `ab`, saw
+# it was not the whole line, and rejected a line GNU selects; `grep -wE 'a|ab'`
+# selected NONE of the three lines GNU selects. `^(PAT)$` and
+# `(^|[^w])(PAT)([^w]|$)` make the constraint part of the match, and a Pike VM
+# explores every alternative until one satisfies it. ⚠ BRE -w keeps the old
+# check: BRE has no alternation to wrap with, and without alternation niyama's
+# choice of extent is the longest in all but contrived repetition patterns.
+fn _gr_compile(pat, engine_flag, ignore_case, word_mode, xline_mode): i64 {
     _gr_icase_err = ICASE_OK;
     var pat_len = strlen(pat);
     # ⛔ Checked on EVERY regex pattern, with or without `-i`. See the note on
@@ -358,44 +427,61 @@ fn _gr_compile(pat, engine_flag, ignore_case): i64 {
         # NOT touch a NAMED CLASS, so `-E -i '[[:upper:]]'` matched upper case
         # only. The bracket expressions are rewritten closed-under-case first,
         # which also supplies the range validation `(?i)` never did.
-        var compile_pat = pat;
         if (ignore_case == 1) {
             var rw_len: i64 = 0;
             var rw = icase_rewrite(pat, pat_len, ICASE_MODE_CLOSED, &rw_len, &_gr_icase_err);
             if (rw == 0) { return 0; }
             pat = rw;
             pat_len = rw_len;
-            var buf = alloc(pat_len + 5);
-            store8(buf + 0, 40);   # (
-            store8(buf + 1, 63);   # ?
-            store8(buf + 2, 105);  # i
-            store8(buf + 3, 41);   # )
-            var k: i64 = 0;
-            while (k < pat_len) {
-                store8(buf + 4 + k, load8(pat + k));
-                k = k + 1;
-            }
-            store8(buf + 4 + pat_len, 0);
-            compile_pat = buf;
         }
+        var wrap = GR_WRAP_NONE;
+        var body = pat;
+        var blen = pat_len;
+        if (xline_mode == 1) {
+            body = _gr_cat3("^(", 2, pat, pat_len, ")$", 2);
+            wrap = GR_WRAP_LINE;
+        } elif (word_mode == 1) {
+            body = _gr_cat3("(^|[^[:alnum:]_])(", 18, pat, pat_len, ")([^[:alnum:]_]|$)", 18);
+            wrap = GR_WRAP_WORD;
+        }
+        blen = strlen(body);
+        # ⚠ The inline flag goes OUTSIDE the wrapper: `(?i)` must lead the pattern.
+        var compile_pat = body;
+        if (ignore_case == 1) { compile_pat = _gr_cat3("(?i)", 4, body, blen, "", 0); }
         var nfa = niyama_re2_compile(compile_pat);
         if (nfa == 0) { return 0; }
-        return _gr_handle_new(GR_ENG_RE2, nfa, compile_pat, strlen(compile_pat), 0);
+        var rh = _gr_handle_new(GR_ENG_RE2, nfa, compile_pat, strlen(compile_pat), 0);
+        store64(rh + 40, wrap);
+        return rh;
     }
     # BRE
     var use_pat = pat;
     var use_len = pat_len;
+    # ⛔ POSIX's literal `*` positions first — `^*`, `\(*a\)` — which niyama gets
+    # wrong. See `icase_bre_literal_stars`.
+    var sl: i64 = 0;
+    use_pat = icase_bre_literal_stars(use_pat, use_len, &sl);
+    use_len = sl;
     var fold = 0;
     if (ignore_case == 1) {
         var fl: i64 = 0;
-        use_pat = icase_rewrite(pat, pat_len, ICASE_MODE_FOLD, &fl, &_gr_icase_err);
+        use_pat = icase_rewrite(use_pat, use_len, ICASE_MODE_FOLD, &fl, &_gr_icase_err);
         if (use_pat == 0) { return 0; }
         use_len = fl;
         fold = 1;
     }
+    var bwrap = GR_WRAP_NONE;
+    if (xline_mode == 1) {
+        var wl: i64 = 0;
+        use_pat = _gr_bre_line_wrap(use_pat, use_len, &wl);
+        use_len = wl;
+        bwrap = GR_WRAP_LINE;
+    }
     var bnfa = niyama_bre_compile(use_pat);
     if (bnfa == 0) { return 0; }
-    return _gr_handle_new(GR_ENG_BRE, bnfa, use_pat, use_len, fold);
+    var bh = _gr_handle_new(GR_ENG_BRE, bnfa, use_pat, use_len, fold);
+    store64(bh + 40, bwrap);
+    return bh;
 }
 
 # Run `handle` against `line` (len bytes). Returns match start offset, or
@@ -465,49 +551,116 @@ fn _gr_is_word_byte(c): i64 {
     return 0;
 }
 
-# Iterate matches across the line. For each match, the caller's check
-# (word/whole-line) decides whether to accept. Returns 1 (line matches),
-# 0 (no acceptable match), and writes the first accepted match's
-# (start, end) into the out-pointers when non-zero. `from_ptr` may be
-# non-zero to continue iteration (used by -o multi-match emit).
+# The first acceptable match of ONE handle that starts at or after `from`: 1
+# with (start, end) in the out-pointers, or 0.
+fn _gr_handle_find(handle, line, len, from, word_mode, xline_mode, ms_ptr, me_ptr): i64 {
+    var wrap = load64(handle + 40);
+    if (wrap == GR_WRAP_LINE) {
+        # The NFA is anchored at both ends: any match is the whole line.
+        if (from > 0) { return 0; }
+        var xe: i64 = 0;
+        if (_gr_search_at(handle, line, len, 0, &xe) < 0) { return 0; }
+        store64(ms_ptr, 0);
+        store64(me_ptr, len);
+        return 1;
+    }
+    if (wrap == GR_WRAP_WORD) {
+        # Group 2 is the word; group 1 consumed the byte before it, so the search
+        # starts one byte early to let a word begin exactly at `from`.
+        var nfa = load64(handle + 8);
+        var sfrom = from;
+        if (sfrom > 0) { sfrom = sfrom - 1; }
+        var looking: i64 = 1;
+        while (looking == 1) {
+            if (sfrom > len) { return 0; }
+            var p = niyama_re2_search_at(nfa, line, len, sfrom);
+            if (p < 0) { return 0; }
+            var gs = niyama_re2_group_start(nfa, 2);
+            var ge = niyama_re2_group_end(nfa, 2);
+            if (gs >= from) {
+                store64(ms_ptr, gs);
+                store64(me_ptr, ge);
+                return 1;
+            }
+            sfrom = p + 1;
+        }
+        return 0;
+    }
+    # Checked after the search: the fixed engine, where every match of a literal
+    # has one length, and BRE -w (see `_gr_compile`).
+    var pos = from;
+    var done: i64 = 0;
+    while (done == 0) {
+        var me: i64 = 0;
+        var ms = _gr_search_at(handle, line, len, pos, &me);
+        if (ms < 0) { done = 1; }
+        else {
+            var ok: i64 = 1;
+            if (word_mode == 1) {
+                if (ms > 0) {
+                    if (_gr_is_word_byte(load8(line + ms - 1)) == 1) { ok = 0; }
+                }
+                if (me < len) {
+                    if (_gr_is_word_byte(load8(line + me)) == 1) { ok = 0; }
+                }
+            }
+            if (xline_mode == 1) {
+                if (ms != 0)    { ok = 0; }
+                if (me != len)  { ok = 0; }
+            }
+            if (ok == 1) {
+                store64(ms_ptr, ms);
+                store64(me_ptr, me);
+                return 1;
+            }
+            # Move past this match start to keep looking for an acceptable one.
+            pos = ms + 1;
+            if (pos > len) { done = 1; }
+        }
+    }
+    return 0;
+}
+
+# Does the line match any pattern at or after `from`? 1 with (start, end), or 0.
+#
+# `longest == 0` answers "does it match" and returns the first handle's match —
+# the line-selection question, which must not pay for the rest. `longest == 1`
+# is `-o`'s question: GNU compiles every `-e` into ONE alternation and takes the
+# leftmost match, the longest on a tie, so `-o -e a -e ab` prints `ab` where
+# asking the handles in order printed `a` (1.6.14).
 fn _gr_check_line(handles, n_handles, line, len, word_mode, xline_mode,
-  match_start_ptr, match_end_ptr, from): i64 {
+  match_start_ptr, match_end_ptr, from, longest): i64 {
+    var found: i64 = 0;
+    var bs: i64 = 0;
+    var be: i64 = 0;
     var h_i: i64 = 0;
     while (h_i < n_handles) {
-        var handle = vec_get(handles, h_i);
-        var pos = from;
-        var done: i64 = 0;
-        while (done == 0) {
-            var me: i64 = 0;
-            var ms: i64 = 0;
-            ms = _gr_search_at(handle, line, len, pos, &me);
-            if (ms < 0) { done = 1; }
-            else {
-                var ok: i64 = 1;
-                if (word_mode == 1) {
-                    if (ms > 0) {
-                        if (_gr_is_word_byte(load8(line + ms - 1)) == 1) { ok = 0; }
-                    }
-                    if (me < len) {
-                        if (_gr_is_word_byte(load8(line + me)) == 1) { ok = 0; }
-                    }
-                }
-                if (xline_mode == 1) {
-                    if (ms != 0)    { ok = 0; }
-                    if (me != len)  { ok = 0; }
-                }
-                if (ok == 1) {
-                    if (match_start_ptr != 0) { store64(match_start_ptr, ms); }
-                    if (match_end_ptr != 0)   { store64(match_end_ptr, me); }
-                    return 1;
-                }
-                # Move past this match start to keep looking for an
-                # acceptable one further along the line.
-                pos = ms + 1;
-                if (pos > len) { done = 1; }
+        var s: i64 = 0;
+        var e: i64 = 0;
+        if (_gr_handle_find(vec_get(handles, h_i), line, len, from, word_mode, xline_mode, &s, &e) == 1) {
+            if (longest == 0) {
+                if (match_start_ptr != 0) { store64(match_start_ptr, s); }
+                if (match_end_ptr != 0)   { store64(match_end_ptr, e); }
+                return 1;
+            }
+            var take: i64 = 0;
+            if (found == 0) { take = 1; }
+            elif (s < bs) { take = 1; }
+            elif (s == bs) {
+                if (e > be) { take = 1; }
+            }
+            if (take == 1) {
+                found = 1;
+                bs = s;
+                be = e;
             }
         }
         h_i = h_i + 1;
+    }
+    if (found == 1) {
+        if (match_start_ptr != 0) { store64(match_start_ptr, bs); }
+        if (match_end_ptr != 0)   { store64(match_end_ptr, be); }
+        return 1;
     }
     return 0;
 }
@@ -597,8 +750,9 @@ var _GR_CTX_SLOT = 32;
 var _GR_CTX_MIN  = 256;
 
 var _gr_ring      = 0;   # slot array
-var _gr_ring_cap  = 0;   # number of slots (= before_ctx)
-var _gr_ring_n    = 0;   # slots currently filled (<= cap)
+var _gr_ring_cap  = 0;   # lines the ring may hold (= before_ctx)
+var _gr_ring_phys = 0;   # slots actually allocated (<= cap), grown on demand
+var _gr_ring_n    = 0;   # slots currently filled (<= phys)
 var _gr_ring_head = 0;   # index of the OLDEST buffered line
 
 # Has anything been emitted yet in this grep run? ⚠ Spans FILES: GNU prints a
@@ -608,15 +762,23 @@ var _gr_ctx_emitted = 0;
 # Last line number emitted for the CURRENT file; 0 = nothing yet.
 var _gr_ctx_last    = 0;
 
+# ⛔ THE SLOT ARRAY GROWS ON DEMAND (1.6.14). It was allocated at full `-B` size
+# up front — `before × 32` bytes — so `grep -C 2147483648` asked for 64 GiB and
+# SEGFAULTED, where GNU prints the file. `-NUM` made that one keystroke away. It
+# now starts at 64 slots and doubles toward the cap as lines arrive, so memory
+# tracks the lines actually buffered and a huge `-B` means "everything so far".
 fn _gr_ring_init(before): i64 {
     _gr_ring_cap  = before;
     _gr_ring_n    = 0;
     _gr_ring_head = 0;
     if (before <= 0) { return 0; }
     if (_gr_ring != 0) { return 0; }
-    _gr_ring = alloc(before * _GR_CTX_SLOT);
+    var first = before;
+    if (first > 64) { first = 64; }
+    _gr_ring = alloc(first * _GR_CTX_SLOT);
+    _gr_ring_phys = first;
     var i: i64 = 0;
-    while (i < before) {
+    while (i < first) {
         store64(_gr_ring + i * _GR_CTX_SLOT, 0);
         store64(_gr_ring + i * _GR_CTX_SLOT + 8, 0);
         i = i + 1;
@@ -624,15 +786,41 @@ fn _gr_ring_init(before): i64 {
     return 0;
 }
 
+# Double the slot array (never past the cap), keeping the lines in order from
+# slot 0 — the ring is FULL when this runs, so it wraps at `phys` exactly.
+fn _gr_ring_grow(): i64 {
+    var nphys = _gr_ring_phys * 2;
+    if (nphys > _gr_ring_cap) { nphys = _gr_ring_cap; }
+    var nr = alloc(nphys * _GR_CTX_SLOT);
+    var i: i64 = 0;
+    while (i < nphys) {
+        var dst = nr + i * _GR_CTX_SLOT;
+        if (i < _gr_ring_n) {
+            memcpy(dst, _gr_ring + ((_gr_ring_head + i) % _gr_ring_phys) * _GR_CTX_SLOT, _GR_CTX_SLOT);
+        } else {
+            store64(dst, 0);
+            store64(dst + 8, 0);
+        }
+        i = i + 1;
+    }
+    _gr_ring = nr;
+    _gr_ring_phys = nphys;
+    _gr_ring_head = 0;
+    return 0;
+}
+
 # Remember `line` as possible leading context, evicting the oldest when full.
 fn _gr_ring_push(line, len, lineno): i64 {
     if (_gr_ring_cap <= 0) { return 0; }
+    if (_gr_ring_n == _gr_ring_phys) {
+        if (_gr_ring_phys < _gr_ring_cap) { _gr_ring_grow(); }
+    }
     var idx = _gr_ring_head;
-    if (_gr_ring_n < _gr_ring_cap) {
-        idx = (_gr_ring_head + _gr_ring_n) % _gr_ring_cap;
+    if (_gr_ring_n < _gr_ring_phys) {
+        idx = (_gr_ring_head + _gr_ring_n) % _gr_ring_phys;
         _gr_ring_n = _gr_ring_n + 1;
     } else {
-        _gr_ring_head = (_gr_ring_head + 1) % _gr_ring_cap;
+        _gr_ring_head = (_gr_ring_head + 1) % _gr_ring_phys;
     }
     var sp = _gr_ring + idx * _GR_CTX_SLOT;
     var cap = load64(sp + 8);
@@ -703,10 +891,22 @@ fn _gr_ctx_gap(first_line, term): i64 {
 #     `--exclude='c.c'` both skip the operand `sub/c.c`. The identical file is
 #     therefore filtered differently depending on how it was found.
 #
-# ⚠ Also measured: directories are exempt entirely (never pruned, always
-# descended — that is `--exclude-dir`, not shipped, roadmap 1.6.14); stdin is
-# never filtered; and an excluded operand that cannot be OPENED still reports
-# its error and exits 2, because filtering happens after the open attempt.
+# ⚠ Also measured: --include/--exclude never prune a DIRECTORY — a directory
+# matching `--exclude` is still descended; that is `--exclude-dir` (1.6.14,
+# below). stdin is never filtered, and an excluded operand that cannot be
+# OPENED still reports its error and exits 2, because filtering happens after
+# the open attempt.
+#
+# ⭐ `--exclude-dir=GLOB` (1.6.14), measured against GNU 3.12 on each point:
+#   * under -r it matches a subdirectory's BASE NAME, whole (`sub` prunes every
+#     `sub` at any depth; `t/sub` never matches, a base name has no `/`);
+#   * for a directory OPERAND it matches the path as typed or any trailing part
+#     after a `/` — `sub` and `keep/sub` both skip `t/keep/sub`, `eep/sub` does
+#     not, and `t/` (trailing slash) is NOT `t`; `*` crosses `/` there;
+#   * an excluded operand is skipped SILENTLY — no "Is a directory" even
+#     without -r — and does not touch the exit status;
+#   * the pattern's own trailing slashes are dropped (`sub/` is `sub`); an empty
+#     pattern excludes nothing; any match excludes (there is no include form).
 enum GrFilterKind {
     GR_FILT_INCLUDE = 1,
     GR_FILT_EXCLUDE = 2,
@@ -715,46 +915,104 @@ var _gr_filt_kind = 0;   # vec of GR_FILT_*
 var _gr_filt_pat  = 0;   # vec of cstr, parallel
 var _gr_filt_n    = 0;
 var _gr_filt_first = 0;  # kind of the FIRST option given; 0 = none given
+var _gr_xdir   = 0;      # vec of cstr: --exclude-dir globs, trailing `/` dropped
+var _gr_xdir_n = 0;
 
-# Collect the two options IN COMMAND-LINE ORDER. ⚠ `kriya_argv_collect` gathers
-# one option name at a time and so loses the interleaving, which rules 1 and 2
-# both depend on — hence a dedicated walk.
+# Does `tok + 2` for `nlen` bytes spell `name`?
+fn _gr_long_is(tok, nlen, name): i64 {
+    if (nlen != strlen(name)) { return 0; }
+    return _seq_bytes_eq(tok + 2, name, nlen);
+}
+
+# Collect the filters IN COMMAND-LINE ORDER. ⚠ `kriya_argv_collect` gathers one
+# option name at a time and so loses the interleaving, which rules 1 and 2 both
+# depend on — hence a dedicated walk.
+# ⛔ OVER THE EXPANDED ARGV, not the raw one (1.6.14). The raw walk read every
+# token that looked like `--exclude=...`, including the VALUE of `-e`: measured,
+# `grep -e --exclude=x x` excluded the file `x` and exited 1 where GNU searches
+# it and matches. The expanded argv knows which tokens are values.
 fn _gr_filter_init(): i64 {
     _gr_filt_kind = vec_new();
     _gr_filt_pat  = vec_new();
     _gr_filt_n    = 0;
     _gr_filt_first = 0;
-    var n = kriya_argv_count();
-    var flat = kriya_argv_flat();
+    _gr_xdir   = vec_new();
+    _gr_xdir_n = 0;
+    var av = kriya_expanded_argv();
+    var n  = kriya_expanded_argc();
+    if (av == 0) { return 0; }
+    var no_more: i64 = 0;
     var i: i64 = 1;
     while (i < n) {
-        var tok = load64(flat + i * 8);
+        var tok  = load64(av + i * 8);
         var tlen = strlen(tok);
-        var kind: i64 = 0;
-        var pat: i64 = 0;
-        if (tlen >= 9) {
-            if (_seq_bytes_eq(tok, "--include", 9) == 1) { kind = GR_FILT_INCLUDE; }
-            if (_seq_bytes_eq(tok, "--exclude", 9) == 1) { kind = GR_FILT_EXCLUDE; }
-        }
-        if (kind != 0) {
-            # ⚠ `--exclude-dir` also starts with `--exclude`; it is a DIFFERENT
-            # option and must not be swallowed here.
-            if (tlen > 9) {
-                if (load8(tok + 9) == 61) { pat = tok + 10; }
-                else { kind = 0; }
-            } else {
-                i = i + 1;
-                if (i < n) { pat = load64(flat + i * 8); }
+        var step: i64 = 1;
+        if (no_more == 0) {
+            if (tlen >= 2) {
+                if (load8(tok) == 45) {
+                    if (load8(tok + 1) == 45) {
+                        if (tlen == 2) { no_more = 1; }
+                        else {
+                            var eq: i64 = 0;
+                            var e: i64 = 2;
+                            while (e < tlen) {
+                                if (eq == 0) { if (load8(tok + e) == 61) { eq = e; } }
+                                e = e + 1;
+                            }
+                            var nlen = tlen - 2;
+                            if (eq > 0) { nlen = eq - 2; }
+                            var kind: i64 = 0;
+                            if (_gr_long_is(tok, nlen, "include") == 1)     { kind = GR_FILT_INCLUDE; }
+                            if (_gr_long_is(tok, nlen, "exclude") == 1)     { kind = GR_FILT_EXCLUDE; }
+                            if (_gr_long_is(tok, nlen, "exclude-dir") == 1) { kind = 3; }
+                            var val: i64 = 0;
+                            if (kind != 0) {
+                                if (eq > 0) { val = tok + eq + 1; }
+                                elif (i + 1 < n) { val = load64(av + (i + 1) * 8); }
+                            }
+                            if (val != 0) {
+                                if (kind == 3) {
+                                    # A copy, so the trailing slashes can go.
+                                    var vl = strlen(val);
+                                    var xv = alloc(vl + 1);
+                                    memcpy(xv, val, vl + 1);
+                                    while (vl > 1) {
+                                        if (load8(xv + vl - 1) == 47) {
+                                            vl = vl - 1;
+                                            store8(xv + vl, 0);
+                                        } else { vl = 0; }
+                                    }
+                                    vec_push(_gr_xdir, xv);
+                                    _gr_xdir_n = _gr_xdir_n + 1;
+                                } else {
+                                    vec_push(_gr_filt_kind, kind);
+                                    vec_push(_gr_filt_pat, val);
+                                    _gr_filt_n = _gr_filt_n + 1;
+                                    if (_gr_filt_first == 0) { _gr_filt_first = kind; }
+                                }
+                            }
+                            if (eq == 0) {
+                                if (kriya_long_type(_grep_spec, tok + 2, nlen) > 0) { step = 2; }
+                            }
+                        }
+                    } else {
+                        # A registered short is its own token, its value the next.
+                        if (kriya_short_type(_grep_spec, load8(tok + 1)) > 0) { step = 2; }
+                    }
+                }
             }
         }
-        if (kind != 0) {
-            if (pat != 0) {
-                vec_push(_gr_filt_kind, kind);
-                vec_push(_gr_filt_pat, pat);
-                _gr_filt_n = _gr_filt_n + 1;
-                if (_gr_filt_first == 0) { _gr_filt_first = kind; }
-            }
-        }
+        i = i + step;
+    }
+    return 0;
+}
+
+# 1 when a directory must be skipped. `whole_path` selects the operand rule
+# (the path as typed and every `/`-suffix) over the -r rule (the base name).
+fn _gr_dir_excluded(path, whole_path): i64 {
+    var i: i64 = 0;
+    while (i < _gr_xdir_n) {
+        if (_gr_filt_hit(vec_get(_gr_xdir, i), path, whole_path) == 1) { return 1; }
         i = i + 1;
     }
     return 0;
@@ -981,7 +1239,7 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                     var ms: i64 = 0;
                     var me: i64 = 0;
                     var matched = _gr_check_line(handles, n_handles, search_buf, line_len,
-                      word_mode, xline_mode, &ms, &me, 0);
+                      word_mode, xline_mode, &ms, &me, 0, 0);
                     if (invert == 1) {
                         if (matched == 1) { matched = 0; } else { matched = 1; }
                     }
@@ -1014,32 +1272,34 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                         } elif (count_mode == 1) {
                             # No emit yet — total flushed at file end.
                         } elif (only_match == 1) {
-                            # -o: emit each match substring on its own line,
-                            # walking the line for additional matches. Note
-                            # the first (ms, me) is already valid.
-                            var op: i64 = 0;
-                            var cur_ms = ms;
-                            var cur_me = me;
-                            var more: i64 = 1;
-                            while (more == 1) {
-                                _gr_emit_prefix(name, show_name, show_lineno, lineno);
-                                # Emit raw bytes (not folded) from line_buf.
-                                if (cur_me > cur_ms) {
-                                    k_write( 1, line_buf + cur_ms, cur_me - cur_ms);
-                                }
-                                k_write( 1, &tb, 1);
-                                # Advance past this match to find the next.
-                                var next_from = cur_me;
-                                if (next_from == cur_ms) { next_from = cur_ms + 1; }
-                                if (next_from > line_len) { more = 0; }
-                                else {
+                            # -o: each match on its own line, walking the line.
+                            # ⛔ AN EMPTY MATCH PRINTS NOTHING (1.6.14). `grep -o 'x*'`
+                            # printed a blank line for every position of every line,
+                            # and `-o '^'` one per line; GNU prints none of them and
+                            # moves one byte on. ⛔ And `-o -v` prints nothing at all:
+                            # an inverted line has no match to show, and kriya was
+                            # printing a blank line for each.
+                            if (invert == 0) {
+                                var from: i64 = 0;
+                                var more: i64 = 1;
+                                while (more == 1) {
                                     var nm: i64 = 0;
                                     var ne: i64 = 0;
-                                    var got = _gr_check_line(handles, n_handles, search_buf,
-                                      line_len, word_mode, xline_mode,
-                                      &nm, &ne, next_from);
-                                    if (got == 1) { cur_ms = nm; cur_me = ne; }
-                                    else { more = 0; }
+                                    if (_gr_check_line(handles, n_handles, search_buf, line_len,
+                                        word_mode, xline_mode, &nm, &ne, from, 1) == 0) {
+                                        more = 0;
+                                    } else {
+                                        if (ne > nm) {
+                                            _gr_emit_prefix(name, show_name, show_lineno, lineno);
+                                            # Raw bytes (not folded) from line_buf.
+                                            k_write( 1, line_buf + nm, ne - nm);
+                                            k_write( 1, &tb, 1);
+                                            from = ne;
+                                        } else {
+                                            from = nm + 1;
+                                        }
+                                        if (from > line_len) { more = 0; }
+                                    }
                                 }
                             }
                         } elif (ctx_active == 1) {
@@ -1049,7 +1309,7 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
                             _gr_ctx_gap(_gr_ring_first_lineno(lineno), term_byte);
                             var ri: i64 = 0;
                             while (ri < _gr_ring_n) {
-                                var sp = _gr_ring + ((_gr_ring_head + ri) % _gr_ring_cap) * _GR_CTX_SLOT;
+                                var sp = _gr_ring + ((_gr_ring_head + ri) % _gr_ring_phys) * _GR_CTX_SLOT;
                                 _gr_emit_prefix2(name, show_name, show_lineno,
                                   load64(sp + 24), 45, null_fname);
                                 var sl = load64(sp + 16);
@@ -1191,9 +1451,13 @@ fn _gr_walk_dir(parent_dirfd, dir_name, dir_path, handles, n_handles, opts, term
                         var r = fs_stat_entry(dir_fd, sub, name, &st, 0);
                         if (r == 0) {
                             if (fs_is_dir(&st) == 1) {
-                                if (_gr_walk_dir(dir_fd, name, sub, handles, n_handles,
-                                    opts, term_byte, suppress) == 1) {
-                                    found_any = 1;
+                                # ⭐ --exclude-dir: the BASE NAME, so a pruned
+                                # directory is never opened at any depth.
+                                if (_gr_dir_excluded(name, 0) == 0) {
+                                    if (_gr_walk_dir(dir_fd, name, sub, handles, n_handles,
+                                        opts, term_byte, suppress) == 1) {
+                                        found_any = 1;
+                                    }
                                 }
                             } elif (fs_is_reg(&st) == 1) {
                                 # M8 mitigation: O_NOFOLLOW (131072) to close
@@ -1233,10 +1497,163 @@ fn _gr_walk_dir(parent_dirfd, dir_name, dir_path, handles, n_handles, opts, term
     return found_any;
 }
 
+# 1 when `pat` (an ERE) has a repetition operator with NOTHING to repeat — `*`,
+# `+`, `?` or `{` first, or right after `(` or `|` — and 2 when one repeats
+# another (`a**`, `a+*`); 0 otherwise. Used only to NAME the rule after niyama
+# has refused the pattern ([ADR 0022](../../docs/adr/0022-grep-refuses-a-repetition-of-nothing.md)).
+fn _gr_ere_repeat_fault(pat): i64 {
+    var n = strlen(pat);
+    var i: i64 = 0;
+    var prev: i64 = 40;             # as if after `(`: the start repeats nothing
+    while (i < n) {
+        var c = load8(pat + i);
+        if (c == 92) {
+            prev = 65;              # an escaped atom
+            i = i + 2;
+        } elif (c == 91) {
+            i = _icase_bracket_end(pat, n, i);
+            prev = 65;
+        } else {
+            var rep: i64 = 0;
+            if (c == 42) { rep = 1; }
+            if (c == 43) { rep = 1; }
+            if (c == 63) { rep = 1; }
+            if (c == 123) { rep = 1; }
+            if (rep == 1) {
+                if (prev == 40) { return 1; }
+                if (prev == 124) { return 1; }
+                if (prev == 42) { return 2; }
+                if (prev == 43) { return 2; }
+                if (prev == 63) { return 2; }
+            }
+            prev = c;
+            if (c == 94) { prev = 40; }     # `^*` repeats nothing too
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# A context length: decimal digits, SATURATING at the i64 maximum rather than
+# wrapping, or -1 when it is not one.
+# ⛔ READ FROM THE TEXT, not from `flags_get_int` (1.6.14). The int parser wraps,
+# so `-C 18446744073709551617` came back as 1 — a silently different context —
+# and an explicit `-C -1` was the flag's own "not supplied" default, silently
+# ignored where GNU exits 2 (`invalid context length argument`). A huge value is
+# GNU's "all of it"; ⚠ GNU 3.12 then HANGS on one at INTMAX_MAX, which kriya
+# does not reproduce.
+fn _gr_ctx_value(v): i64 {
+    if (v == 0) { return 0 - 1; }
+    var l = strlen(v);
+    if (l == 0) { return 0 - 1; }
+    var acc: i64 = 0;
+    var sat: i64 = 0;
+    var i: i64 = 0;
+    while (i < l) {
+        var c = load8(v + i);
+        if (c < 48) { return 0 - 1; }
+        if (c > 57) { return 0 - 1; }
+        if (sat == 0) {
+            # 922337203685477580 × 10 + 7 is the i64 maximum.
+            if (acc > 922337203685477580) { sat = 1; }
+            elif (acc == 922337203685477580) {
+                if ((c - 48) > 7) { sat = 1; }
+            }
+            if (sat == 0) { acc = acc * 10 + (c - 48); }
+        }
+        i = i + 1;
+    }
+    if (sat == 1) { return 9223372036854775807; }
+    return acc;
+}
+
+var _gr_ctx_a = 0;
+var _gr_ctx_b = 0;
+var _gr_ctx_c = 0;
+
+# -A / -B / -C (and `-NUM`, which the parser hands over as `-C NUM`), each the
+# LAST occurrence, from the expanded argv. -1 = not given. 0, or -1 after
+# reporting a bad value.
+fn _gr_ctx_resolve(): i64 {
+    _gr_ctx_a = 0 - 1;
+    _gr_ctx_b = 0 - 1;
+    _gr_ctx_c = 0 - 1;
+    var av = kriya_expanded_argv();
+    var n  = kriya_expanded_argc();
+    if (av == 0) { return 0; }
+    var no_more: i64 = 0;
+    var i: i64 = 1;
+    while (i < n) {
+        var tok  = load64(av + i * 8);
+        var tlen = strlen(tok);
+        var step: i64 = 1;
+        var which: i64 = 0;        # 65 / 66 / 67 = A / B / C
+        var val: i64 = 0;
+        if (no_more == 0) {
+            if (tlen >= 2) {
+                if (load8(tok) == 45) {
+                    if (load8(tok + 1) == 45) {
+                        if (tlen == 2) { no_more = 1; }
+                        else {
+                            var eq: i64 = 0;
+                            var e: i64 = 2;
+                            while (e < tlen) {
+                                if (eq == 0) { if (load8(tok + e) == 61) { eq = e; } }
+                                e = e + 1;
+                            }
+                            var nlen = tlen - 2;
+                            if (eq > 0) { nlen = eq - 2; }
+                            if (_gr_long_is(tok, nlen, "after-context") == 1)  { which = 65; }
+                            if (_gr_long_is(tok, nlen, "before-context") == 1) { which = 66; }
+                            if (_gr_long_is(tok, nlen, "context") == 1)        { which = 67; }
+                            if (which != 0) {
+                                if (eq > 0) { val = tok + eq + 1; }
+                                elif (i + 1 < n) { val = load64(av + (i + 1) * 8); }
+                            }
+                            if (eq == 0) {
+                                if (kriya_long_type(_grep_spec, tok + 2, nlen) > 0) { step = 2; }
+                            }
+                        }
+                    } else {
+                        var c = load8(tok + 1);
+                        if (tlen == 2) {
+                            if (c == 65) { which = 65; }
+                            if (c == 66) { which = 66; }
+                            if (c == 67) { which = 67; }
+                            if (which != 0) {
+                                if (i + 1 < n) { val = load64(av + (i + 1) * 8); }
+                            }
+                        }
+                        if (kriya_short_type(_grep_spec, c) > 0) { step = 2; }
+                    }
+                }
+            }
+        }
+        if (which != 0) {
+            var cv = _gr_ctx_value(val);
+            if (cv < 0) {
+                var shown = val;
+                if (shown == 0) { shown = ""; }
+                report_note("grep", shown, "invalid context length argument");
+                return 0 - 1;
+            }
+            if (which == 65) { _gr_ctx_a = cv; }
+            if (which == 66) { _gr_ctx_b = cv; }
+            if (which == 67) { _gr_ctx_c = cv; }
+        }
+        i = i + step;
+    }
+    return 0;
+}
+
 # --- Entry point --------------------------------------------------------
 
 fn cmd_grep(start: i64): i64 {
     _gr_init_spec();
+    # ⭐ `-NUM` is `-C NUM` (1.6.14): the shared expander rewrites a digit run in
+    # option position, so every later reader — the flag table, the ordered walks
+    # below — sees `-C NUM` and nothing needs a second definition of it.
+    kriya_set_digit_option(67);
     if (kriya_args_parse(_grep_spec, start) != 0) {
         k_write( 2, "kriya grep: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
         return EXIT_USAGE;
@@ -1328,17 +1745,26 @@ fn cmd_grep(start: i64): i64 {
     var np = vec_len(patterns);
     while (pi < np) {
         var p = vec_get(patterns, pi);
-        var h = _gr_compile(p, engine, ignore_case);
+        var h = _gr_compile(p, engine, ignore_case, word_mode, xline_mode);
         if (h == 0) {
             # ⚠ Name the rule that was broken. "bad pattern" alone sent readers
             # looking for a typo when the real answer was a range GNU also
             # refuses, or a construct niyama does not implement.
+            var rf: i64 = 0;
+            if (engine == GR_ENG_RE2) { rf = _gr_ere_repeat_fault(p); }
             if (_gr_icase_err == ICASE_E_RANGE) {
                 k_write( 2, "kriya grep: error: invalid range end in: ", 41);
             } elif (_gr_icase_err == ICASE_E_EQUIV) {
                 k_write( 2, "kriya grep: error: niyama implements no [=c=] / [.c.] in: ", 58);
             } elif (_gr_icase_err == ICASE_E_BRACKET) {
                 k_write( 2, "kriya grep: error: unterminated [ in: ", 38);
+            } elif (rf == 1) {
+                # ⭐ ADR 0022: undefined in POSIX; GNU warns and DROPS the operator.
+                k_write( 2, "kriya grep: error: a repetition operator repeats nothing ", 57);
+                k_write( 2, "(undefined in POSIX; write \\* for a literal *) in: ", 51);
+            } elif (rf == 2) {
+                k_write( 2, "kriya grep: error: a repetition operator repeats a repetition ", 62);
+                k_write( 2, "(undefined in POSIX) in: ", 25);
             } else {
                 k_write( 2, "kriya grep: error: bad pattern: ", 32);
             }
@@ -1385,9 +1811,17 @@ fn cmd_grep(start: i64): i64 {
     #   -h forces off; -H forces on; otherwise on when (n_files >= 2 OR -r/-R).
     var show_name: i64 = 0;
     if (n_files >= 2) { show_name = 1; }
-    if (rec_mode == 1) { show_name = 1; }
-    if (name_force == 1) { show_name = 1; }
-    if (name_no == 1)    { show_name = 0; }
+    # ⛔ -r ALONE DOES NOT NAME A LONE FILE OPERAND (1.6.14). With one operand GNU
+    # names what it finds INSIDE a directory and nothing else: `grep -r hit f`
+    # prints `hit`, `grep -rc hit f` prints `1`, and kriya prefixed both with
+    # `f:`. So under -r with one operand the prefix is switched on for the walk
+    # only (`rec_auto`), and -H / -h still decide outright.
+    var rec_auto: i64 = 0;
+    if (rec_mode == 1) {
+        if (n_files < 2) { rec_auto = 1; }
+    }
+    if (name_force == 1) { show_name = 1; rec_auto = 0; }
+    if (name_no == 1)    { show_name = 0; rec_auto = 0; }
     if (list_match == 1) { show_name = 1; }
     if (list_nomatch == 1) { show_name = 1; }
 
@@ -1412,9 +1846,10 @@ fn cmd_grep(start: i64): i64 {
     # ⚠ The spec default is (0 - 1), i.e. "not supplied" — distinct from an
     # explicit 0, which still activates the `--` separator. A plain 0 default
     # could not tell `grep -C 0` from `grep`.
-    var c_val = flags_get_int(_grep_spec, _gr_C_idx);
-    var b_val = flags_get_int(_grep_spec, _gr_B_idx);
-    var a_val = flags_get_int(_grep_spec, _gr_A_idx);
+    if (_gr_ctx_resolve() != 0) { return EXIT_USAGE; }
+    var c_val = _gr_ctx_c;
+    var b_val = _gr_ctx_b;
+    var a_val = _gr_ctx_a;
     if (c_val >= 0) {
         ctx_active = 1;
         before_ctx = c_val;
@@ -1478,13 +1913,19 @@ fn cmd_grep(start: i64): i64 {
                     _gr_report(name, 0 - lr, suppress);
                     any_failed = 1;
                 } elif (fs_is_dir(&st) == 1) {
-                    if (rec_mode == 1) {
+                    # ⭐ --exclude-dir on an OPERAND: the path as typed and every
+                    # `/`-suffix, skipped silently, -r or not (1.6.14).
+                    if (_gr_dir_excluded(name, 1) == 1) {
+                        var xskipped: i64 = 0;
+                    } elif (rec_mode == 1) {
                         # Top level: AT_FDCWD + the operand. A symlinked operand
                         # never reaches here — the lstat above classifies it as
                         # a non-directory.
+                        if (rec_auto == 1) { store64(opts + 48, 1); }
                         if (_gr_walk_dir(0 - 100, name, name, handles, n_handles, opts, term_byte, suppress) == 1) {
                             any_match = 1;
                         }
+                        store64(opts + 48, show_name);
                     } else {
                         if (suppress == 0) {
                             k_write( 2, "kriya grep: ", 12);

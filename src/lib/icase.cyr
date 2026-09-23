@@ -649,3 +649,186 @@ fn icase_scan_unsupported(pat, plen): i64 {
     }
     return ICASE_OK;
 }
+
+# The index just past the bracket expression opening at `i` (`pat[i]` is `[`),
+# or `plen` when it is unterminated. `]` first (after an optional `^`) is a
+# member, and `[:class:]` / `[=c=]` / `[.c.]` are skipped whole so their own `]`
+# is not read as the close — the same walk `icase_scan_unsupported` makes.
+fn _icase_bracket_end(pat, plen, i): i64 {
+    var p = i + 1;
+    if (p < plen) {
+        if (load8(pat + p) == 94) { p = p + 1; }
+    }
+    if (p < plen) {
+        if (load8(pat + p) == 93) { p = p + 1; }
+    }
+    var inb: i64 = 1;
+    while (inb == 1) {
+        if (p >= plen) {
+            inb = 0;
+        } else {
+            var c = load8(pat + p);
+            if (c == 93) {
+                p = p + 1;
+                inb = 0;
+            } else {
+                var skipped: i64 = 0;
+                if (c == 91) {
+                    if (p + 1 < plen) {
+                        var d = load8(pat + p + 1);
+                        var inner: i64 = 0;
+                        if (d == 58) { inner = 1; }
+                        if (d == 61) { inner = 1; }
+                        if (d == 46) { inner = 1; }
+                        if (inner == 1) {
+                            var e = p + 2;
+                            var found: i64 = 0;
+                            while (found == 0) {
+                                if (e + 1 >= plen) {
+                                    found = 1;
+                                    e = plen;
+                                } else {
+                                    if (load8(pat + e) == d) {
+                                        if (load8(pat + e + 1) == 93) { found = 1; }
+                                    }
+                                    if (found == 0) { e = e + 1; }
+                                }
+                            }
+                            p = e + 2;
+                            if (p > plen) { p = plen; }
+                            skipped = 1;
+                        }
+                    }
+                }
+                if (skipped == 0) { p = p + 1; }
+            }
+        }
+    }
+    return p;
+}
+
+# ⛔ A POSIX BRE `*` IS A LITERAL as the first character of the whole pattern or
+# of a `\(` subexpression — after an initial `^`, if any — and niyama honours
+# only the first of those (1.6.14). Measured against GNU 3.11 and 3.12:
+#
+#     pattern     GNU                     niyama before
+#     ^*          lines starting with *   EVERY line ("zero or more anchors")
+#     ^*a         *a                      *a and xa
+#     \(^*a\)     *a                      *a and xa
+#     \(*a\)      *a                      refused (bad pattern)
+#
+# Three of those are silent wrong answers, and they reach every BRE niyama
+# compiles for kriya: `grep`, `nl -b pBRE` (`nl -b 'p^*'` numbered every line)
+# and `find -regex`. The fix hands niyama `\*` in exactly those positions — a
+# literal `*` anywhere — and changes nothing else. ⚠ Bracket expressions are
+# copied whole (`[*]`, `[^*]`, `[]*]` are not positions), and every `\X` pair is
+# copied as a pair. ⚠ niyama is the right home for this, and the day it treats
+# the positions as POSIX says, this rewrite goes (roadmap M11).
+#
+# ⚠ A `^` AFTER `\(` IS POSIX'S "MAY BE AN ANCHOR", and the two engines chose
+# differently: GNU an anchor, niyama a literal. At the very START of a pattern
+# the choice cannot matter — `\(\(^X\)\)` and `^\(\(X\)\)` are the same match
+# — so a `^` opening the leading groups is HOISTED in front of them, where
+# niyama reads the anchor GNU does. A `^` opening any later group is left alone
+# (niyama's literal, and a `*` after it repeats that literal): matching GNU
+# there needs the anchor inside the group, which only niyama can supply.
+#
+# Returns a fresh copy (the input is never modified), its length in
+# `*out_len_p`.
+fn icase_bre_literal_stars(pat, plen, out_len_p): i64 {
+    var out = alloc(plen * 2 + 2);
+    var n: i64 = 0;
+    var i: i64 = 0;
+    # Leading `\(` groups, and whether a `^` opens the innermost of them.
+    var g: i64 = 0;
+    var scanning: i64 = 1;
+    while (scanning == 1) {
+        if (i + 1 < plen) {
+            if (load8(pat + i) == 92) {
+                if (load8(pat + i + 1) == 40) {
+                    g = g + 1;
+                    i = i + 2;
+                } else { scanning = 0; }
+            } else { scanning = 0; }
+        } else { scanning = 0; }
+    }
+    var lead_caret: i64 = 0;
+    if (i < plen) {
+        if (load8(pat + i) == 94) { lead_caret = 1; }
+    }
+    if (lead_caret == 1) { store8(out + n, 94); n = n + 1; }
+    var k: i64 = 0;
+    while (k < g) {
+        store8(out + n, 92);
+        store8(out + n + 1, 40);
+        n = n + 2;
+        k = k + 1;
+    }
+    if (lead_caret == 1) { i = i + 1; }
+    # The byte now at `i` is the first of the pattern (after any hoisted `^`),
+    # or of the innermost leading group: a `*` there is a literal.
+    var at_start: i64 = 1;
+    # ⚠ Only the very start may take a `^` before its literal `*` (`^*`); the
+    # hoisted form has already spent it.
+    var caret_ok: i64 = 1;
+    if (g > 0) { caret_ok = 0; }
+    if (lead_caret == 1) { caret_ok = 0; }
+    while (i < plen) {
+        var c = load8(pat + i);
+        var consumed: i64 = 0;
+        if (at_start == 1) {
+            at_start = 0;
+            if (c == 94) {
+                if (caret_ok == 1) {
+                    store8(out + n, 94);            # the optional `^`
+                    n = n + 1;
+                    i = i + 1;
+                    consumed = 1;
+                    if (i < plen) {
+                        if (load8(pat + i) == 42) {  # `^*`
+                            store8(out + n, 92);
+                            store8(out + n + 1, 42);
+                            n = n + 2;
+                            i = i + 1;
+                        }
+                    }
+                }
+            } elif (c == 42) {                      # a leading `*`
+                store8(out + n, 92);
+                store8(out + n + 1, 42);
+                n = n + 2;
+                i = i + 1;
+                consumed = 1;
+            }
+            caret_ok = 0;
+        }
+        if (consumed == 0) {
+            if (c == 92) {
+                store8(out + n, 92);
+                n = n + 1;
+                i = i + 1;
+                if (i < plen) {
+                    var d = load8(pat + i);
+                    store8(out + n, d);
+                    n = n + 1;
+                    i = i + 1;
+                    if (d == 40) { at_start = 1; }  # `\(` opens a subexpression
+                }
+            } elif (c == 91) {
+                var e = _icase_bracket_end(pat, plen, i);
+                while (i < e) {
+                    store8(out + n, load8(pat + i));
+                    n = n + 1;
+                    i = i + 1;
+                }
+            } else {
+                store8(out + n, c);
+                n = n + 1;
+                i = i + 1;
+            }
+        }
+    }
+    store8(out + n, 0);
+    store64(out_len_p, n);
+    return out;
+}

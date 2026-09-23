@@ -6,6 +6,139 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.14] - 2026-09-22 — `grep`: `-NUM`, `--exclude-dir`, and the wrong answers under them
+
+The 1.6.14 slot's four `grep` items, each measured against GNU 3.12 (this box) and 3.11 (CI's)
+before anything was written. Measuring them found **four silent wrong answers** the slot did not
+name — `-x` / `-w` with ERE alternation, BRE `^*` in three utilities, `-e`'s value read as an option,
+and `-o -v` — plus a **segfault** that `-NUM` would have put one keystroke away.
+
+### Added — `grep -NUM`, through the shared parser
+
+`grep -3` is `-C 3`. It works anywhere on the line (`grep pat f -2`) and inside clusters (`-in2`).
+Digits accumulate within a run: `-12` is 12. A new run restarts it: `-1 -2` is 2, and so is
+`-1i2`. `-A` and `-B` still override it in either order, and a `-2` after `-e` is still a pattern.
+All 24 forms match GNU.
+
+The shared expander in `src/lib/args.cyr` rewrites the digit run to `-C NUM` for a utility that
+registers a digit option (`kriya_set_digit_option`), so the flag table and every ordered walk after
+it see the same `-C`. That is the roadmap's condition: no second definition inside `grep`.
+`seq`'s negative-number test is lifted beside it as `kriya_token_is_dashdigit`: one recogniser, two
+meanings.
+
+### Added — `grep --exclude-dir=GLOB`
+
+Measured point by point against GNU 3.12:
+- **Under `-r`**, the glob must match a subdirectory's whole base name. `sub` prunes every `sub` at
+  any depth, and `t/sub` never matches, since a base name has no `/`.
+- **For a directory operand**, it matches the path as typed or any trailing part after a `/`. `sub`
+  and `keep/sub` skip `t/keep/sub`; `eep/sub` does not. `t/` is not `t`, and `*` crosses `/` here.
+- An excluded operand is skipped **silently**, even without `-r` (no "Is a directory"), and leaves
+  the exit status alone.
+- The pattern's own trailing `/` is dropped. `--exclude` never prunes a directory.
+
+All 34 cases match GNU.
+
+### Fixed — ⛔ `-x` and `-w` checked only the alternative niyama tried first
+
+niyama is **leftmost-first**: a Pike VM that stops at the first alternative to match. POSIX and GNU
+are leftmost-longest. `grep` checked `-x` and `-w` against that one match after the search. So
+`grep -xE 'a|ab'` found `a` inside the line `ab`, saw it was not the whole line, and **rejected a line
+GNU selects**. `grep -wE 'a|ab'` selected **none** of the three lines GNU selects, and `-cxE` counted
+0 where GNU counts 1. These are silent wrong answers, with an exit status to match.
+
+`-x` now compiles as `^(PAT)$` and ERE `-w` as `(^|[^[:alnum:]_])(PAT)([^[:alnum:]_]|$)`. A Pike VM
+explores every alternative until one satisfies the constraint. A BRE under `-x` takes the same
+wrapper, with its own `^` and `$` taken off first. ⚠ **What is left is `-o`'s extent inside one
+pattern:** `-oE 'a|ab'` prints `a` where GNU prints `ab`. Line selection no longer depends on it;
+recorded as a gap in `smoke-grep.sh` and under roadmap M11.
+
+⚠ Timing over 500,000 lines: `-cxE 'line 1|line 12'` goes 2,085 → 1,340 ms, since the anchored form
+gives up early, and `-cwE 'li(ne|n)'` goes 585 → 737 ms, the price of trying every alternative.
+Plain ERE and fixed-string searches are unchanged (1,349 → 1,354 ms, 52 → 57 ms).
+
+### Fixed — ⛔ a POSIX-literal `*` in a BRE, in `grep`, `nl -b p` and `find -regex`
+
+POSIX defines a `*` first in a BRE, or first in a `\(` group (after an initial `^`), as a literal.
+niyama honours only the very first case:
+
+| pattern | GNU | kriya before |
+|---|---|---|
+| `^*` | lines starting with `*` | **every line** ("zero or more anchors") |
+| `^*a` | `*a` | `*a` and `xa` |
+| `\(^*a\)` | `*a` | `*a` and `xa` |
+| `\(*a\)` | `*a` | refused |
+
+`nl -b 'p^*'` numbered every line, and `find -regex 'fr/\(*a\)'` was refused. The shared
+`icase_bre_literal_stars` escapes exactly those stars before niyama sees them, at all three compile
+sites. ⚠ A `^` after `\(` is POSIX's "may be an anchor": GNU picks anchor, niyama literal. A `^`
+opening the leading groups is hoisted in front of them, where both agree. One in a later group
+(`x\(^a\)`) is filed under M11.
+
+### Fixed — ⛔ `grep -o`
+
+- **An empty match printed a blank line.** `-o 'x*'` printed one per position of every line, and
+  `-o '^'` or `-o ''` one per line. GNU prints nothing and moves one byte on.
+- **`-o -v` printed a blank line per inverted line.** An inverted line has no match to show, and GNU
+  prints nothing.
+- **Several `-e` patterns took the first pattern's match.** GNU takes the leftmost match across all
+  of them, the longest on a tie: `-o -e a -e ab` printed `a` where GNU prints `ab`, and
+  `-o -e 'x*' -e a` printed none of the `a`s.
+
+### Fixed — ⛔ `grep -C 2147483648` segfaulted, and `-C -1` was ignored
+
+The context ring was allocated at full `-B` size up front, so 2³¹ asked for 64 GiB. It now grows as
+lines arrive. Context values are read from their text, and three things change:
+- A value past i64 means "everything", rather than wrapping to a small number:
+  `-C 18446744073709551617` came back as 1.
+- ⚠ GNU 3.12 **hangs** from about INTMAX_MAX; kriya does not reproduce that.
+- `-C -1`, which was the flag's own "not given" default and silently ignored, is refused with GNU's
+  words: `kriya grep: -1: invalid context length argument`, exit 2.
+
+### Fixed — ⛔ the name filters read `-e`'s value as an option
+
+`_gr_filter_init` walked the raw argv, so `grep -e --exclude=x x` excluded the file `x` and exited 1
+where GNU searches it. It walks the expanded argv now, which knows a value when it sees one.
+
+### Fixed — `-r` with one operand names only what it finds in a directory
+
+`grep -r hit f` prints `hit` and `grep -rc hit f` prints `1` under GNU. kriya prefixed both with
+`f:`. `-H` and `-h` still decide outright.
+
+### Documentation
+
+- **[ADR 0022](docs/adr/0022-grep-refuses-a-repetition-of-nothing.md)** — `grep -E` refuses a
+  repetition operator that repeats nothing. ⛔ The roadmap said GNU treats a leading `*` in an ERE as
+  a literal. **Measured, GNU 3.11 and 3.12 warn and DROP it**: `grep -E '*a'` is `grep a` plus a
+  warning. kriya keeps its refusal, now naming the rule and pointing at `\*`. Stacked operators
+  (`a**`, `a++`) are refused too; GNU accepts those silently, and in PCRE `a++` means something else
+  again.
+- **Roadmap**: 1.6.14 retired, next up 1.6.15. The shipped `-DIGIT` enabler row is removed.
+- **M11 gains the two niyama residuals**: the leftmost-first extent under `-o`, and `\(^` in a
+  non-leading group.
+- **1.6.16 gains `grep -r` with no operand**, which GNU treats as `.` and kriya refuses.
+- The `grep` and `find` rows of `state.md` no longer list shipped options as deferred.
+
+### Tests
+
+- `smoke-grep.sh` **213 → 328**: every item above against GNU, the context-overflow answers asserted
+  as their finite equivalents where GNU hangs, and the ADR 0022 refusals as kriya's own answer.
+  ⭐ **Run against the 1.6.13 binary, the new assertions fail 74 times.**
+- `kriya.tcyr` 517 → 541: `kriya_token_is_dashdigit` and the literal-star rewrite, including the
+  hoist and the later-group case it leaves alone.
+- `smoke-help-json.sh` 1,827 → 1,830 with `--exclude-dir`.
+
+### Release totals
+
+**6,160 smoke cases across 41 scripts** (from 6,042), **541 unit**, 18 POSIX; fuzz green under poison
+(1,127 / 201 / 201); `cyrius lint`, `lint-deferrals.sh`, `lint-help-schema.sh` and
+`check-oracles.sh` clean; `watchlist-scan.py` clean (189 declarations; M15a 0, M15c the 3 known,
+M15d 0, M15i 0); `vet` 56 deps; both targets build warning-free. ⭐ Verified in the `ubuntu:24.04`
+container (coreutils **9.4**, grep **3.11**) as a non-root user: 39 of 41 scripts green, **3,670**
+cases. The two exceptions need `python3`, which the image lacks.
+
+Binary 1,191,096 → **1,208,064** bytes on host (+16,968), 1,186,816 → **1,203,784** on agnos (+16,968).
+
 ## [1.6.13] - 2026-09-22 — `cp` completeness: unreadable destinations, `-f`, `-a`, and the order options arrive in
 
 The 1.6.13 roadmap slot: three `cp` gaps, each measured against GNU first. Measuring them turned up

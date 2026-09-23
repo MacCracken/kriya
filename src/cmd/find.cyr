@@ -202,7 +202,10 @@ fn _f_regex_compile(pat, fold): i64 {
         }
         return niyama_re2_compile(pat);
     }
-    return niyama_bre_compile(pat);
+    # ⛔ The POSIX-literal `*` positions niyama gets wrong (1.6.14): `fr/\(*a\)`
+    # was refused where GNU matches `fr/*a`. See `icase_bre_literal_stars`.
+    var sl: i64 = 0;
+    return niyama_bre_compile(icase_bre_literal_stars(pat, strlen(pat), &sl));
 }
 
 # --- fnmatch-style glob -----------------------------------------------

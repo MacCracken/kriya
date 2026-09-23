@@ -454,6 +454,16 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   `--`, listed with `-a`, and printed something else — and the difference was recorded as a quoting
   rule, shipped in every diagnostic until 1.6.12. The 1.6.12 fuzz made the same mistake first, which
   is how it was recognised.
+- ⛔ **Measure the behaviour a roadmap entry ASSERTS before deciding against it.** 1.6.14's entry
+  said GNU reads a leading ERE `*` as a literal and asked whether to match it. GNU 3.11 and 3.12
+  do neither: they warn and DROP the operator. The decision (ADR 0022) was about a behaviour
+  that does not exist until it was measured. It is the comment-is-a-claim rule applied to the
+  roadmap.
+- ⛔ **A check made after the search inherits the engine's choice of match.** `grep -x` and `-w`
+  asked "is THIS match the whole line / a word" of the one match niyama returned, and niyama is
+  leftmost-first. So a line where a LATER alternative qualified was rejected, silently
+  (`-xE 'a|ab'` on `ab`). A constraint the engine must satisfy belongs IN the pattern (`^(…)$`),
+  where every alternative is tried against it.
 - **A per-byte table cannot see a whole-name rule.** `{` and `}` are bare anywhere in a word and
   quoted when they ARE the word; a table measured byte by byte at two positions records them as bare.
   One-byte names are a fuzz stratum of their own.

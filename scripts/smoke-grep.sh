@@ -532,6 +532,159 @@ compare 'plain [[:upper:]] control'  "$(cat icase_mix)" "'[[:upper:]]' icase_mix
 compare 'plain [[:lower:]] control'  "$(cat icase_mix)" "'[[:lower:]]' icase_mix"
 compare 'plain [A-C] control'        "$(cat icase_mix)" "'[A-C]' icase_mix"
 
+# --- 1.6.14: -NUM, --exclude-dir, and what measuring them found -------------
+#
+# ⭐ EVERY CASE ASKS GNU, with stdin closed: a case that lost its file operand to
+# a misparse would otherwise sit reading the terminal. `g14` compares stdout and
+# the exit status; stderr is dropped, since GNU's frame is `grep:` and kriya's
+# `kriya grep:`.
+g14() {   # g14 <label> <args...>
+    _l=$1; shift
+    _grc=0; _g=$(cd g14 && LC_ALL=C grep "$@" < /dev/null 2>/dev/null | sort) || _grc=$?
+    _krc=0; _k=$(cd g14 && LC_ALL=C "$BIN" grep "$@" < /dev/null 2>/dev/null | sort) || _krc=$?
+    expect_eq "1.6.14: $_l" "$_grc|$_g" "$_krc|$_k"
+}
+mkdir -p g14/t/sub/deep g14/t/keep/sub g14/t/.git g14/t/sub2
+for _p in t/a t/sub/b t/sub/deep/c t/keep/d t/keep/sub/e t/.git/g t/sub2/h; do
+    printf 'hit\n' > "g14/$_p"
+done
+seq 1 30 | sed 's/^/line /' > g14/f
+
+# ⛔ `-NUM` IS `-C NUM`, and it was a usage error. The shared parser expands it
+# (`kriya_set_digit_option`): digits accumulate within a run, a new run
+# restarts, it permutes like any option, and -A / -B still override it.
+for _o in "-2" "-12" "-0" "-21" "-2i" "-i2" "-in2" "-n2" "-2n" "-1i2" "-2c"; do
+    g14 "grep $_o" $_o 'line 15' f
+done
+g14 "-1 -2: the later run wins"       -1 -2 'line 15' f
+g14 "-2 -1"                           -2 -1 'line 15' f
+g14 "-2 -A 0: -A overrides"           -2 -A 0 'line 15' f
+g14 "-A 0 -2: in either order"        -A 0 -2 'line 15' f
+g14 "-C 1 -3: last of -C/-NUM wins"   -C 1 -3 'line 15' f
+g14 "-3 -C 1"                         -3 -C 1 'line 15' f
+g14 "-1e: the e still takes a value"  -1e 'line 15' f
+g14 "-e -2: a value, not an option"   -e -2 f
+g14 "-- -2: an operand"               -- -2 f
+g14 "after the operands"              'line 15' f -2
+g14 "leading zeros"                   -0000000000000000000000002 'line 15' f
+
+# ⛔ A HUGE CONTEXT SEGFAULTED. The ring was sized to -B up front, so
+# `-C 2147483648` asked for 64 GiB. ⚠ GNU 3.12 HANGS from about INTMAX_MAX, so
+# past that the answer is asserted as the equivalent finite request.
+g14 "-C 2147483648 (was a segfault)"  -C 2147483648 'line 15' f
+g14 "-2147483648"                     -2147483648 'line 15' f
+expect_eq "1.6.14: -C past i64 is everything, not a wrap" \
+  "$(cd g14 && LC_ALL=C grep -C 1000 'line 15' f)" \
+  "$(cd g14 && "$BIN" grep -C 18446744073709551617 'line 15' f < /dev/null)"
+expect_eq "1.6.14: -B past i64 likewise" \
+  "$(cd g14 && LC_ALL=C grep -B 1000 'line 15' f)" \
+  "$(cd g14 && "$BIN" grep -B 99999999999999999999 'line 15' f < /dev/null)"
+# ⛔ `-C -1` WAS THE FLAG'S OWN "NOT GIVEN" DEFAULT, and silently ignored.
+for _v in -1 -3; do
+    expect_exit "1.6.14: -C $_v is refused" 2 "$BIN" grep -C "$_v" x g14/f
+    expect_exit "1.6.14: ...and GNU agrees"  2 grep -C "$_v" x g14/f
+done
+case "$("$BIN" grep -A -1 x g14/f 2>&1)" in
+    *"invalid context length argument"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf 'FAIL 1.6.14: -A -1 names the rule\n' >&2 ;;
+esac
+
+# ⭐ --exclude-dir: the base name under -r, the path or any `/`-suffix for an
+# operand, silently, and never an --include/--exclude side effect.
+g14 "-r (control)"                        -r hit t
+for _x in sub 'sub*' deep .git t 's?b' '[s]ub' sub/ '' a '*'; do
+    g14 "-r --exclude-dir='$_x'"          -r "--exclude-dir=$_x" hit t
+done
+g14 "operand t/ keeps its slash"          -r --exclude-dir=t hit t/
+g14 "a / never matches a base name"       -r --exclude-dir=t/sub hit t
+g14 "operand: t/sub by its suffix"        -r --exclude-dir=sub hit t/sub
+g14 "operand: t/sub/ not"                 -r --exclude-dir=sub hit t/sub/
+g14 "operand: keep/sub"                   -r --exclude-dir=keep/sub hit t/keep/sub
+g14 "operand: eep/sub is not a suffix"    -r --exclude-dir=eep/sub hit t/keep/sub
+g14 "operand: * crosses / there"          -r '--exclude-dir=t*' hit t/keep/sub
+g14 "operand: ."                          -r --exclude-dir=. hit .
+g14 "--exclude never prunes a directory"  -r --exclude=sub hit t
+g14 "two of them"                         -r --exclude-dir=sub --exclude-dir=keep hit t
+g14 "separated value"                     -r --exclude-dir sub hit t
+g14 "with --include"                      -r --exclude-dir=sub --include=b hit t
+g14 "without -r: silent, not Is a dir"    --exclude-dir=t hit t
+g14 "...beside a file"                    --exclude-dir=t hit t t/a
+g14 "-c"                                  -c -r --exclude-dir=t hit t
+g14 "-l"                                  -l -r --exclude-dir=sub hit t
+g14 "-L"                                  -L -r --exclude-dir=sub hit t
+# ⛔ THE FILTER WALK READ `-e`'S VALUE AS AN OPTION. `grep -e --exclude=x x`
+# excluded the file `x` and exited 1; GNU searches it.
+printf -- '--exclude=x\n' > g14/x
+g14 "-e --exclude=x is a pattern"         -e --exclude=x x
+g14 "-e --exclude-dir=sub likewise"       -r -e --exclude-dir=sub t
+
+# ⛔ -r WITH ONE OPERAND NAMES ONLY WHAT IT FINDS INSIDE A DIRECTORY.
+g14 "-r one file: no prefix"              -r hit t/a
+g14 "-rc one file"                        -rc hit t/a
+g14 "-r two files"                        -r hit t/a t/keep/d
+g14 "-rH one file"                        -rH hit t/a
+
+# ⛔ -x AND -w HOLD FOR EVERY ALTERNATIVE. niyama is leftmost-first, and the
+# check ran on the one alternative it tried: `-xE 'a|ab'` rejected the line
+# `ab` and `-wE 'a|ab'` selected nothing — silently.
+printf 'ab\nab cd\nabc\nx ab y\n' > g14/xw
+for _o in "-xE a|ab" "-xE ab|a" "-wE a|ab" "-wE ab|a" "-xE (a|ab)(c|)" "-wE a|abc" \
+          "-cxE a|ab" "-cwE a|ab" "-owE a|ab" "-oxE a|ab"; do
+    _flags=${_o%% *}; _pat=${_o#* }
+    g14 "grep $_o" "$_flags" "$_pat" xw
+done
+g14 "-x -e a -e ab"                       -x -e a -e ab xw
+g14 "-w -e a -e ab"                       -w -e a -e ab xw
+
+# ⛔ -o: NO EMPTY MATCHES, NOTHING UNDER -v, LEFTMOST-LONGEST ACROSS -e.
+printf 'abc\nbaaac\nxyz\n\naa\n' > g14/o
+for _pat in 'x*' 'a*' '^' '$' ''; do
+    g14 "-o '$_pat'"                      -o "$_pat" o
+done
+g14 "-on 'a*'"                            -on 'a*' o
+g14 "-o -v 'x*'"                          -o -v 'x*' o
+g14 "-o -v zzz"                           -o -v zzz o
+g14 "-oE 'a?'"                            -oE 'a?' o
+g14 "-o -e 'x*' -e a"                     -o -e 'x*' -e a o
+g14 "-o -e a -e ab"                       -o -e a -e ab xw
+g14 "-o -e b -e abc"                      -o -e b -e abc xw
+g14 "-oF -e a -e ab"                      -oF -e a -e ab xw
+# ⚠ RECORDED, NOT FIXED: inside ONE pattern the extent is still niyama's first
+# alternative. Line selection no longer depends on it; `-o`'s text does.
+# Roadmap M11 — the day this flips, niyama is leftmost-longest and it goes.
+expect_eq "1.6.14: recorded gap: GNU -oE 'a|ab' prints ab" "ab" \
+  "$(cd g14 && LC_ALL=C grep -oE 'a|ab' xw | head -1)"
+expect_eq "1.6.14: ...and kriya prints a" "a" \
+  "$(cd g14 && "$BIN" grep -oE 'a|ab' xw < /dev/null | head -1)"
+
+# ⛔ A POSIX-LITERAL `*` IN A BRE: after a leading `^`, and first in a group.
+printf '*a\nb*c\nxa\n**\n^*a\n' > g14/st
+for _pat in '^*' '^*a' '\(*a\)' '\(^*a\)' '\(\(^*a\)\)' 'b\(*c\)' '^\(*a\)' '*' '**' '[*]a'; do
+    g14 "BRE '$_pat'"                     "$_pat" st
+done
+expect_eq "1.6.14: nl -b 'p^*' numbers only the * line" \
+  "$(cd g14 && nl -b 'p^*' st)" "$(cd g14 && "$BIN" nl -b 'p^*' st)"
+mkdir -p g14/fr && : > 'g14/fr/*a' && : > g14/fr/xa
+expect_eq "1.6.14: find -regex 'fr/\(*a\)'" \
+  "$(cd g14 && find fr -regex 'fr/\(*a\)')" "$(cd g14 && "$BIN" find fr -regex 'fr/\(*a\)')"
+
+# ⛔ ADR 0022: an ERE repetition operator with nothing to repeat is REFUSED,
+# where GNU warns and drops it. Asserted as kriya's own answer, with the rule
+# named rather than a bare "bad pattern".
+for _pat in '*' '*a' 'x|*' '(*a)' '+' '?' '{2}'; do
+    expect_exit "1.6.14: grep -E '$_pat' is refused" 2 "$BIN" grep -E "$_pat" g14/o
+done
+case "$("$BIN" grep -E '*a' g14/o 2>&1)" in
+    *"repeats nothing"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf 'FAIL 1.6.14: the refusal names the rule\n' >&2 ;;
+esac
+case "$("$BIN" grep -E 'a**' g14/o 2>&1)" in
+    *"repeats a repetition"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf 'FAIL 1.6.14: a** names its rule too\n' >&2 ;;
+esac
+# ...and a literal is one backslash away, as the message says.
+g14 "ERE '\\*a' is the literal"           -E '\*a' st
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

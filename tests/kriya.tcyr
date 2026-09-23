@@ -110,6 +110,14 @@ fn _t_q(src, style, want): i64 {
     return streq(out, want);
 }
 
+# 1 when `icase_bre_literal_stars` turns `pat` into exactly `want`.
+fn _t_star(pat, want): i64 {
+    var n: i64 = 0;
+    var out = icase_bre_literal_stars(pat, strlen(pat), &n);
+    if (n != strlen(want)) { return 0; }
+    return streq(out, want);
+}
+
 # The same, through the section-header rules.
 fn _t_qh(src, style, want): i64 {
     var n = strlen(src);
@@ -1092,6 +1100,38 @@ fn main() {
     fs_proc_fd_path(1030, &pfd);
     assert_eq(streq(&pfd, "/proc/self/fd/1030"), 1, "digits in order, with a zero inside");
     assert_eq(fs_proc_fd_path(65535, &pfd), 19, "and the length is returned");
+
+    test_group("kriya_token_is_dashdigit — one shape, two meanings");
+    # ⭐ Lifted from seq at 1.6.14: seq reads it as a negative number, grep as
+    # `-NUM`. The recogniser only says the shape is there.
+    assert_eq(kriya_token_is_dashdigit("-5"), 1, "-5");
+    assert_eq(kriya_token_is_dashdigit("-12"), 1, "-12");
+    assert_eq(kriya_token_is_dashdigit("-3i"), 1, "-3i: a digit first is enough");
+    assert_eq(kriya_token_is_dashdigit("-"), 0, "a lone dash");
+    assert_eq(kriya_token_is_dashdigit("--5"), 0, "--5 is a long option");
+    assert_eq(kriya_token_is_dashdigit("5"), 0, "no dash");
+    assert_eq(kriya_token_is_dashdigit("-i3"), 0, "a letter first");
+    assert_eq(kriya_token_is_dashdigit(0), 0, "a null token");
+
+    test_group("icase_bre_literal_stars — POSIX's literal * positions");
+    # ⛔ The rewrite behind grep, nl -b p and find -regex (1.6.14): exactly the
+    # positions POSIX makes literal, nothing else.
+    assert_eq(_t_star("^*", "^\\*"), 1, "^* — after the leading anchor");
+    assert_eq(_t_star("*a", "\\*a"), 1, "*a — first in the pattern");
+    assert_eq(_t_star("\\(*a\\)", "\\(\\*a\\)"), 1, "\\(*a\\) — first in a group");
+    assert_eq(_t_star("\\(^*a\\)", "^\\(\\*a\\)"), 1, "a caret opening the leading group is hoisted");
+    assert_eq(_t_star("\\(\\(^*a\\)\\)", "^\\(\\(\\*a\\)\\)"), 1, "...past every leading group");
+    assert_eq(_t_star("x\\(^a\\)", "x\\(^a\\)"), 1, "a caret in a LATER group is left alone");
+    assert_eq(_t_star("x\\(^*a\\)", "x\\(^*a\\)"), 1, "...and a star after it repeats it");
+    assert_eq(_t_star("a*", "a*"), 1, "a star after an atom repeats it");
+    assert_eq(_t_star("^\\(*a\\)", "^\\(\\*a\\)"), 1, "^\\(*a\\)");
+    assert_eq(_t_star("[*]a", "[*]a"), 1, "a bracket is copied whole");
+    assert_eq(_t_star("[]*]", "[]*]"), 1, "...with ] first");
+    assert_eq(_t_star("[[:alpha:]*]", "[[:alpha:]*]"), 1, "...and a class inside");
+    assert_eq(_t_star("\\*", "\\*"), 1, "an escaped star stays one");
+    assert_eq(_t_star("a\\(b*\\)", "a\\(b*\\)"), 1, "a star after an atom inside a group");
+    assert_eq(_t_star("^", "^"), 1, "a lone caret");
+    assert_eq(_t_star("", ""), 1, "the empty pattern");
 
     test_group("fs_is_dev — character and block, nothing else");
     var dsb[144];

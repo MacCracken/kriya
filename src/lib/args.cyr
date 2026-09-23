@@ -42,6 +42,30 @@ var _kriya_expanded_n = 0;
 # one (see `kriya_opt_seq`).
 var _kriya_expanded_val = 0;
 
+# ⭐ THE SHORT OPTION A BARE DIGIT RUN STANDS FOR, anywhere on the command line —
+# grep's `-NUM`, which is `-C NUM` — or 0 (1.6.14). Registered by the utility
+# before it parses (`kriya_set_digit_option`). ⚠ Distinct from `obs_num`, which
+# is head/tail's obsolescent `-5` and valid in the FIRST position only.
+var _kriya_digit_opt = 0;
+
+fn kriya_set_digit_option(letter): i64 {
+    _kriya_digit_opt = letter;
+    return 0;
+}
+
+# 1 when `tok` is `-` followed by a digit: `-5`, `-12`, `-3i`.
+# ⭐ Lifted from `seq` (1.6.14), which reads the shape as a NEGATIVE NUMBER — an
+# operand — while grep reads it as `-NUM`, an option. One recogniser, and each
+# caller decides what the shape means.
+fn kriya_token_is_dashdigit(tok): i64 {
+    if (tok == 0) { return 0; }
+    if (load8(tok) != 45) { return 0; }
+    var c = load8(tok + 1);
+    if (c < 48) { return 0; }
+    if (c > 57) { return 0; }
+    return 1;
+}
+
 # ⚠ ONE SLOT WAS NOT ENOUGH. The note above used to end "no utility has two" —
 # `uniq` has two (`--group` and `--all-repeated`), so the single slot became a
 # small registry at 1.4.3. ⛔ Each name keeps its OWN captured value: sharing one
@@ -221,6 +245,91 @@ fn _kriya_obsnum_trailing(tok, tlen): i64 {
     return 0;
 }
 
+# Does the option cluster `tok` (`-xyz`, tlen >= 2) hold a digit in OPTION
+# position — before any value-taking short, whose attached remainder is a value?
+fn _kriya_cluster_has_digit(spec, tok, tlen): i64 {
+    var k: i64 = 1;
+    var found: i64 = 0;
+    while (k < tlen) {
+        var c = load8(tok + k);
+        if (c >= 48) {
+            if (c <= 57) { found = 1; }
+        }
+        var ty = kriya_short_type(spec, c);
+        if (ty > 0) { k = tlen; }              # the rest is this option's value
+        k = k + 1;
+    }
+    return found;
+}
+
+# Expand a cluster holding digit runs: each run becomes `-<digit opt>` plus the
+# run as its value; every other letter is handled as the plain cluster path
+# handles it. Returns the new output cursor; sets `_kriya_dx_want` when the last
+# letter is value-taking with nothing attached (its value is the next token).
+#
+# ⚠ GNU's rule, measured on grep 3.12: digits ACCUMULATE within one run — `-12`
+# is 12 — and a new run restarts, whether in the same token (`-1i2` is 2) or the
+# next (`-1 -2` is 2). Emitting one `-C RUN` per run and letting the parser keep
+# the last value is exactly that.
+var _kriya_dx_want = 0;
+
+fn _kriya_expand_digits(spec, tok, tlen, out, oi): i64 {
+    _kriya_dx_want = 0;
+    var k: i64 = 1;
+    while (k < tlen) {
+        var c = load8(tok + k);
+        var isdig: i64 = 0;
+        if (c >= 48) {
+            if (c <= 57) { isdig = 1; }
+        }
+        if (isdig == 1) {
+            var j = k;
+            var run: i64 = 1;
+            while (run == 1) {
+                if (j >= tlen) { run = 0; }
+                else {
+                    var dj = load8(tok + j);
+                    if (dj < 48) { run = 0; }
+                    elif (dj > 57) { run = 0; }
+                    else { j = j + 1; }
+                }
+            }
+            var f = alloc(3);
+            store8(f, 45);
+            store8(f + 1, _kriya_digit_opt);
+            store8(f + 2, 0);
+            store64(out + oi * 8, f);
+            oi = oi + 1;
+            var v = alloc(j - k + 1);
+            memcpy(v, tok + k, j - k);
+            store8(v + j - k, 0);
+            store64(out + oi * 8, v);
+            oi = oi + 1;
+            k = j;
+        } else {
+            var ty = kriya_short_type(spec, c);
+            var g = alloc(3);
+            store8(g, 45);
+            store8(g + 1, c);
+            store8(g + 2, 0);
+            store64(out + oi * 8, g);
+            oi = oi + 1;
+            if (ty > 0) {
+                if (k + 1 < tlen) {
+                    store64(out + oi * 8, tok + k + 1);
+                    oi = oi + 1;
+                } else {
+                    _kriya_dx_want = 1;
+                }
+                k = tlen;
+            } else {
+                k = k + 1;
+            }
+        }
+    }
+    return oi;
+}
+
 # Rewrite `av[0..n)` with clusters expanded, returning the new count. The
 # expanded array is written to `out` (caller-allocated, see the cap computed in
 # `kriya_args_parse`). `av[0]` is the program name and passes through untouched.
@@ -356,6 +465,32 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
                                 }
                                 if (has_eq == 0) {
                                     if (kriya_long_type(spec, tok + 2, tlen - 2) > 0) { want_value = 1; }
+                                }
+                            }
+                        }
+                    }
+                }
+                # ⭐ `grep -NUM` (1.6.14): a digit run in option position is the
+                # registered digit option with the run as its value — `-5` is
+                # `-C 5`, `-in2` is `-i -n -C 2` — anywhere on the line, as GNU's.
+                # ⚠ Only for a utility that registered one, and only when the
+                # cluster has a digit where an OPTION could stand: `-e5` and
+                # `-A5` still read their `5` as the value they already were.
+                if (handled == 0) {
+                    if (_kriya_digit_opt != 0) {
+                        if (tlen >= 2) {
+                            if (load8(tok) == 45) {
+                                if (load8(tok + 1) != 45) {
+                                    var lead_ok: i64 = 0;
+                                    if (kriya_token_is_dashdigit(tok) == 1) { lead_ok = 1; }
+                                    if (kriya_short_type(spec, load8(tok + 1)) >= 0) { lead_ok = 1; }
+                                    if (lead_ok == 1) {
+                                        if (_kriya_cluster_has_digit(spec, tok, tlen) == 1) {
+                                            oi = _kriya_expand_digits(spec, tok, tlen, out, oi);
+                                            if (_kriya_dx_want == 1) { want_value = 1; }
+                                            handled = 1;
+                                        }
+                                    }
                                 }
                             }
                         }

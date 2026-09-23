@@ -38,7 +38,7 @@ watchlist in [`lessons.md`](lessons.md). The rest are shipped or dissolved into 
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.6.x** | GNU-parity leftovers and cleanup | — | **1.6.14** — `grep` parity leftovers |
+| **1.6.x** | GNU-parity leftovers and cleanup | — | **1.6.15** — `head` / `tail` count forms |
 | **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | ARG_MAX argv chunking | **1.7.0** — batched exec |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.8.0** — floats |
 | **1.9.x** | Performance | niyama regex speed (upstream) | **1.9.0** — `wc -c` fast path |
@@ -54,26 +54,6 @@ test-first. **1.7.x onward is new capability**, a different kind of risk: it cha
 
 What the closed arcs and the release audits left open. One release per entry; every item was
 measured against GNU when it was filed and re-confirmed open at 1.6.11.
-
-- **1.6.14 — `grep` parity leftovers.** Two deliberate omissions and two divergences a fuzz found:
-  - **`grep -NUM` shorthand** (`grep -3` for `-C 3`) needs a bare `-DIGIT` to parse as an OPTION
-    rather than an operand, and `grep` goes through the shared parser, where a digit is not a
-    registered short. `seq` solves the same problem with a dedicated argv walk
-    (`_seq_token_is_negnum`); lifting that into `src/lib/args.cyr` would serve both. ⛔ Do not
-    special-case it inside `grep` — that is the second-source-of-truth shape.
-  - **`grep --exclude-dir`.** `--exclude` does NOT prune directories (measured against GNU: a
-    directory matching `--exclude` is still descended), so `--exclude-dir` is a genuinely separate
-    flag whose subject is the directory name during descent. ⭐ The ordered
-    rightmost-wins/first-option-default machinery in `_gr_name_allowed` is the part to reuse; the
-    matcher (`src/lib/glob.cyr`) is already shared.
-  - **A leading `*` in an ERE.** `grep -E '*'` (and `'*a'`, `'a**'`) is a LITERAL asterisk in GNU
-    and a usage error in kriya. ⚠ Check POSIX before matching GNU: a leading `*` in an ERE is
-    undefined by the standard, so this may be a deliberate divergence rather than a bug — decide,
-    then record the decision either way.
-  - ⛔ **`grep -o` emits empty matches.** `grep -o 'x*'` on `abc` prints empty lines in kriya and
-    nothing in GNU. ⚠ Related but distinct: kriya's `-o` also disagrees with GNU on a case-gap range
-    under `-i`, and there kriya is the CORRECT one — GNU's `-o` contradicts GNU's own line matcher.
-    Do not "fix" that second case toward GNU.
 
 - **1.6.15 — `head` / `tail` count forms.** All three are refusals today, never wrong answers:
   - **Negative counts**: `head -n -5` (all but the last five lines) and `head -c -3` are
@@ -104,6 +84,10 @@ measured against GNU when it was filed and re-confirmed open at 1.6.11.
     overwrites and exits 0. kriya's `-f` skips the prompt in either order — CLAUDE.md's "`-f`
     overrides" read broadly. ⚠ Decide before changing: GNU's `mv` makes `-f`/`-i`/`-n` last-wins
     while its `cp` keeps `-i` whatever `-f` says, so "match GNU" is two different rules.
+  - **`grep -r` with no operand is refused** (`-r requires file operands`, exit 2); GNU searches `.`
+    and prints paths without a `./` prefix (`sub/b:hit`). ⚠ GNU also exempts that implied `.` from
+    `--exclude-dir` — `grep -r --exclude-dir=. hit` still searches — so the walk needs a display
+    prefix of its own, not the literal operand `.`. Measured at 1.6.14.
   - **`stat %C`** — the SELinux context — prints `?` and exits 0, as an unknown specifier does.
     GNU reads `security.selinux` and, where there is none, prints `?` too but exits **1** with
     *failed to get security context*, so a script cannot tell "no context" from "not asked".
@@ -308,6 +292,21 @@ Two regex-surface gaps whose fix belongs to niyama rather than kriya.
   at niyama** — filing it is the next step; niyama's roadmap does not mention it. ⭐ If kriya closes
   it first by refusing in `grep` too, lift `src/cmd/nl.cyr:_nl_rx_unsupported` into a shared lib so
   every utility reads one list — do NOT copy it. Closing it upstream deletes the guard instead.
+- ⛔ **niyama is LEFTMOST-FIRST, where POSIX and GNU are leftmost-LONGEST.** It is a Pike VM that
+  stops at the first alternative to match. Measured at 1.6.14: `grep -oE 'a|ab'` prints `a` where
+  GNU prints `ab`, and `grep -oE 'x*|b'` loses the `b` because the empty alternative wins first.
+  Before 1.6.14 it was a **wrong LINE SELECTION** too — `grep -xE 'a|ab'` rejected `ab`, and
+  `grep -wE 'a|ab'` selected nothing — until `-x` and `-w` were built into the pattern
+  (`_gr_compile`), which a Pike VM honours on every alternative. ⚠ What is left is `-o`'s extent
+  inside ONE pattern. BRE has no alternation, and there the gap needs contrived repetition
+  (`a*\(ab\)*`). `smoke-grep.sh` records the `-oE 'a|ab'` case as a gap, and it flips the day niyama
+  is leftmost-longest.
+- **niyama reads the POSIX-literal `*` wrongly and `\(^` as a literal.** `^*` came out "zero or more
+  anchors" (every line), and `\(*a\)` was refused. kriya works around it in
+  `icase_bre_literal_stars` since 1.6.14, for `grep`, `nl -b p` and `find -regex`: escaping exactly
+  those stars, and hoisting a `^` that opens the leading groups. ⚠ A `^` opening a LATER group is
+  POSIX's "may be an anchor": GNU makes it one and niyama a literal, so `x\(^a\)` matches `x^a` here
+  and nothing under GNU. Closing that upstream deletes the workaround.
 - **BRE backreferences** (`\(a\)\1`) are POSIX-required; kriya refuses them loudly (`bad pattern`,
   exit 2) where GNU matches. niyama's ADR 0009 took them out of its **v1** scope — a v1 decision,
   not a permanent one. ⚠ kriya's [ADR 0005](../adr/0005-regex-engine-niyama.md) says backreferences
@@ -360,7 +359,6 @@ What still gates the arcs. Ship the enabler and everything under it becomes smal
 
 | Enabler | Home | Unblocks | Slot |
 |---|---|---|---|
-| Shared `-DIGIT` option walk | `src/lib/args.cyr`, lifted from `seq`'s `_seq_token_is_negnum` | `grep -NUM`; `seq` reuses it | 1.6.14 |
 | ARG_MAX argv chunking | `src/lib/` | `find -exec +`, `xargs -L` / `-x` | 1.7.0 |
 | Float formatting | `src/cmd/printf.cyr` | `printf %e/%f/%g/%a`, `seq -f` | 1.8.0 |
 | Byte-suffix parser | `src/lib/args.cyr` | `head -c 1K`, `tail -c 1K`, `sort -S` | 1.8.2 |
