@@ -6,6 +6,260 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.12] - 2026-09-22 — `ls` and `stat` print what GNU prints
+
+The 1.6.12 roadmap slot — every open `ls` / `stat` output gap — closed in one release and then
+measured the way the slot asked: **byte for byte against GNU**, under one sanitised environment
+(`TZ=UTC LC_ALL=C`, GNU's own variables unset), in a new block of `scripts/smoke-ls.sh` and
+`scripts/smoke-stat.sh`. ⭐ **That comparison found four `ls` defects no roadmap entry had named**,
+and a full-byte-range quoting fuzz found two more in the shared quoter. All six are fixed below.
+
+### Changed — ⛔ BREAKING: `ls -l` dates are POSIX's ([ADR 0020](docs/adr/0020-ls-long-format-dates-are-posix.md))
+
+kriya printed every `-l` date as `2026-08-29 03:53`. POSIX specifies, for the POSIX locale,
+`date "+%b %e %H:%M"` for a file modified in the last six months and `date "+%b %e %Y"` — two
+spaces before the year — for an older one or one dated in the future, and that is GNU's C-locale
+output: `Aug 29 03:53`, `Jan  2  2020`. "Six months" is GNU's 15,778,476 s (half a mean Gregorian
+year), with the clock refreshed for a file dated ahead of it. Still UTC
+([ADR 0007](docs/adr/0007-date-utc-only-at-v0-7-0.md)).
+
+**Migration:** `--time-style=long-iso` restores the old date column byte for byte. A script that read
+the name from `$8` reads it from `$9` now, as on every GNU, BusyBox and BSD `ls`.
+
+### Changed — ⛔ BREAKING: `ls -h` rounds UP
+
+gnulib's `human_ceiling`: a size never displays smaller than it is. A 1,536,000-byte file was `1.4M`
+here and is `1.5M` under GNU and now here; `-h`'s `total` rounds the same way. **Migration:** none —
+it is GNU's number.
+
+### Changed — `ls --color`: an unknown `LS_COLORS` key turns colour off, as in GNU
+
+The roadmap asked for a decision before a change. GNU prints *unrecognized prefix* and *unparsable
+value* and colours nothing; kriya skipped the item and coloured the rest. ⭐ **GNU's rule, now that
+kriya knows GNU's whole table** (24 keys, from 17): nothing a real `dircolors -b` emits trips it, so
+what is left is a typo — and a typo that silently half-works is harder to find than one that says
+so. ⚠ Knowing all 24 was the precondition: a stock `dircolors -b` emits `mh`, `do` and `ca`, so the
+same rule over the old table would have switched colour off for everyone using one.
+
+### Changed — `ls --color` with `LS_COLORS` unset or empty colours on a known terminal
+
+GNU loads its compiled-in defaults when `COLORTERM` is non-empty or `TERM` matches a `dircolors`
+pattern (`xterm*`, `screen*`, `tmux*`, `*color*`, `linux`, …) and colours nothing otherwise; kriya
+coloured nothing either way. The list is 9.11's — ⚠ it has `vt220`, which 9.4 lacks. Both variables
+only configure the colour `--color` turned on
+([ADR 0017](docs/adr/0017-environment-variables-configure-features-the-caller-turned-on.md)).
+
+### Changed — `stat`'s default output is GNU's, and `-t` carries a birth time
+
+The default format printed epoch seconds, `%dh/%Dh` for the device, bare numeric ids and no `Birth:`
+line, under a comment saying the dates "await chrono" — `%x`/`%y`/`%z` had rendered since v1.2.5. It
+is built from GNU's own format strings now, including GNU's separate `Device type:` layout for a
+character or block device. `stat -t`'s fifteenth column (`%W`) was always `0`; it is the birth time.
+⚠ Output for humans, but a change: a script parsing it wants `-c`.
+
+### Added — `ls`: `-g`, `-o`, `--full-time`, `--time-style`, `-D`/`--dired`, `-T`/`--tabsize`
+
+- **`-g` / `-o`** — long format without the owner / the group column. ⚠ Not synonyms, and STICKY:
+  each implies `-l` through the last-wins format group, but a later `-l` does not bring the column
+  back.
+- **`--time-style=full-iso|long-iso|iso|locale`**, each with GNU's `posix-` prefix, and
+  **`--full-time`**. `posix-STYLE` means "STYLE outside the POSIX locale"; kriya has no locale, so
+  every `posix-` style is the default — even an unknown one, as under GNU in the C locale. An unknown
+  style under `-l` is exit 2; without `-l` it is not read. ⚠ `+FORMAT` exits 2 naming roadmap 1.8.4,
+  and `TIME_STYLE` is not read — refused rather than approximated.
+- **`-D` / `--dired`** — Emacs dired's index: a two-space indent, `//DIRED//` byte offsets of every
+  name (colour escapes excluded), `//SUBDIRED//` for every `-R` header, and
+  `//DIRED-OPTIONS// --quoting-style=X`. ⚠ A bare `--dired` implies `-l`, as in coreutils **9.5+**;
+  9.4, CI's, ignores it — see *Tests*.
+- **`-T` / `--tabsize` and `TABSIZE`** — tab stops for the columnar formats, `0` for spaces only.
+  GNU's `indent()` rule; the variable is read only when something columnates.
+
+### Added — `ls --quoting-style`: all nine of GNU's styles
+
+`shell`, `shell-always`, `c`, `escape`, `locale` and `clocale` join `literal`, `shell-escape` and
+`shell-escape-always`; they were refused by name. With no locale, `locale` and `clocale` are what GNU
+prints in the C locale — `'…'` and `"…"` around C escapes.
+
+- ⛔ **Section headers are quoted too**, which kriya never did: a `:` forces the quotes in the shell
+  styles and becomes `\:` in `c` / `escape` / `locale` — `'hd/c:d':`, `"hd/c\:d":`.
+- ⛔ **The alignment pad**: in `-l` and in finite-width columns, the styles that quote only when needed
+  indent a name that needed none by one space, so it lines up with the quoted names beside it.
+- **`?` for a control byte on a terminal**, GNU's tty default, where a style prints bytes raw.
+- ⚠ Display width counts printable ASCII only, so a raw control or high byte no longer pushes a column
+  out of line.
+
+### Added — `ls --color`: GNU's whole indicator table
+
+- **All 24 keys** — `lc rc ec rs no fi di ln pi so bd cd mi or ex do su sg st ow tw ca mh cl`; kriya
+  knew 17. ⚠ `ca` costs a `getxattr(2)` per regular file, paid only when colour is on and `ca` has a
+  value — GNU's own gate.
+- **Value escapes**, GNU's `get_funky_string`: `\e \a \b \f \n \r \t \v`, `\?` (DEL), `\_` (space),
+  octal `\NNN`, hex `\xHH` and caret `^X`. `lc=\e[` was four literal characters here.
+- **`ln=target`** colours a link as its referent; **`mi`** colours a missing target and falls back to
+  `or`.
+- **Clear-to-EOL** (`cl`) after a coloured name that may wrap, in the non-long formats, so a
+  background colour does not bleed to the margin.
+- ⚠ **`no=` opens at the start of the ROW** — before the inode and the `-l` columns — where kriya
+  emitted it before the name.
+
+### Added — `ls` warns about an invalid `COLUMNS`, `TABSIZE` or `LS_COLORS`
+
+`kriya ls: abc: ignoring invalid width in environment variable COLUMNS` — GNU warns and kriya was
+silent, the note [ADR 0019](docs/adr/0019-the-line-width-is-a-number-not-a-format.md) left open.
+⚠ Only when the variable is READ: a columnar format, or colour REQUESTED — GNU checks before
+`LS_COLORS` or `TERM` can turn colour off. An empty value is "unset" and quiet; an overflowing one is
+unlimited, silently, as GNU's is. `TABSIZE` likewise, under the narrower columnar-only gate, and
+`LS_COLORS` as above. All three use architecture 001's frame (see *Documentation*).
+
+### Added — `stat`: GNU's printf directives, birth time, and the specifiers kriya lacked
+
+- **`%[flags][width][.precision]`** on every specifier. ⚠ The flags a directive KEEPS depend on its
+  kind — strings `-`, unsigned `'-0`, octal and hex `-#0`, signed `'-+ 0` — and the rest are dropped,
+  not refused. Precision on `%X %Y %Z %W` is **fractional seconds** (`%.3Y`), with GNU's width
+  arithmetic.
+- **`%w` / `%W` — birth time**, from `statx(2)` (raw syscall 332, `STATX_BTIME`); `-` / `0` where the
+  filesystem records none. ⭐ The last specifier kriya refused: `smoke-stat.sh`'s "deferred" block
+  went red exactly as its comment promised, and is retired.
+- **`%m`** (mount point), **`%r` / `%R`** (the raw `st_rdev`), and **`H` / `L`** before `d` or `r`
+  for the major / minor half — each printed `?` before.
+
+### Fixed — `ls`
+
+- ⛔ **`ls -l` omitted `total N`** — the listed entries' `st_blocks` in 1K units, rounded up (or
+  `-h`-scaled); `total 0` for an empty directory, none for a file operand. `ls -l | head -1` and
+  every line count disagreed.
+- ⛔ **`ls -d` with no operand listed the directory's CONTENTS**; GNU lists `.`, so `ls -ld` is the
+  one-line `drwx… .` people run it for.
+- ⛔ **File-operand columns were sized without the directory operands.** GNU gathers every operand
+  before splitting directories off, so `ls -l file d` pads `file`'s columns to `d`'s; kriya was two
+  spaces short — the same two bytes that put every `--dired` offset out.
+- ⛔ **A device's size column is `major, minor`**; kriya printed `st_size` — `0` for `/dev/null`,
+  where GNU prints `1, 3`, each number right-aligned in its own width. *Found by the new comparison.*
+- ⛔ **`ls -R` with no operand omitted GNU's leading `.:`**, while `ls -R sub` had its `sub:`. *Found
+  by the new comparison.*
+- ⛔ **An unreadable directory left an empty section** — a blank line and `locked:`, then the error.
+  GNU writes a section's separator and header only once the directory has opened. *Found by the new
+  comparison.*
+- ⛔ **`ls -R` past an unreadable subdirectory exited 0** — the recursive call's status was dropped.
+  GNU exits 1, and so does [ADR 0008](docs/adr/0008-posix-exit-code-policy.md). *Found by the new
+  comparison.*
+- **`-lF` put the link's own `@` after its target**; GNU puts the TARGET's indicator there —
+  `l2dir -> dir/`, `l2exe -> file*`, nothing for a broken link.
+
+### Fixed — the shared quoter: `ls`, `stat %N`, and every utility's diagnostics
+
+- ⛔ **A leading `-` was quoted, and GNU never quotes it.** 1.5.3 derived its table by handing GNU
+  `ls` names like `-a` **without `--`** — GNU parsed an option, and the difference was recorded as a
+  quoting rule. So `kriya realpath -e -- -x` said `'-x'` where GNU says `-x`, and `ls` on a terminal
+  quoted every such name. *Found by the fuzz — which made the same mistake first.*
+- ⛔ **A name that is exactly `{` or `}` was bare.** Alone, each is shell syntax and GNU quotes it, in
+  listings and in diagnostics; `cur{ly}` stays bare. *Found by the fuzz.*
+- **`/` is double-quote-safe**: GNU's `stat -c %N "sq/it's"` is `"sq/it's"`, and kriya wrote
+  `'sq/it'\''s'`. Never measured, because an `ls` NAME cannot hold a `/`; paths reach the quoter
+  through `stat %N`, every diagnostic and `ls`'s headers.
+
+### Fixed — `stat`
+
+- **`%F` of an empty regular file is `regular empty file`**, not `regular file`.
+- **`%t` / `%T` split the device number with glibc's layout**; the old `(rdev >> 8) & 0xfff` and
+  `rdev & 0xff` dropped the high bits of both. The split is shared now as `fs_dev_major` /
+  `fs_dev_minor` in `src/lib/fs.cyr` — ⚠ with glibc's 32-bit masks, because an `& ~0xff` in i64
+  carries the major's top bits into the minor (a unit test holds it; the old mask fails it).
+- **`%N` is quoted only if the format contains the two bytes `%N`.** GNU decides once per format, so
+  `%-20N` alone prints the name bare and `%-20N|%N` quotes both.
+- ⛔ **`%%` with modifiers, and a format that ends inside a directive, are fatal**:
+  `kriya stat: %5%: invalid directive`, exit 1, as GNU's. kriya echoed them as text and exited 0.
+
+### Deliberate divergences — asserted as kriya's own answer, not hidden
+
+- **GNU `stat`'s stray `s`.** Under the `0`, `#`, `+`, space or `'` flag, GNU prints `%0N` of a
+  symlink as `ln -> fs` — its conversion character, appended to a format it assembled. kriya prints
+  `ln -> f`. (roadmap § Non-goals)
+- **`COLUMNS` and `TABSIZE` are decimal.** GNU reads both base-0, so `TABSIZE=010` is 8 and
+  `COLUMNS=0x50` is 80 there; ADR 0019's reasoning for `-w`. (roadmap § Non-goals)
+- **Warnings keep architecture 001's field order.** GNU writes the value last (`…COLUMNS: 'abc'`);
+  kriya puts it in the operand slot (`kriya ls: abc: …`), with GNU's words.
+- **`-T x` and `--tabsize=abc`** are refused by the shared option parser, with its message; GNU says
+  `invalid tab size: 'x'`. Same exit status, 2.
+- **`stat %C`** prints `?` and exits 0; GNU prints `?` and exits 1 where there is no SELinux context.
+  Filed at roadmap 1.6.16.
+
+### Resolved — the 0.17% quoting residual
+
+Recorded at 1.5.3 from a 3,000-name `%N` fuzz and carried on the roadmap since. ⚠ **It does not
+reproduce**: the recorded example, `<TAB>kcwA'79hp<NL>`, is byte-identical to GNU 9.4 and 9.11 from
+the 1.6.11 binary as well as this one, and 10,500 names fuzzed in the shape it described, across both
+builds, find nothing. What the fuzz found instead — widened to the whole byte range, one-byte names
+and six renderings — was the two quoter defects above. After them: **8,000 names × 6 renderings,
+zero differences.** The roadmap entry is removed.
+
+### Added — two differential fuzzers, run by hand
+
+`scripts/difffuzz-quote.py` and `scripts/difffuzz-stat-format.py`, beside 1.6.8's
+`difffuzz-ls-format.py`. They measure kriya against whatever coreutils is installed, so they are run
+by hand and in the container rather than gating CI. ⛔ **Every name goes after `--`** — the lesson of
+the leading-`-` defect. At release: quoting **8,000 names × 6 renderings, 0 differences**; `stat`
+**9,000 formats, 0 unexpected differences** (about 100 per 3,000 are GNU's stray `s` or a symlink's
+own atime, skipped by name).
+
+### Documentation
+
+- **[ADR 0020](docs/adr/0020-ls-long-format-dates-are-posix.md)** — `ls -l` dates are POSIX's, and
+  ISO is one flag away.
+- **[Architecture 001](docs/architecture/001-errno-message-policy.md), rule 8** — a warning with no
+  errno uses the error frame through `report_note(util, context, message)` in `src/lib/report.cyr`:
+  the context — usually a value from the environment — in the operand slot, quoted, so
+  `COLUMNS=$'a\nb'` stays one line. ADR 0019's open note is marked resolved.
+- **The roadmap is forward-facing and renumbered** (committed after the 1.6.11 tag): shipped items
+  removed and one release per slot — 1.6.13 `cp`, 1.6.14 `grep`, 1.6.15 `head` / `tail` counts,
+  1.6.16 cleanup — with 1.7.x–1.9.x re-sequenced, every gate re-verified at pin 6.6.6, and niyama's
+  BRE scope recorded as its **v1** decision, not a permanent one. Source citations moved with their
+  slots; ⚠ `kriya grep --help` now cites roadmap 1.6.14 where it said 1.4.x.
+- New roadmap items: `ls --time-style=+FORMAT` and `TIME_STYLE` (1.8.4); `statx` and `getxattr`,
+  two raw syscalls the 6.6.6 stdlib does not wrap — 291 and 8 on aarch64 (1.7.4); `stat %C`
+  (1.6.16). ⛔ The splitting policy's figures are re-measured: `ls` is **2,201** code lines, from
+  1,479 — twice the next utility.
+- Five broken relative links repaired: two in ADR 0019, three in this file.
+
+### Tests
+
+- `smoke-ls.sh` **219 → 347** and `smoke-stat.sh` **65 → 113**. A 1.6.12 block in each compares every
+  new behaviour against GNU — stdout bytes, exit status, and stderr's LINE COUNT, since kriya's frame
+  is `kriya ls:` and GNU's `ls:`. ⚠ Eight older assertions pinned the old behaviour (ISO dates, eight
+  fields, `1.4M`, `--quoting-style=c` refused, `%w` refused) and were rewritten against GNU, as were
+  three that compared only part of a line because `-l`'s date "differed by design".
+- ⛔ **The oracle's environment is pinned.** `TIME_STYLE`, `LS_BLOCK_SIZE` and `BLOCK_SIZE` are unset
+  (GNU reads them, kriya does not), and `TERM=dumb` with no `COLORTERM` wherever `LS_COLORS` is empty.
+  ⚠ The 1.5.2 assertion "an unset `LS_COLORS` emits nothing" was only true on a terminal type
+  `dircolors` does not know; run in an xterm, it would have failed.
+- ⭐ **The container run caught a GNU version split**: a bare `--dired` implies `-l` since coreutils
+  9.5, and CI's 9.4 ignores it. Those three cases compare against GNU's `-l --dired` — the spelling
+  every version agrees on — and directly wherever the oracle has the rule.
+- ⚠ **`/tmp` on the release box is strictatime**: every read of a symlink bumps its atime, so
+  whichever binary reads it second sees the other's read. `stat`'s default-format symlink case drops
+  that one line; every other line of it is compared.
+- `kriya.tcyr` **453 → 512**: the new quoting styles, headers, the brace and dash rules, the
+  diagnostic set, the device split — ⭐ a mutant with the old minor mask fails it — and `fs_is_dev`.
+- `smoke-help-json.sh` 1,791 → 1,816, with `ls`'s six new options.
+
+### Performance
+
+No change measured: `ls -l` over 20,200 entries **151 → 153 ms**, with `--color=always` 193 → 197 ms
+(GNU 76 ms), and `-C -w 120` 61 → 62 ms (GNU 14 ms) — 1.6.11 against 1.6.12, ten runs each on the
+release box.
+
+### Release totals
+
+**5,963 smoke cases across 41 scripts** (from 5,762), **512 unit**, 18 POSIX; fuzz green under poison
+(1,127 / 201 / 201); `cyrius lint`, `lint-deferrals.sh`, `lint-help-schema.sh` and
+`check-oracles.sh` clean; `watchlist-scan.py` clean (184 declarations; M15a 0, M15c the 3 known,
+M15d 0, M15i 0); `vet` 56 deps; both targets build warning-free. ⭐ Verified in the `ubuntu:24.04`
+container (coreutils **9.4**) as a non-root user — 39 of 41 scripts green, **3,491** cases; the two
+exceptions need `python3`, which the image lacks.
+
+Binary 1,147,512 → **1,182,232** bytes on host (+34,720), 1,139,136 → **1,177,944** on agnos
+(+38,808).
+
 ## [1.6.11] - 2026-09-22 — toolchain pin 6.6.6, every operand processed, and a fuzz gate that could not fail
 
 ### Changed — toolchain pin 6.6.2 → **6.6.6**
@@ -341,7 +595,7 @@ and interleaving, on both paths.
 
 `head --lines=` printed ten lines and reported success: the empty value was skipped over and the
 option thrown away. GNU says *invalid number of lines: `''`* and exits 1, and
-[ADR 0002](docs/adr/0002-argument-parsing-is-agent-safe.md) names this case. ⚠ The parser already
+[ADR 0002](docs/adr/0002-option-parsing-humans-and-agents.md) names this case. ⚠ The parser already
 rejected the empty string; the bug was the guard that kept it from ever being asked. Same in `tail`,
 for both `--lines=` and `--bytes=`, because both were written from the same shape.
 
@@ -415,7 +669,7 @@ spellings of the same request that are not equivalent, and both are pinned. ⭐ 
 `-l -C -1` is single (the `-C` cleared long, so `-1` applies) and `-C -l -1` is long.
 
 ⚠ `--format=` **requires its value and has no short form of its own**, per
-[ADR 0002](docs/adr/0002-argument-parsing-is-agent-safe.md) rule 3 — the same split `tee` got at
+[ADR 0002](docs/adr/0002-option-parsing-humans-and-agents.md) rule 3 — the same split `tee` got at
 1.6.4 and `--backup` at 1.6.5. There is **no prefix matching**: GNU accepts `--format=vert`, kriya
 takes the six exact spellings and refuses the rest by name.
 
@@ -5361,7 +5615,7 @@ reformatting 12 files inside a release cut would bury the change that matters in
   `agnos/scripts/kriya-crash-probe.py`). The underlying compiler bug is already fixed
   upstream (≥ 6.1.37), so this is a consumer re-pin, not a cyrius-side action. Host
   build + behavior unchanged. Surfaced kriya's M10 consumer-burn signal; details in
-  [`docs/development/issue/2026-06-14-bin-applets-crash-on-agnos-iron.md`](docs/development/issue/2026-06-14-bin-applets-crash-on-agnos-iron.md).
+  [`docs/development/issue/2026-06-14-bin-applets-crash-on-agnos-iron.md`](docs/development/issue/archive/2026-06-14-bin-applets-crash-on-agnos-iron.md).
 
 ## [1.1.3] — 2026-06-13
 

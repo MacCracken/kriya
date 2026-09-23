@@ -625,6 +625,28 @@ fn k_fgetxattr(fd, name, value, size): i64 {
     #endif
 }
 
+# `statx(2)`, for what `stat(2)` has no field for — the birth time. ⚠ agnos has no
+# statx and declines; aarch64's number differs (291), which is roadmap 1.7.4.
+fn k_statx(dirfd, path, flags, mask, buf): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(332, dirfd, path, flags, mask, buf);   # linux statx #332
+    #endif
+}
+
+# By PATH, following symlinks — `ls`'s `ca` probe, which must not need read
+# permission on the file (an fd-anchored read would).
+fn k_getxattr(path, name, value, size): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(191, path, name, value, size);          # linux getxattr #191
+    #endif
+}
+
 fn k_fsetxattr(fd, name, value, size, flags): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 38;

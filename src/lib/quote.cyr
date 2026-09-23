@@ -52,12 +52,51 @@ enum QuoteStyle {
     # can never appear inside a single name, so it was never measured — quoted
     # every path in every diagnostic: `kriya tee: '/dev/full': …`.
     QUOTE_DIAGNOSTIC = 2;
+    # ── `ls --quoting-style` values beyond shell-escape (1.6.12). Measured over
+    # a matrix of hostile names under `LC_ALL=C` on coreutils 9.11. kriya has no
+    # locale, so `locale` and `clocale` are what GNU does in the C locale —
+    # which is also why `clocale` needs no entry of its own: it IS `c` there.
+    #
+    # `shell` / `shell-always`: shell-escape's quoting DECISION with no `$'…'`
+    # escapes. ⚠ Only TAB, NEWLINE and CR force quotes; every other control or
+    # high byte is copied raw, bare or quoted — `bel<BEL>` stays bare.
+    QUOTE_SHELL        = 3;
+    QUOTE_SHELL_ALWAYS = 4;
+    # `c`: always `"…"`, C escapes (`\a \b \t \n \v \f \r \\ \"`), three-digit
+    # octal for any other control or high byte. ⚠ No trigraph handling:
+    # `??=trig` is `"??=trig"`.
+    QUOTE_C            = 5;
+    # `escape`: `c` without the quotes — `"` is then bare — and a SPACE written
+    # `\ `. ⚠ The space rule is `ls`'s (it adds space to quotearg's set for this
+    # style alone), so this constant describes `ls`, not quotearg in general.
+    QUOTE_ESCAPE       = 6;
+    # `locale` with no locale: `'…'` around C escapes, a `'` written `\'` and a
+    # `"` left bare.
+    QUOTE_LOCALE       = 7;
 }
 
 # ⚠ Set by `quote_shell` for the duration of one call. A parameter would have to
 # be threaded through `_q_needs_quote`'s two call sites and both of its
 # neighbours; the two bytes it changes do not earn that.
 var _q_colon_style = 0;
+
+# ⚠ 1 while rendering `shell` / `shell-always`: control and high bytes are
+# copied raw instead of opening a `$'…'` run. Same reason as `_q_colon_style`.
+var _q_raw = 0;
+
+# ⚠ 1 while rendering an `ls` section HEADER (`dir:`). GNU quotes headers with
+# its filename options plus `:` — the header is colon-terminated — so in the
+# shell styles `:` forces quotes and `/` is bare (QUOTE_DIAGNOSTIC's two bytes),
+# and in `c` / `escape` / `locale` a `:` is written `\:`. Measured: `hd/plain:`,
+# `'hd/c:d':`, `"hd/c\:d":`.
+var _q_hdr = 0;
+
+fn quote_header(src, len, style, out): i64 {
+    _q_hdr = 1;
+    var n = quote_shell(src, len, style, out);
+    _q_hdr = 0;
+    return n;
+}
 
 # Does this byte survive inside single quotes untouched?
 fn _q_is_plain(c): i64 {
@@ -67,16 +106,21 @@ fn _q_is_plain(c): i64 {
     return 1;
 }
 
-# Does this byte force quoting? ⚠ `at_start` matters: THREE bytes are safe
+# Does this byte force quoting? ⚠ `at_start` matters: TWO bytes are safe
 # mid-word and quoted as the FIRST byte of a name.
 #
 # ⛔ Measured over all 94 printable bytes at both positions, via
 # `ls --quoting-style=shell-escape` (which is byte-identical to the tty
 # default and needs no pty):
 #     mid-word bare : # % + , - . 0-9 : @ A-Z ] _ a-z { } ~
-#     first-pos bare: the same MINUS `#`, `-` and `~`
-# `#` starts a comment, `-` starts an option and `~` starts tilde expansion —
-# only at the beginning of a word, which is exactly where they are quoted.
+#     first-pos bare: the same MINUS `#` and `~`
+# `#` starts a comment and `~` starts tilde expansion — only at the beginning
+# of a word, which is exactly where they are quoted.
+# ⛔ `-` IS BARE AT THE START TOO, and the 1.5.3 table said otherwise: it was
+# measured by passing `-X` to GNU `ls` WITHOUT `--`, so GNU parsed the name as
+# an OPTION and the "quoted" verdict was an artifact. With `--`, GNU 9.4 and
+# 9.11 print `-a` bare, and so does every diagnostic (`realpath: -x: No such
+# file`); quotearg files `-` with the digits. kriya quoted it until 1.6.12.
 #
 # ⛔ `=` IS QUOTED, and that one is a correctness matter rather than cosmetics:
 # an unquoted `a=b` pasted into a shell is a variable ASSIGNMENT, not a
@@ -104,9 +148,9 @@ fn _q_needs_quote(c, at_start): i64 {
     # ⚠ `/` cannot occur in an `ls` name, so it was never in the measured set.
     # It is bare in a diagnostic, where operands are whole paths.
     if (c == 47) { return 1 - _q_colon_style; }   # /
+    if (c == 45) { return 0; }    # -
     # Safe only away from the start.
     if (c == 35) { return at_start; }    # #
-    if (c == 45) { return at_start; }    # -
     if (c == 126) { return at_start; }   # ~
     return 1;
 }
@@ -121,6 +165,12 @@ fn _q_dq_safe(c): i64 {
     if (c == 32) { return 1; }                       # space
     if (c == 37) { return 1; }                       # %
     if (c >= 43) { if (c <= 46) { return 1; } }      # + , - .
+    # ⛔ `/` too (1.6.12) — never measured before because an `ls` NAME cannot
+    # hold one, but a PATH can, and paths reach this through `stat %N`, every
+    # diagnostic and `ls`'s section headers. GNU: `stat -c %N "sq/it's"` is
+    # `"sq/it's"`; kriya wrote `'sq/it'\''s'`. quotearg lists `/` with the
+    # digits as compatible with double quotes.
+    if (c == 47) { return 1; }                       # /
     if (c >= 48) { if (c <= 58) { return 1; } }      # 0-9 :
     if (c == 64) { return 1; }                       # @
     if (c >= 65) { if (c <= 90) { return 1; } }      # A-Z
@@ -159,14 +209,25 @@ fn _q_puts(out, n, s): i64 {
 # Render `src` (len bytes) into `out`; returns the byte count written.
 # ⚠ `out` must hold at least `quote_bufsz(len)` bytes.
 fn quote_shell(src, len, style, out): i64 {
+    if (style >= QUOTE_C) { return _quote_c(src, len, style, out); }
     # ⚠ QUOTE_DIAGNOSTIC is QUOTE_IF_NEEDED with two bytes reclassified, so it
     # sets the flag and then behaves as IF_NEEDED everywhere below.
     _q_colon_style = 0;
+    _q_raw = 0;
     var eff = style;
     if (style == QUOTE_DIAGNOSTIC) {
         _q_colon_style = 1;
         eff = QUOTE_IF_NEEDED;
     }
+    if (style == QUOTE_SHELL) {
+        _q_raw = 1;
+        eff = QUOTE_IF_NEEDED;
+    }
+    if (style == QUOTE_SHELL_ALWAYS) {
+        _q_raw = 1;
+        eff = QUOTE_ALWAYS;
+    }
+    if (_q_hdr == 1) { _q_colon_style = 1; }
     var n: i64 = 0;
     # Pass 1: classify the name.
     var any_special: i64 = 0;   # forces quoting at all
@@ -179,11 +240,36 @@ fn quote_shell(src, len, style, out): i64 {
         var c = load8(src + i);
         var at_start: i64 = 0;
         if (i == 0) { at_start = 1; }
-        if (_q_needs_quote(c, at_start) == 1) { any_special = 1; }
+        var forces = _q_needs_quote(c, at_start);
+        # ⛔ `{` AND `}` ALONE ARE SHELL SYNTAX — grouping and brace expansion —
+        # while inside a word they are harmless, which is all the per-byte table
+        # above could measure. quotearg: "sometimes special if isolated". A
+        # one-byte name `{` is `'{'`; `cur{ly}` stays bare. Found at 1.6.12 by
+        # a full-byte-range fuzz; kriya left it bare since 1.5.3.
+        if (len == 1) {
+            if (c == 123) { forces = 1; }
+            if (c == 125) { forces = 1; }
+        }
+        if (_q_raw == 1) {
+            # ⚠ A raw control byte does not force quotes — only the three that
+            # are shell whitespace do. Measured: `bel<BEL>` is bare under `shell`,
+            # `tab<TAB>x` is `'tab<TAB>x'`.
+            if (_q_is_plain(c) == 0) {
+                if (c != 39) {
+                    forces = 0;
+                    if (c == 9)  { forces = 1; }
+                    if (c == 10) { forces = 1; }
+                    if (c == 13) { forces = 1; }
+                }
+            }
+        }
+        if (forces == 1) { any_special = 1; }
         if (c == 39) { has_sq = 1; }
         if (c == 34) { has_dq = 1; }
         if (_q_is_plain(c) == 0) {
-            if (c != 39) { has_esc = 1; }
+            if (c != 39) {
+                if (_q_raw == 0) { has_esc = 1; }
+            }
         }
         if (c != 39) {
             # ⚠ `#` is double-quote-safe ONLY at index 0. Measured and
@@ -237,7 +323,13 @@ fn quote_shell(src, len, style, out): i64 {
     i = 0;
     while (i < len) {
         var c = load8(src + i);
-        if (_q_is_plain(c) == 1) {
+        var plain = _q_is_plain(c);
+        # `shell` / `shell-always` write every non-quote byte raw inside the
+        # single-quoted run — there is no `$'…'` to open.
+        if (_q_raw == 1) {
+            if (c != 39) { plain = 1; }
+        }
+        if (plain == 1) {
             if (in_esc == 1) {
                 n = _q_put(out, n, 39);      # close $'...'
                 in_esc = 0;
@@ -304,6 +396,82 @@ fn quote_shell(src, len, style, out): i64 {
         n = _q_put(out, n, 39);
         n = _q_put(out, n, 39);
     }
+    return n;
+}
+
+# `c`, `escape` and `locale`: C escapes, three-digit octal for the rest.
+# ⚠ The escaped quote is the style's OWN quote — `\"` in `c`, `\'` in `locale` —
+# and `escape` has no quote at all, so a `"` there is written bare.
+fn _quote_c(src, len, style, out): i64 {
+    var q: i64 = 0;
+    if (style == QUOTE_C) { q = 34; }
+    if (style == QUOTE_LOCALE) { q = 39; }
+    var n: i64 = 0;
+    if (q != 0) { n = _q_put(out, n, q); }
+    var i: i64 = 0;
+    while (i < len) {
+        var c = load8(src + i);
+        var ne = _q_named_escape(c);
+        var done: i64 = 0;
+        if (c == 92) {
+            n = _q_put(out, n, 92);
+            n = _q_put(out, n, 92);
+            done = 1;
+        }
+        if (done == 0) {
+            if (q != 0) {
+                if (c == q) {
+                    n = _q_put(out, n, 92);
+                    n = _q_put(out, n, c);
+                    done = 1;
+                }
+            }
+        }
+        if (done == 0) {
+            if (c == 58) {
+                if (_q_hdr == 1) {
+                    n = _q_put(out, n, 92);
+                    n = _q_put(out, n, 58);
+                    done = 1;
+                }
+            }
+        }
+        if (done == 0) {
+            if (ne != 0) {
+                n = _q_put(out, n, 92);
+                n = _q_put(out, n, ne);
+                done = 1;
+            }
+        }
+        if (done == 0) {
+            var octal: i64 = 0;
+            if (c < 32) { octal = 1; }
+            if (c > 126) { octal = 1; }
+            if (octal == 1) {
+                n = _q_put(out, n, 92);
+                n = _q_put(out, n, 48 + ((c >> 6) & 7));
+                n = _q_put(out, n, 48 + ((c >> 3) & 7));
+                n = _q_put(out, n, 48 + (c & 7));
+                done = 1;
+            }
+        }
+        if (done == 0) {
+            if (c == 32) {
+                if (style == QUOTE_ESCAPE) {
+                    # ⚠ Not in a HEADER: `ls` adds space to its filename
+                    # options only — measured, `hd/sp ace:` stays bare.
+                    if (_q_hdr == 0) {
+                        n = _q_put(out, n, 92);
+                        n = _q_put(out, n, 32);
+                        done = 1;
+                    }
+                }
+            }
+        }
+        if (done == 0) { n = _q_put(out, n, c); }
+        i = i + 1;
+    }
+    if (q != 0) { n = _q_put(out, n, q); }
     return n;
 }
 

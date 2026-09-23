@@ -39,6 +39,22 @@ Every kriya utility that surfaces a kernel error to the user does so via the sam
 
 7. **`<message>` is exactly what `errmsg_for(errno)` returns.** Utilities do not paraphrase. If a utility wants extra context (e.g. "while reading from"), it goes in the operand slot, not the message slot.
 
+8. **A warning that has no errno uses the same frame** (1.6.12), through `report_note(util, context, message)` in `src/lib/report.cyr`. The context goes in the operand slot, quoted exactly as rule 4 quotes an operand; the message is a fixed phrase at the call site — ASCII, lowercase, no period, GNU's wording where GNU has one:
+
+   ```
+   kriya ls: abc: ignoring invalid width in environment variable COLUMNS
+   kriya ls: x: ignoring invalid tab size in environment variable TABSIZE
+   kriya ls: zz: unrecognized prefix in environment variable LS_COLORS
+   kriya ls: LS_COLORS: unparsable value, colour disabled
+   kriya stat: %5: invalid directive
+   ```
+
+   ⚠ **This deliberately reorders GNU**, which puts the value LAST — `ls: ignoring invalid width in environment variable COLUMNS: 'abc'`. The value is the thing a reader acts on, and a second shape with the fields swapped is exactly what rule 3's single frame exists to prevent. The words match GNU's so a human searching for the message finds it.
+
+   ⛔ **The context is quoted for the same reason the operand is.** It is usually a value the user put in the environment, which is precisely the text that can hold a newline: `COLUMNS=$'a\nb'` is `kriya ls: 'a'$'\n''b': ignoring invalid width …` — one line.
+
+   A note does not decide the exit status; its caller does. `ls`'s warnings leave it alone, as GNU's do, while `stat`'s invalid directive is fatal and exits 1, as GNU's is.
+
 ## Where this binds
 
 - `src/lib/errmsg.cyr` — the table, plus `errmsg_is_known(errno)` for the "named vs `errno N`" pick.

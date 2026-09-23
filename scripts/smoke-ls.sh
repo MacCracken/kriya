@@ -19,6 +19,9 @@ unset QUOTING_STYLE
 # operands to a POSIX-strict GNU. kriya does not read the variable at all
 # (ADR 0011's reasoning), so the oracle must not either.
 unset POSIXLY_CORRECT
+# ⛔ ...and TIME_STYLE, LS_BLOCK_SIZE and BLOCK_SIZE, which GNU reads for `-l`'s
+# date and sizes and kriya does not (TIME_STYLE is roadmap 1.8.4).
+unset TIME_STYLE LS_BLOCK_SIZE BLOCK_SIZE
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/build/kriya"
@@ -120,14 +123,17 @@ rm script
 out=$("$BIN" ls -i regfile | awk '{print NF}')
 expect_eq "-i adds 1 column"      "2" "$out"
 
-# --- -l columns: 7 fields (mode nlink uid gid size DATE TIME name) ---
+# --- -l columns: 9 fields (mode nlink owner group size MON DAY TIME name) ---
+# ⚠ The date is POSIX's `%b %e %H:%M` since 1.6.12 (ADR 0020), so it is THREE
+# fields, and a file this fresh is inside the six-month window — the time form,
+# not the year. The byte-for-byte check against GNU is in the 1.6.12 block.
 line=$("$BIN" ls -l regfile)
 nf=$(echo "$line" | awk '{print NF}')
-expect_eq "-l 8 columns (incl date+time)"  "8" "$nf"
-# Date in YYYY-MM-DD form: field 6.
-date_field=$(echo "$line" | awk '{print $6}')
+expect_eq "-l 9 columns (incl month, day, time)"  "9" "$nf"
+date_field=$(echo "$line" | awk '{print $6, $7, $8}')
 case "$date_field" in
-    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) PASS=$((PASS + 1)) ;;
+    [A-S][a-u][b-y]\ [1-9]\ [0-2][0-9]:[0-5][0-9]) PASS=$((PASS + 1)) ;;
+    [A-S][a-u][b-y]\ [1-3][0-9]\ [0-2][0-9]:[0-5][0-9]) PASS=$((PASS + 1)) ;;
     *) FAIL=$((FAIL + 1)); echo "FAIL -l date format: $date_field" >&2 ;;
 esac
 # Symbolic mode column 1: starts with '-' for regfile.
@@ -153,9 +159,12 @@ expect_eq "-h 1024B"              "1.0K" "$sz"
 # 5120 bytes → "5.0K"
 sz=$("$BIN" ls -l -h fivek.bin | awk '{print $5}')
 expect_eq "-h 5120B"              "5.0K" "$sz"
-# 1500K (~1.46 MiB) → "1.4M" (smart-rounded one decimal)
+# 1500K (1.46 MiB) → "1.5M". ⛔ GNU ROUNDS UP (gnulib `human_ceiling`), so a
+# size never displays smaller than it is; kriya rounded to nearest and printed
+# "1.4M" — which is what this assertion expected until 1.6.12.
 sz=$("$BIN" ls -l -h meg.bin | awk '{print $5}')
-expect_eq "-h ~1.5MiB"            "1.4M" "$sz"
+expect_eq "-h ~1.5MiB rounds up"  "1.5M" "$sz"
+expect_eq "...and GNU agrees"     "1.5M" "$(ls -l -h meg.bin | awk '{print $5}')"
 # Under 1024 bytes: bare decimal (no suffix).
 real_size=$(stat -c %s regfile)
 sz=$("$BIN" ls -l -h regfile | awk '{print $5}')
@@ -274,17 +283,19 @@ expect_exit "M17g: healthy listing still exits 0" 0 "$BIN" ls -l .
 # `macro` on the box this was written on and somebody else on the CI runner — so
 # `expect_eq "owner" "macro"` would assert the laptop rather than the code.
 #
-# ⚠ Only the columns THROUGH the owner and group are compared, because kriya's
-# date column is deliberately different: it renders ISO and in UTC (ADR 0007)
-# while GNU renders `Mon DD` in local time. Comparing whole lines would fail for
-# a reason that has nothing to do with this release.
+# ⚠ Only the columns THROUGH the owner and group are compared, because they are
+# what is under test. kriya's date is GNU's POSIX form since 1.6.12 (ADR 0020)
+# but still in UTC (ADR 0007), so a whole-line comparison needs `TZ=UTC` on the
+# oracle — the 1.6.12 block below does exactly that.
+# ⚠ Both sides open with `total N` since 1.6.12, which `own_cols` passes through
+# unchanged; GNU's used to be stripped with `tail -n +2` to line the two up.
 mkdir -p ownerdir && : > ownerdir/f1 && : > ownerdir/f2
 own_cols() { awk '{print $1, $2, $3, $4}'; }
 
 expect_eq "-l shows the owner NAME" \
     "$(ls -l ownerdir/f1 | own_cols)" "$("$BIN" ls -l ownerdir/f1 | own_cols)"
 expect_eq "-l owner columns on a directory listing" \
-    "$(ls -l ownerdir | tail -n +2 | own_cols)" "$("$BIN" ls -l ownerdir | own_cols)"
+    "$(ls -l ownerdir | own_cols)" "$("$BIN" ls -l ownerdir | own_cols)"
 # A root-owned path exercises a different passwd entry than the test user's.
 expect_eq "-l of a root-owned path" \
     "$(ls -ld / | own_cols)" "$("$BIN" ls -ld / | own_cols)"
@@ -293,7 +304,7 @@ expect_eq "-l of a root-owned path" \
 expect_eq "-n forces numeric ids" \
     "$(ls -n ownerdir/f1 | own_cols)" "$("$BIN" ls -n ownerdir/f1 | own_cols)"
 expect_eq "-n implies -l" \
-    "$(ls -n ownerdir | tail -n +2 | own_cols)" "$("$BIN" ls -n ownerdir | own_cols)"
+    "$(ls -n ownerdir | own_cols)" "$("$BIN" ls -n ownerdir | own_cols)"
 # ...and the two must actually DIFFER, or the pair above proves nothing. On a
 # host where the test user has no passwd entry they legitimately match, so this
 # is a comparison against GNU rather than an assertion of difference.
@@ -416,10 +427,13 @@ expect_eq "sort: mixed operands, whole output" \
 mkdir -p cdir && cd cdir && mkdir -p sub && : > plain && : > runme && chmod +x runme
 ln -s plain ok_link && ln -s /nonexistent-target bad_link && cd ..
 
+# ⚠ TERM=dumb and no COLORTERM on every call: with LS_COLORS empty, those two
+# decide whether the compiled-in defaults load (1.6.12), and the runner's
+# values are not this test's business.
 col_same() {
     label=$1; lsc=$2; shift 2
-    g=$(cd cdir && LS_COLORS="$lsc" ls --color=always "$@" 2>&1 | od -An -c)
-    k=$(cd cdir && LS_COLORS="$lsc" "$BIN" ls --color=always "$@" 2>&1 | od -An -c)
+    g=$(cd cdir && env -u COLORTERM TERM=dumb LS_COLORS="$lsc" ls --color=always "$@" 2>&1 | od -An -c)
+    k=$(cd cdir && env -u COLORTERM TERM=dumb LS_COLORS="$lsc" "$BIN" ls --color=always "$@" 2>&1 | od -An -c)
     expect_eq "color: $label" "$g" "$k"
 }
 CB='di=01;34:ln=01;36:ex=01;32'
@@ -429,16 +443,20 @@ col_same "extension"          "di=01;34:*.c=01;33" -1 -d plain sub
 col_same "defaults via rs=0"  "rs=0" -1 -d sub runme ok_link
 col_same "di override"        "di=01;35" -1 -d sub
 col_same "or on a broken link" "or=01;31:ln=01;36" -1 -d bad_link
-# ⚠ Only the text AFTER `->` is compared: kriya's `-l` date column is ISO+UTC
-# by design (ADR 0007), so a whole-line compare would fail on the date rather
-# than on the colour under test.
-lt_g=$(cd cdir && LS_COLORS='or=01;31' ls --color=always -l -d bad_link | sed 's/^.* -> //' | od -An -c)
-lt_k=$(cd cdir && LS_COLORS='or=01;31' "$BIN" ls --color=always -l -d bad_link | sed 's/^.* -> //' | od -An -c)
+# ⚠ WHOLE LINES since 1.6.12 — only the text after `->` was compared while
+# kriya's `-l` date was ISO. The date is GNU's form now but still UTC (ADR
+# 0007), hence `TZ=UTC` on both sides.
+lt_g=$(cd cdir && LS_COLORS='or=01;31' TZ=UTC LC_ALL=C ls --color=always -l -d bad_link | od -An -c)
+lt_k=$(cd cdir && LS_COLORS='or=01;31' TZ=UTC LC_ALL=C "$BIN" ls --color=always -l -d bad_link | od -An -c)
 expect_eq "color: or colours the -l target" "$lt_g" "$lt_k"
 col_same "zero code falls through" "ow=0:di=01;34" -1 -d sub
-# ⛔ The gate: unset and empty must produce NO escapes at all.
-gu=$(cd cdir && env -u LS_COLORS ls --color=always -1 -d sub plain | od -An -c)
-ku=$(cd cdir && env -u LS_COLORS "$BIN" ls --color=always -1 -d sub plain | od -An -c)
+# ⛔ The gate: unset and empty must produce NO escapes at all — ON A TERMINAL
+# TYPE `dircolors` DOES NOT KNOW. Since 1.6.12 an unset LS_COLORS still colours
+# with the compiled-in defaults when COLORTERM is non-empty or TERM matches
+# GNU's list (the 1.6.12 block tests that half), so this pins TERM=dumb rather
+# than trusting the runner's — an xterm running this script would colour.
+gu=$(cd cdir && env -u LS_COLORS -u COLORTERM TERM=dumb ls --color=always -1 -d sub plain | od -An -c)
+ku=$(cd cdir && env -u LS_COLORS -u COLORTERM TERM=dumb "$BIN" ls --color=always -1 -d sub plain | od -An -c)
 expect_eq "color: LS_COLORS unset emits nothing" "$gu" "$ku"
 col_same "LS_COLORS empty"    "" -1 -d sub plain
 # ⚠ ...and it must really be nothing, not merely equal — a pair of
@@ -518,20 +536,41 @@ qa "mid-word # is bare"   'mid#hash'   'mid#hash'
 qa "mid-word ~ is bare"   'mid~tilde'  'mid~tilde'
 qa "] is bare"            'br]ack'     'br]ack'
 qa "{ } are bare"         'cur{ly}'    'cur{ly}'
+# ⛔ ...INSIDE A WORD. Alone, each is shell syntax and GNU quotes it — the case
+# the per-byte table above could not see, found by a fuzz at 1.6.12.
+cd qdir && : > '{' && : > '}' && : > '{}' && cd ..
+qa "a lone { is quoted"   "'{'"        '{'
+qa "a lone } is quoted"   "'}'"        '}'
+qa "{} is not"            '{}'         '{}'
+expect_eq "quote: ...and GNU agrees on all three" \
+    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C ls -1d --quoting-style=shell-escape '{' '}' '{}')" \
+    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1d --quoting-style=shell-escape '{' '}' '{}')"
 qa "space is quoted"      "'a b'"      'a b'
 qa "plain stays bare"     'plain'      'plain'
 # ...and the position rule: the same bytes quoted at index 0.
 cd qdir && : > '#lead' && : > '~lead' && cd ..
 qa "leading # is quoted"  "'#lead'"    '#lead'
 qa "leading ~ is quoted"  "'~lead'"    '~lead'
+# ⛔ ...AND A LEADING `-` IS NOT. 1.5.3 quoted it, from a measurement that gave
+# GNU `-X` without `--` — so GNU read an option, not a name. `--` on BOTH sides.
+cd qdir && : > ./-lead && : > ./- && cd ..
+expect_eq "quote: a leading - is bare, as GNU's is" \
+    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C ls -1d --quoting-style=shell-escape -- -lead -)" \
+    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1d --quoting-style=shell-escape -- -lead -)"
+expect_eq "...and absolutely"  "- -lead " \
+    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1d --quoting-style=shell-escape -- -lead - | tr '\n' ' ')"
 # ⚠ shell-escape-always must differ from shell-escape on a name needing nothing,
 # or the two style assertions above would both pass for one implementation.
 expect_eq "quote: always-quote differs from if-needed" "'plain'" \
     "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1d --quoting-style=shell-escape-always plain)"
 
-# An unsupported style is REFUSED by name rather than silently defaulted.
-rc=0; (cd qdir && "$BIN" ls --quoting-style=c) >/dev/null 2>&1 || rc=$?
-expect_eq "quote: unsupported style refused" "2" "$rc"
+# An unknown style is REFUSED by name rather than silently defaulted. ⚠ This
+# used `c` until 1.6.12, when kriya grew all nine of GNU's styles and `c` became
+# a valid answer — the 1.6.12 block compares every one of them against GNU.
+# ⚠ Exit 2 is ADR 0008's "invalid value"; GNU exits 1 here (its ARGMATCH_DIE is
+# `usage (EXIT_FAILURE)`), so this is asserted as kriya's own answer.
+rc=0; (cd qdir && "$BIN" ls --quoting-style=bogus) >/dev/null 2>&1 || rc=$?
+expect_eq "quote: unknown style refused" "2" "$rc"
 
 # The piped DEFAULT must stay RAW — the regression that would break scripts.
 expect_eq "quote: piped default is raw" \
@@ -620,14 +659,12 @@ same_ls "-C then --format="          -C --format=commas -w 20
 same_ls "a cluster resolves too"     -1C -w 20
 # ⚠ `-1` IS THE ONE EXCEPTION: it has no effect after `-l`, in either order,
 # which is GNU's own special case rather than a last-wins consequence.
-# ⚠ COMPARED kriya-TO-kriya, DELIBERATELY. The rule under test is "`-1` has no
-# effect after `-l`", and `ls -l`'s BYTES still differ from GNU's for two
-# pre-existing reasons this release does not touch — no `total N` line and a
-# different mtime format (both filed at roadmap 1.6.12). Comparing full `-l`
-# output against GNU would fail for those reasons and say nothing about ordering.
-_l_only=$(env -u COLUMNS "$BIN" ls -l colw)
-expect_eq "-l then -1 stays long" "$_l_only" "$(env -u COLUMNS "$BIN" ls -l -1 colw)"
-expect_eq "-1 then -l is long"    "$_l_only" "$(env -u COLUMNS "$BIN" ls -1 -l colw)"
+# ⭐ AGAINST GNU'S BYTES since 1.6.12, which gave `-l` its `total N` line and
+# GNU's date form; until then this compared kriya to kriya. `TZ=UTC` because
+# kriya's dates are UTC by design (ADR 0007) and GNU's are local.
+_l_only=$(env -u COLUMNS TZ=UTC LC_ALL=C ls -l colw)
+expect_eq "-l then -1 stays long" "$_l_only" "$(env -u COLUMNS TZ=UTC "$BIN" ls -l -1 colw)"
+expect_eq "-1 then -l is long"    "$_l_only" "$(env -u COLUMNS TZ=UTC "$BIN" ls -1 -l colw)"
 # ⭐ And GNU agrees the two orders are identical, which is the half that pins the
 # rule to GNU rather than to kriya's own opinion.
 expect_eq "...and GNU agrees the orders match" \
@@ -693,15 +730,14 @@ same_lsd "...(the wider one)"              tiny -C -w 76
 # one-per-line only when the current format is not LONG, so it never overrides
 # `-l` in either order — while `--format=single-column` does. Two spellings of
 # the same request that are not equivalent, which is why both are pinned.
-# ⚠ CLASSIFIES THE FORMAT, IT DOES NOT COMPARE `-l`'s BYTES. Those still differ
-# from GNU's for two pre-existing reasons out of scope here — no `total N` line
-# and a different mtime rendering, both filed at roadmap 1.6.12 — so a byte
-# comparison would go red for reasons that say nothing about which format won.
+# ⚠ CLASSIFIES THE FORMAT, IT DOES NOT COMPARE `-l`'s BYTES: the property under
+# test is which format won, and the bytes of each format are pinned elsewhere
+# (the 1.6.12 block for long).
 same_fmt() {  # same_fmt <name> <arg...>
     _n=$1; shift
-    # ⚠ CLASSIFIES THE WHOLE OUTPUT, NOT LINE 1. GNU's long listing opens with
-    # `total N` and kriya's does not (roadmap 1.6.12), so a line-1 test reads
-    # GNU's long output as "not long" and every comparison inverts.
+    # ⚠ CLASSIFIES THE WHOLE OUTPUT, NOT LINE 1. A long listing opens with
+    # `total N` — GNU's always did, kriya's since 1.6.12 — so a line-1 test
+    # reads long output as "not long" and every comparison inverts.
     _cls() {
         case "$1" in
             *"rw-"*) echo LONG ;;
@@ -826,6 +862,244 @@ expect_eq "...and GNU agrees"       "a:b plainq " \
 : > 'qcol/a b'
 expect_eq "...while a space is still quoted" "1" \
           "$("$BIN" ls --quoting-style=shell-escape qcol | grep -c "'a b'")"
+
+# --- 1.6.12: output fidelity, byte for byte against GNU ---------------------
+#
+# ⛔ ONE SANITISED ENVIRONMENT FOR BOTH SIDES. `TZ=UTC` because kriya's dates
+# are UTC by design (ADR 0007); `LC_ALL=C` because GNU localises month names and
+# quote marks and kriya has no locale; TIME_STYLE, LS_BLOCK_SIZE and BLOCK_SIZE
+# unset because GNU reads them and kriya does not — the QUOTING_STYLE lesson at
+# the top of this file. COLUMNS, TABSIZE, LS_COLORS, COLORTERM and TERM are
+# pinned because BOTH read them, so the runner's values would pick the answer;
+# a case that needs one sets it.
+# ⚠ STDERR IS COUNTED, NOT COMPARED: kriya's frame is `kriya ls: <operand>:
+# <message>` (architecture 001) and GNU's is `ls: ...`. The count still catches
+# a warning one side prints and the other does not.
+L612_ENV="-u COLUMNS -u TABSIZE -u TIME_STYLE -u LS_BLOCK_SIZE -u BLOCK_SIZE -u LS_COLORS -u COLORTERM TERM=dumb TZ=UTC LC_ALL=C"
+l612() {   # l612 <name> <env-words> <ls-arg...>; LS_COLORS comes from LC612 if set
+    _n=$1; _e=$2; shift 2
+    _grc=0
+    (cd l612 && env $L612_ENV $_e ${LC612+"LS_COLORS=$LC612"} ls "$@" \
+        >"$WORK/g.out" 2>"$WORK/g.err") || _grc=$?
+    _krc=0
+    (cd l612 && env $L612_ENV $_e ${LC612+"LS_COLORS=$LC612"} "$BIN" ls "$@" \
+        >"$WORK/k.out" 2>"$WORK/k.err") || _krc=$?
+    expect_eq "$_n" \
+        "$(od -An -c "$WORK/g.out") rc=$_grc stderr=$(wc -l < "$WORK/g.err" | tr -d ' ')" \
+        "$(od -An -c "$WORK/k.out") rc=$_krc stderr=$(wc -l < "$WORK/k.err" | tr -d ' ')"
+}
+# l612g <name> <GNU's args, one word-split string> <kriya's args...> — the same
+# comparison, for a case where the two binaries need different words to mean
+# one thing (a GNU version difference kriya has already chosen a side of).
+l612g() {
+    _n=$1; _ga=$2; shift 2
+    _grc=0
+    (cd l612 && env $L612_ENV ls $_ga >"$WORK/g.out" 2>"$WORK/g.err") || _grc=$?
+    _krc=0
+    (cd l612 && env $L612_ENV "$BIN" ls "$@" >"$WORK/k.out" 2>"$WORK/k.err") || _krc=$?
+    expect_eq "$_n" \
+        "$(od -An -c "$WORK/g.out") rc=$_grc stderr=$(wc -l < "$WORK/g.err" | tr -d ' ')" \
+        "$(od -An -c "$WORK/k.out") rc=$_krc stderr=$(wc -l < "$WORK/k.err" | tr -d ' ')"
+}
+mkdir -p l612 && cd l612
+# ⚠ THREE DATES, ONE PER BRANCH of GNU's six-month test: inside the window is
+# `%b %e %H:%M`, before it and AFTER NOW are both `%b %e  %Y`.
+: > recent; : > old; : > future
+touch -d "@$(( $(date +%s) - 2592000 ))" recent
+TZ=UTC touch -d '2020-01-02 03:04:05.123456789' old
+TZ=UTC touch -d '2099-06-07 08:09:10' future
+dd if=/dev/zero of=big bs=1024 count=1500 status=none
+mkdir sub empt; : > sub/x
+printf '#!/bin/sh\n' > run; chmod 0755 run
+ln -s recent lnk; ln -s sub dlnk; ln -s run xlnk; ln -s nowhere dangle
+# ⚠ SPARSE, so `-h` sees exact sizes at no disk cost: each pair straddles a
+# boundary where rounding up and rounding to nearest disagree.
+mkdir sz
+for _s in 1 1023 1024 1025 10239 10240 10241 102399 1048575 1048576 1572865 \
+          1073741823 1099511627776; do truncate -s "$_s" "sz/s$_s"; done
+cd ..
+
+l612 "-l, a whole directory, total line and all" "" -l
+l612 "-la: the total counts . and .."            "" -la
+l612 "-l on an empty directory is total 0"       "" -l empt
+l612 "-lR: a total per section"                  "" -lR
+l612 "-li and -ln"                               "" -li -n
+# ⛔ FILE OPERANDS SHARE THEIR WIDTHS WITH THE DIRECTORY OPERANDS. GNU sizes the
+# columns across every operand before splitting files from directories, so a
+# directory's link count widens its files' column; kriya was two spaces short.
+l612 "-l over files and a directory"             "" -l old recent big sub
+l612 "-l on a device: major, minor"              "" -l /dev/null old big
+# ⛔ `-h` ROUNDS UP. A size never displays smaller than it is.
+l612 "-lh: ceiling sizes, scaled total"          "" -lh
+l612 "-lh at every rounding boundary"            "" -lh sz
+for _ts in full-iso long-iso iso locale posix-full-iso posix-long-iso posix-iso \
+           posix-locale posix-bogus; do
+    l612 "--time-style=$_ts"                     "" -l "--time-style=$_ts" old recent future
+done
+l612 "--full-time implies -l"                    "" --full-time old recent future
+l612 "--time-style is inert without -l"          "" -1 --time-style=bogus
+expect_exit "-l --time-style=bogus is a usage error" 2 "$BIN" ls -l --time-style=bogus
+expect_exit "...and GNU agrees"                      2 ls -l --time-style=bogus
+# ⚠ `+FORMAT` IS REFUSED, NOT IGNORED — roadmap 1.8.4. GNU renders it; a silent
+# fallback to the default form would print a date the caller did not ask for.
+expect_exit "--time-style=+FORMAT is refused for now" 2 "$BIN" ls -l --time-style=+%Y
+# ⛔ `-g` AND `-o` ARE STICKY and ARE format members: each implies long, and a
+# later `-l` does not bring the dropped column back.
+l612 "-g drops the owner"                        "" -g
+l612 "-o drops the group"                        "" -o
+l612 "-go drops both"                            "" -go
+l612 "-g then -l stays dropped"                  "" -g -l
+l612 "-g -n"                                     "" -g -n
+l612 "-g then -C is columns"                     "" -g -C
+l612 "-C then -g is long"                        "" -C -g
+l612 "-o --full-time"                            "" -o --full-time
+# ⛔ `--dired` OFFSETS ARE BYTES INTO THE OUTPUT, so one misplaced space anywhere
+# on a line moves every offset after it — the whole-listing compare is the test.
+l612 "-lR --dired: //SUBDIRED//"                 "" -lR --dired
+l612 "--dired over operands"                     "" -l --dired old sub empt
+l612 "--dired then -C drops it"                  "" --dired -C
+l612 "--dired records a quoting style"           "" -l --dired --quoting-style=c
+# ⛔ A BARE `--dired` IMPLIES `-l` SINCE COREUTILS 9.5, and CI's 9.4 predates it:
+# there it is ignored and `ls --dired` prints names. kriya follows 9.5+, so its
+# answer is compared with the spelling every version agrees on — GNU given its
+# own `-l` — and directly as well wherever the oracle has the rule.
+# ⭐ Caught by the ubuntu:24.04 container run, not by the host.
+l612g "--dired implies long"                     "-l --dired"    --dired
+l612g "-D is --dired"                            "-l -D"         -D
+l612g "-C then --dired is long"                  "-C --dired -l" -C --dired
+if env $L612_ENV ls --dired /dev/null 2>/dev/null | grep -q '//DIRED//'; then
+    l612 "...and this GNU agrees with no -l"     "" --dired
+    l612 "...-D too"                             "" -D
+    l612 "...and after -C"                       "" -C --dired
+else
+    echo "note: $(ls --version | head -1) predates a bare --dired implying -l (9.5);"
+    echo "      those three cases were compared against 'ls -l --dired' only"
+fi
+# ⛔ `-lF` PUTS THE TARGET'S INDICATOR AFTER THE TARGET, and none on the link.
+l612 "-lF"                                       "" -lF
+l612 "-lF on link operands"                      "" -lF lnk dlnk xlnk dangle
+# ⛔ TAB STOPS: `-T` / `--tabsize` / TABSIZE, read only when something columnates.
+for _t in 0 1 4 8 16; do
+    l612 "-T $_t"                                "" -C -w 30 -T "$_t" ../gapw
+done
+l612 "--tabsize=3 across"                        "" -x -w 30 --tabsize=3 ../gapw
+l612 "TABSIZE=4"                                 "TABSIZE=4" -C -w 30 ../gapw
+l612 "-T beats TABSIZE"                          "TABSIZE=0" -C -w 30 -T 4 ../gapw
+l612 "TABSIZE=abc warns"                         "TABSIZE=abc" -C -w 30 ../gapw
+l612 "...but not when nothing columnates"        "TABSIZE=abc" -l ../gapw
+expect_exit "-T x is a usage error"  2 "$BIN" ls -T x
+expect_exit "...and GNU agrees"      2 ls -T x
+# ⛔ COLUMNS: warned about when it is READ and invalid — a columnar format, or
+# colour REQUESTED (GNU checks before LS_COLORS or TERM can turn colour off).
+l612 "COLUMNS=abc warns under -C"                "COLUMNS=abc" -C ../gapw
+l612 "...and is not read one per line"           "COLUMNS=abc" -1 ../gapw
+l612 "...but a colour request reads it"          "COLUMNS=abc" --color=always -1 ../gapw
+l612 "COLUMNS= empty is ignored quietly"         "COLUMNS=" -C ../gapw
+# ⛔ ALL NINE QUOTING STYLES, plus the alignment pad: in `-l` and in finite-width
+# columns, GNU indents a name that needed no quotes by one space so it lines up
+# with the quoted ones beside it.
+cd qdir && : > "$(printf 'hi\351x')" && : > "$(printf 'esc\033x')" && : > "$(printf 'del\177x')" && cd ..
+for _qs in literal shell shell-always shell-escape shell-escape-always c escape \
+           locale clocale; do
+    l612 "--quoting-style=$_qs"                  "" -1 "--quoting-style=$_qs" ../qdir
+    l612 "--quoting-style=$_qs, -l aligns"       "" -l "--quoting-style=$_qs" ../qdir
+    l612 "--quoting-style=$_qs, -C aligns"       "" -C -w 60 "--quoting-style=$_qs" ../qdir
+done
+# ⛔ SECTION HEADERS ARE QUOTED TOO, where a `:` forces the quotes and a `/` does
+# not, and an operand header shares the rule.
+mkdir -p 'h612/a b' 'h612/a:b' h612/plain "h612/$(printf 'n\nl')"
+: > 'h612/a b/x'; : > 'h612/a:b/y'
+for _qs in literal shell shell-escape c escape; do
+    l612 "headers, $_qs"                         "" -R "--quoting-style=$_qs" ../h612
+done
+l612 "operand headers"                           "" --quoting-style=shell-escape '../h612/a b' ../h612/a:b
+
+# ⛔ AN UNREADABLE DIRECTORY LEAVES NO SECTION BEHIND — no blank line, no
+# header. GNU writes both only once the directory has opened; kriya wrote them
+# first and then the error. ⚠ Root reads anything, so the cases skip there
+# rather than pass vacuously.
+mkdir -p l612/lk/a l612/lk/locked l612/lk/z && : > l612/lk/a/f && chmod 000 l612/lk/locked
+if ! ls l612/lk/locked >/dev/null 2>&1; then
+    l612 "-R past an unreadable directory"       "" -R lk
+    l612 "...in long form, with --dired"         "" -lR --dired lk
+    # ⚠ STDOUT ONLY for an unreadable OPERAND: GNU exits 2 for a command-line
+    # argument it cannot open, kriya 1 (ADR 0008 — a per-operand failure).
+    expect_eq "...and as an operand among others" \
+        "$(cd l612/lk && env $L612_ENV ls z locked a 2>/dev/null || true)" \
+        "$(cd l612/lk && env $L612_ENV "$BIN" ls z locked a 2>/dev/null || true)"
+    expect_eq "...after a file operand" \
+        "$(cd l612/lk && env $L612_ENV ls a/f locked z 2>/dev/null || true)" \
+        "$(cd l612/lk && env $L612_ENV "$BIN" ls a/f locked z 2>/dev/null || true)"
+else
+    echo "note: running as root — the unreadable-directory cases are skipped"
+fi
+chmod 755 l612/lk/locked
+# ⛔ `-R` HEADS THE IMPLIED `.` too — GNU's listing opens with `.:`.
+expect_eq "-R with no operand opens with .:" \
+    "$(cd l612/lk && env $L612_ENV ls -R)" "$(cd l612/lk && env $L612_ENV "$BIN" ls -R)"
+
+# ⛔ COLOUR: GNU's whole table — 24 keys — and every file type that selects one.
+mkdir -p l612/c && cd l612/c
+mkfifo pipe; : > suid; chmod u+s suid; : > sgid; chmod g+s sgid
+mkdir sticky ow stow dir; chmod +t sticky; chmod o+w ow; chmod +t,o+w stow
+: > hard; ln hard hard2; : > plain; : > run; chmod +x run; : > file.c
+ln -s plain lnk; ln -s dir dlnk; ln -s run xlnk; ln -s nowhere dangle
+: > a-rather-long-name-one; : > a-rather-long-name-two
+cd ../..
+LC612='rs=0'   # any valid key loads GNU's compiled-in defaults under it
+l612 "colour: the default table, one per line"   "" --color=always -1 c
+l612 "colour: -l, targets coloured"              "" --color=always -l c
+l612 "colour: -F outside the escape"             "" --color=always -F c
+l612 "colour: -lF"                               "" --color=always -lF c
+# ⚠ CLEAR-TO-EOL: in a non-long format, a coloured name that may wrap is
+# followed by `cl`, so a background colour does not bleed to the margin.
+l612 "colour: -C emits clear-to-EOL"             "" --color=always -C -w 30 c
+l612 "colour: -x"                                "" --color=always -x -w 30 c
+l612 "colour: -m"                                "" --color=always -m -w 30 c
+LC612='rs=0:mh=44;37:su=0:sg=0'
+l612 "colour: mh, once su and sg step aside"     "" --color=always -1 c
+LC612='ln=target:di=01;34:ex=01;32:or=01;31:mi=05;37'
+l612 "colour: ln=target colours as the referent" "" --color=always -1 c
+l612 "...and in -l, with mi on the missing target" "" --color=always -l c
+# ⛔ LS_COLORS VALUES CARRY ESCAPES — GNU's get_funky_string. `lc=\e[` was four
+# literal characters here before 1.6.12.
+LC612='lc=\e[:rc=m:ec=\e[0m:di=1;34'
+l612 "colour: \\e escapes"                       "" --color=always -1 c
+LC612='lc=^[[:rc=\x6d:di=01;34'
+l612 "colour: caret and hex escapes"             "" --color=always -1 c
+LC612='lc=\033[:rc=\155:di=\_1\?'
+l612 "colour: octal, \\_ and \\?"                "" --color=always -1 c
+# ⛔ AN UNKNOWN KEY OR A PARSE ERROR WARNS AND TURNS COLOUR OFF ENTIRELY.
+LC612='zz=01'
+l612 "colour: an unknown key warns, colour off"  "" --color=always -1 c
+LC612='di=01;34:bogus'
+l612 "colour: a parse error warns, colour off"   "" --color=always -1 c
+# ⛔ THE TERMINAL GATE: with LS_COLORS unset or empty, GNU colours with its
+# defaults only for a non-empty COLORTERM or a TERM its dircolors list names.
+# ⚠ `vt220` is on 9.11's list and not 9.4's (CI), so it is not asserted here.
+unset LC612
+l612 "colour: unset, TERM=xterm-256color"        "TERM=xterm-256color" --color=always -1 c
+l612 "colour: unset, COLORTERM=truecolor"        "COLORTERM=truecolor" --color=always -1 c
+l612 "colour: unset, TERM=dumb"                  "" --color=always -1 c
+l612 "colour: unset, COLORTERM empty"            "COLORTERM=" --color=always -1 c
+LC612=''
+l612 "colour: empty, TERM=screen"                "TERM=screen" --color=always -1 c
+unset LC612
+
+# ⛔ `?` FOR A CONTROL BYTE ON A TERMINAL. Only reachable through a pty.
+if script -qec true /dev/null >/dev/null 2>&1; then
+    pty612() {   # pty612 <name> <ls args, one shell string>
+        _g=$(cd qdir && script -qec "env $L612_ENV ls $2" /dev/null 2>/dev/null | tr -d '\r')
+        _k=$(cd qdir && script -qec "env $L612_ENV '$BIN' ls $2" /dev/null 2>/dev/null | tr -d '\r')
+        expect_eq "$1" "$_g" "$_k"
+    }
+    pty612 "tty: literal masks control bytes with ?" "-1 --quoting-style=literal"
+    pty612 "tty: the default style escapes them"     "-1"
+    pty612 "tty: -l masks too"                       "-l --quoting-style=literal"
+    pty612 "tty: columns, literal"                   "--quoting-style=literal"
+else
+    echo "note: no util-linux script(1) — the tty's ? masking is unverified here"
+fi
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

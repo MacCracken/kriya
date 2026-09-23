@@ -134,11 +134,10 @@ expect_eq "-L size"         "7"              "$("$BIN" stat -L -c "%s" alink)"
 cols=$("$BIN" stat -t regfile | awk '{print NF}')
 expect_eq "terse 16 columns" "16" "$cols"
 
-# First 14 columns should match GNU (15th is %W birth time which we
-# don't have via stat(2) — documented deviation).
-mine=$("$BIN" stat -t regfile | awk '{for(i=1;i<=14;i++) printf "%s ", $i; print ""}')
-gnu=$(stat -t regfile     | awk '{for(i=1;i<=14;i++) printf "%s ", $i; print ""}')
-expect_eq "terse columns 1-14 match GNU" "$gnu" "$mine"
+# ⭐ ALL SIXTEEN columns since 1.6.12. The 15th is %W, the birth time, which
+# stat(2) does not carry — kriya printed 0 there and this compared only 1-14.
+# It comes from statx(2) now, as GNU's does.
+expect_eq "terse matches GNU, all 16 columns" "$(stat -t regfile)" "$("$BIN" stat -t regfile)"
 
 # --- missing file ---
 expect_exit "missing"      1 "$BIN" stat ghost
@@ -168,16 +167,10 @@ expect_eq "unknown %q matches GNU" "$(stat --format="%q" regfile 2>/dev/null)" "
 # its own source text. `stat -c %y` printed the two bytes "%y" where a timestamp
 # belonged and exited 0 — a script substituting that into a filename or a
 # comparison got literal garbage with every sign of success.
-# ⚠ The list keeps shrinking and these assertions have to shrink with it:
-# %x/%y/%z left at v1.2.5 and %U/%G at 1.5.0, when `src/lib/userdb.cyr` landed.
-# ⭐ This block going red is the SUCCESS signal for a release that implements
-# one of them — 1.5.0 took %U/%G and 1.5.3 took %N. Only %w (statx(2)) is left.
-for spec in %w; do
-    rc=0
-    out=$("$BIN" stat -c "$spec" regfile 2>/dev/null) || rc=$?
-    expect_eq "deferred $spec exits 1"     "1"  "$rc"
-    expect_eq "deferred $spec prints none" ""   "$out"
-done
+# ⭐ THE LIST IS EMPTY as of 1.6.12. It shrank a release at a time — %x/%y/%z at
+# v1.2.5, %U/%G at 1.5.0, %N at 1.5.3 — and %w, the last, went red here exactly
+# as this block promised when statx(2) arrived. What replaced it is the 1.6.12
+# block's GNU comparison of %w and %W.
 
 # --- %U / %G: owner and group NAMES (1.5.0) ---
 #
@@ -255,6 +248,71 @@ expect_eq "stat %y at epoch zero" \
 # ...while implemented ones are untouched.
 expect_eq "%s still works" "$(stat -c %s regfile)" "$("$BIN" stat -c %s regfile)"
 expect_eq "%n still works" "$(stat -c %n regfile)" "$("$BIN" stat -c %n regfile)"
+
+# --- 1.6.12: the printf engine, birth time, and the default format ----------
+#
+# ⛔ EVERY CASE ASKS GNU, under `TZ=UTC LC_ALL=C`: UTC because kriya is UTC-only
+# (ADR 0007), C because GNU groups digits for `'` in other locales and kriya
+# has no locale. The oracle ignores what kriya ignores.
+# ⚠ GNU's directive is `%[flags][width][.precision]` and the flags it KEEPS
+# depend on the kind — strings take only `-`, unsigned numbers `'-0`, octal and
+# hex `-#0`, signed `'-+ 0` — so a flag that is valid on one specifier is
+# silently dropped on another. kriya ignored every modifier before 1.6.12 and
+# printed `%10s` as a bare size.
+mkdir -p d612 && cd d612
+echo "hello!" > f; chmod 0640 f; : > empty; mkdir dd; ln -s f ln
+cd ..
+st_same() {   # st_same <format> <operand...>
+    _f=$1; shift
+    expect_eq "stat -c '$_f' $*" \
+        "$(cd d612 && TZ=UTC LC_ALL=C stat -c "$_f" "$@" 2>&1)" \
+        "$(cd d612 && TZ=UTC LC_ALL=C "$BIN" stat -c "$_f" "$@" 2>&1)"
+}
+for _fmt in '%10s|' '%-10s|' '%010s' '%+s' '%#a' '%05a' '%-5a|' '%#f' '%#o' \
+            '%.3Y' '%12.4Y' '%.0Y' '%.9X' '%.30Y' "%'s" '% d' '%+i' '%-#15x' \
+            '%-7n|' '%.2n' '%-12U|%8G|'; do
+    st_same "$_fmt" f dd
+done
+# Birth time: from statx(2), or `-` / `0` on a filesystem without one — both
+# sides make the same call, so the comparison holds either way.
+for _fmt in '%w' '%W' '%.3W'; do st_same "$_fmt" f; done
+# The device specifiers: %H/%L split a device number, %r/%R are the raw rdev.
+st_same '%Hd,%Ld' f
+st_same '%Hr,%Lr|%r|%R|%t|%T' /dev/null
+st_same '%m' f
+st_same '%F' empty
+# ⛔ `%N` IS QUOTED ONLY IF THE FORMAT CONTAINS THE BYTES `%N`. GNU decides once,
+# per format, so `%-20N` alone prints the name BARE and `%-20N|%N` quotes both.
+st_same '%-20N|' f
+st_same '%-20N|%N' f
+st_same '%N' ln
+# ⛔ `%%` with modifiers, and a directive the format ENDS inside, are fatal: GNU
+# exits 1 before printing anything. A lone trailing `%` is a literal.
+for _fmt in '%5%' '%5' '%-.3'; do
+    expect_exit "stat -c '$_fmt' exits 1" 1 "$BIN" stat -c "$_fmt" d612/f
+    expect_exit "...and GNU agrees"       1 stat -c "$_fmt" d612/f
+    expect_eq "...printing nothing" "" "$("$BIN" stat -c "$_fmt" d612/f 2>/dev/null)"
+    case "$("$BIN" stat -c "$_fmt" d612/f 2>&1)" in
+        *"invalid directive"*) PASS=$((PASS + 1)) ;;
+        *) FAIL=$((FAIL + 1)); printf "FAIL stat -c '%s': no 'invalid directive'\n" "$_fmt" >&2 ;;
+    esac
+done
+st_same '100%' f
+# ⭐ THE DEFAULT FORMAT, byte for byte — including the Birth line, and GNU's
+# separate layout for a device file (`Device type:` in place of `Links:`'s pad).
+for _o in f empty dd /dev/null; do
+    expect_eq "stat $_o (default format)" \
+        "$(cd d612 && TZ=UTC LC_ALL=C stat "$_o")" "$(cd d612 && "$BIN" stat "$_o")"
+done
+# ⚠ A symlink's ATIME LINE IS DROPPED, and only its. Printing ` -> f` reads the
+# link, and on a strictatime mount (this box's /tmp) every read bumps the atime
+# — so whichever of the two runs second sees the first one's read. The line is
+# covered by the operands above; everything else about the symlink is compared.
+expect_eq "stat ln (default format, atime line aside)" \
+    "$(cd d612 && TZ=UTC LC_ALL=C stat ln | sed '/^Access: [0-9]/d')" \
+    "$(cd d612 && "$BIN" stat ln | sed '/^Access: [0-9]/d')"
+expect_eq "stat -t on a device and a directory" \
+    "$(cd d612 && stat -t /dev/null dd)" "$(cd d612 && "$BIN" stat -t /dev/null dd)"
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

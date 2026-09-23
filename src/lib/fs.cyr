@@ -116,6 +116,14 @@ fn fs_is_lnk(stat_buf): i64 {
     return 0;
 }
 
+# A character or a block device: the two types whose `st_rdev` means something.
+fn fs_is_dev(stat_buf): i64 {
+    var t = load64(stat_buf + 24) & 61440;
+    if (t == 8192)  { return 1; }   # S_IFCHR
+    if (t == 24576) { return 1; }   # S_IFBLK
+    return 0;
+}
+
 # Extract the low-12 mode bits (permission + setuid/gid/sticky).
 fn fs_perms(stat_buf): i64 {
     return load64(stat_buf + 24) & 4095;
@@ -1108,6 +1116,21 @@ fn fs_inoset_count(set): i64 {
 fn fs_nlink(stat_buf): i64 { return load64(stat_buf + FS_STAT_NLINK); }
 fn fs_dev(stat_buf):   i64 { return load64(stat_buf + FS_STAT_DEV); }
 fn fs_ino(stat_buf):   i64 { return load64(stat_buf + FS_STAT_INO); }
+fn fs_rdev(stat_buf):  i64 { return load64(stat_buf + FS_STAT_RDEV); }
+
+# glibc's `gnu_dev_major` / `gnu_dev_minor`: a `dev_t` split into its two
+# numbers. ⚠ `(dev >> 8) & 0xfff` and `dev & 0xff` are the OLD 16-bit layout and
+# drop the high bits of both — `stat %t`/`%T` did exactly that before 1.6.12.
+# ⛔ THE HIGH MASKS ARE 32 BITS WIDE, not "everything above". glibc returns an
+# `unsigned int`, so its `& ~0xff` is truncated for free; in i64 the same mask
+# would carry the MAJOR's top bits (dev bits 44-63) into the minor.
+fn fs_dev_major(dev): i64 {
+    return ((dev >> 8) & 0xfff) | ((dev >> 32) & 0xfffff000);
+}
+
+fn fs_dev_minor(dev): i64 {
+    return (dev & 0xff) | ((dev >> 12) & 0xffffff00);
+}
 
 # --- walk-ancestor stack --------------------------------------------
 #

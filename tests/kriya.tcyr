@@ -21,6 +21,9 @@ include "src/lib/path.cyr"
 # after the build breaks.
 include "src/lib/glob.cyr"
 include "src/lib/str.cyr"
+# `quote.cyr` is pure byte work and depends on nothing above it; it sits here
+# because that is its place in `src/main.cyr`.
+include "src/lib/quote.cyr"
 # ⚠ M15e, PRE-EMPTIVELY again. `src/lib/icase.cyr` is exercised directly below;
 # `grep.cyr` and `find.cyr` are its live callers but neither is in this subset,
 # so a missing include would stay green until one of them arrived.
@@ -80,6 +83,40 @@ fn _t_udb_line(lit, min_fields, ent): i64 {
     var buf = alloc(n + 1);
     memcpy(buf, lit, n + 1);
     return _udb_line(buf, 0, n, min_fields, ent);
+}
+
+# A writable copy of `lit` with every `from` byte replaced by `to` — how a test
+# spells a `"`, a TAB or a high byte without leaning on a string escape.
+fn _t_sub(lit, from, to): i64 {
+    var n = strlen(lit);
+    var b = alloc(n + 1);
+    var i: i64 = 0;
+    while (i < n) {
+        var c = load8(lit + i);
+        if (c == from) { c = to; }
+        store8(b + i, c);
+        i = i + 1;
+    }
+    store8(b + n, 0);
+    return b;
+}
+
+# 1 when quoting `src` in `style` produces exactly `want`.
+fn _t_q(src, style, want): i64 {
+    var n = strlen(src);
+    var out = alloc(quote_bufsz(n) + 1);
+    var k = quote_shell(src, n, style, out);
+    store8(out + k, 0);
+    return streq(out, want);
+}
+
+# The same, through the section-header rules.
+fn _t_qh(src, style, want): i64 {
+    var n = strlen(src);
+    var out = alloc(quote_bufsz(n) + 1);
+    var k = quote_header(src, n, style, out);
+    store8(out + k, 0);
+    return streq(out, want);
 }
 
 fn main() {
@@ -952,6 +989,112 @@ fn main() {
     assert_eq(backup_control_from("NONE"),     BACKUP_INVALID,  "the names are case-sensitive");
     assert_eq(backup_control_from(""),         BACKUP_INVALID,  "the empty string");
     assert_eq(backup_control_from("bogus"),    BACKUP_INVALID,  "anything else");
+
+    # ⭐ `ls --quoting-style` beyond shell-escape (1.6.12). Every expected value
+    # is GNU's own output under `LC_ALL=C`; the smoke suite re-asks GNU at run
+    # time, so these pin the algorithm without a second binary.
+    # `#` stands for `"`, `~` for TAB, `%` for the byte 0xE9, `@` for BEL.
+    var q_dq  = _t_sub("a#b", 35, 34);
+    var q_tab = _t_sub("tab~here", 126, 9);
+    var q_hi  = _t_sub("caf%", 37, 233);
+    var q_bel = _t_sub("bel@", 64, 7);
+    test_group("quote — c: always double quotes, C escapes, octal");
+    assert_eq(_t_q("a b", QUOTE_C, _t_sub("#a b#", 35, 34)), 1, "a space is quoted");
+    assert_eq(_t_q("plain", QUOTE_C, _t_sub("#plain#", 35, 34)), 1, "...and so is nothing at all");
+    assert_eq(_t_q("it's", QUOTE_C, _t_sub("#it's#", 35, 34)), 1, "a ' is bare inside");
+    assert_eq(_t_q(q_dq, QUOTE_C, _t_sub("#a\\#b#", 35, 34)), 1, "a \" is escaped");
+    assert_eq(_t_q(q_tab, QUOTE_C, _t_sub("#tab\\there#", 35, 34)), 1, "TAB is \\t");
+    assert_eq(_t_q(q_bel, QUOTE_C, _t_sub("#bel\\a#", 35, 34)), 1, "BEL is \\a");
+    assert_eq(_t_q(q_hi, QUOTE_C, _t_sub("#caf\\351#", 35, 34)), 1, "a high byte is octal");
+
+    test_group("quote — escape: c's escapes without the quotes");
+    assert_eq(_t_q("a b", QUOTE_ESCAPE, "a\\ b"), 1, "a SPACE is \\<space> — ls's own rule");
+    assert_eq(_t_q(q_dq, QUOTE_ESCAPE, q_dq), 1, "a \" is bare with no quotes to close");
+    assert_eq(_t_q("it's", QUOTE_ESCAPE, "it's"), 1, "...and so is a '");
+    assert_eq(_t_q(q_tab, QUOTE_ESCAPE, "tab\\there"), 1, "TAB is \\t");
+    assert_eq(_t_q(q_hi, QUOTE_ESCAPE, "caf\\351"), 1, "a high byte is octal");
+    assert_eq(_t_q("plain", QUOTE_ESCAPE, "plain"), 1, "nothing to escape, nothing added");
+
+    test_group("quote — locale, with no locale: '...' around C escapes");
+    assert_eq(_t_q("plain", QUOTE_LOCALE, "'plain'"), 1, "always quoted");
+    assert_eq(_t_q("it's", QUOTE_LOCALE, "'it\\'s'"), 1, "a ' is \\'");
+    assert_eq(_t_q(q_dq, QUOTE_LOCALE, _t_sub("'a#b'", 35, 34)), 1, "a \" is bare");
+    assert_eq(_t_q(q_bel, QUOTE_LOCALE, "'bel\\a'"), 1, "BEL is \\a");
+
+    test_group("quote — shell: shell-escape's decision, raw bytes");
+    assert_eq(_t_q("a b", QUOTE_SHELL, "'a b'"), 1, "a space still quotes");
+    assert_eq(_t_q("it's", QUOTE_SHELL, _t_sub("#it's#", 35, 34)), 1, "a lone ' still picks double quotes");
+    # ⛔ ONLY TAB, NEWLINE AND CR FORCE QUOTES, and nothing is escaped: the TAB
+    # is copied raw inside them, and BEL or a high byte leaves the name bare.
+    assert_eq(_t_q(q_tab, QUOTE_SHELL, _t_sub("'tab~here'", 126, 9)), 1, "TAB quotes, raw");
+    assert_eq(_t_q(q_bel, QUOTE_SHELL, q_bel), 1, "BEL does not quote");
+    assert_eq(_t_q(q_hi, QUOTE_SHELL, q_hi), 1, "nor does a high byte");
+    assert_eq(_t_q("plain", QUOTE_SHELL_ALWAYS, "'plain'"), 1, "shell-always quotes anyway");
+    assert_eq(_t_q(q_hi, QUOTE_SHELL_ALWAYS, _t_sub("'caf%'", 37, 233)), 1, "...raw inside");
+
+    test_group("quote — a brace alone is shell syntax, inside a word it is not");
+    assert_eq(_t_q("{", QUOTE_IF_NEEDED, "'{'"), 1, "{ alone is quoted");
+    assert_eq(_t_q("}", QUOTE_IF_NEEDED, "'}'"), 1, "} alone is quoted");
+    assert_eq(_t_q("{}", QUOTE_IF_NEEDED, "{}"), 1, "...but not two of them");
+    assert_eq(_t_q("cur{ly}", QUOTE_IF_NEEDED, "cur{ly}"), 1, "...nor inside a word");
+    assert_eq(_t_q("{", QUOTE_SHELL, "'{'"), 1, "shell style agrees");
+    assert_eq(_t_q("{", QUOTE_ESCAPE, "{"), 1, "escape has no shell syntax to fear");
+
+    test_group("quote — a leading - is bare; # and ~ are not");
+    # ⛔ The 1.5.3 table quoted a leading `-`, from a measurement that handed
+    # GNU `-X` without `--` — GNU parsed it as an option. With `--`, it is bare.
+    assert_eq(_t_q("-", QUOTE_IF_NEEDED, "-"), 1, "- alone");
+    assert_eq(_t_q("-a", QUOTE_IF_NEEDED, "-a"), 1, "-a");
+    assert_eq(_t_q("--x", QUOTE_IF_NEEDED, "--x"), 1, "--x");
+    assert_eq(_t_q("-missing", QUOTE_DIAGNOSTIC, "-missing"), 1, "...and in a diagnostic");
+    assert_eq(_t_q("#a", QUOTE_IF_NEEDED, "'#a'"), 1, "a leading # is still quoted");
+    assert_eq(_t_q("~a", QUOTE_IF_NEEDED, "'~a'"), 1, "...and a leading ~");
+    assert_eq(_t_q("-#", QUOTE_IF_NEEDED, "-#"), 1, "...but not once something precedes it");
+
+    test_group("quote — section headers: `:` forces quotes or is escaped");
+    assert_eq(_t_qh("hd/c:d", QUOTE_IF_NEEDED, "'hd/c:d'"), 1, "shell-escape quotes a :");
+    assert_eq(_t_qh("hd/plain", QUOTE_IF_NEEDED, "hd/plain"), 1, "...and leaves a / bare");
+    assert_eq(_t_qh("hd/c:d", QUOTE_C, _t_sub("#hd/c\\:d#", 35, 34)), 1, "c writes \\:");
+    assert_eq(_t_qh("hd/c:d", QUOTE_ESCAPE, "hd/c\\:d"), 1, "...as does escape");
+    assert_eq(_t_qh("hd/c:d", QUOTE_LOCALE, "'hd/c\\:d'"), 1, "...and locale");
+    # ⚠ The header flag is per call: the next plain quote is back to `ls`'s set.
+    assert_eq(_t_q("a:b", QUOTE_IF_NEEDED, "a:b"), 1, "a listing leaves : bare after a header");
+
+    test_group("quote — diagnostics: / is bare even inside double quotes");
+    # ⛔ `/` joined the double-quote-safe set in 1.6.12: GNU prints `"sqd/it's"`,
+    # and kriya switched to single quotes at the slash — `'sqd/it'\''s'`.
+    assert_eq(_t_q("sqd/it's", QUOTE_DIAGNOSTIC, _t_sub("#sqd/it's#", 35, 34)), 1, "a path with a '");
+    assert_eq(_t_q("a:b", QUOTE_DIAGNOSTIC, "'a:b'"), 1, "a : is quoted in a message");
+    assert_eq(_t_q("/no/such/f", QUOTE_DIAGNOSTIC, "/no/such/f"), 1, "...a / is not");
+
+    # ⛔ The device-number split behind `stat %Hd %Lr %t %T` and `ls -l`'s
+    # `major, minor` column. Values are glibc's `makedev()` of the pair.
+    test_group("fs_dev_major / fs_dev_minor — glibc's split");
+    assert_eq(fs_dev_major(259), 1, "/dev/null is 1, 3");
+    assert_eq(fs_dev_minor(259), 3, "...minor");
+    assert_eq(fs_dev_major(66304), 259, "a major past 255 (NVMe's 259, 0)");
+    assert_eq(fs_dev_minor(66304), 0, "...minor");
+    assert_eq(fs_dev_major(1050668), 8, "a minor past 255 (8, 300)");
+    assert_eq(fs_dev_minor(1050668), 300, "...minor");
+    # ⛔ Both numbers at full width, the case the high masks exist for: an
+    # `& ~0xff` in i64 carries the major's top bits into the minor.
+    assert_eq(fs_dev_major(0x000120006783459A), 0x12345, "a 20-bit major");
+    assert_eq(fs_dev_minor(0x000120006783459A), 0x6789A, "...and a 20-bit minor, untouched by it");
+
+    test_group("fs_is_dev — character and block, nothing else");
+    var dsb[144];
+    store64(&dsb + 24, 8192 + 438);
+    assert_eq(fs_is_dev(&dsb), 1, "a character device");
+    store64(&dsb + 24, 24576 + 432);
+    assert_eq(fs_is_dev(&dsb), 1, "a block device");
+    store64(&dsb + 24, 32768 + 420);
+    assert_eq(fs_is_dev(&dsb), 0, "a regular file");
+    store64(&dsb + 24, 4096 + 420);
+    assert_eq(fs_is_dev(&dsb), 0, "a FIFO");
+    # ⚠ `st_mode` is 32 bits and `st_uid` follows it, so a load64 carries the uid
+    # in the high half; the type mask must not care.
+    store64(&dsb + 24, (1000 << 32) + 8192 + 438);
+    assert_eq(fs_is_dev(&dsb), 1, "...with a uid in the high half");
 
     return assert_summary();
 

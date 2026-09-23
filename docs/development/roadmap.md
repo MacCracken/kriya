@@ -38,7 +38,7 @@ watchlist in [`lessons.md`](lessons.md). The rest are shipped or dissolved into 
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.6.x** | GNU-parity leftovers and cleanup | — | **1.6.12** — `ls` / `stat` output fidelity |
+| **1.6.x** | GNU-parity leftovers and cleanup | — | **1.6.13** — `cp` completeness |
 | **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | ARG_MAX argv chunking | **1.7.0** — batched exec |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.8.0** — floats |
 | **1.9.x** | Performance | niyama regex speed (upstream) | **1.9.0** — `wc -c` fast path |
@@ -54,46 +54,6 @@ test-first. **1.7.x onward is new capability**, a different kind of risk: it cha
 
 What the closed arcs and the release audits left open. One release per entry; every item was
 measured against GNU when it was filed and re-confirmed open at 1.6.11.
-
-- **1.6.12 — `ls` / `stat` output fidelity** (roughly in priority order). Small, well-bounded, and
-  none of it blocks another arc:
-  - **`ls -d` with no operand lists the directory's CONTENTS**; GNU lists `.`. Small and clearly
-    wrong. ⚠ It needs a test that would have caught it, not just the fix.
-  - ⛔ **`ls -l` omits the `total N` line entirely.** GNU prints `total 8` before a directory's
-    entries — 1K blocks, and absent for a plain FILE operand. A script doing `ls -l | head -1` or
-    counting lines gets a different answer.
-  - ⚠ **The `-l` mtime format differs**: GNU writes `Aug 28 20:53` (and `Mon DD  YYYY` past six
-    months), kriya writes `2026-08-29 03:53`. Distinct from
-    [ADR 0007](../adr/0007-date-utc-only-at-v0-7-0.md)'s UTC-only decision, which is about the
-    VALUE; this is the rendering. Decide whether to match GNU or keep ISO-8601 — and if the latter,
-    record it, because it is currently neither chosen nor documented.
-  - **GNU WARNS on an invalid `$COLUMNS` and kriya is silent.** `ls: ignoring invalid width in
-    environment variable COLUMNS: 'abc'` — the fallback to 80 already matches; only the diagnostic
-    is missing. ⚠ It is a NEW stderr shape (not the operand/message pair), so it has to answer to
-    [architecture 001](../architecture/001-errno-message-policy.md) before it lands.
-  - **`-g`, `-o`, `--full-time` and `--dired` are unimplemented.** All four imply LONG format and
-    behave as ordinary last-wins members of the format group (measured), so `_ls_scan_format`
-    already has the shape to hold them. ⚠ `-g` omits the OWNER column and `-o` the GROUP one — not
-    synonyms, and the difference is invisible unless owner != group.
-  - **`-T`/`--tabsize` is unimplemented.** The column separator hard-codes 8. ⚠ `-T 0` disables tab
-    packing entirely, which is the same switch `-w 0` already flips internally.
-  - **`--quoting-style` accepts only the three styles kriya implements** — `literal`,
-    `shell-escape`, `shell-escape-always`. `shell`, `c`, `escape`, `locale` and `clocale` are
-    REFUSED by name; adding them is small and well-bounded. (`src/cmd/ls.cyr` points here.)
-  - **An unknown two-letter `LS_COLORS` key is IGNORED where GNU errors.** GNU prints
-    `ls: unrecognized prefix: 'zz'` and disables colour ENTIRELY; kriya skips the item and colours
-    the rest. ⚠ Decide which is right before changing it — refusing the whole variable because one
-    key is unknown is arguably worse for a user whose `dircolors` is newer than their `ls`.
-  - **`no=` positions its colour prefix at the START OF THE LINE** — before the `-l` columns and the
-    `-i` inode — where kriya emits it before the NAME. 140 of 2,500 pathological comparisons and
-    **zero** on realistic input, because a real `dircolors -b` never emits `no=`.
-  - **A 0.17% quoting residual** over a 3,000-name hostile fuzz: names combining a `'` with escaped
-    bytes in particular positions, where GNU emits a leading empty `''` kriya does not. ⛔ In at
-    least one of those GNU's own output does not round-trip (`'\t'` reads as backslash-t). Worth
-    revisiting only if a consumer hits it.
-  - **`stat %w`** — file BIRTH time, the last specifier kriya knows about and does not render (it is
-    refused by name today). Needs `statx(2)`, which the stdlib does not wrap at 6.6.6 — a raw syscall
-    or an upstream wrapper. ⚠ Not every filesystem records it; GNU prints `-` then.
 
 - **1.6.13 — `cp` completeness.** All measured against GNU while fixing the 1.6.9 mode protocol, and
   each a different mechanism:
@@ -152,6 +112,10 @@ measured against GNU when it was filed and re-confirmed open at 1.6.11.
     `find` and `xargs` cache PATH at startup to dodge a stack clobber in that same old buffer.
     ⚠ Not a drop-in swap: the stdlib copies every hit to a fresh heap buffer where `kriya_getenv`
     returns a pointer into its cached block. Pure cleanup either way.
+  - **`stat %C`** — the SELinux context — prints `?` and exits 0, as an unknown specifier does.
+    GNU reads `security.selinux` and, where there is none, prints `?` too but exits **1** with
+    *failed to get security context*, so a script cannot tell "no context" from "not asked".
+    `k_getxattr` (1.6.12) is half of it; an unfollowed symlink needs the `l` variant.
   - **Four doc blocks in `src/lib/args.cyr` sit 100–190 lines above the functions they document**
     (`kriya_parse_nonneg_int`, `kriya_argv_collect`, `kriya_parse_octal_mode`).
 
@@ -180,8 +144,9 @@ measured against GNU when it was filed and re-confirmed open at 1.6.11.
     4 KiB `getdents64` buffer per directory and a joined path per entry and frees neither, so
     `kriya du -s /usr` peaks at **68 MB against GNU's 7.7 MB** with dedup switched off entirely.
     Measure it in the same pass.
-- **1.7.4 — Raw syscalls to stdlib wrappers.** kriya issues **38 distinct raw `syscall(N, …)`
-  numbers across 54 sites**, in x86-64 Linux numbering; 16 of those sites are the `*at()` family
+- **1.7.4 — Raw syscalls to stdlib wrappers.** kriya issues **40 distinct raw `syscall(N, …)`
+  numbers across 56 sites** (re-counted at 1.6.12), in x86-64 Linux numbering; 16 of those sites are
+  the `*at()` family
   (`openat` 257, `mkdirat` 258, `newfstatat` 262, `unlinkat` 263, `utimensat` 280, …). ⭐ **The
   wrappers kriya asked for exist**: the stdlib has exposed `sys_openat`, `sys_mkdirat`,
   `sys_fstatat`, `sys_unlinkat`, `sys_linkat`, `sys_renameat`, `sys_fchmodat`, `sys_fchownat`,
@@ -194,6 +159,11 @@ measured against GNU when it was filed and re-confirmed open at 1.6.11.
     `getdents64` 217→61 and `unlinkat` 263→35; 6.6.6 added `statfs` 137. `openat` and `mkdirat`
     were not checked. A `qemu-aarch64` run of the smoke suite says whether an aarch64 build is
     broken today or only hard to read.
+  - ⚠ **Two of them have no wrapper to convert to.** 1.6.12 added `statx` (332; **291** on aarch64)
+    for `stat %w`/`%W` and `getxattr` (191; **8** on aarch64) for `ls`'s `ca` colour, both as
+    `k_statx` / `k_getxattr` in `src/lib/sys.cyr`, and the 6.6.6 stdlib wraps neither. Check both
+    against cyrius's aarch64 translation table in the same `qemu-aarch64` run; upstream wrappers are
+    the fix if either is missing. Both already decline with `-38` on agnos.
   - ⚠ **agnos keeps its own arms.** The agnos syscall peer wraps only `sys_fchownat` of this set
     (plus the `stat` family), so kriya's `CYRIUS_TARGET_AGNOS` branches in `src/lib/sys.cyr` and
     `src/lib/fs.cyr` stay; the sweep is the Linux side.
@@ -236,6 +206,12 @@ measured against GNU when it was filed and re-confirmed open at 1.6.11.
   refuses by name today: `%V` / `%G` / `%g` (ISO week-date) and the rest of `_date_is_deferred_spec`.
   ⚠ Most want no locale data and no tzfile — they are arithmetic on a broken-down time — so they do
   **not** belong behind the Gated chrono item the way local time does.
+  - **`ls --time-style=+FORMAT` and the `TIME_STYLE` variable ride on the same renderer.** GNU
+    formats `-l` dates with an arbitrary strftime string (`+%F`, and `+OLD<newline>NEW` for the two
+    ages); kriya exits 2 naming this slot, and does not read `TIME_STYLE`, so that a half-working
+    variable never silently drops a `+FORMAT` ([ADR 0020](../adr/0020-ls-long-format-dates-are-posix.md)).
+    ⭐ `TIME_STYLE` passes [ADR 0017](../adr/0017-environment-variables-configure-features-the-caller-turned-on.md)'s
+    test — it changes nothing without `-l` — so it lands with `+FORMAT`, not after it.
 
 ---
 
@@ -293,6 +269,14 @@ decision, which needs an ADR rather than a roadmap line.
   lets `QUOTING_STYLE` override the tty/pipe default and `POSIXLY_CORRECT` change behaviour with no
   flag — `echo`'s escapes, `du`'s 512-byte blocks — and kriya declines both. Revisit only with an
   ADR.
+- **GNU `stat`'s stray `s` after a flagged `%N` on a symlink.** With a `0`, `#`, `+`, space or `'`
+  flag, GNU prints `%0N` of a link as `ln -> fs` — its own conversion character, appended to a
+  format it assembled. kriya prints `ln -> f`. Measured on 9.4 and 9.11; `scripts/difffuzz-stat-format.py`
+  tolerates exactly that byte and nothing else. ⛔ Do not "fix" this toward GNU.
+- **Base-0 and saturating parses of `COLUMNS` and `TABSIZE`.** GNU reads both as C integers, so
+  `TABSIZE=010` is 8 and `COLUMNS=0x50` is 80; kriya reads decimal, as
+  [ADR 0019](../adr/0019-the-line-width-is-a-number-not-a-format.md) decided for `-w`, and warns on
+  the rest.
 - **`which`'s shell-state flags** — `--read-alias`, `--read-functions`, `--show-dot`,
   `--show-tilde`, `--skip-tilde`, `--skip-dot`, `--skip-functions`. Shell state belongs to agnoshi
   (CLAUDE.md scope boundaries), decided when `which` shipped (CHANGELOG `[0.4.0]`).
@@ -340,7 +324,10 @@ Two regex-surface gaps whose fix belongs to niyama rather than kriya.
 
 ### Upstream chrono — local time
 
-`date` local time and `ls -l` locale-aware mtime need tzfile parsing (`chrono_tz.cyr`). ⚠ This is
+`date` local time, and local time in `ls -l` and `stat`'s dates, need tzfile parsing
+(`chrono_tz.cyr`). ⚠ What is gated is the VALUE — every kriya time is UTC — not the spelling:
+`ls -l` has printed POSIX's date form since 1.6.12
+([ADR 0020](../adr/0020-ls-long-format-dates-are-posix.md)). ⚠ This is
 the **genuine** chrono gate — re-verified absent at pin 6.6.6 — and the trigger
 [ADR 0007](../adr/0007-date-utc-only-at-v0-7-0.md) already names.
 
@@ -387,7 +374,7 @@ What still gates the arcs. Ship the enabler and everything under it becomes smal
 | Byte-suffix parser | `src/lib/args.cyr` | `head -c 1K`, `tail -c 1K`, `sort -S` | 1.8.2 |
 | niyama regex speed | **upstream** | `grep` on metacharacter patterns (~160× GNU) | 1.9.2, gated |
 | niyama GNU BRE operators and backreferences | **upstream** | `grep`, `find -regex`, `nl -b p` | M11, gated |
-| chrono tzfile reader | **upstream** | `date` local time, `ls -l` locale mtime | gated |
+| chrono tzfile reader | **upstream** | local time in `date`, `ls -l` and `stat` | gated |
 
 ---
 
@@ -413,7 +400,9 @@ four-criteria gate can land as a 1.x.y, but the list below does not move.
 
 If a single utility crosses **~400 lines of code** or grows a non-trivial dependency surface,
 propose extracting it into its own repo. ⚠ **Fifteen already exceed it** (non-blank, non-comment
-lines at 1.6.11); the largest are `ls` (1,479), `grep` (1,124), `cp` (1,068) and `find` (956), and
-none has been split. The threshold is a **prompt to decide**, not an automatic trigger: the
+lines at 1.6.12); the largest are `ls` (**2,201**, up from 1,479 at 1.6.11), `grep` (1,124), `cp`
+(1,068) and `find` (956), and none has been split. ⛔ **`ls` is the one to decide first**: 1.6.12's
+GNU output surface — dates, `--dired`, tab stops, nine quoting styles, the full colour table — made
+it twice the next utility, and most of that growth is rendering `src/lib/` does not share. The threshold is a **prompt to decide**, not an automatic trigger: the
 multi-tool is the right home while they share `src/lib/`, and the question is whether a given
 utility has stopped sharing. Revisit at each arc boundary.

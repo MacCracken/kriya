@@ -7,23 +7,29 @@
 # operands, lists each (directory contents for directories, the entry
 # itself for non-directories).
 #
-# Flags (this ship):
+# Flags:
 #   -a / --all              include `.` and `..` and other dotfiles.
 #   -A / --almost-all       include dotfiles but skip `.` and `..`.
-#   -l                      long form (mode nlink uid gid size mtime name).
-#   -h / --human-readable   human-readable size suffixes (B/K/M/G/T/P)
-#                           in -l form.
-#   -r / --reverse          reverse the alphabetical sort.
-#   -1                      force one entry per line (overrides the
-#                           default multi-column layout).
-#   -w / --width COLS       assume terminal width COLS for column
-#                           packing (0 = auto-detect).
-#   -F                      append type indicator (`/` dir, `*` exec,
-#                           `@` symlink, `|` fifo, `=` socket).
-#   -i / --inode            prepend the inode number.
-#   -d / --directory        list directory operands as entries
-#                           themselves, not their contents.
+#   -d / --directory        list directory operands as entries, not contents.
 #   -R / --recursive        descend into subdirectories.
+#   -r / --reverse          reverse the sort.
+#   -t / -S                 sort by mtime / by size, largest first.
+#   -F                      append a type indicator (`/` `*` `@` `|` `=`).
+#   -i / --inode            prepend the inode number.
+#   format group, last wins: -1, -C, -x, -m, -l, --format=WORD, and the long
+#   implications -n, -g, -o, --full-time and -D / --dired.
+#   -l                      long form: mode, links, owner, group, size (or
+#                           `major, minor`), date, name — after `total N`.
+#   -g / -o                 long form without the owner / the group column.
+#   -n / --numeric-uid-gid  long form with numeric ids.
+#   -h / --human-readable   `-l` sizes and `total` in K/M/G…, rounded UP.
+#   --time-style=STYLE      full-iso, long-iso, iso, locale; `posix-` prefix.
+#   --full-time             `-l --time-style=full-iso`.
+#   -D / --dired            long form plus Emacs dired's byte-offset index.
+#   -w / --width COLS       line width for the columnar formats (0 = none).
+#   -T / --tabsize COLS     tab stops for column padding (0 = spaces only).
+#   --color[=WHEN]          GNU's LS_COLORS table, all 24 keys.
+#   --quoting-style=WORD    GNU's nine styles; shell-escape on a tty.
 #
 # Default output is GNU-style multi-column (column-major, fill down then
 # across) sized to the terminal — ioctl(TIOCGWINSZ) on Linux, winsize()#60
@@ -31,10 +37,11 @@
 # hint it degrades to one-per-line (script-safe, like GNU ls piped).
 #
 # ⭐ `-t` / `-S` shipped at 1.5.1 (and the insertion sort became a merge sort in
-# the same pass), `--color` at 1.5.2 and quoting at 1.5.3. What is left is small
-# and listed under roadmap 1.6.12 — the `-d`-with-no-operand bug, the missing
-# `total N` line, the `no=` prefix position, the remaining `--quoting-style`
-# styles and the unimplemented `-g`/`-o`/`--full-time`/`-T`.
+# the same pass), `--color` at 1.5.2, quoting at 1.5.3, the format group at
+# 1.6.8. 1.6.12 closed the rest of GNU's output surface this file carries —
+# `total N`, POSIX dates (ADR 0020), `-g`/`-o`/`--time-style`/`--dired`/`-T`,
+# all nine quoting styles and the whole colour table — measured byte for byte
+# against GNU in `scripts/smoke-ls.sh`. `+FORMAT` and TIME_STYLE: roadmap 1.8.4.
 #
 # ⭐ Owner/group NAMES shipped at 1.5.0 on `src/lib/userdb.cyr`, and `-n` with
 # them — it forces numeric regardless, and in GNU it also IMPLIES `-l`.
@@ -71,6 +78,69 @@ var _ls_C_idx  = 0;
 var _ls_x_idx  = 0;
 var _ls_m_idx  = 0;
 var _ls_fmt_idx = 0;
+var _ls_g_idx  = 0;
+var _ls_o_idx  = 0;
+var _ls_ft_idx = 0;
+var _ls_ts_idx = 0;
+var _ls_D_idx  = 0;
+var _ls_T_idx  = 0;
+
+# ── 1.6.12 display state, all resolved ONCE in `cmd_ls` before any listing
+
+# `-g` drops the OWNER column and `-o` the GROUP one. ⚠ Not synonyms, and both
+# are STICKY: they imply `-l` through the last-wins group, but a later `-l` does
+# not bring the column back — measured, `ls -g -l` still has no owner.
+var _ls_no_owner = 0;
+var _ls_no_group = 0;
+
+enum LsTimeStyle {
+    LS_TS_LOCALE   = 0,   # POSIX: `Sep 22 18:50`, or `Sep 22  2025` past six months
+    LS_TS_LONG_ISO = 1,   # `2026-09-22 18:50` — what kriya printed before 1.6.12
+    LS_TS_ISO      = 2,   # `09-22 18:50`, or `2025-09-22 ` past six months
+    LS_TS_FULL_ISO = 3,   # `2026-09-22 18:50:19.123456789 +0000`
+}
+var _ls_time_style = 0;
+# The clock `-l` measures "recent" against. ⚠ Refreshed when a file's mtime is
+# AHEAD of it, as GNU does, so a file written while `ls` runs is not filed as
+# "future" against a stale clock.
+var _ls_now_s  = 0;
+var _ls_now_ns = 0;
+
+# Line width, resolved once (`-w`, the tty, `$COLUMNS`, then 80). 0 = unlimited.
+# ⚠ Once, because `$COLUMNS` can now WARN: resolving it per directory printed the
+# warning once per listing.
+var _ls_line_length = 80;
+var _ls_T_given = 0;
+var _ls_tabsize = 8;
+
+# Quoting: a `quote.cyr` style, or LS_Q_LITERAL for none.
+enum LsQuoting { LS_Q_LITERAL = 99, }
+var _ls_qstyle = 99;
+# ⛔ `?` FOR EVERY NON-PRINTABLE BYTE ON A TERMINAL, whatever the style. GNU's
+# `-q` is on by default at a tty; without it `--quoting-style=literal` wrote a
+# file name's raw ESC bytes straight into the terminal — an escape-sequence
+# injection surface, not a cosmetic difference. Styles that escape leave nothing
+# for it to replace.
+var _ls_qmark = 0;
+
+# ⛔ `--dired`: two-space indent on long-format lines and a trailing byte-offset
+# index for Emacs. ⚠ The offsets EXCLUDE colour escapes — GNU counts only what
+# goes through its dired writer, never an indicator — so every stdout write in
+# this file goes through `_ls_out`, and every escape through `_ls_cout`.
+var _ls_dired = 0;
+# 1 when `-F` is on in long format: symlink targets are stat'd for their indicator.
+var _ls_F_long = 0;
+var _ls_dpos  = 0;
+var _ls_dired_names = 0;
+var _ls_dired_subs  = 0;
+
+fn _ls_out(buf, n): i64 {
+    _ls_dpos = _ls_dpos + n;
+    return k_write( 1, buf, n);
+}
+
+# A colour escape: written, never counted.
+fn _ls_cout(buf, n): i64 { return k_write( 1, buf, n); }
 
 # ⛔ THE FORMAT SELECTORS ARE ONE LAST-WINS GROUP, and the flag table cannot say
 # so — it keeps a bool per flag with no order. Measured against GNU:
@@ -132,6 +202,7 @@ fn _ls_format_from(name): i64 {
 fn _ls_scan_format(): i64 {
     _ls_format = LS_FMT_AUTO;
     _ls_w_given = 0;
+    _ls_T_given = 0;
     var av = kriya_expanded_argv();
     var n  = kriya_expanded_argc();
     if (av == 0) { return 0; }
@@ -161,8 +232,16 @@ fn _ls_scan_format(): i64 {
                                 # under GNU and was long here, because `-n` set
                                 # long_mode directly and the walk never saw it.
                                 if (streq(tok, "--numeric-uid-gid") == 1) { _ls_format = LS_FMT_LONG; }
+                                # ⚠ `--full-time` and `--dired` are format-group
+                                # members too (measured: `ls --dired -C` is plain
+                                # columns, `ls -C --dired` long with offsets).
+                                if (streq(tok, "--full-time") == 1) { _ls_format = LS_FMT_LONG; }
+                                if (streq(tok, "--dired") == 1) { _ls_format = LS_FMT_LONG; }
                                 if (streq(tok, "--format") == 1) { skip_next = 1; }
                                 if (streq(tok, "--width") == 1)  { _ls_w_given = 1; skip_next = 2; }
+                                if (streq(tok, "--tabsize") == 1) { _ls_T_given = 1; skip_next = 2; }
+                                if (streq(tok, "--time-style") == 1) { skip_next = 2; }
+                                if (_ls_pfx(tok, "--tabsize=", 10) == 1) { _ls_T_given = 1; }
                                 # ⚠ THE ATTACHED FORM TOO. The expander leaves
                                 # `--format=commas` as ONE token, so a scanner
                                 # that only handles the separated spelling sees
@@ -181,7 +260,13 @@ fn _ls_scan_format(): i64 {
                                 if (c == 109) { _ls_format = LS_FMT_COMMAS; }    # m
                                 if (c == 108) { _ls_format = LS_FMT_LONG; }      # l
                                 if (c == 110) { _ls_format = LS_FMT_LONG; }      # n
-                                if (c == 119) { _ls_w_given = 1; }               # w
+                                if (c == 103) { _ls_format = LS_FMT_LONG; }      # g
+                                if (c == 111) { _ls_format = LS_FMT_LONG; }      # o
+                                if (c == 68)  { _ls_format = LS_FMT_LONG; }      # D (--dired)
+                                # ⚠ The VALUE of `-w` / `-T` is skipped, so a width
+                                # of `-C` cannot be read back as a format selector.
+                                if (c == 119) { _ls_w_given = 1; skip_next = 2; } # w
+                                if (c == 84)  { _ls_T_given = 1; skip_next = 2; } # T
 
                                 # ⚠ `-1` is the exception: no effect after `-l`.
                                 if (c == 49) {
@@ -218,7 +303,13 @@ fn _ls_init_spec(): i64 {
     _ls_S_idx = flags_add_bool(s, 83,  "",                0, "sort by size, largest first");
     _ls_color_idx = flags_add_str(s, 0, "color", 0, "colourise output: always|auto|never");
     _ls_qs_idx = flags_add_str(s, 0, "quoting-style", 0,
-      "literal|shell-escape|shell-escape-always");
+      "literal|shell|shell-always|shell-escape|shell-escape-always|c|escape|locale|clocale");
+    _ls_g_idx = flags_add_bool(s, 103, "",                0, "like -l, without the owner column");
+    _ls_o_idx = flags_add_bool(s, 111, "",                0, "like -l, without the group column");
+    _ls_ft_idx = flags_add_bool(s, 0, "full-time",        0, "like -l --time-style=full-iso");
+    _ls_ts_idx = flags_add_str(s, 0, "time-style", 0, "full-iso|long-iso|iso|locale (posix- prefix accepted)");
+    _ls_D_idx = flags_add_bool(s, 68, "dired",            0, "long format with an Emacs dired offset index");
+    _ls_T_idx = flags_add_int(s, 84, "tabsize",           0, "tab stops every COLS (0 = spaces only)");
     _ls_d_idx = flags_add_bool(s, 100, "directory",       0, "list dir operands as entries, not contents");
     _ls_R_idx = flags_add_bool(s, 82,  "recursive",       0, "descend into subdirectories");
     # ⚠ `-w 0` MEANS UNLIMITED, NOT "auto". Measured: `ls -C -w 0` puts every
@@ -283,25 +374,31 @@ var _ls_stat_failed = 0;
 # precedent for display state living here.
 var _ls_numeric = 0;
 
-# ⭐ Shell-escape quoting, on when stdout is a TERMINAL — which is GNU's default
-# and the reason `ls | cat` and `ls` on screen differ. ⚠ Piped output stays raw,
-# which is what every script that parses `ls` depends on.
-var _ls_quote = 0;
-
-# ⚠ Set per LISTING in `-l`: when ANY entry needs quotes, the ones that do NOT
-# get a single leading space, so every name starts in the same column as the
-# first character inside a quote. Measured: an all-plain `-l` has no padding,
-# and adding one quoted name shifts every other name right by one.
-var _ls_long_qpad = 0;
-
 fn _ls_rec_new(name_cstr): i64 {
-    var rec = alloc(184);
+    var rec = alloc(200);
     store64(rec, name_cstr);
     store64(rec + 152, 0);
     store64(rec + 160, 0);          # 1 = stat failed; fields are unknown
     store64(rec + 168, 0);          # 1 = symlink whose target does not resolve
     store64(rec + 176, 0);          # colour code for the -l link TARGET, or 0
+    store64(rec + 184, 0);          # the TARGET's stat (144 bytes), when it was read
+    store64(rec + 192, 0);          # 1 = carries security.capability (`ca`)
     return rec;
+}
+
+fn _ls_rec_tgt_st(rec): i64  { return load64(rec + 184); }
+fn _ls_rec_has_cap(rec): i64 { return load64(rec + 192); }
+
+# `ca` colours a regular file carrying `security.capability`. ⚠ Asked only when
+# `ca` is coloured — one extra syscall per regular file is a colour feature's
+# cost, and the plain path must not pay it. GNU reads it by PATH, which needs no
+# read permission on the file.
+fn _ls_probe_cap(rec, path): i64 {
+    if (_ls_color == 0) { return 0; }
+    if (_ls_is_colored(LSK_CA) == 0) { return 0; }
+    if (fs_is_reg(_ls_rec_st(rec)) == 0) { return 0; }
+    if (k_getxattr(path, "security.capability", 0, 0) > 0) { store64(rec + 192, 1); }
+    return 0;
 }
 
 fn _ls_rec_broken(rec): i64     { return load64(rec + 168); }
@@ -374,10 +471,10 @@ fn _ls_emit_dec_padded(v, width): i64 {
     var sp[2];
     store8(&sp, 32);
     while (pad > 0) {
-        k_write( 1, &sp, 1);
+        _ls_out(&sp, 1);
         pad = pad - 1;
     }
-    k_write( 1, &buf, n);
+    _ls_out(&buf, n);
     return 0;
 }
 
@@ -392,12 +489,12 @@ fn _ls_emit_dec_padded(v, width): i64 {
 # ⚠ Guessing one rule for the column would be wrong half the time.
 fn _ls_emit_str_padded(s, width): i64 {
     var n = strlen(s);
-    k_write( 1, s, n);
+    _ls_out(s, n);
     var pad = width - n;
     var sp[2];
     store8(&sp, 32);
     while (pad > 0) {
-        k_write( 1, &sp, 1);
+        _ls_out(&sp, 1);
         pad = pad - 1;
     }
     return 0;
@@ -443,8 +540,8 @@ fn _ls_emit_owner(id, width, numeric, is_user): i64 {
 # Right-align a single `?` in a `width` column, matching the numeric emitters.
 fn _ls_emit_q_padded(width): i64 {
     var pad = width - 1;
-    while (pad > 0) { k_write( 1, " ", 1); pad = pad - 1; }
-    k_write( 1, "?", 1);
+    while (pad > 0) { _ls_out(" ", 1); pad = pad - 1; }
+    _ls_out("?", 1);
     return 0;
 }
 
@@ -490,83 +587,279 @@ fn _ls_render_symperm(mode, buf): i64 {
     return 10;
 }
 
-# Human-readable size: writes up to 6 bytes (e.g. "1.5K", "999", "10G").
-# Rule: under 1024 → bare integer. Otherwise divide by 1024 with the
-# appropriate suffix from BKMGTP; if quotient < 10 emit "X.XS", else
-# integer + suffix. Matches GNU `ls -h` "smart rounding".
-fn _ls_render_human(v, buf): i64 {
-    var thresholds = "BKMGTP";
-    var unit: i64 = 0;
-    var val = v;
-    var rem10: i64 = 0;  # tenths
-    while (val >= 1024) {
-        # Carry the next decimal digit when we'll need < 10 output.
-        rem10 = ((val - (val / 1024) * 1024) * 10) / 1024;
-        val = val / 1024;
-        unit = unit + 1;
-    }
-    var n = _ls_render_dec(val, buf);
-    if (unit > 0) {
-        if (val < 10) {
-            store8(buf + n, 46);  # '.'
-            store8(buf + n + 1, 48 + rem10);
-            n = n + 2;
+# ⛔ `-h` ROUNDED DOWN AND GNU ROUNDS UP — a wrong number, not a style choice.
+# Measured on coreutils 9.11: 1025 bytes is `1.1K` under GNU and was `1.0K` here,
+# 5000 is `4.9K` (was `4.8K`), 10,000,000 is `9.6M` (was `9.5M`). The old
+# renderer truncated the tenths digit; GNU's `human_readable` carries a rounding
+# state through every division and applies CEILING at the end.
+#
+# ⭐ A port of gnulib's `human_readable`, integer path, for exactly what `ls`
+# uses: ceiling rounding, base 1024, the `K M G T P E Z Y R Q` letters, a point
+# and one digit only below 10. `n` is in `from`-byte units and the result in
+# `to`-byte units, both powers of two; `autoscale` = 1 is `-h`.
+#
+# ⚠ The two carries are the part that is easy to get wrong: 10,239 bytes must be
+# `10K`, not `10.0K` (the tenths overflow into the integer and the point is then
+# dropped), and 1,048,575 must be `1.0M`, not `1024K` (the final increment
+# reaches the base and bumps the exponent).
+fn _ls_human(n, from, to, autoscale, buf): i64 {
+    var amt: i64 = 0;
+    var tenths: i64 = 0;
+    var rounding: i64 = 0;
+    if (to <= from) {
+        amt = n * (from / to);
+    } else {
+        var divisor = to / from;
+        var r10 = (n % divisor) * 10;
+        var r2 = (r10 % divisor) * 2;
+        amt = n / divisor;
+        tenths = r10 / divisor;
+        if (r2 < divisor) {
+            if (r2 > 0) { rounding = 1; }
+        } else {
+            rounding = 2;
+            if (divisor < r2) { rounding = 3; }
         }
-        store8(buf + n, load8(thresholds + unit));
-        n = n + 1;
     }
-    return n;
+    var base: i64 = 1024;
+    var exponent: i64 = 0;
+    var point: i64 = 0;
+    var pdigit: i64 = 0;
+    if (autoscale == 1) {
+        if (amt >= base) {
+            var loop: i64 = 1;
+            while (loop == 1) {
+                var old_r = rounding;
+                var r10b = (amt % base) * 10 + tenths;
+                var r2b = (r10b % base) * 2 + (old_r >> 1);
+                amt = amt / base;
+                tenths = r10b / base;
+                rounding = 0;
+                if (r2b < base) {
+                    if ((r2b + old_r) != 0) { rounding = 1; }
+                } else {
+                    rounding = 2;
+                    if (base < (r2b + old_r)) { rounding = 3; }
+                }
+                exponent = exponent + 1;
+                if (amt < base) { loop = 0; }
+                if (exponent >= 10) { loop = 0; }
+            }
+            if (amt < 10) {
+                if (rounding > 0) {
+                    tenths = tenths + 1;
+                    rounding = 0;
+                    if (tenths == 10) {
+                        amt = amt + 1;
+                        tenths = 0;
+                    }
+                }
+                if (amt < 10) {
+                    point = 1;
+                    pdigit = tenths;
+                    tenths = 0;
+                    rounding = 0;
+                }
+            }
+        }
+    }
+    if ((tenths + rounding) > 0) {
+        amt = amt + 1;
+        if (autoscale == 1) {
+            if (amt == base) {
+                if (exponent < 10) {
+                    exponent = exponent + 1;
+                    point = 1;
+                    pdigit = 0;
+                    amt = 1;
+                }
+            }
+        }
+    }
+    var k = _ls_render_dec(amt, buf);
+    if (point == 1) {
+        store8(buf + k, 46);
+        store8(buf + k + 1, 48 + pdigit);
+        k = k + 2;
+    }
+    if (exponent > 0) {
+        store8(buf + k, load8("KMGTPEZYRQ" + exponent - 1));
+        k = k + 1;
+    }
+    return k;
 }
+
+fn _ls_render_human(v, buf): i64 { return _ls_human(v, 1, 1, 1, buf); }
 
 # Emit `v` as human-readable size right-justified to `width`.
 fn _ls_emit_human_padded(v, width): i64 {
-    var buf[16];
+    var buf[32];
     var n = _ls_render_human(v, &buf);
     var pad = width - n;
     var sp[2];
     store8(&sp, 32);
     while (pad > 0) {
-        k_write( 1, &sp, 1);
+        _ls_out(&sp, 1);
         pad = pad - 1;
     }
-    k_write( 1, &buf, n);
+    _ls_out(&buf, n);
     return 0;
 }
 
 fn _ls_human_width(v): i64 {
-    var buf[16];
+    var buf[32];
     return _ls_render_human(v, &buf);
 }
 
-# Emit `YYYY-MM-DD HH:MM ` (17 chars including trailing space) for the
-# given epoch. Uses chrono's `epoch_to_date`.
-fn _ls_emit_mtime(epoch): i64 {
-    var d = epoch_to_date(epoch);
-    var buf[20];
+# ── `-l` timestamps (1.6.12)
+#
+# ⛔ THE DEFAULT IS POSIX'S, AND KRIYA'S WAS NOT. POSIX specifies `ls -l`'s date,
+# in the POSIX locale, as `date "+%b %e %H:%M"` for a file modified in the last
+# six months and `date "+%b %e %Y"` — with TWO spaces before the year — for an
+# older one or one dated in the future. GNU prints exactly that in the C
+# locale: `Sep 22 18:50` and `Sep 22  2025`. kriya printed `2026-09-22 18:50`
+# for every file — GNU's `long-iso`, which is still available as
+# `--time-style=long-iso`. [ADR 0020](../../docs/adr/0020-ls-long-format-dates-are-posix.md).
+#
+# ⚠ "Recent" is GNU's rule, measured to the second: strictly after `now` minus
+# 15,778,476 s (half a mean Gregorian year) and strictly before `now`. A file
+# dated in the FUTURE gets the year form, not the time.
+# ⚠ Times are UTC, as everywhere in kriya (ADR 0007): no tzfile yet.
+fn _ls_put2(buf, k, v): i64 {
+    store8(buf + k, 48 + (v / 10));
+    store8(buf + k + 1, 48 + (v % 10));
+    return k + 2;
+}
+
+fn _ls_put_year(buf, k, y): i64 {
+    var tmp[32];
+    var n = _ls_render_dec(y, &tmp);
+    # %Y is at least four digits.
+    var pad = 4 - n;
+    while (pad > 0) { store8(buf + k, 48); k = k + 1; pad = pad - 1; }
+    var i: i64 = 0;
+    while (i < n) { store8(buf + k, load8(&tmp + i)); k = k + 1; i = i + 1; }
+    return k;
+}
+
+# Is (sec, nsec) within the last six months, as GNU draws the line?
+fn _ls_is_recent(sec, nsec): i64 {
+    # ⚠ Refresh the clock for a file that is AHEAD of it — GNU does, so a file
+    # modified during the listing is not misfiled against a stale `now`.
+    var ahead: i64 = 0;
+    if (sec > _ls_now_s) { ahead = 1; }
+    if (sec == _ls_now_s) { if (nsec > _ls_now_ns) { ahead = 1; } }
+    if (ahead == 1) {
+        var t = clock_epoch_ns();
+        _ls_now_s = t / 1000000000;
+        _ls_now_ns = t % 1000000000;
+    }
+    var lo_s = _ls_now_s - 15778476;
+    var after: i64 = 0;
+    if (sec > lo_s) { after = 1; }
+    if (sec == lo_s) { if (nsec > _ls_now_ns) { after = 1; } }
+    var before: i64 = 0;
+    if (sec < _ls_now_s) { before = 1; }
+    if (sec == _ls_now_s) { if (nsec < _ls_now_ns) { before = 1; } }
+    if (after == 1) { if (before == 1) { return 1; } }
+    return 0;
+}
+
+# Render one timestamp in the active style; returns the byte count.
+fn _ls_render_time(sec, nsec, buf): i64 {
+    var d = epoch_to_date(sec);
     var year  = load64(d);
     var month = load64(d + 8);
     var day   = load64(d + 16);
     var hour  = load64(d + 24);
     var min   = load64(d + 32);
-    # Year: 4 digits.
-    store8(&buf + 0, 48 + (year / 1000));
-    store8(&buf + 1, 48 + ((year / 100) - ((year / 1000) * 10)));
-    store8(&buf + 2, 48 + ((year / 10) - ((year / 100) * 10)));
-    store8(&buf + 3, 48 + (year - (year / 10) * 10));
-    store8(&buf + 4, 45);  # '-'
-    store8(&buf + 5, 48 + (month / 10));
-    store8(&buf + 6, 48 + (month - (month / 10) * 10));
-    store8(&buf + 7, 45);  # '-'
-    store8(&buf + 8, 48 + (day / 10));
-    store8(&buf + 9, 48 + (day - (day / 10) * 10));
-    store8(&buf + 10, 32);  # ' '
-    store8(&buf + 11, 48 + (hour / 10));
-    store8(&buf + 12, 48 + (hour - (hour / 10) * 10));
-    store8(&buf + 13, 58);  # ':'
-    store8(&buf + 14, 48 + (min / 10));
-    store8(&buf + 15, 48 + (min - (min / 10) * 10));
-    store8(&buf + 16, 32);  # trailing space
-    k_write( 1, &buf, 17);
+    var secs  = load64(d + 40);
+    var k: i64 = 0;
+    if (_ls_time_style == LS_TS_LOCALE) {
+        var mn = "JanFebMarAprMayJunJulAugSepOctNovDec" + (month - 1) * 3;
+        store8(buf, load8(mn)); store8(buf + 1, load8(mn + 1)); store8(buf + 2, load8(mn + 2));
+        store8(buf + 3, 32);
+        # %e: the day, space-padded to two.
+        if (day < 10) { store8(buf + 4, 32); store8(buf + 5, 48 + day); }
+        else { _ls_put2(buf, 4, day); }
+        store8(buf + 6, 32);
+        k = 7;
+        if (_ls_is_recent(sec, nsec) == 1) {
+            k = _ls_put2(buf, k, hour);
+            store8(buf + k, 58);
+            k = _ls_put2(buf, k + 1, min);
+        } else {
+            store8(buf + k, 32);
+            k = _ls_put_year(buf, k + 1, year);
+        }
+        return k;
+    }
+    if (_ls_time_style == LS_TS_ISO) {
+        if (_ls_is_recent(sec, nsec) == 1) {
+            k = _ls_put2(buf, 0, month);
+            store8(buf + k, 45);
+            k = _ls_put2(buf, k + 1, day);
+            store8(buf + k, 32);
+            k = _ls_put2(buf, k + 1, hour);
+            store8(buf + k, 58);
+            return _ls_put2(buf, k + 1, min);
+        }
+        k = _ls_put_year(buf, 0, year);
+        store8(buf + k, 45);
+        k = _ls_put2(buf, k + 1, month);
+        store8(buf + k, 45);
+        k = _ls_put2(buf, k + 1, day);
+        store8(buf + k, 32);         # ⚠ GNU's `iso` old-date form ends in a space
+        return k + 1;
+    }
+    # long-iso and full-iso share `YYYY-MM-DD HH:MM`.
+    k = _ls_put_year(buf, 0, year);
+    store8(buf + k, 45);
+    k = _ls_put2(buf, k + 1, month);
+    store8(buf + k, 45);
+    k = _ls_put2(buf, k + 1, day);
+    store8(buf + k, 32);
+    k = _ls_put2(buf, k + 1, hour);
+    store8(buf + k, 58);
+    k = _ls_put2(buf, k + 1, min);
+    if (_ls_time_style == LS_TS_FULL_ISO) {
+        store8(buf + k, 58);
+        k = _ls_put2(buf, k + 1, secs);
+        store8(buf + k, 46);
+        k = k + 1;
+        var div: i64 = 100000000;
+        while (div > 0) {
+            store8(buf + k, 48 + ((nsec / div) % 10));
+            k = k + 1;
+            div = div / 10;
+        }
+        store8(buf + k, 32);
+        store8(buf + k + 1, 43);     # +
+        store8(buf + k + 2, 48);
+        store8(buf + k + 3, 48);
+        store8(buf + k + 4, 48);
+        store8(buf + k + 5, 48);
+        k = k + 6;
+    }
+    return k;
+}
+
+# Width of the time column for an entry whose stat FAILED, which prints a `?`
+# right-aligned in the space a real date would take. GNU sizes it from the
+# style: 12 for the POSIX form, 16 long-iso, 11 iso, 35 full-iso.
+fn _ls_time_width(): i64 {
+    if (_ls_time_style == LS_TS_LOCALE)   { return 12; }
+    if (_ls_time_style == LS_TS_ISO)      { return 11; }
+    if (_ls_time_style == LS_TS_FULL_ISO) { return 35; }
+    return 16;
+}
+
+# Emit the timestamp and its trailing separator space.
+fn _ls_emit_mtime(sec, nsec): i64 {
+    var buf[64];
+    var n = _ls_render_time(sec, nsec, &buf);
+    store8(&buf + n, 32);
+    _ls_out(&buf, n + 1);
     return 0;
 }
 
@@ -590,52 +883,63 @@ fn _ls_emit_suffix(st): i64 {
     if (c != 0) {
         var sb[2];
         store8(&sb, c);
-        k_write( 1, &sb, 1);
+        _ls_out(&sb, 1);
     }
     return 0;
 }
 
 # Read and cache the symlink target into the record (for -l rendering).
 fn _ls_load_link_target(parent_dirfd, rec): i64 {
-    # ⛔ Also decide whether the link is BROKEN, because `or` needs it and this
-    # is the only place with both the dirfd and the name. ⚠ Gated on colour
-    # being active AND `or` actually being set: it costs one extra stat per
-    # symlink, and the non-colour path should not pay for a colour feature.
-    # ⛔ `or` or `mi` being COLOURABLE is the switch that makes GNU stat the
-    # target — and, having stat'd it, colour the `-l` target text by the
-    # TARGET's own type. ⚠ Neither `mi=00` nor `mi=` counts, and a real
-    # `dircolors -b` emits no `mi` at all; but it DOES emit `or`, so this is an
-    # ordinary-user path rather than an exotic one.
-    if (_ls_color == 1) {
-        # ⚠ SET, not colourable: `or=0` still makes GNU stat the target and
-        # colour it, even though `or=0` does not colour the link NAME.
-        var want: i64 = 0;
-        if (_ls_code(LSK_OR) != 0) { want = 1; }
-        if (_ls_code(LSK_MI) != 0) { want = 1; }
-        if (want == 1) {
-            var tst[FS_STAT_BUFSZ];
-            # flags 0 = FOLLOW, the opposite of `fs_lstat_at`'s 256.
-            #ifndef CYRIUS_TARGET_AGNOS
-            if (syscall(262, parent_dirfd, _ls_rec_name(rec), &tst, 0) != 0) {
-                store64(rec + 168, 1);
-                # ⚠ A MISSING target takes `mi` when set and falls back to `or`
-                # — not to nothing. With `or=31` and no `mi`, GNU paints the
-                # target text `31` just like the link name.
-                var mc2 = _ls_code(LSK_MI);
-                if (mc2 == 0) { mc2 = _ls_code(LSK_OR); }
-                store64(rec + 176, mc2);
-            } else {
-                store64(rec + 176, _ls_color_for_stat(&tst, _ls_rec_name(rec), 0, 0));
-            }
-            #endif
+    if (_ls_rec_link_target(rec) == 0) {
+        var buf = alloc(4096);
+        var n = fs_readlinkat(parent_dirfd, _ls_rec_name(rec), buf, 4095);
+        if (n >= 0) {
+            store8(buf + n, 0);
+            _ls_rec_set_link_target(rec, buf);
         }
     }
-    if (_ls_rec_link_target(rec) != 0) { return 0; }
-    var buf = alloc(4096);
-    var n = fs_readlinkat(parent_dirfd, _ls_rec_name(rec), buf, 4095);
-    if (n < 0) { return n; }
-    store8(buf + n, 0);
-    _ls_rec_set_link_target(rec, buf);
+    # ⛔ Stat the TARGET only when something will use it: it costs one syscall
+    # per symlink, and the plain path should not pay for a colour feature.
+    # ⛔ `or` or `mi` being SET is one switch — measured, `or=0` still makes GNU
+    # stat the target and colour its text, though `or=0` does not colour the
+    # link NAME. `ln=target` is another: the link is coloured as its referent.
+    # ⭐ And `-lF` is the third (1.6.12): GNU's indicator after a symlink's target
+    # is the TARGET's type — `l2dir -> dir/`, `l2exe -> file*`, nothing for a
+    # broken link — where kriya appended the link's own `@`.
+    var want: i64 = 0;
+    if (_ls_color == 1) {
+        if (_ls_code(LSK_OR) != 0) { want = 1; }
+        if (_ls_code(LSK_MI) != 0) { want = 1; }
+        if (_ls_ln_target == 1) { want = 1; }
+    }
+    if (_ls_F_long == 1) { want = 1; }
+    if (want == 0) { return 0; }
+    #ifndef CYRIUS_TARGET_AGNOS
+    var tst[FS_STAT_BUFSZ];
+    # flags 0 = FOLLOW, the opposite of `fs_lstat_at`'s 256.
+    if (syscall(262, parent_dirfd, _ls_rec_name(rec), &tst, 0) != 0) {
+        store64(rec + 168, 1);
+        if (_ls_color == 1) {
+            # ⚠ A MISSING target takes `mi` when set and falls back to `or` —
+            # not to nothing. With `or=31` and no `mi`, GNU paints the target
+            # text `31` just like the link name.
+            var mc2 = _ls_code(LSK_MI);
+            if (mc2 == 0) { mc2 = _ls_code(LSK_OR); }
+            store64(rec + 176, mc2);
+        }
+    } else {
+        var keep = alloc(FS_STAT_BUFSZ);
+        memcpy(keep, &tst, FS_STAT_BUFSZ);
+        store64(rec + 184, keep);
+        if (_ls_color == 1) {
+            # ⚠ The target TEXT matches extensions by the TARGET's name, not
+            # the link's: `x -> foo.tar` takes `*.tar`.
+            var tname = _ls_rec_link_target(rec);
+            if (tname == 0) { tname = _ls_rec_name(rec); }
+            store64(rec + 176, _ls_color_for_stat(keep, tname, 0, 0, 0));
+        }
+    }
+    #endif
     return 0;
 }
 
@@ -665,59 +969,273 @@ enum LsColorWhen {
     LS_CW_AUTO   = 2;
 }
 
-# Type keys, in the order `_ls_color_for` tests them.
+# ⭐ GNU's WHOLE indicator table, in GNU's order (1.6.12). kriya knew seventeen of
+# the twenty-four keys, and that mattered once an unknown key became an error:
+# a stock `dircolors -b` emits `mh`, `do` and `ca`, so refusing unknown keys with
+# only seventeen known would have switched colour off for everyone using one.
 enum LsColorKey {
-    LSK_RS = 0;    # reset (the lazy leading prefix)
-    LSK_NO = 1;    # normal — the fallback for anything unmatched
-    LSK_FI = 2;    # regular file
-    LSK_DI = 3;    # directory
-    LSK_LN = 4;    # symlink
-    LSK_PI = 5;    # fifo
-    LSK_SO = 6;    # socket
-    LSK_BD = 7;    # block device
-    LSK_CD = 8;    # char device
-    LSK_OR = 9;    # orphaned (broken) symlink
-    LSK_MI = 10;   # missing target
-    LSK_EX = 11;   # executable
-    LSK_SU = 12;   # setuid
-    LSK_SG = 13;   # setgid
-    LSK_ST = 14;   # sticky
-    LSK_OW = 15;   # other-writable
-    LSK_TW = 16;   # sticky AND other-writable
-    LSK_COUNT = 17;
+    LSK_LC = 0;    # left of a colour sequence     (ESC[)
+    LSK_RC = 1;    # right of a colour sequence    (m)
+    LSK_EC = 2;    # end: replaces lc rs rc when set
+    LSK_RS = 3;    # reset
+    LSK_NO = 4;    # normal — also the colour of a whole `-l` row
+    LSK_FI = 5;    # regular file
+    LSK_DI = 6;    # directory
+    LSK_LN = 7;    # symlink — or the word `target`
+    LSK_PI = 8;    # fifo
+    LSK_SO = 9;    # socket
+    LSK_BD = 10;   # block device
+    LSK_CD = 11;   # char device
+    LSK_MI = 12;   # missing symlink target
+    LSK_OR = 13;   # orphaned (broken) symlink
+    LSK_EX = 14;   # executable
+    LSK_DO = 15;   # door — Solaris only; parsed so a real dircolors does not fail
+    LSK_SU = 16;   # setuid
+    LSK_SG = 17;   # setgid
+    LSK_ST = 18;   # sticky
+    LSK_OW = 19;   # other-writable
+    LSK_TW = 20;   # sticky AND other-writable
+    LSK_CA = 21;   # file carrying a capability
+    LSK_MH = 22;   # regular file with more than one hard link
+    LSK_CL = 23;   # clear to end of line          (ESC[K)
+    LSK_COUNT = 24;
 }
 
 var _ls_color      = 0;   # 1 = emit escapes
-var _ls_color_init = 0;   # 0 = LS_COLORS not parsed yet
-var _ls_ckey       = 0;   # LSK_COUNT slots: code cstring, or 0
-var _ls_cext       = 0;   # 2 slots per entry: extension cstring, code cstring
+var _ls_color_init = 0;   # 0 = the table has not been built yet
+var _ls_ckey       = 0;   # LSK_COUNT slots: code cstring, or 0 for unset
+var _ls_cext       = 0;   # 2 slots per entry: pattern cstring, code cstring
 var _ls_cext_n     = 0;
 var _ls_color_lead = 0;   # 1 = the leading reset has been emitted
+var _ls_ln_target  = 0;   # `ln=target`: a symlink takes its TARGET's colour
 
 # Map a two-letter LS_COLORS key to an LSK_* slot, or (0 - 1).
 fn _ls_ckey_index(a, b): i64 {
-    if (a == 114) { if (b == 115) { return LSK_RS; } }   # rs
-    if (a == 110) { if (b == 111) { return LSK_NO; } }   # no
-    if (a == 102) { if (b == 105) { return LSK_FI; } }   # fi
-    if (a == 100) { if (b == 105) { return LSK_DI; } }   # di
-    if (a == 108) { if (b == 110) { return LSK_LN; } }   # ln
-    if (a == 112) { if (b == 105) { return LSK_PI; } }   # pi
-    if (a == 115) { if (b == 111) { return LSK_SO; } }   # so
-    if (a == 98)  { if (b == 100) { return LSK_BD; } }   # bd
-    if (a == 99)  { if (b == 100) { return LSK_CD; } }   # cd
-    if (a == 111) { if (b == 114) { return LSK_OR; } }   # or
-    if (a == 109) { if (b == 105) { return LSK_MI; } }   # mi
-    if (a == 101) { if (b == 120) { return LSK_EX; } }   # ex
-    if (a == 115) { if (b == 117) { return LSK_SU; } }   # su
-    if (a == 115) { if (b == 103) { return LSK_SG; } }   # sg
-    if (a == 115) { if (b == 116) { return LSK_ST; } }   # st
-    if (a == 111) { if (b == 119) { return LSK_OW; } }   # ow
-    if (a == 116) { if (b == 119) { return LSK_TW; } }   # tw
+    var names = "lcrcecrsnofidilnpisobdcdmiorexdosusgstowtwcamhcl";
+    var k: i64 = 0;
+    while (k < LSK_COUNT) {
+        if (load8(names + k * 2) == a) {
+            if (load8(names + k * 2 + 1) == b) { return k; }
+        }
+        k = k + 1;
+    }
     return 0 - 1;
 }
 
-# Parse LS_COLORS once. ⚠ Parsed IN PLACE in a private copy: each `=` and `:`
-# becomes a NUL so keys and values are plain cstrings pointing into it.
+# A cstring holding ESC followed by `tail` (e.g. ESC[ and ESC[K).
+fn _ls_esc_str(tail): i64 {
+    var tl = strlen(tail);
+    var s = alloc(tl + 2);
+    store8(s, 27);
+    memcpy(s + 1, tail, tl + 1);
+    return s;
+}
+
+# ⛔ WITH LS_COLORS UNSET, GNU STILL COLOURS — when the terminal is one it knows.
+# kriya's note here used to say the built-in table was "gated on LS_COLORS being
+# non-empty", which was measured with no TERM in the environment at all. With
+# `TERM=xterm-256color` and no LS_COLORS, GNU's `ls --color=always` paints
+# directories `01;34`; kriya printed plain names. That is the default on every
+# distribution that does not export LS_COLORS. The gate is GNU's
+# `known_term_type()`: a non-empty COLORTERM, or TERM matching one of the
+# patterns `dircolors` carries (these are 9.11's).
+# ⚠ ADR 0017 is satisfied: both variables only CONFIGURE colour, which `--color`
+# turned on — with colour off neither is read.
+# Is there more of the current `:`-separated pattern at `p`?
+fn _ls_pat_more(p): i64 {
+    var c = load8(p);
+    if (c == 0) { return 0; }
+    if (c == 58) { return 0; }
+    return 1;
+}
+
+fn _ls_term_known(): i64 {
+    var ct = kriya_getenv("COLORTERM");
+    if (ct != 0) { if (load8(ct) != 0) { return 1; } }
+    var t = kriya_getenv("TERM");
+    if (t == 0) { return 0; }
+    var tl = strlen(t);
+    if (tl == 0) { return 0; }
+    var pats = "Eterm:ansi:*color*:con[0-9]*x[0-9]*:cons25:console:cygwin:*direct*:dtterm:gnome:hurd:jfbterm:konsole:kterm:linux:linux-c:mlterm:putty:rxvt*:screen*:st:terminator:tmux*:vt100:vt220:xterm*";  #skip-lint
+    var ps = pats;
+    var more: i64 = 1;
+    while (more == 1) {
+        var pe = ps;
+        while (_ls_pat_more(pe) == 1) { pe = pe + 1; }
+        if (glob_match(ps, pe - ps, t, tl) == 1) { return 1; }
+        if (load8(pe) == 0) { more = 0; }
+        else { ps = pe + 1; }
+    }
+    return 0;
+}
+
+# ── LS_COLORS value syntax: GNU's `get_funky_string`, ported
+#
+# A value may carry escapes — `\e` `\a` `\b` `\f` `\n` `\r` `\t` `\v`, `\?` for
+# DEL, `\_` for a space, octal `\NNN`, hex `\xHH`, and caret `^X` — and a user
+# setting `lc`/`rc`/`ec` has to write one, because those ARE escape bytes. kriya
+# stored values verbatim, so `lc=\e[` produced the four characters `\e[`.
+# ⚠ Octal and hex digits accumulate into ONE byte (wrapping, as GNU's `char`
+# does), and the character that ends the run is re-read in the ground state.
+var _ls_fp = 0;   # parse cursor into the variable
+var _ls_fq = 0;   # write cursor into the decoded buffer
+
+# Decode one value (or, with `equals_end`, one `*pattern`) at `_ls_fp` into
+# `_ls_fq`, NUL-terminate it, and leave `_ls_fp` on the terminator. Returns 0,
+# or 1 on a malformed escape.
+fn _ls_funky(equals_end): i64 {
+    var st: i64 = 0;          # 0 ground, 1 backslash, 2 octal, 3 hex, 4 caret
+    var num: i64 = 0;
+    var go: i64 = 1;
+    while (go == 1) {
+        var c = load8(_ls_fp);
+        if (st == 0) {
+            if (c == 58) { go = 0; }
+            elif (c == 0) { go = 0; }
+            elif (c == 92) { st = 1; _ls_fp = _ls_fp + 1; }
+            elif (c == 94) { st = 4; _ls_fp = _ls_fp + 1; }
+            elif (c == 61) {
+                if (equals_end == 1) { go = 0; }
+                else { store8(_ls_fq, c); _ls_fq = _ls_fq + 1; _ls_fp = _ls_fp + 1; }
+            } else {
+                store8(_ls_fq, c);
+                _ls_fq = _ls_fq + 1;
+                _ls_fp = _ls_fp + 1;
+            }
+        } elif (st == 1) {
+            if (c == 0) { return 1; }
+            var emit: i64 = 1;
+            if (c >= 48) { if (c <= 55) { st = 2; num = c - 48; emit = 0; } }
+            if (emit == 1) {
+                if (c == 120) { st = 3; num = 0; emit = 0; }
+                if (c == 88)  { st = 3; num = 0; emit = 0; }
+            }
+            if (emit == 1) {
+                num = c;
+                if (c == 97)  { num = 7; }
+                if (c == 98)  { num = 8; }
+                if (c == 101) { num = 27; }
+                if (c == 102) { num = 12; }
+                if (c == 110) { num = 10; }
+                if (c == 114) { num = 13; }
+                if (c == 116) { num = 9; }
+                if (c == 118) { num = 11; }
+                if (c == 63)  { num = 127; }
+                if (c == 95)  { num = 32; }
+                store8(_ls_fq, num & 255);
+                _ls_fq = _ls_fq + 1;
+                st = 0;
+            }
+            _ls_fp = _ls_fp + 1;
+        } elif (st == 2) {
+            var isoct: i64 = 0;
+            if (c >= 48) { if (c <= 55) { isoct = 1; } }
+            if (isoct == 1) {
+                num = ((num << 3) + (c - 48)) & 255;
+                _ls_fp = _ls_fp + 1;
+            } else {
+                store8(_ls_fq, num);
+                _ls_fq = _ls_fq + 1;
+                st = 0;
+            }
+        } elif (st == 3) {
+            var hv: i64 = 0 - 1;
+            if (c >= 48) { if (c <= 57) { hv = c - 48; } }
+            if (c >= 97) { if (c <= 102) { hv = c - 87; } }
+            if (c >= 65) { if (c <= 70) { hv = c - 55; } }
+            if (hv >= 0) {
+                num = ((num << 4) + hv) & 255;
+                _ls_fp = _ls_fp + 1;
+            } else {
+                store8(_ls_fq, num);
+                _ls_fq = _ls_fq + 1;
+                st = 0;
+            }
+        } else {
+            # Caret: `^@`..`^~` is the control byte, `^?` is DEL, anything else fails.
+            var ok: i64 = 0;
+            if (c >= 64) { if (c <= 126) { ok = 1; store8(_ls_fq, c & 31); } }
+            if (c == 63) { ok = 1; store8(_ls_fq, 127); }
+            if (ok == 0) { return 1; }
+            _ls_fq = _ls_fq + 1;
+            _ls_fp = _ls_fp + 1;
+            st = 0;
+        }
+    }
+    store8(_ls_fq, 0);
+    _ls_fq = _ls_fq + 1;
+    return 0;
+}
+
+# GNU's `parse_ls_color`. Returns 0, or 1 when the variable cannot be parsed.
+#
+# ⛔ AN UNKNOWN KEY SWITCHES COLOUR OFF, AS IN GNU — decided at 1.6.12 after the
+# roadmap asked. kriya used to skip the item and colour the rest. GNU prints
+# *unrecognized prefix* and *unparsable value* and disables colour entirely.
+# ⭐ With all twenty-four keys known, GNU's rule is the better one: nothing a
+# real `dircolors` emits trips it, so what remains is a TYPO — and a typo that
+# silently half-works is harder to find than one that says so. The worry the
+# roadmap recorded (a dircolors newer than the ls) is the same exposure GNU's
+# own ls has, and is met by knowing GNU's whole table.
+# ⚠ Grammar, measured: `XX=` with EXACTLY two characters before the `=`
+# (`dix=1` fails without an *unrecognized prefix* line — the `=` check comes
+# first), `*pattern=value`, and empty items between colons are skipped.
+fn _ls_color_parse(env): i64 {
+    var n = strlen(env);
+    _ls_fq = alloc(n * 2 + 16);
+    _ls_cext = alloc((n + 1) * 16);
+    _ls_cext_n = 0;
+    _ls_fp = env;
+    var bad: i64 = 0;
+    var go: i64 = 1;
+    while (go == 1) {
+        var c = load8(_ls_fp);
+        if (c == 0) { go = 0; }
+        elif (c == 58) { _ls_fp = _ls_fp + 1; }
+        elif (c == 42) {
+            _ls_fp = _ls_fp + 1;
+            var pat = _ls_fq;
+            if (_ls_funky(1) != 0) { bad = 1; go = 0; }
+            else {
+                if (load8(_ls_fp) != 61) { bad = 1; go = 0; }
+                else {
+                    _ls_fp = _ls_fp + 1;
+                    var val = _ls_fq;
+                    if (_ls_funky(0) != 0) { bad = 1; go = 0; }
+                    else {
+                        store64(_ls_cext + _ls_cext_n * 16, pat);
+                        store64(_ls_cext + _ls_cext_n * 16 + 8, val);
+                        _ls_cext_n = _ls_cext_n + 1;
+                    }
+                }
+            }
+        } else {
+            var b = load8(_ls_fp + 1);
+            if (b == 0) { bad = 1; go = 0; }
+            elif (load8(_ls_fp + 2) != 61) { bad = 1; go = 0; }
+            else {
+                var ki = _ls_ckey_index(c, b);
+                if (ki < 0) {
+                    var lab[8];
+                    store8(&lab, c);
+                    store8(&lab + 1, b);
+                    store8(&lab + 2, 0);
+                    report_note("ls", &lab, "unrecognized prefix in environment variable LS_COLORS");
+                    bad = 1;
+                    go = 0;
+                } else {
+                    _ls_fp = _ls_fp + 3;
+                    var v2 = _ls_fq;
+                    if (_ls_funky(0) != 0) { bad = 1; go = 0; }
+                    else { store64(_ls_ckey + ki * 8, v2); }
+                }
+            }
+        }
+    }
+    return bad;
+}
+
+# Build the table once: GNU's compiled-in defaults, then LS_COLORS on top.
 fn _ls_color_load(): i64 {
     if (_ls_color_init == 1) { return 0; }
     _ls_color_init = 1;
@@ -727,74 +1245,41 @@ fn _ls_color_load(): i64 {
         store64(_ls_ckey + z * 8, 0);
         z = z + 1;
     }
-    var env = kriya_getenv("LS_COLORS");
-    if (env == 0) { return 0; }
-    var n = strlen(env);
-    if (n == 0) { return 0; }
-    # ⭐ Non-empty: load the compiled-in defaults, then let the variable
-    # overlay them. ⚠ `fi`, `or`, `mi` and `no` default to UNSET, not to a
+    # ⚠ `fi`, `no`, `or`, `mi`, `ca`, `mh` and `ec` default to UNSET, not to a
     # code — a plain file is uncoloured, and a broken symlink falls through to
-    # `ln`, which is why `or` looks like it defaults to `01;36`.
+    # `ln`, which is why `or` looks like it defaults to `01;36`. Measured out of
+    # `ls` itself; `dircolors -p` is not the source and disagrees on `bd`/`pi`.
+    store64(_ls_ckey + LSK_LC * 8, _ls_esc_str("["));
+    store64(_ls_ckey + LSK_RC * 8, "m");
     store64(_ls_ckey + LSK_RS * 8, "0");
     store64(_ls_ckey + LSK_DI * 8, "01;34");
     store64(_ls_ckey + LSK_LN * 8, "01;36");
-    store64(_ls_ckey + LSK_SO * 8, "01;35");
     store64(_ls_ckey + LSK_PI * 8, "33");
+    store64(_ls_ckey + LSK_SO * 8, "01;35");
     store64(_ls_ckey + LSK_BD * 8, "01;33");
     store64(_ls_ckey + LSK_CD * 8, "01;33");
     store64(_ls_ckey + LSK_EX * 8, "01;32");
+    store64(_ls_ckey + LSK_DO * 8, "01;35");
     store64(_ls_ckey + LSK_SU * 8, "37;41");
     store64(_ls_ckey + LSK_SG * 8, "30;43");
     store64(_ls_ckey + LSK_ST * 8, "37;44");
     store64(_ls_ckey + LSK_OW * 8, "34;42");
     store64(_ls_ckey + LSK_TW * 8, "30;42");
-    var buf = alloc(n + 1);
-    memcpy(buf, env, n + 1);
-    # Worst case every item is an extension.
-    _ls_cext = alloc((n + 1) * 16);
-    var i: i64 = 0;
-    while (i <= n) {
-        # One item spans [i, e) where e is the next `:` or the end.
-        var e = i;
-        var scan: i64 = 1;
-        while (scan == 1) {
-            if (e >= n) { scan = 0; }
-            elif (load8(buf + e) == 58) { scan = 0; }
-            else { e = e + 1; }
-        }
-        if (e > i) {
-            # Split on the first `=`.
-            var q = i;
-            var eqp: i64 = 0 - 1;
-            while (q < e) {
-                if (load8(buf + q) == 61) {
-                    if (eqp < 0) { eqp = q; }
-                }
-                q = q + 1;
-            }
-            if (eqp > i) {
-                store8(buf + eqp, 0);
-                store8(buf + e, 0);
-                var key = buf + i;
-                var val = buf + eqp + 1;
-                if (load8(key) == 42) {
-                    # `*.ext=CODE` — the pattern includes the dot.
-                    store64(_ls_cext + _ls_cext_n * 16, key + 1);
-                    store64(_ls_cext + _ls_cext_n * 16 + 8, val);
-                    _ls_cext_n = _ls_cext_n + 1;
-                } else {
-                    var ki = _ls_ckey_index(load8(key), load8(key + 1));
-                    # ⚠ An unknown two-letter key is IGNORED rather than fatal.
-                    # GNU prints a diagnostic and disables colour entirely; kriya
-                    # ignores the item and colours the rest (roadmap 1.6.12).
-                    if (ki >= 0) {
-                        if (load8(key + 2) == 0) { store64(_ls_ckey + ki * 8, val); }
-                    }
-                }
-            }
-        }
-        i = e + 1;
+    store64(_ls_ckey + LSK_CL * 8, _ls_esc_str("[K"));
+    var env = kriya_getenv("LS_COLORS");
+    var have: i64 = 0;
+    if (env != 0) { if (load8(env) != 0) { have = 1; } }
+    if (have == 0) {
+        if (_ls_term_known() == 0) { _ls_color = 0; }
+        return 0;
     }
+    if (_ls_color_parse(env) != 0) {
+        report_note("ls", "LS_COLORS", "unparsable value, colour disabled");
+        _ls_color = 0;
+        return 0;
+    }
+    var lnc = _ls_code(LSK_LN);
+    if (lnc != 0) { if (streq(lnc, "target") == 1) { _ls_ln_target = 1; } }
     return 0;
 }
 
@@ -876,14 +1361,30 @@ fn _ls_ext_code(name): i64 {
 # Which colour code applies to this entry, or 0 for none.
 #
 # ⛔ The precedence is measured, not guessed: `tw`/`ow`/`st` override `di`, and
-# for a regular file `su`/`sg`/`ex` beat an EXTENSION match, which beats `fi`.
-# An executable `run.c` takes `ex`; a non-executable `plain.c` takes `*.c`.
+# for a regular file `su`/`sg`/`ca`/`ex`/`mh` beat an EXTENSION match, which
+# beats `fi`. An executable `run.c` takes `ex`; a non-executable `plain.c` takes
+# `*.c`.
+# ⚠ `ln=target` colours a symlink as its REFERENT (by the referent's mode, with
+# the link's own name for extensions); a link that does not resolve then takes
+# `or` whether or not `or` is set.
 fn _ls_color_for(rec): i64 {
-    return _ls_color_for_stat(_ls_rec_st(rec), _ls_rec_name(rec),
-      _ls_rec_bad(rec), _ls_rec_broken(rec));
+    var st = _ls_rec_st(rec);
+    if (_ls_ln_target == 1) {
+        if (fs_is_lnk(st) == 1) {
+            if (_ls_rec_broken(rec) == 0) {
+                var tst = _ls_rec_tgt_st(rec);
+                if (tst != 0) {
+                    return _ls_color_for_stat(tst, _ls_rec_name(rec), 0, 0, rec);
+                }
+            } else {
+                return _ls_code(LSK_OR);
+            }
+        }
+    }
+    return _ls_color_for_stat(st, _ls_rec_name(rec), _ls_rec_bad(rec), _ls_rec_broken(rec), rec);
 }
 
-fn _ls_color_for_stat(st, name, bad, broken): i64 {
+fn _ls_color_for_stat(st, name, bad, broken, rec): i64 {
     var mode = load64(st + 24);
     if (bad == 1) {
         var mc = _ls_code(LSK_MI);
@@ -928,120 +1429,223 @@ fn _ls_color_for_stat(st, name, bad, broken): i64 {
     if ((mode & 1024) != 0) {
         if (_ls_is_colored(LSK_SG) == 1) { return _ls_code(LSK_SG); }
     }
+    if (_ls_is_colored(LSK_CA) == 1) {
+        if (rec != 0) {
+            if (_ls_rec_has_cap(rec) == 1) { return _ls_code(LSK_CA); }
+        }
+    }
     if ((mode & 73) != 0) {
         if (_ls_is_colored(LSK_EX) == 1) { return _ls_code(LSK_EX); }
+    }
+    if (load64(st + 16) > 1) {
+        if (_ls_is_colored(LSK_MH) == 1) { return _ls_code(LSK_MH); }
     }
     var xc = _ls_ext_code(name);
     if (xc != 0) { return xc; }
     return _ls_code(LSK_FI);
 }
 
-# Emit one entry's NAME, wrapped in its colour when one applies.
+# ── emission: GNU's order, byte for byte
 #
-# ⚠ The leading reset is LAZY — emitted once, before the first COLOURED entry,
-# and never at all if nothing is coloured. Measured: listing only plain files
-# with `di` set produces no escape bytes whatsoever. `rs=` overrides its code.
-# ⚠ The `-F` type indicator is written by the CALLER, after this returns, which
-# is what puts it OUTSIDE the escape exactly as GNU does.
-# ⚠ Cyrius string literals have no octal escape: `"\033["` is NOT `ESC [`, it is
-# a NUL followed by `3`. The byte is built explicitly instead — caught by a
-# byte-exact comparison against GNU, which is the only kind that would.
-fn _ls_emit_csi(): i64 {
-    var b[2];
-    store8(&b, 27);
-    k_write( 1, &b, 1);
-    k_write( 1, "[", 1);
+# ⛔ `no` COLOURS THE WHOLE ROW, NOT THE NAME. GNU's `set_normal_color` runs at
+# the START of every `-l` line and of every entry's cell — before the inode —
+# so under `no=01;31` the permissions, owner, size and date are all red and the
+# name is reached with `no` already in force. kriya emitted the `no` prefix just
+# before the NAME, which matched every format where the name opens the cell
+# (`-1`, `-C`, `-m`) and none where something precedes it (`-l`, `-i`).
+#
+# The pieces, in the order GNU writes them:
+#   _ls_set_normal    lc no rc                      at the start of the cell/row
+#   (name)            [lc rc] lc CODE rc NAME       the [lc rc] only when `no` is
+#                                                   coloured: it clears `no`'s
+#                                                   attributes before the entry's
+#   _ls_prep_nonname  ec — or lc rs rc              after any name that used colour
+#   cl                clear-to-EOL                  when the name may have wrapped
+# ⚠ Every escape is preceded, the FIRST time, by one `_ls_prep_nonname` — the
+# lazy reset: a listing with nothing coloured writes no escape bytes at all.
+fn _ls_put_ind(s): i64 {
+    if (_ls_color_lead == 0) {
+        _ls_color_lead = 1;
+        _ls_prep_nonname();
+    }
+    if (s != 0) { _ls_cout(s, strlen(s)); }
     return 0;
 }
 
-# Write the (possibly quoted) name bytes. ⚠ One place, so colour and quoting
-# cannot disagree about what the name is.
-fn _ls_put_name(name, nlen): i64 {
-    if (_ls_quote == 0) {
-        k_write( 1, name, nlen);
-        return 0;
+fn _ls_prep_nonname(): i64 {
+    var ec = _ls_code(LSK_EC);
+    if (ec != 0) { return _ls_put_ind(ec); }
+    _ls_put_ind(_ls_code(LSK_LC));
+    _ls_put_ind(_ls_code(LSK_RS));
+    _ls_put_ind(_ls_code(LSK_RC));
+    return 0;
+}
+
+fn _ls_set_normal(): i64 {
+    if (_ls_color == 0) { return 0; }
+    if (_ls_is_colored(LSK_NO) == 0) { return 0; }
+    _ls_put_ind(_ls_code(LSK_LC));
+    _ls_put_ind(_ls_code(LSK_NO));
+    _ls_put_ind(_ls_code(LSK_RC));
+    return 0;
+}
+
+# The name as it will be written: quoted in the active style, then `?`-masked on
+# a terminal. Length in `_ls_rn_len`.
+var _ls_rn_len = 0;
+
+fn _ls_render_name(name, nlen): i64 {
+    var buf = name;
+    var n = nlen;
+    if (_ls_qstyle != LS_Q_LITERAL) {
+        buf = alloc(quote_bufsz(nlen));
+        n = quote_shell(name, nlen, _ls_qstyle, buf);
     }
-    var st = QUOTE_IF_NEEDED;
-    if (_ls_quote == 2) { st = QUOTE_ALWAYS; }
-    var qb = alloc(quote_bufsz(nlen));
-    var qn = quote_shell(name, nlen, st, qb);
-    k_write( 1, qb, qn);
+    if (_ls_qmark == 1) {
+        var cp = alloc(n + 1);
+        var i: i64 = 0;
+        while (i < n) {
+            var c = load8(buf + i);
+            if (c < 32) { c = 63; }
+            if (c > 126) { c = 63; }
+            store8(cp + i, c);
+            i = i + 1;
+        }
+        buf = cp;
+    }
+    _ls_rn_len = n;
+    return buf;
+}
+
+# ⛔ DISPLAY WIDTH, NOT BYTES, for the styles that write control bytes RAW
+# (`literal`, `shell`, `shell-always` off a terminal). GNU lays columns out by
+# its unibyte branch of `quote_name_buf`, which counts only `isprint` bytes: a
+# control byte, DEL and every HIGH byte take ZERO columns. Measured: under
+# `--quoting-style=literal -C`, `bel<BEL>` occupies three columns and
+# `hi<0xE9>` two, and the rest of each column moves with them.
+fn _ls_disp_width(buf, n): i64 {
+    var w: i64 = 0;
+    var i: i64 = 0;
+    while (i < n) {
+        var c = load8(buf + i);
+        if (c >= 32) { if (c <= 126) { w = w + 1; } }
+        i = i + 1;
+    }
+    return w;
+}
+
+# Would this name come out quoted? ⚠ Asked by the alignment pass, which needs
+# to know before any name is emitted — and only for the two styles GNU aligns.
+fn _ls_name_is_quoted(name): i64 {
+    var al: i64 = 0;
+    if (_ls_qstyle == QUOTE_IF_NEEDED) { al = 1; }
+    if (_ls_qstyle == QUOTE_SHELL) { al = 1; }
+    if (al == 0) { return 0; }
+    var nlen = strlen(name);
+    _ls_render_name(name, nlen);
+    if (_ls_rn_len != nlen) { return 1; }
     return 0;
 }
 
 # Display width of a name once quoting is applied — ⛔ NOT `strlen`. A quoted
 # name is longer, and the column layout has to reserve the width it will
-# actually occupy or the columns tear.
-# Would this name come out quoted? ⚠ Asked by the `-l` alignment pass, which
-# needs to know before any name is emitted.
-fn _ls_name_is_quoted(name): i64 {
-    if (_ls_quote == 0) { return 0; }
-    if (_ls_quote == 2) { return 1; }
-    var nlen = strlen(name);
-    var qb = alloc(quote_bufsz(nlen));
-    if (quote_shell(name, nlen, QUOTE_IF_NEEDED, qb) != nlen) { return 1; }
-    return 0;
-}
-
+# actually occupy or the columns tear. ⚠ The alignment pad counts too.
 fn _ls_name_width(name): i64 {
     var nlen = strlen(name);
-    if (_ls_quote == 0) { return nlen; }
-    var st = QUOTE_IF_NEEDED;
-    if (_ls_quote == 2) { st = QUOTE_ALWAYS; }
-    var qb = alloc(quote_bufsz(nlen));
-    return quote_shell(name, nlen, st, qb);
+    var qb = _ls_render_name(name, nlen);
+    var w = _ls_disp_width(qb, _ls_rn_len);
+    if (_ls_qpad == 1) {
+        if (_ls_name_is_quoted(name) == 0) { w = w + 1; }
+    }
+    return w;
 }
 
-fn _ls_emit_name(rec): i64 {
-    var name = _ls_rec_name(rec);
-    var nlen = strlen(name);
-    if (_ls_color == 0) {
-        return _ls_put_name(name, nlen);
+# ⛔ ALIGNMENT PAD: WHEN ANY NAME IN A LISTING IS QUOTED, EVERY UNQUOTED ONE GETS A
+# LEADING SPACE, so all names start in the column after an opening quote. kriya
+# did this for `-l` and not for `-C`/`-x`, where GNU does it too — measured,
+# `ls -C` with `plain` and `sp ace` is ` plain<TAB>'sp ace'` — and shell-escape
+# is the default on a TERMINAL, so this was the most common interactive case.
+# ⚠ Only for `shell` and `shell-escape`, and only in `-l` or in columns with a
+# finite width: `-1`, `-m` and `-w 0` never pad.
+var _ls_qpad = 0;
+
+fn _ls_listing_qpad(entries, columnar): i64 {
+    _ls_qpad = 0;
+    var al: i64 = 0;
+    if (_ls_qstyle == QUOTE_IF_NEEDED) { al = 1; }
+    if (_ls_qstyle == QUOTE_SHELL) { al = 1; }
+    if (al == 0) { return 0; }
+    if (columnar == 1) {
+        if (_ls_line_length == 0) { return 0; }
     }
-    var code = _ls_color_for(rec);
-    if (code == 0) {
-        # ⚠ The `no` fallback takes the same `is_colored` gate: `no=0` means the
-        # entry is left PLAIN, not wrapped in `ESC[0m`.
-        if (_ls_is_colored(LSK_NO) == 1) { code = _ls_code(LSK_NO); }
-    }
-    if (code == 0) {
-        return _ls_put_name(name, nlen);
-    }
-    if (_ls_color_lead == 0) {
-        _ls_color_lead = 1;
-        _ls_emit_csi();
-        var rs = _ls_code(LSK_RS);
-        if (rs != 0) { k_write( 1, rs, strlen(rs)); }
-        else { k_write( 1, "0", 1); }
-        k_write( 1, "m", 1);
-    }
-    # ⛔ When `no` (normal) is set, GNU restores it and then CLEARS before
-    # applying the entry's own colour: `ESC[<no>m ESC[m ESC[<code>m name`.
-    # ⚠ An entry that takes `no` ITSELF gets no such prefix — just `no`. The
-    # empty `ESC[m` in the middle is not a typo; it is what GNU writes.
-    var nc = _ls_code(LSK_NO);
-    if (_ls_is_colored(LSK_NO) == 1) {
-        if (code != nc) {
-            _ls_emit_csi();
-            k_write( 1, nc, strlen(nc));
-            k_write( 1, "m", 1);
-            _ls_emit_csi();
-            k_write( 1, "m", 1);
+    var n = vec_len(entries);
+    var i: i64 = 0;
+    while (i < n) {
+        if (_ls_name_is_quoted(_ls_rec_name(vec_get(entries, i))) == 1) {
+            _ls_qpad = 1;
+            i = n;
+        } else {
+            i = i + 1;
         }
     }
-    _ls_emit_csi();
-    k_write( 1, code, strlen(code));
-    k_write( 1, "m", 1);
-    _ls_put_name(name, nlen);
-    # ⚠ The trailing reset uses `rs` too when it is set: with `rs=99`, GNU
-    # closes with `ESC[99m`, not `ESC[0m`.
-    _ls_emit_csi();
-    var rs2 = _ls_code(LSK_RS);
-    if (rs2 != 0) { k_write( 1, rs2, strlen(rs2)); }
-    else { k_write( 1, "0", 1); }
-    k_write( 1, "m", 1);
     return 0;
 }
+
+# Clear-to-EOL applies when this is > 0 — the width, in formats where GNU checks.
+# ⚠ Not in `-l`: measured, a 60-character name past column 80 gets no `ESC[K`
+# there, while the same name in `-1` under `COLUMNS=50` does.
+var _ls_cl_width = 0;
+
+# Emit a name — the entry's own or, with `tgt` = 1, its `-l` symlink target — and
+# return the display width written (the pad included). `start_col` is the
+# column the entry's CELL began at, which is what GNU's wrap test measures from.
+fn _ls_emit_name_ex(rec, tgt, start_col): i64 {
+    var name = _ls_rec_name(rec);
+    if (tgt == 1) { name = _ls_rec_link_target(rec); }
+    var nlen = strlen(name);
+    var pad: i64 = 0;
+    if (tgt == 0) {
+        if (_ls_qpad == 1) {
+            if (_ls_name_is_quoted(name) == 0) { pad = 1; }
+        }
+    }
+    var qb = _ls_render_name(name, nlen);
+    var qn = _ls_rn_len;
+    # ⚠ The pad is written BEFORE the colour — it is alignment, not name.
+    if (pad == 1) { _ls_out(" ", 1); }
+    var used: i64 = 0;
+    if (_ls_color == 1) {
+        var code: i64 = 0;
+        if (tgt == 1) { code = _ls_rec_tgt_code(rec); }
+        else { code = _ls_color_for(rec); }
+        if (_ls_is_colored(LSK_NO) == 1) { used = 1; }
+        if (code != 0) {
+            used = 1;
+            if (_ls_is_colored(LSK_NO) == 1) {
+                _ls_put_ind(_ls_code(LSK_LC));
+                _ls_put_ind(_ls_code(LSK_RC));
+            }
+            _ls_put_ind(_ls_code(LSK_LC));
+            _ls_put_ind(code);
+            _ls_put_ind(_ls_code(LSK_RC));
+        }
+    }
+    if (_ls_dired == 1) { if (tgt == 0) { vec_push(_ls_dired_names, _ls_dpos); } }
+    _ls_out(qb, qn);
+    if (_ls_dired == 1) { if (tgt == 0) { vec_push(_ls_dired_names, _ls_dpos); } }
+    if (used == 1) {
+        _ls_prep_nonname();
+        if (_ls_cl_width > 0) {
+            var w = qn + pad;
+            if ((start_col / _ls_cl_width) != ((start_col + w - 1) / _ls_cl_width)) {
+                _ls_put_ind(_ls_code(LSK_CL));
+            }
+        }
+    }
+    return qn + pad;
+}
+
+fn _ls_emit_name(rec, start_col): i64 { return _ls_emit_name_ex(rec, 0, start_col); }
 
 # --- collection + sorting ---
 
@@ -1256,6 +1860,7 @@ fn _ls_collect(dir_path, all_mode, almost_all): i64 {
                             if (fs_is_lnk(_ls_rec_st(rec)) == 1) {
                                 _ls_load_link_target(dir_fd, rec);
                             }
+                            _ls_probe_cap(rec, ent_fp);
                         }
                         vec_push(entries, rec);
                     }
@@ -1270,150 +1875,198 @@ fn _ls_collect(dir_path, all_mode, almost_all): i64 {
 
 # --- output ---
 
-# Terminal width for multi-column packing. Priority: -w flag, then $COLUMNS, then the platform's
-# live console geometry. Returns 0 to mean "not a terminal / unknown" → the caller falls back to
-# one-per-line (script-safe, matching GNU ls piped output).
-#
-# ⛔ `$COLUMNS` NO LONGER FORCES COLUMNS OFF A TTY, AND THE COMMENT THAT SAID IT
-# DOES WAS WRONG. It read "an explicit -w or $COLUMNS forces columns even off a
-# tty (a real GNU affordance)". Measured — GNU does neither:
-#
-#     $ COLUMNS=200 ls | cat        one name per line
-#     $ ls -w 200 | cat             one name per line
-#     $ ls -C | cat                 columns   <- `-C` is what forces them
-#
-# ⚠ THE FAILURE IS THE ONE ADR 0011 DESCRIBES, and it was live: bash exports
-# `COLUMNS` from interactive shells, so `kriya ls | while read f` could produce
-# MULTI-COLUMN output — several names per line — purely because of the parent
-# shell. A script reading that gets `file1  file2` as one "filename".
-#
-# ⭐ [ADR 0017](../../docs/adr/0017-environment-variables-configure-features-the-caller-turned-on.md)
-# is the rule this now obeys: an environment variable may configure a feature the
-# command line already turned on, and may never turn one on. `$COLUMNS` sets the
-# WIDTH of a columnar format; it does not decide that the format is columnar.
-#
-# Line width in columns, for whichever format is packing. ⭐ WIDTH ONLY — it no
-# longer decides whether the output is columnar; `_ls_format` does that.
-#
-# ⛔ `-w` USED TO FORCE COLUMNS OFF A TTY AND GNU'S DOES NOT. Measured:
-# `ls -w 200 | cat` is one name per line under GNU and was multi-column here.
-# `-C` is what forces columns, and 1.6.8 is where kriya gained it — 1.6.5 left
-# `-w` alone precisely because removing this without `-C` would have deleted the
-# only way to ask for columns off a tty.
-#
-# ⭐ `$COLUMNS` IS READ OFF A TTY TOO, now that `-C` exists. Measured:
-# `COLUMNS=40 ls -C | cat` wraps at 40. That is not a retreat from
-# [ADR 0017](../../docs/adr/0017-environment-variables-configure-features-the-caller-turned-on.md)
-# but the rule working: the variable configures a feature the command line
-# turned on, and `isatty` was only ever a proxy for "did anyone ask for columns".
-# With `-C` the caller can say so directly, so the proxy comes out.
-#
-# ⭐ [ADR 0019](../../docs/adr/0019-the-line-width-is-a-number-not-a-format.md) is
-# the rule all of this obeys: every source here supplies a NUMBER, and none of
-# them chooses a format.
-#
-# Precedence, measured end to end: `-w` beats the **ioctl** beats `$COLUMNS`
-# beats 80.
-#
-# ⛔ THE IOCTL BEATS `$COLUMNS`, NOT THE OTHER WAY ROUND, and kriya had it
-# backwards. Measured on a pty: `stty cols 40; COLUMNS=20 ls -C` is EIGHT columns
-# under GNU — the terminal's real width — and was four here. A live terminal
-# knows its own size; an exported `COLUMNS` is a guess that survives a resize, so
-# the variable is the FALLBACK for when the ioctl cannot answer (not a tty, or a
-# tty reporting zero), which is exactly when it is the only source there is.
-#
-# ⚠ This is still ADR 0017 working, not a retreat from it: `$COLUMNS` supplies a
-# WIDTH for a format the command line already chose. Losing to a better source of
-# the same number does not change what it is allowed to do.
-#
-# ⚠ `-w 0` is UNLIMITED, not auto — `ls -C -w 0` puts everything on one line.
-fn _ls_term_width(): i64 {
-    if (_ls_w_given == 1) {
-        var wf = flags_get_int(_ls_spec, _ls_w_idx);
-        if (wf == 0) { return LS_WIDTH_UNLIMITED; }
-        return wf;
+# ⛔ THE FILE OPERANDS' COLUMNS ARE SIZED ACROSS EVERY OPERAND, directories too
+# (1.6.12). GNU gobbles all command-line operands before it splits the
+# directories off, and its column widths are running maxima kept during that
+# gobble — so `ls -l file1 d` pads `file1`'s size to the width of `d`'s: measured,
+# `macro   1` under GNU where kriya wrote `macro 1`. ⚠ It moves every `-l` column
+# and the `-i` inode, and it is the same two bytes that put every `--dired`
+# offset out by two. Set to the directory operands while the file list prints.
+var _ls_wextra = 0;
+
+# Widest inode among `entries` and the extra operands.
+fn _ls_ino_width(entries): i64 {
+    var w: i64 = 0;
+    var n = vec_len(entries);
+    var i: i64 = 0;
+    while (i < n) {
+        var wi = _ls_dec_width(load64(_ls_rec_st(vec_get(entries, i)) + 8));
+        if (wi > w) { w = wi; }
+        i = i + 1;
     }
-    #ifdef CYRIUS_TARGET_AGNOS
-    # agnos has no isatty; winsize()#60 returns the live console grid as (cols<<16 | rows) from the
-    # framebuffer geometry (same source kii/chakshu use), so it stands in for the ioctl here.
-    var packed = syscall(60);
-    var acols = packed >> 16;
-    if (acols > 0) { return acols; }
-    #endif
-    #ifndef CYRIUS_TARGET_AGNOS
-    if (k_isatty(1) == 1) {
-        var ws[8];
-        var r = syscall(16, 1, 21523, &ws);          # SYS_IOCTL, TIOCGWINSZ = 0x5413
-        if (r == 0) {
-            var lcols = load16(&ws + 2) & 65535;
-            if (lcols > 0) { return lcols; }
+    if (_ls_wextra != 0) {
+        var m = vec_len(_ls_wextra);
+        var j: i64 = 0;
+        while (j < m) {
+            var wj = _ls_dec_width(load64(_ls_rec_st(vec_get(_ls_wextra, j)) + 8));
+            if (wj > w) { w = wj; }
+            j = j + 1;
         }
     }
-    #endif
-    # ⛔ `COLUMNS=0` IS UNLIMITED, EXACTLY AS `-w 0` IS, and `atoi` could not say
-    # so: it returns 0 for `0`, for the empty string and for `abc` alike, so the
-    # one spelling that means "no limit" was indistinguishable from the two that
-    # mean "unusable" and all three fell through to 80. Measured: 40 names under
-    # `COLUMNS=0 ls -C` are ONE line for GNU and were three here.
-    #
-    # ⚠ `kriya_parse_nonneg_int` returns -1 for null / empty / any non-digit,
-    # which is the distinction `atoi` cannot make.
-    var ce = kriya_getenv("COLUMNS");
-    if (ce != 0) {
-        var cw = kriya_parse_nonneg_int(ce);
-        if (cw == 0) { return LS_WIDTH_UNLIMITED; }
-        if (cw > 0)  { return cw; }
-        # ⚠ Invalid falls through to 80, as GNU's does. GNU additionally WARNS
-        # (`ls: ignoring invalid width in environment variable COLUMNS: 'abc'`)
-        # and kriya is silent — a diagnostic-only gap, filed at roadmap 1.6.12
-        # because a new stderr shape has to answer to architecture 001 first.
-    }
-    # ⚠ 80 EVEN OFF A TTY. Measured: `ls -C | cat` with no -w and no $COLUMNS
-    # wraps at 80, it does not go unlimited.
-    return 80;
+    return w;
 }
 
-# Advance from column `from` by `n` positions, using a TAB when one lands exactly
-# on the target and spaces otherwise.
+# ⛔ `$COLUMNS` NO LONGER FORCES COLUMNS OFF A TTY, and `-w` never did under GNU:
+# `COLUMNS=200 ls | cat` and `ls -w 200 | cat` are one name per line, and `-C` is
+# what forces columns. bash exports `COLUMNS` from interactive shells, so letting
+# it choose the format made `kriya ls | while read f` read `file1  file2` as one
+# name. ⭐ [ADR 0017](../../docs/adr/0017-environment-variables-configure-features-the-caller-turned-on.md)
+# and [ADR 0019](../../docs/adr/0019-the-line-width-is-a-number-not-a-format.md):
+# every width source supplies a NUMBER and none of them chooses a format.
 #
-# ⛔ GNU USES TABS BETWEEN COLUMNS AND KRIYA USED SPACES — the last known `ls`
-# output divergence, and invisible to every piped comparison because the column
-# POSITIONS are identical either way. Measured with `cat -A`:
+# Precedence, measured end to end: `-w` beats the **ioctl** beats `$COLUMNS` beats
+# 80. ⛔ The ioctl beats the variable — a live terminal knows its own size, and an
+# exported `COLUMNS` is a guess that survives a resize — so the variable is the
+# fallback for when the ioctl cannot answer.
 #
-#   ls -C -w 40   f1  f3^If5  f7^If9        col width 4: 2→4 spaces, 6→8 TAB
-#   ls -C -w 40   aaaaaa^Ibbbbbb^Icccccc    col width 8: every boundary is a stop
-#   aaaaaaaaaa  cccccccccc^It.sh            col width 12: 10→12 spaces, 22→24 TAB
+# ⭐ RESOLVED ONCE, AND ONLY WHEN SOMETHING WILL USE IT (1.6.12) — GNU's own gate:
+# a columnar format (`-C`, `-x`, `-m`, or a bare `ls` on a terminal) or colour.
+# That gate decides when an invalid `$COLUMNS` is WARNED about, measured:
+#   COLUMNS=abc ls -C     warns      COLUMNS=abc ls           silent
+#   COLUMNS=abc ls -l     silent     COLUMNS=abc ls -l --color=always  warns
+#   COLUMNS=abc ls -C -w 50   silent (the flag is the answer)
+#   COLUMNS= ls -C        silent (empty is "unset")
+# ⚠ The warning frame is architecture 001's, with the VALUE as the operand:
+# `kriya ls: abc: ignoring invalid width in environment variable COLUMNS`.
+# ⚠ Accepted like GNU's reader: leading whitespace and one `+`. ⛔ An OVERFLOWING
+# value means unlimited, silently, as GNU's does. ⚠ One deliberate divergence
+# stays (1.6.8): kriya reads DECIMAL only — `COLUMNS=040` is forty, not 32.
+
+# A C `isspace` byte.
+fn _ls_isspace(c): i64 {
+    if (c == 32) { return 1; }
+    if (c >= 9) { if (c <= 13) { return 1; } }
+    return 0;
+}
+
+# Parse an environment number: the value, (0 - 1) invalid, (0 - 2) overflow.
+fn _ls_parse_env_num(s): i64 {
+    var p = s;
+    while (_ls_isspace(load8(p)) == 1) { p = p + 1; }
+    if (load8(p) == 43) { p = p + 1; }
+    var c = load8(p);
+    if (c < 48) { return 0 - 1; }
+    if (c > 57) { return 0 - 1; }
+    var v: i64 = 0;
+    var over: i64 = 0;
+    var more: i64 = 1;
+    while (more == 1) {
+        c = load8(p);
+        var dig: i64 = 0;
+        if (c >= 48) { if (c <= 57) { dig = 1; } }
+        if (dig == 0) { more = 0; }
+        else {
+            if (v > (9223372036854775807 - (c - 48)) / 10) { over = 1; }
+            if (over == 0) { v = v * 10 + (c - 48); }
+            p = p + 1;
+        }
+    }
+    if (load8(p) != 0) { return 0 - 1; }
+    if (over == 1) { return 0 - 2; }
+    return v;
+}
+
+fn _ls_resolve_width(columnar, color_req): i64 {
+    if (_ls_w_given == 1) {
+        # ⚠ `-w 0` is UNLIMITED, not auto — `ls -C -w 0` is one line.
+        _ls_line_length = flags_get_int(_ls_spec, _ls_w_idx);
+        return 0;
+    }
+    var lw: i64 = 0 - 1;
+    # ⚠ Colour as REQUESTED, not as it survived LS_COLORS/TERM: GNU reads the
+    # width in `decode_switches`, before its colour parser can switch colour off,
+    # so `COLUMNS=abc ls --color=always` warns even where no escape is written.
+    var need: i64 = columnar;
+    if (color_req == 1) { need = 1; }
+    if (need == 1) {
+        #ifdef CYRIUS_TARGET_AGNOS
+        # agnos has no isatty; winsize()#60 returns the live console grid as
+        # (cols<<16 | rows) from the framebuffer geometry, standing in for the ioctl.
+        var packed = syscall(60);
+        var acols = packed >> 16;
+        if (acols > 0) { lw = acols; }
+        #endif
+        #ifndef CYRIUS_TARGET_AGNOS
+        if (k_isatty(1) == 1) {
+            var ws[8];
+            var r = syscall(16, 1, 21523, &ws);          # SYS_IOCTL, TIOCGWINSZ = 0x5413
+            if (r == 0) {
+                var lcols = load16(&ws + 2) & 65535;
+                if (lcols > 0) { lw = lcols; }
+            }
+        }
+        #endif
+        if (lw < 0) {
+            var ce = kriya_getenv("COLUMNS");
+            if (ce != 0) {
+                if (load8(ce) != 0) {
+                    var v = _ls_parse_env_num(ce);
+                    if (v == (0 - 2)) { lw = 0; }
+                    elif (v >= 0) { lw = v; }
+                    else {
+                        report_note("ls", ce, "ignoring invalid width in environment variable COLUMNS");
+                    }
+                }
+            }
+        }
+    }
+    # ⚠ 80 EVEN OFF A TTY: `ls -C | cat` wraps at 80, it does not go unlimited.
+    if (lw < 0) { lw = 80; }
+    _ls_line_length = lw;
+    return 0;
+}
+
+# ⭐ `-T` / `--tabsize` and `TABSIZE` (1.6.12). Tab stops every N columns, and 0
+# means spaces only. GNU reads the variable under a narrower gate than `COLUMNS`
+# — a columnar format, not colour — and WARNS on an invalid one, overflow
+# included: `kriya ls: x: ignoring invalid tab size in environment variable
+# TABSIZE`. ⚠ ADR 0019 again: the variable supplies a number for a layout the
+# command line already chose; one-per-line output never reads it.
+fn _ls_resolve_tabsize(): i64 {
+    _ls_tabsize = 8;
+    if (_ls_T_given == 1) {
+        _ls_tabsize = flags_get_int(_ls_spec, _ls_T_idx);
+        return 0;
+    }
+    var te = kriya_getenv("TABSIZE");
+    if (te != 0) {
+        var v = _ls_parse_env_num(te);
+        if (v >= 0) { _ls_tabsize = v; }
+        else {
+            report_note("ls", te, "ignoring invalid tab size in environment variable TABSIZE");
+        }
+    }
+    return 0;
+}
+
+# Line width for the packers. `0` is stored for "unlimited".
+fn _ls_term_width(): i64 {
+    if (_ls_line_length == 0) { return LS_WIDTH_UNLIMITED; }
+    return _ls_line_length;
+}
+
+# Advance from column `from` by `n` positions, using a TAB when GNU's `indent()`
+# would: a tab when `to / T > (from + 1) / T`, spaces otherwise, T the tab size.
 #
-# ⭐ THE RULE IS GNU'S `indent()`, AND IT IS NOT ANY OF THE THREE SHAPES THAT
-# LOOK RIGHT. Per output position, a tab is emitted when
-#
-#     to / 8 > (from + 1) / 8
-#
-# — i.e. the target lies in a LATER tab block than the position one past `from`.
-# Two earlier attempts matched the column POSITIONS and not the bytes:
-#   "only when a tab lands exactly on the target" — misses `-x -w 20`, where GNU
-#   writes `f1  f2<TAB>  f3`: a tab to 8 then two spaces to reach 10.
-#   "while the next stop is at or before the target" — emits a tab from 15 to 17,
-#   where GNU writes two spaces because 17/8 == 16/8.
-# A 560-case differential fuzz over name lengths x widths x formats is what
-# separated them; both wrong versions passed every hand-written case.
-#
-# ⚠ `--color=always` does not change it — measured byte-identical — so the
-# colour interaction the roadmap warned about is not there.
-#
-# ⛔ AND NO TABS AT ALL AT UNLIMITED WIDTH. `ls -C -w 0` is a single line of
-# entries separated by exactly two spaces, tab stops ignored — GNU takes a
-# different emit path there, and the gap is always just the gutter.
+# ⛔ THE RULE IS GNU'S `indent()`, AND IT IS NOT ANY OF THE THREE SHAPES THAT
+# LOOK RIGHT. "Only when a tab lands exactly on the target" misses `-x -w 20`,
+# where GNU writes `f1  f2<TAB>  f3`; "while the next stop is at or before the
+# target" emits a tab from 15 to 17 where GNU writes two spaces. A 560-case
+# differential fuzz is what separated them; both wrong versions passed every
+# hand-written case.
+# ⛔ AND NO TABS AT ALL AT UNLIMITED WIDTH — GNU takes a different path there.
 fn _ls_emit_gap(from, n, tabs): i64 {
-    if (tabs == 0) { return _ls_emit_spaces(n); }
+    var ts = _ls_tabsize;
+    if (tabs == 0) { ts = 0; }
+    if (ts == 0) { return _ls_emit_spaces(n); }
     var target = from + n;
     var at = from;
     while (at < target) {
-        if ((target / 8) > ((at + 1) / 8)) {
-            k_write( 1, "\t", 1);
-            at = at + 8 - (at - (at / 8) * 8);
+        if ((target / ts) > ((at + 1) / ts)) {
+            _ls_out("\t", 1);
+            at = at + ts - (at % ts);
         } else {
-            k_write( 1, " ", 1);
+            _ls_out(" ", 1);
             at = at + 1;
         }
     }
@@ -1422,27 +2075,41 @@ fn _ls_emit_gap(from, n, tabs): i64 {
 
 fn _ls_emit_spaces(n): i64 {
     var i: i64 = 0;
-    while (i < n) { k_write( 1, " ", 1); i = i + 1; }
+    while (i < n) { _ls_out(" ", 1); i = i + 1; }
     return 0;
 }
 
-# Display width of one entry's cell: optional inode prefix (ino_w digits + a space), the name, and
-# the -F type suffix if present. Matches exactly what _ls_print_columns emits per cell.
+# Display width of one entry's cell: optional inode prefix, the name (alignment
+# pad included), and the -F type suffix if present.
+# ⚠ `ino_w` < 0 means "this inode's own digits": `-m` does not pad the inode —
+# measured, and GNU says so in `print_file_name_and_frills`.
 fn _ls_entry_width(rec, F_mode, inode_mode, ino_w): i64 {
     var dw = _ls_name_width(_ls_rec_name(rec));
     if (F_mode == 1) { if (_ls_type_suffix(_ls_rec_st(rec)) != 0) { dw = dw + 1; } }
-    if (inode_mode == 1) { dw = dw + ino_w + 1; }
+    if (inode_mode == 1) {
+        var iw = ino_w;
+        if (iw < 0) { iw = _ls_dec_width(load64(_ls_rec_st(rec) + 8)); }
+        dw = dw + iw + 1;
+    }
     return dw;
 }
 
-# GNU-style multi-column listing, COLUMN-major (fill down each column, then across) — the default
-# `ls` layout to a terminal. Packs into the widest column count whose per-column widths + a 2-space
-# gutter fit `width`; a single over-wide name degrades to one column.
-# ⭐ ONE PACKER, TWO ORDERINGS. `-C` fills each column top-to-bottom (entry
-# `k*rows + r`); `-x` fills each ROW left-to-right (entry `r*cols + k`). The
-# column-count search, the per-column widths and the emission all use the same
-# mapping, so `across` threads through as one flag rather than duplicating the
-# 60 lines GNU's `calculate_columns` needs.
+# The opening of every entry's cell, in GNU's order: the `no` colour, then the
+# inode. ⚠ `ino_w` < 0 writes the inode unpadded, as `-m` does.
+fn _ls_cell_open(rec, inode_mode, ino_w): i64 {
+    _ls_set_normal();
+    if (inode_mode == 1) {
+        var ino = load64(_ls_rec_st(rec) + 8);
+        if (ino_w < 0) { _ls_emit_dec_padded(ino, 0); }
+        else { _ls_emit_dec_padded(ino, ino_w); }
+        _ls_out(" ", 1);
+    }
+    return 0;
+}
+
+# GNU-style multi-column listing: `-C` column-major (fill down, then across),
+# `-x` row-major. ⭐ ONE PACKER, TWO ORDERINGS — the column-count search, the
+# per-column widths and the emission all use the same (row, col) mapping.
 fn _ls_cell(k, r, rows, cols, across): i64 {
     if (across == 1) { return r * cols + k; }
     return k * rows + r;
@@ -1451,17 +2118,9 @@ fn _ls_cell(k, r, rows, cols, across): i64 {
 fn _ls_print_columns(entries, F_mode, inode_mode, width, across): i64 {
     var n = vec_len(entries);
     if (n == 0) { return 0; }
-    # Shared inode-column width (-i).
+    _ls_listing_qpad(entries, 1);
     var ino_w: i64 = 0;
-    if (inode_mode == 1) {
-        var i: i64 = 0;
-        while (i < n) {
-            var w = _ls_dec_width(load64(_ls_rec_st(vec_get(entries, i)) + 8));
-            if (w > ino_w) { ino_w = w; }
-            i = i + 1;
-        }
-    }
-    # Per-entry display widths.
+    if (inode_mode == 1) { ino_w = _ls_ino_width(entries); }
     var ew = alloc(n * 8);
     var i: i64 = 0;
     while (i < n) {
@@ -1471,39 +2130,20 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width, across): i64 {
     var gutter: i64 = 2;
     var use_tabs: i64 = 1;
     if (width >= LS_WIDTH_UNLIMITED) { use_tabs = 0; }
-    # Column selection, matching GNU ls `calculate_columns` exactly. Iterate candidate COLUMN counts
-    # c; the canonical row count for c columns is rows = ceil(n/c). SKIP "degenerate" counts whose
-    # last column would be empty ((c-1)*rows >= n) — GNU never uses them (this is why d2's 5/6-column
-    # layouts never appear). Each column reserves its widest entry + a 2-space gap for every column
-    # EXCEPT the last, and every column is floored at MIN_COLUMN_WIDTH (3) — the floor only bites a
-    # tiny final column. A layout is valid when its total reserved width is STRICTLY < the terminal
-    # width. The most columns that fits wins; fall back to one column.
+    # Column selection, matching GNU's `calculate_columns` exactly: candidate
+    # column counts c, rows = ceil(n/c), each column floored at 3, the last one
+    # reserving no gutter, valid when the total is STRICTLY under the width.
     #
-    # ⛔ AND THE SEARCH IS QUADRATIC WITHOUT A CAP — `-x` PAID IT IN FULL. Each
-    # candidate runs an O(n) inner scan, so an uncapped `c <= n` is O(n²).
-    # `-C` hid it because the degenerate skip prunes almost every large `c`;
-    # `-x` disables that skip by design, so every candidate ran. Measured on
-    # 20,000 entries at `-w 80`: **4,628 ms against GNU's 16 ms, 290×**, and
-    # textbook quadratic below it — 2,500/81 ms, 5,000/304 ms, 10,000/1,179 ms.
-    #
-    # ⭐ The cap is exact, not a heuristic. Every field is floored at 3, so a
-    # `c`-column layout reserves at least `3c`, and a layout is valid only when
-    # its total is STRICTLY less than the width — therefore no `c` with
-    # `3c >= width` can ever win, and GNU caps at the same
-    # `line_length / MIN_COLUMN_WIDTH`.
+    # ⛔ THE SEARCH IS CAPPED, EXACTLY: every column reserves at least 3, so no
+    # `c` with `3c >= width` can win (GNU caps at `line_length / 3`, rounded UP —
+    # measured). Uncapped it was O(n²), and `-x` paid it in full: 20,000 entries
+    # took 4.6 s against GNU's 16 ms.
     var best_c: i64 = 1;
     var c_max = n;
     if (width >= LS_WIDTH_UNLIMITED) {
-        # ⭐ Unlimited width: EVERY candidate fits, so the widest usable one wins
-        # outright and there is nothing to search. `c = n` is usable under both
-        # orderings (rows = 1, so the last column holds the last entry), which
-        # is why GNU prints ONE LINE for `-C -w 0` and `-x -w 0` alike.
         best_c = n;
         c_max = 0;
     } else {
-        # ⚠ CEIL, NOT FLOOR — measured. GNU's cap is `line_length / MIN_COLUMN_WIDTH`
-        # rounded UP: 40 one-character names give 25 columns at width 75 and 26 at
-        # width 76, where a floor would say 25 for both. Widths 74…91 all agree.
         var lim = (width + 2) / 3;
         if (lim < c_max) { c_max = lim; }
         if (c_max < 1) { c_max = 1; }
@@ -1511,30 +2151,18 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width, across): i64 {
     var c: i64 = 1;
     while (c <= c_max) {
         var rows_c = (n + c - 1) / c;
-        # ⛔ THE DEGENERATE SKIP IS A COLUMN-MAJOR PROPERTY AND MUST NOT APPLY
-        # TO `-x`. Filling down, c columns with rows=ceil(n/c) can leave the last
-        # column empty, and GNU never uses such a count. Filling ACROSS it
-        # cannot: c=9 over 10 entries is a full first row and one entry on the
-        # second, which is exactly what GNU picks — measured, `ls -x -w 40` is
-        # nine columns where the vertical rule would have said five.
+        # ⛔ The degenerate-column skip is COLUMN-MAJOR only: filling across, c
+        # columns over n entries never leaves the last column empty.
         var usable: i64 = 0;
         if (across == 1) { usable = 1; }
         else {
-            if (((c - 1) * rows_c) < n) { usable = 1; }        # last column non-empty
+            if (((c - 1) * rows_c) < n) { usable = 1; }
         }
         if (usable == 1) {
-            # ⛔ THE FIT TEST IS NOT `sum of fields < width`, AND THE DIFFERENCE IS
-            # VISIBLE. GNU seeds every column at MIN_COLUMN_WIDTH (3) — so the
-            # running length starts at `3c` — and then re-tests validity ONLY when
-            # some column GROWS past that seed. A layout whose columns all fit in 3
-            # is therefore never re-tested and stays valid even though `3c` may
-            # exceed the width.
-            #
-            # ⚠ That is not a rounding difference, it is a whole extra column: 52
-            # ONE-CHARACTER names at `-x -w 80` are 27 columns under GNU and were 26
-            # here. The seed over-charges the last column by its absent 2-space
-            # gutter, and skipping the re-test is what cancels it — the row really
-            # is 79 columns wide, not the 81 the running length claims.
+            # ⛔ GNU seeds every column at 3 and re-tests the fit ONLY when one
+            # grows past that seed, so a layout whose columns all fit in 3 stays
+            # valid though `3c` may exceed the width: 52 one-character names at
+            # `-x -w 80` are 27 columns, not 26.
             var line_len = 3 * c;
             var valid: i64 = 1;
             var k: i64 = 0;
@@ -1542,16 +2170,13 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width, across): i64 {
                 var colmax: i64 = 0;
                 var r: i64 = 0;
                 while (r < rows_c) {
-                    var cols_c = c;
-                    var idx = _ls_cell(k, r, rows_c, cols_c, across);
+                    var idx = _ls_cell(k, r, rows_c, c, across);
                     if (idx < n) {
                         var v = load64(ew + idx * 8);
                         if (v > colmax) { colmax = v; }
                     }
                     r = r + 1;
                 }
-                # ⚠ The LAST column reserves no gutter — this is why the widest
-                # entry may sit in it without costing the layout a column.
                 var field = colmax;
                 if (k < c - 1) { field = colmax + gutter; }
                 if (field > 3) {
@@ -1567,7 +2192,6 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width, across): i64 {
     }
     var cols = best_c;
     var rows = (n + cols - 1) / cols;
-    # Per-column max widths for the chosen layout.
     var colw = alloc(cols * 8);
     var k: i64 = 0;
     while (k < cols) {
@@ -1584,8 +2208,6 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width, across): i64 {
         store64(colw + k * 8, colmax);
         k = k + 1;
     }
-    # Emit row by row; `_ls_cell` maps (row, col) to an entry index for whichever
-    # ordering is in force.
     var r: i64 = 0;
     while (r < rows) {
         var last_k: i64 = 0;
@@ -1600,13 +2222,9 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width, across): i64 {
             var idx = _ls_cell(k2, r, rows, cols, across);
             if (idx < n) {
                 var rec = vec_get(entries, idx);
-                var st = _ls_rec_st(rec);
-                if (inode_mode == 1) {
-                    _ls_emit_dec_padded(load64(st + 8), ino_w);
-                    k_write( 1, " ", 1);
-                }
-                _ls_emit_name(rec);
-                if (F_mode == 1) { _ls_emit_suffix(st); }
+                _ls_cell_open(rec, inode_mode, ino_w);
+                _ls_emit_name(rec, colpos);
+                if (F_mode == 1) { _ls_emit_suffix(_ls_rec_st(rec)); }
                 if (k2 < last_k) {
                     var pad = load64(colw + k2 * 8) - load64(ew + idx * 8);
                     _ls_emit_gap(colpos + load64(ew + idx * 8), pad + gutter, use_tabs);
@@ -1615,7 +2233,7 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width, across): i64 {
             }
             k2 = k2 + 1;
         }
-        k_write( 1, "\n", 1);
+        _ls_out("\n", 1);
         r = r + 1;
     }
     return 0;
@@ -1627,62 +2245,39 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width, across): i64 {
 fn _ls_print_commas(entries, F_mode, inode_mode, width): i64 {
     var n = vec_len(entries);
     if (n == 0) { return 0; }
-    var ino_w: i64 = 0;
-    if (inode_mode == 1) {
-        var i0: i64 = 0;
-        while (i0 < n) {
-            var w0 = _ls_dec_width(load64(_ls_rec_st(vec_get(entries, i0)) + 8));
-            if (w0 > ino_w) { ino_w = w0; }
-            i0 = i0 + 1;
-        }
-    }
+    _ls_qpad = 0;
     var pos: i64 = 0;
     var i: i64 = 0;
     while (i < n) {
         var rec = vec_get(entries, i);
-        var ew = _ls_entry_width(rec, F_mode, inode_mode, ino_w);
+        var ew = _ls_entry_width(rec, F_mode, inode_mode, 0 - 1);
         # ⚠ The separator counts toward the line, and it is written BEFORE the
-        # wrap decision — which is why a wrapped line ends in `,` rather than
-        # carrying it to the next.
+        # wrap decision — which is why a wrapped line ends in `,`.
         if (i > 0) {
             if (pos + 2 + ew >= width) {
-                k_write( 1, ",\n", 2);
+                _ls_out(",\n", 2);
                 pos = 0;
             } else {
-                k_write( 1, ", ", 2);
+                _ls_out(", ", 2);
                 pos = pos + 2;
             }
         }
-        if (inode_mode == 1) {
-            _ls_emit_dec_padded(load64(_ls_rec_st(rec) + 8), ino_w);
-            k_write( 1, " ", 1);
-        }
-        _ls_emit_name(rec);
+        _ls_cell_open(rec, inode_mode, 0 - 1);
+        _ls_emit_name(rec, pos);
         if (F_mode == 1) { _ls_emit_suffix(_ls_rec_st(rec)); }
         pos = pos + ew;
         i = i + 1;
     }
-    k_write( 1, "\n", 1);
+    _ls_out("\n", 1);
     return 0;
 }
 
 fn _ls_print_simple(entries, F_mode, inode_mode): i64 {
     # ⭐ THE FORMAT IS ALREADY DECIDED — `_ls_scan_format` resolved the last-wins
-    # group before any operand was read. This only dispatches on it.
-    #
-    # ⚠ `LS_FMT_AUTO` is the one that still asks the environment: a tty gets
-    # columns, a pipe gets one per line, which is GNU's default and what keeps
-    # `ls | while read` safe. Every other value was asked for explicitly.
+    # group before any operand was read. `LS_FMT_AUTO` is the one that still asks
+    # the environment: a tty gets columns, a pipe one per line.
     var fmt = _ls_format;
-    if (fmt == LS_FMT_AUTO) {
-        fmt = LS_FMT_SINGLE;
-        #ifdef CYRIUS_TARGET_AGNOS
-        fmt = LS_FMT_COLUMNS;
-        #endif
-        #ifndef CYRIUS_TARGET_AGNOS
-        if (k_isatty(1) == 1) { fmt = LS_FMT_COLUMNS; }
-        #endif
-    }
+    if (fmt == LS_FMT_AUTO) { fmt = _ls_auto_format(); }
     if (fmt == LS_FMT_COLUMNS) {
         return _ls_print_columns(entries, F_mode, inode_mode, _ls_term_width(), 0);
     }
@@ -1692,47 +2287,80 @@ fn _ls_print_simple(entries, F_mode, inode_mode): i64 {
     if (fmt == LS_FMT_COMMAS) {
         return _ls_print_commas(entries, F_mode, inode_mode, _ls_term_width());
     }
-
+    _ls_qpad = 0;
     var n = vec_len(entries);
-    # Compute inode column width if -i.
     var ino_w: i64 = 0;
-    if (inode_mode == 1) {
-        var i: i64 = 0;
-        while (i < n) {
-            var rec = vec_get(entries, i);
-            var w = _ls_dec_width(load64(_ls_rec_st(rec) + 8));
-            if (w > ino_w) { ino_w = w; }
-            i = i + 1;
-        }
-    }
+    if (inode_mode == 1) { ino_w = _ls_ino_width(entries); }
     var i: i64 = 0;
     while (i < n) {
         var rec = vec_get(entries, i);
-        var name = _ls_rec_name(rec);
-        var st = _ls_rec_st(rec);
-        if (inode_mode == 1) {
-            _ls_emit_dec_padded(load64(st + 8), ino_w);
-            k_write( 1, " ", 1);
-        }
-        _ls_emit_name(rec);
-        if (F_mode == 1) { _ls_emit_suffix(st); }
-        k_write( 1, "\n", 1);
+        _ls_cell_open(rec, inode_mode, ino_w);
+        _ls_emit_name(rec, 0);
+        if (F_mode == 1) { _ls_emit_suffix(_ls_rec_st(rec)); }
+        _ls_out("\n", 1);
         i = i + 1;
     }
     return 0;
 }
 
+# The format a bare `ls` gets: columns on a terminal, one per line elsewhere.
+fn _ls_auto_format(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return LS_FMT_COLUMNS;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (k_isatty(1) == 1) { return LS_FMT_COLUMNS; }
+    return LS_FMT_SINGLE;
+    #endif
+}
+
+# ⛔ `ls -l` OMITTED THE `total` LINE (1.6.12). GNU prints `total N` before a
+# directory's entries — the sum of their allocated blocks, in 1K units rounded
+# UP, or `-h`-scaled — and never for a plain FILE operand. A script doing
+# `ls -l | head -1`, or counting lines, got a different answer. ⚠ It counts the
+# entries LISTED (so `-a` adds `.` and `..`), and `total 0` for an empty directory
+# is still printed.
+fn _ls_print_total(entries, human): i64 {
+    var tot: i64 = 0;
+    var n = vec_len(entries);
+    var i: i64 = 0;
+    while (i < n) {
+        var rec = vec_get(entries, i);
+        if (_ls_rec_bad(rec) == 0) { tot = tot + load64(_ls_rec_st(rec) + 64); }
+        i = i + 1;
+    }
+    if (_ls_dired == 1) { _ls_out("  ", 2); }
+    _ls_out("total ", 6);
+    var buf[64];
+    var k: i64 = 0;
+    if (human == 1) { k = _ls_human(tot, 512, 1, 1, &buf); }
+    else { k = _ls_human(tot, 512, 1024, 0, &buf); }
+    _ls_out(&buf, k);
+    _ls_out("\n", 1);
+    return 0;
+}
+
 fn _ls_print_long(entries, human, F_mode, inode_mode, numeric): i64 {
     var n = vec_len(entries);
-    # Pass 1: compute widths.
+    _ls_listing_qpad(entries, 0);
+    # Pass 1: column widths.
     var w_nlink: i64 = 1;
     var w_uid:   i64 = 1;
     var w_gid:   i64 = 1;
     var w_size:  i64 = 1;
     var w_ino:   i64 = 1;
+    # ⛔ A DEVICE'S SIZE COLUMN IS `major, minor` (1.6.12). kriya printed st_size
+    # — `0` for `/dev/null` where GNU prints `1, 3`. Each number has its own
+    # width across the listing, and together they widen the size column.
+    var w_maj:   i64 = 0;
+    var w_min:   i64 = 0;
+    var nx: i64 = 0;
+    if (_ls_wextra != 0) { nx = vec_len(_ls_wextra); }
     var i: i64 = 0;
-    while (i < n) {
-        var rec = vec_get(entries, i);
+    while (i < n + nx) {
+        var rec = 0;
+        if (i < n) { rec = vec_get(entries, i); }
+        else { rec = vec_get(_ls_wextra, i - n); }
         var st = _ls_rec_st(rec);
         if (_ls_rec_bad(rec) == 1) {
             # Every numeric field renders as a single `?`; contributing the
@@ -1747,11 +2375,15 @@ fn _ls_print_long(entries, human, F_mode, inode_mode, numeric): i64 {
         var wg = _ls_owner_width(load64(st + 32) & 4294967295, numeric, 0);
         if (wg > w_gid)   { w_gid = wg; }
         var sz: i64 = 0;
-        if (human == 1) {
-            sz = _ls_human_width(load64(st + 48));
-        } else {
-            sz = _ls_dec_width(load64(st + 48));
+        if (fs_is_dev(st) == 1) {
+            var wj = _ls_dec_width(fs_dev_major(fs_rdev(st)));
+            if (wj > w_maj) { w_maj = wj; }
+            var wm = _ls_dec_width(fs_dev_minor(fs_rdev(st)));
+            if (wm > w_min) { w_min = wm; }
+            sz = w_maj + 2 + w_min;
         }
+        elif (human == 1) { sz = _ls_human_width(load64(st + 48)); }
+        else { sz = _ls_dec_width(load64(st + 48)); }
         if (sz > w_size)  { w_size = sz; }
         if (inode_mode == 1) {
             var wi = _ls_dec_width(load64(st + 8));
@@ -1759,90 +2391,97 @@ fn _ls_print_long(entries, human, F_mode, inode_mode, numeric): i64 {
         }
         i = i + 1;
     }
-    # ⚠ Does any name in THIS listing quote? If so the unquoted ones are padded.
-    _ls_long_qpad = 0;
-    if (_ls_quote == 1) {
-        var qi: i64 = 0;
-        while (qi < n) {
-            if (_ls_name_is_quoted(_ls_rec_name(vec_get(entries, qi))) == 1) {
-                _ls_long_qpad = 1;
-                qi = n;
-            } else {
-                qi = qi + 1;
-            }
-        }
-    }
-    # Pass 2: emit.
+    # Pass 2: emit. ⚠ `no` colours the WHOLE row — it opens before the inode.
     i = 0;
     while (i < n) {
         var rec = vec_get(entries, i);
         var st = _ls_rec_st(rec);
-        var name = _ls_rec_name(rec);
         var bad = _ls_rec_bad(rec);
+        _ls_set_normal();
+        if (_ls_dired == 1) { _ls_out("  ", 2); }
+        # The prefix's width is tracked for GNU's clear-to-EOL test — which `-l`
+        # never passes, but the target's start column is honest either way.
+        var col: i64 = 0;
         if (inode_mode == 1) {
             if (bad == 1) { _ls_emit_q_padded(w_ino); }
             else { _ls_emit_dec_padded(load64(st + 8), w_ino); }
-            k_write( 1, " ", 1);
+            _ls_out(" ", 1);
+            col = col + w_ino + 1;
         }
         var perm_buf[16];
         _ls_render_symperm(load64(st + 24), &perm_buf);
         if (bad == 1) {
-            # Type character survives (from the dirent); the nine permission
+            # The type character survives (from the dirent); the nine permission
             # bits are genuinely unknown.
             var q: i64 = 1;
             while (q < 10) { store8(&perm_buf + q, 63); q = q + 1; }
         }
-        k_write( 1, &perm_buf, 10);
-        k_write( 1, " ", 1);
+        _ls_out(&perm_buf, 10);
+        _ls_out(" ", 1);
+        col = col + 11;
         if (bad == 1) {
-            _ls_emit_q_padded(w_nlink); k_write( 1, " ", 1);
-            _ls_emit_q_padded(w_uid);   k_write( 1, " ", 1);
-            _ls_emit_q_padded(w_gid);   k_write( 1, " ", 1);
-            _ls_emit_q_padded(w_size);  k_write( 1, " ", 1);
-            k_write( 1, "               ? ", 17);      # mtime column, right-aligned
+            _ls_emit_q_padded(w_nlink); _ls_out(" ", 1);
+            col = col + w_nlink + 1;
+            if (_ls_no_owner == 0) {
+                _ls_emit_q_padded(w_uid); _ls_out(" ", 1);
+                col = col + w_uid + 1;
+            }
+            if (_ls_no_group == 0) {
+                _ls_emit_q_padded(w_gid); _ls_out(" ", 1);
+                col = col + w_gid + 1;
+            }
+            _ls_emit_q_padded(w_size); _ls_out(" ", 1);
+            _ls_emit_q_padded(_ls_time_width()); _ls_out(" ", 1);
+            col = col + w_size + 1 + _ls_time_width() + 1;
         } else {
             _ls_emit_dec_padded(load64(st + 16), w_nlink);
-            k_write( 1, " ", 1);
-            _ls_emit_owner(load64(st + 28) & 4294967295, w_uid, numeric, 1);
-            k_write( 1, " ", 1);
-            _ls_emit_owner(load64(st + 32) & 4294967295, w_gid, numeric, 0);
-            k_write( 1, " ", 1);
-            if (human == 1) {
-                _ls_emit_human_padded(load64(st + 48), w_size);
-            } else {
-                _ls_emit_dec_padded(load64(st + 48), w_size);
+            _ls_out(" ", 1);
+            col = col + w_nlink + 1;
+            if (_ls_no_owner == 0) {
+                _ls_emit_owner(load64(st + 28) & 4294967295, w_uid, numeric, 1);
+                _ls_out(" ", 1);
+                col = col + w_uid + 1;
             }
-            k_write( 1, " ", 1);
-            _ls_emit_mtime(load64(st + 88));
-        }
-        if (_ls_long_qpad == 1) {
-            if (_ls_name_is_quoted(name) == 0) { k_write( 1, " ", 1); }
-        }
-        _ls_emit_name(rec);
-        # Symlink target — QUOTED by the same rules as the name, and left
-        # UNCOLOURED unless `or`/`mi` enabled target colouring.
-        if (fs_is_lnk(st) == 1) {
-            var tgt = _ls_rec_link_target(rec);
-            if (tgt != 0) {
-                k_write( 1, " -> ", 4);
-                var tc = _ls_rec_tgt_code(rec);
-                if (tc == 0) {
-                    _ls_put_name(tgt, strlen(tgt));
-                } else {
-                    _ls_emit_csi();
-                    k_write( 1, tc, strlen(tc));
-                    k_write( 1, "m", 1);
-                    _ls_put_name(tgt, strlen(tgt));
-                    _ls_emit_csi();
-                    var trs = _ls_code(LSK_RS);
-                    if (trs != 0) { k_write( 1, trs, strlen(trs)); }
-                    else { k_write( 1, "0", 1); }
-                    k_write( 1, "m", 1);
-                }
+            if (_ls_no_group == 0) {
+                _ls_emit_owner(load64(st + 32) & 4294967295, w_gid, numeric, 0);
+                _ls_out(" ", 1);
+                col = col + w_gid + 1;
             }
+            if (fs_is_dev(st) == 1) {
+                # GNU's `%*s, %*s`: the major takes whatever the size column
+                # has beyond `major, minor`, so the minor stays right-aligned.
+                var wmj = w_size - 2 - w_min;
+                _ls_emit_dec_padded(fs_dev_major(fs_rdev(st)), wmj);
+                _ls_out(", ", 2);
+                _ls_emit_dec_padded(fs_dev_minor(fs_rdev(st)), w_min);
+            }
+            elif (human == 1) { _ls_emit_human_padded(load64(st + 48), w_size); }
+            else { _ls_emit_dec_padded(load64(st + 48), w_size); }
+            _ls_out(" ", 1);
+            col = col + w_size + 1;
+            var tb[64];
+            var tn = _ls_render_time(load64(st + 88), load64(st + 96), &tb);
+            store8(&tb + tn, 32);
+            _ls_out(&tb, tn + 1);
+            col = col + tn + 1;
         }
-        if (F_mode == 1) { _ls_emit_suffix(st); }
-        k_write( 1, "\n", 1);
+        col = col + _ls_emit_name(rec, col);
+        # Symlink target — QUOTED by the same rules as the name, and coloured by
+        # the TARGET's type when the target was read (see `_ls_load_link_target`).
+        var tgt = 0;
+        if (fs_is_lnk(st) == 1) { tgt = _ls_rec_link_target(rec); }
+        if (tgt != 0) {
+            _ls_out(" -> ", 4);
+            _ls_emit_name_ex(rec, 1, col + 4);
+            if (F_mode == 1) {
+                # ⭐ The TARGET's indicator, and none for a broken link.
+                var tst = _ls_rec_tgt_st(rec);
+                if (tst != 0) { _ls_emit_suffix(tst); }
+            }
+        } else {
+            if (F_mode == 1) { _ls_emit_suffix(st); }
+        }
+        _ls_out("\n", 1);
         i = i + 1;
     }
     return 0;
@@ -1855,29 +2494,78 @@ fn _ls_print_dir(entries, long_mode, human, F_mode, inode_mode): i64 {
     return _ls_print_simple(entries, F_mode, inode_mode);
 }
 
-# Print one directory's listing (and recurse if R_mode). `prefix_with_header`
-# means emit "path:\n" header before the entries (used in -R / multi-dir).
-fn _ls_list_dir(dir_path, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, header): i64 {
-    if (header == 1) {
-        k_write( 1, dir_path, strlen(dir_path));
-        k_write( 1, ":\n", 2);
+# The header's text: the quoting style's header variant, `?`-masked on a tty.
+fn _ls_render_header(path): i64 {
+    var nlen = strlen(path);
+    var buf = path;
+    var n = nlen;
+    if (_ls_qstyle != LS_Q_LITERAL) {
+        buf = alloc(quote_bufsz(nlen));
+        n = quote_header(path, nlen, _ls_qstyle, buf);
     }
+    if (_ls_qmark == 1) {
+        var cp = alloc(n + 1);
+        var i: i64 = 0;
+        while (i < n) {
+            var c = load8(buf + i);
+            if (c < 32) { c = 63; }
+            if (c > 126) { c = 63; }
+            store8(cp + i, c);
+            i = i + 1;
+        }
+        buf = cp;
+    }
+    _ls_rn_len = n;
+    return buf;
+}
+
+# A section header — `dir:` — for `-R` and multi-directory listings.
+# ⚠ Under `--dired` it is indented and its NAME is indexed in `//SUBDIRED//`.
+fn _ls_emit_header(dir_path): i64 {
+    if (_ls_dired == 1) { _ls_out("  ", 2); }
+    if (_ls_dired == 1) { vec_push(_ls_dired_subs, _ls_dpos); }
+    var qb = _ls_render_header(dir_path);
+    _ls_out(qb, _ls_rn_len);
+    if (_ls_dired == 1) { vec_push(_ls_dired_subs, _ls_dpos); }
+    _ls_out(":\n", 2);
+    return 0;
+}
+
+# Print one directory's listing (and recurse if R_mode). `header` means emit the
+# "path:" line first (used by -R and by multi-directory listings).
+# ⛔ A SECTION'S BLANK LINE AND HEADER BELONG TO THE SECTION, AND ARE WRITTEN
+# ONLY ONCE THE DIRECTORY OPENED (1.6.12). kriya printed `\nlocked:` and then the
+# error; GNU prints neither, so an unreadable directory leaves no empty section
+# in the listing. ⚠ The separator goes before every header but the first one —
+# the blank line after a FILE operand list is the caller's, as it is GNU's.
+var _ls_hdr_first = 1;
+
+fn _ls_list_dir(dir_path, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, header): i64 {
     var entries_or_err = _ls_collect(dir_path, all_mode, almost_all);
     if (entries_or_err < 0) {
         _ls_report(dir_path, 0 - entries_or_err);
         return entries_or_err;
     }
+    if (header == 1) {
+        if (_ls_hdr_first == 0) { _ls_out("\n", 1); }
+        _ls_hdr_first = 0;
+        _ls_emit_header(dir_path);
+    }
     var entries = entries_or_err;
     _ls_sort(entries, reverse);
+    if (long_mode == 1) { _ls_print_total(entries, human); }
     _ls_print_dir(entries, long_mode, human, F_mode, inode_mode);
 
+    # ⛔ A SUBDIRECTORY THAT FAILS FAILS THE RUN (1.6.12). The recursive call's
+    # result was dropped, so `ls -R` past an unreadable directory printed the
+    # error and exited 0 — GNU exits 1, and so does ADR 0008.
+    var sub_failed: i64 = 0;
     if (R_mode == 1) {
         var n = vec_len(entries);
         var i: i64 = 0;
         while (i < n) {
             var rec = vec_get(entries, i);
             var name = _ls_rec_name(rec);
-            # Skip . and ..
             var skip: i64 = 0;
             if (load8(name) == 46) {
                 if (load8(name + 1) == 0) { skip = 1; }
@@ -1888,38 +2576,99 @@ fn _ls_list_dir(dir_path, all_mode, almost_all, long_mode, human, reverse, F_mod
                 }
             }
             if (skip == 0) {
-                var st = _ls_rec_st(rec);
                 # Only descend into REAL directories (not symlinks-to-dir).
-                if (fs_is_dir(st) == 1) {
-                    k_write( 1, "\n", 1);
+                if (fs_is_dir(_ls_rec_st(rec)) == 1) {
                     var child = path_join(dir_path, name);
-                    _ls_list_dir(child, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, 1);
+                    var cr = _ls_list_dir(child, all_mode, almost_all, long_mode, human, reverse,
+                                          F_mode, inode_mode, R_mode, 1);
+                    if (cr != 0) { sub_failed = 1; }
                 }
             }
             i = i + 1;
         }
     }
+    return sub_failed;
+}
+
+# The quoting style's GNU name, for `//DIRED-OPTIONS//`.
+var _ls_qs_name = "literal";
+
+# ⭐ `--dired`'s trailer: byte offsets of every name and every section header,
+# then the quoting style — the index Emacs' dired mode reads.
+fn _ls_dired_trailer(): i64 {
+    var buf[32];
+    if (vec_len(_ls_dired_names) > 0) {
+        k_write( 1, "//DIRED//", 9);
+        var i: i64 = 0;
+        while (i < vec_len(_ls_dired_names)) {
+            k_write( 1, " ", 1);
+            var k = _ls_render_dec(vec_get(_ls_dired_names, i), &buf);
+            k_write( 1, &buf, k);
+            i = i + 1;
+        }
+        k_write( 1, "\n", 1);
+    }
+    if (vec_len(_ls_dired_subs) > 0) {
+        k_write( 1, "//SUBDIRED//", 12);
+        var j: i64 = 0;
+        while (j < vec_len(_ls_dired_subs)) {
+            k_write( 1, " ", 1);
+            var k2 = _ls_render_dec(vec_get(_ls_dired_subs, j), &buf);
+            k_write( 1, &buf, k2);
+            j = j + 1;
+        }
+        k_write( 1, "\n", 1);
+    }
+    k_write( 1, "//DIRED-OPTIONS// --quoting-style=", 34);
+    k_write( 1, _ls_qs_name, strlen(_ls_qs_name));
+    k_write( 1, "\n", 1);
     return 0;
 }
 
-# Print a single-entry listing for a non-directory operand (or a
-# directory under -d). Caller has already lstat'd into st_buf.
-fn _ls_print_entry(name, st_buf, long_mode, human, F_mode, inode_mode): i64 {
-    # Build a one-entry vec, then route through the same printer.
-    var rec = _ls_rec_new(name);
-    memcpy(_ls_rec_st(rec), st_buf, 144);
-    if (fs_is_lnk(st_buf) == 1) {
-        var lb = alloc(4096);
-        var n = fs_readlinkat(0 - 100, name, lb, 4095);
-        if (n >= 0) {
-            store8(lb + n, 0);
-            _ls_rec_set_link_target(rec, lb);
-        }
+# Map a `--quoting-style` word to a style, or (0 - 1) for an unknown one.
+fn _ls_qstyle_from(w): i64 {
+    if (streq(w, "literal") == 1)             { return LS_Q_LITERAL; }
+    if (streq(w, "shell") == 1)               { return QUOTE_SHELL; }
+    if (streq(w, "shell-always") == 1)        { return QUOTE_SHELL_ALWAYS; }
+    if (streq(w, "shell-escape") == 1)        { return QUOTE_IF_NEEDED; }
+    if (streq(w, "shell-escape-always") == 1) { return QUOTE_ALWAYS; }
+    if (streq(w, "c") == 1)                   { return QUOTE_C; }
+    if (streq(w, "escape") == 1)              { return QUOTE_ESCAPE; }
+    if (streq(w, "locale") == 1)              { return QUOTE_LOCALE; }
+    # ⚠ With no locale, `clocale` IS `c` — measured byte-identical under C.
+    if (streq(w, "clocale") == 1)             { return QUOTE_C; }
+    return 0 - 1;
+}
+
+# Resolve `--time-style` / `--full-time`: 0, or 2 with the diagnostic written.
+fn _ls_resolve_time_style(): i64 {
+    _ls_time_style = LS_TS_LOCALE;
+    # ⚠ LAST-WINS between the two spellings: `--full-time` is GNU's
+    # `--time-style=full-iso` plus `-l`, and whichever came later decides.
+    var ft = kriya_opt_seq(_ls_spec, 0, "full-time");
+    var ts = kriya_opt_seq(_ls_spec, 0, "time-style");
+    if (ft > ts) {
+        _ls_time_style = LS_TS_FULL_ISO;
+        return 0;
     }
-    var v = vec_new();
-    vec_push(v, rec);
-    _ls_print_dir(v, long_mode, human, F_mode, inode_mode);
-    return 0;
+    var v = flags_get_str(_ls_spec, _ls_ts_idx);
+    if (v == 0) { return 0; }
+    # ⚠ `posix-STYLE` means STYLE outside the POSIX locale — and kriya has no
+    # locale, so every `posix-` word is the POSIX form, as GNU is under `LC_ALL=C`
+    # (measured: `--time-style=posix-long-iso` prints `Sep 23  2026` there).
+    if (_ls_pfx(v, "posix-", 6) == 1) { return 0; }
+    if (streq(v, "full-iso") == 1) { _ls_time_style = LS_TS_FULL_ISO; return 0; }
+    if (streq(v, "long-iso") == 1) { _ls_time_style = LS_TS_LONG_ISO; return 0; }
+    if (streq(v, "iso") == 1)      { _ls_time_style = LS_TS_ISO; return 0; }
+    if (streq(v, "locale") == 1)   { return 0; }
+    if (load8(v) == 43) {
+        # `+FORMAT` wants a strftime shared with `date` — refused by name rather
+        # than rendered in some other style.
+        k_write( 2, "kriya ls: error: --time-style=+FORMAT is not implemented (roadmap 1.8.4)\n", 73);
+        return 2;
+    }
+    k_write( 2, "kriya ls: error: invalid --time-style (want full-iso, long-iso, iso or locale)\n", 79);
+    return 2;
 }
 
 fn cmd_ls(start: i64): i64 {
@@ -1934,23 +2683,25 @@ fn cmd_ls(start: i64): i64 {
     var almost_all: i64 = 0;
     if (flags_get_bool(_ls_spec, _ls_A_idx) == 1) { almost_all = 1; }
     # ⭐ THE FORMAT COMES FROM THE ARGV WALK, NOT FROM THE FLAG BITS, because the
-    # group is last-wins and the table has no order. `long_mode` is now just
-    # "did the group resolve to long".
+    # group is last-wins and the table has no order.
     _ls_scan_format();
     if (_ls_format == LS_FMT_BAD) {
         k_write( 2, "kriya ls: error: unknown --format value ", 40);
         k_write( 2, "(want vertical, across, horizontal, commas, long, verbose or single-column)\n", 76);
         return EXIT_USAGE;
     }
-    # ⛔ A NEGATIVE `-w` WAS ACCEPTED AND EXITED 0. `kriya ls -w -5` printed one
-    # name per line and reported success, where GNU exits 2 with *invalid line
-    # width*. ⚠ The same guard catches the WRAPAROUND: the parse is i64, so
-    # `-w 9223372036854775808` came back negative and collapsed the layout, which
-    # made the flag NON-MONOTONIC — a larger number giving a narrower listing.
-    # Rejecting everything below zero covers both, because no legitimate width is.
+    # ⛔ A NEGATIVE `-w` WAS ACCEPTED AND EXITED 0 — and the i64 parse WRAPS, so
+    # `-w 9223372036854775808` came back negative and collapsed the layout.
+    # Rejecting everything below zero covers both.
     if (_ls_w_given == 1) {
         if (flags_get_int(_ls_spec, _ls_w_idx) < 0) {
             k_write( 2, "kriya ls: error: invalid line width (want a non-negative integer, 0 for unlimited)\n", 83);
+            return EXIT_USAGE;
+        }
+    }
+    if (_ls_T_given == 1) {
+        if (flags_get_int(_ls_spec, _ls_T_idx) < 0) {
+            k_write( 2, "kriya ls: error: invalid tab size (want a non-negative integer, 0 for no tabs)\n", 79);
             return EXIT_USAGE;
         }
     }
@@ -1962,15 +2713,29 @@ fn cmd_ls(start: i64): i64 {
     if (flags_get_bool(_ls_spec, _ls_r_idx) == 1) { reverse = 1; }
     var F_mode: i64 = 0;
     if (flags_get_bool(_ls_spec, _ls_F_idx) == 1) { F_mode = 1; }
+    if (F_mode == 1) { _ls_F_long = long_mode; }
     var inode_mode: i64 = 0;
     if (flags_get_bool(_ls_spec, _ls_i_idx) == 1) { inode_mode = 1; }
-    # ⚠ `-n` implies `-l` in GNU; it is not merely a modifier of it. ⛔ BUT THE
-    # IMPLICATION BELONGS IN THE LAST-WINS WALK, NOT HERE. Forcing long at this
-    # point overrode whatever the walk had decided, so `ls -n -C` was long where
-    # GNU is vertical: `-n` takes its TURN in the group like `-l` does, and a
-    # later `-C` clears it. `_ls_scan_format` owns the format now; this line owns
-    # only the numeric-uid column.
+    # ⚠ `-n` implies `-l` in GNU, and the implication lives in the last-wins walk;
+    # this line owns only the numeric-uid column.
     if (flags_get_bool(_ls_spec, _ls_n_idx) == 1) { _ls_numeric = 1; }
+    if (flags_get_bool(_ls_spec, _ls_g_idx) == 1) { _ls_no_owner = 1; }
+    if (flags_get_bool(_ls_spec, _ls_o_idx) == 1) { _ls_no_group = 1; }
+    # ⚠ `--dired` only means anything in long format — measured, `ls --dired -C`
+    # writes plain columns and no trailer.
+    if (flags_get_bool(_ls_spec, _ls_D_idx) == 1) {
+        if (long_mode == 1) {
+            _ls_dired = 1;
+            _ls_dired_names = vec_new();
+            _ls_dired_subs = vec_new();
+        }
+    }
+    if (long_mode == 1) {
+        if (_ls_resolve_time_style() != 0) { return EXIT_USAGE; }
+        var t0 = clock_epoch_ns();
+        _ls_now_s = t0 / 1000000000;
+        _ls_now_ns = t0 % 1000000000;
+    }
     _ls_sortkey = _ls_pick_sortkey();
     # ⚠ `--color` takes an OPTIONAL value: bare means `always`. GNU also accepts
     # `yes`/`force`, `tty`/`if-tty` and `no`/`none` as aliases.
@@ -1998,34 +2763,43 @@ fn cmd_ls(start: i64): i64 {
         # means no colour on that target — the fallback IS the normal path.
         if (k_isatty(1) == 1) { _ls_color = 1; }
     }
+    var color_req = _ls_color;
     if (_ls_color == 1) { _ls_color_load(); }
-    # ⚠ GNU quotes on a terminal and not through a pipe, so the same command
-    # produces different bytes depending on where it is pointed. That is
-    # deliberate upstream: the terminal form is for a human to retype, the piped
-    # form is what scripts have always parsed.
-    if (k_isatty(1) == 1) { _ls_quote = 1; }
-    # ⛔ `--quoting-style` exists here for a REASON BEYOND PARITY: without it,
-    # 100% of ls's quoted output sits behind a pty, and on a host with no
-    # `script(1)` the whole quoting block skips — so an `ls` that never quoted
-    # would go green. That was demonstrated with a mutant before this flag
-    # existed: 21 passed, 0 failed. The flag moves the algorithm onto the pipe
-    # path and leaves the pty covering exactly one bit — whether a terminal
-    # turns it on.
-    # ⚠ Only the three styles kriya's helper actually implements are accepted.
-    # The rest (`shell`, `c`, `escape`, `locale`, `clocale`) are REFUSED by name
-    # rather than silently treated as the default (roadmap 1.6.12).
+    # ⚠ GNU quotes on a terminal and not through a pipe — the terminal form is
+    # for a human to retype, the piped form is what scripts have always parsed.
+    # ⛔ `--quoting-style` also exists so the quoting algorithm is testable on the
+    # PIPE path: without it every quoted byte sat behind a pty, and a host with no
+    # `script(1)` skipped the whole block — an `ls` that never quoted went green.
+    if (k_isatty(1) == 1) {
+        _ls_qstyle = QUOTE_IF_NEEDED;
+        _ls_qs_name = "shell-escape";
+        _ls_qmark = 1;
+    }
     var qs = flags_get_str(_ls_spec, _ls_qs_idx);
     if (qs != 0) {
         if (load8(qs) != 0) {
-            if (streq(qs, "literal") == 1) { _ls_quote = 0; }
-            elif (streq(qs, "shell-escape") == 1) { _ls_quote = 1; }
-            elif (streq(qs, "shell-escape-always") == 1) { _ls_quote = 2; }
-            else {
-                k_write( 2, "kriya ls: error: --quoting-style must be ", 41);
-                k_write( 2, "literal, shell-escape or shell-escape-always\n", 45);
+            var qv = _ls_qstyle_from(qs);
+            if (qv < 0) {
+                k_write( 2, "kriya ls: error: invalid --quoting-style (want literal, shell, shell-always, ", 77);
+                k_write( 2, "shell-escape, shell-escape-always, c, escape, locale or clocale)\n", 65);
                 return EXIT_USAGE;
             }
+            _ls_qstyle = qv;
+            _ls_qs_name = qs;
         }
+    }
+    # Width and tab size, once — each can warn, and a warning is not per directory.
+    var fmt_now = _ls_format;
+    if (fmt_now == LS_FMT_AUTO) { fmt_now = _ls_auto_format(); }
+    var columnar: i64 = 0;
+    if (fmt_now == LS_FMT_COLUMNS) { columnar = 1; }
+    if (fmt_now == LS_FMT_ACROSS) { columnar = 1; }
+    if (fmt_now == LS_FMT_COMMAS) { columnar = 1; }
+    _ls_resolve_width(columnar, color_req);
+    if (columnar == 1) { _ls_resolve_tabsize(); }
+    # ⚠ Clear-to-EOL is a non-long, coloured-output concern.
+    if (_ls_color == 1) {
+        if (long_mode == 0) { _ls_cl_width = _ls_line_length; }
     }
     var d_mode: i64 = 0;
     if (flags_get_bool(_ls_spec, _ls_d_idx) == 1) { d_mode = 1; }
@@ -2033,22 +2807,45 @@ fn cmd_ls(start: i64): i64 {
     if (flags_get_bool(_ls_spec, _ls_R_idx) == 1) { R_mode = 1; }
 
     var npos = flags_positional_count(_ls_spec);
+    var rc: i64 = EXIT_SUCCESS;
 
     # No operands → list cwd.
     if (npos < 1) {
         var dir = ".";
         #ifdef CYRIUS_TARGET_AGNOS
-        # AGNOS-only: the AGNOS VFS rejects relative paths (vfs.cyr requires a
-        # leading '/'), so the literal "." opens nothing and ls fails. Resolve
-        # to an absolute path via k_getcwd (returns "/" on agnos). On Linux we
-        # KEEP "." so `ls -R` section headers stay GNU-relative ("./sub:").
+        # AGNOS-only: the AGNOS VFS rejects relative paths, so the literal "."
+        # opens nothing. Resolve to an absolute path via k_getcwd (returns "/" on
+        # agnos). On Linux we KEEP "." so `ls -R` section headers stay
+        # GNU-relative ("./sub:").
         var cwd[4096];
         var clen = k_getcwd(&cwd, 4096);
         if (clen > 0) { dir = &cwd; }
         #endif
-        var r = _ls_list_dir(dir, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, 0);
-        if (r != 0) { return EXIT_FAILURE; }
-        return EXIT_SUCCESS;
+        if (d_mode == 1) {
+            # ⛔ `ls -d` WITH NO OPERAND LISTED THE DIRECTORY'S CONTENTS (1.6.12).
+            # GNU lists `.` itself — `-d` is about the operand, and the implied
+            # operand is `.` — so `ls -ld` is the one-line `drwx… .` people run it
+            # for, and `-R` has nothing to descend into.
+            var dst[144];
+            var dr = fs_lstat_at(0 - 100, dir, &dst);
+            if (dr != 0) {
+                _ls_report(".", 0 - dr);
+                rc = EXIT_FAILURE;
+            } else {
+                var drec = _ls_rec_new(".");
+                memcpy(_ls_rec_st(drec), &dst, 144);
+                var dv = vec_new();
+                vec_push(dv, drec);
+                _ls_print_dir(dv, long_mode, human, F_mode, inode_mode);
+            }
+        } else {
+            # ⛔ `-R` HEADS EVEN THE IMPLIED `.` (1.6.12): GNU's listing opens
+            # with `.:`, and kriya's began with the first entry.
+            var r = _ls_list_dir(dir, all_mode, almost_all, long_mode, human, reverse,
+                                 F_mode, inode_mode, R_mode, R_mode);
+            if (r != 0) { rc = EXIT_FAILURE; }
+        }
+        return _ls_finish(rc);
     }
 
     # Classify operands: split into non-directories (printed first as a
@@ -2070,14 +2867,9 @@ fn cmd_ls(start: i64): i64 {
             if (fs_is_dir(&st) == 1) { is_dir = 1; }
             if (d_mode == 1)         { is_dir = 0; }
             if (is_dir == 1) {
-                # ⛔ A RECORD, not the raw path, so the directory-section list
-                # can go through the same `_ls_sort` the flat list does. It was
-                # a bare `vec_push(dir_paths, p)` and therefore permanently in
-                # ARGV ORDER under every flag: `ls d3 d1 d2` emitted
-                # `d3: d1: d2:` where GNU emits `d1: d2: d3:`, and `-t`/`-r`
-                # changed nothing. ⚠ The stat is already in hand here, so
-                # carrying it costs nothing and is what makes `-t`/`-S` work on
-                # the section order too.
+                # ⛔ A RECORD, not the raw path, so the directory sections sort
+                # through the same `_ls_sort` the flat list does: `ls d3 d1 d2`
+                # emits `d1: d2: d3:`, and `-t`/`-r` apply to the section order.
                 var dlen = strlen(p);
                 var dname = alloc(dlen + 1);
                 memcpy(dname, p, dlen + 1);
@@ -2085,7 +2877,6 @@ fn cmd_ls(start: i64): i64 {
                 memcpy(_ls_rec_st(drec), &st, 144);
                 vec_push(dir_paths, drec);
             } else {
-                # Single-entry record for the flat list.
                 var nlen = strlen(p);
                 var name_copy = alloc(nlen + 1);
                 memcpy(name_copy, p, nlen + 1);
@@ -2094,16 +2885,19 @@ fn cmd_ls(start: i64): i64 {
                 if (fs_is_lnk(&st) == 1) {
                     _ls_load_link_target(0 - 100, rec);
                 }
+                _ls_probe_cap(rec, p);
                 vec_push(nondir_entries, rec);
             }
         }
         i = i + 1;
     }
 
-    # Emit non-directory operands first (sorted).
+    # Emit non-directory operands first (sorted). ⚠ No `total` for them.
     if (vec_len(nondir_entries) > 0) {
         _ls_sort(nondir_entries, reverse);
+        _ls_wextra = dir_paths;
         _ls_print_dir(nondir_entries, long_mode, human, F_mode, inode_mode);
+        _ls_wextra = 0;
     }
 
     # Then each directory operand, in the SAME order the flat list uses.
@@ -2121,18 +2915,41 @@ fn cmd_ls(start: i64): i64 {
         var header: i64 = 0;
         if (multi_dir == 1) { header = 1; }
         if (any_nondir == 1) { header = 1; }
-        # Separate sections with a blank line.
-        if (di > 0) { k_write( 1, "\n", 1); }
-        else {
-            if (any_nondir == 1) { k_write( 1, "\n", 1); }
+        if (di == 0) {
+            if (any_nondir == 1) { _ls_out("\n", 1); }
         }
         var r = _ls_list_dir(dp, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, header);
         if (r != 0) { any_failed = 1; }
         di = di + 1;
     }
 
-    if (any_failed == 1) { return EXIT_FAILURE; }
+    if (any_failed == 1) { rc = EXIT_FAILURE; }
     # An entry we could not stat is a failure even when the listing printed.
-    if (_ls_stat_failed == 1) { return EXIT_FAILURE; }
-    return EXIT_SUCCESS;
+    if (_ls_stat_failed == 1) { rc = EXIT_FAILURE; }
+    return _ls_finish(rc);
+}
+
+# The tail every listing shares: `--dired`'s index, and — when a custom `lc`/`rc`
+# was in use — GNU's closing restore of the default colour.
+fn _ls_finish(rc): i64 {
+    if (_ls_color_lead == 1) {
+        var lc = _ls_code(LSK_LC);
+        var rcd = _ls_code(LSK_RC);
+        var dflt: i64 = 0;
+        if (lc != 0) {
+            if (strlen(lc) == 2) {
+                if (load8(lc) == 27) { if (load8(lc + 1) == 91) { dflt = 1; } }
+            }
+        }
+        if (dflt == 1) {
+            if (rcd == 0) { dflt = 0; }
+            elif (streq(rcd, "m") == 0) { dflt = 0; }
+        }
+        if (dflt == 0) {
+            if (lc != 0) { _ls_cout(lc, strlen(lc)); }
+            if (rcd != 0) { _ls_cout(rcd, strlen(rcd)); }
+        }
+    }
+    if (_ls_dired == 1) { _ls_dired_trailer(); }
+    return rc;
 }

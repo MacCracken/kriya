@@ -388,11 +388,22 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   patch: run the suite against the runner's coreutils in a container before calling a release
   green.** `docker run -v "$PWD":/w -w /w ubuntu:24.04 sh -c '…'` found it in one pass, and
   `check-oracles.sh` now prints the capability so a future log carries its own explanation.
+  ⚠ **Again at 1.6.12**: a bare `ls --dired` implies `-l` since coreutils 9.5 and is ignored by 9.4.
+  Where kriya has chosen a side, compare against the spelling every version agrees on
+  (`-l --dired`) and gate the direct comparison on a probe of the oracle.
 
 ### Cyrius specifics
 
 - ⛔ *`match` is a reserved keyword in Cyrius.* Costs one build. Worth knowing before naming a
-  variable in a comparison loop, which is exactly where the word wants to be used.
+  variable in a comparison loop, which is exactly where the word wants to be used. ⛔ *So is `mod`*
+  (1.6.12, one more build) — the natural name for a `%H`/`%L` modifier.
+- ⛔ **C's `unsigned int` truncates for free; Cyrius's i64 does not.** glibc's `gnu_dev_minor` is
+  `(dev & 0xff) | ((dev >> 12) & ~0xff)` returned as `unsigned int`, so the mask is effectively
+  32 bits. Ported literally to i64 it carries the MAJOR's top bits into the minor. Spell the width
+  (`0xffffff00`), and test with both halves at full width — the realistic values never set the bits.
+- ⛔ **A mechanical rewrite must not reach its own wrapper.** Replacing every `k_write( 1, ` in
+  `ls.cyr` with `_ls_out(` also rewrote `_ls_out`'s body into a call to itself, and every `ls` hung.
+  Exclude the wrapper from the substitution, then read the wrapper.
 
 ## Discoverability and single sources of truth
 
@@ -417,7 +428,28 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 - **If kriya does not read an environment variable, the ORACLE must not either** — or the test
   measures the shell rather than the code. Cost three separate repairs: `BLOCK_SIZE` for `du`/`df`,
   `POSIXLY_CORRECT` for `echo` and `pwd`, `QUOTING_STYLE` for `ls`/`stat`. ⚠ `POSIXLY_CORRECT` also
-  stops GNU permuting options after operands, which is not obvious from its name.
+  stops GNU permuting options after operands, which is not obvious from its name. 1.6.12 added
+  `TIME_STYLE`, `LS_BLOCK_SIZE` and `BLOCK_SIZE` for `ls -l`.
+- ⛔ **...and a variable BOTH read must be PINNED.** 1.5.2's "an unset `LS_COLORS` emits nothing"
+  was true only because the runner's `TERM` was not on GNU's `dircolors` list; from an xterm it
+  fails, since GNU then colours with its defaults — and so, since 1.6.12, does kriya. `TERM=dumb`
+  and no `COLORTERM`, on every call where they decide the answer.
+- ⛔ **A name that parses as an option measures the option parser.** Put every name after `--`, on
+  BOTH sides. 1.5.3's table said a leading `-` is quoted because GNU `ls` was handed `-a` without
+  `--`, listed with `-a`, and printed something else — and the difference was recorded as a quoting
+  rule, shipped in every diagnostic until 1.6.12. The 1.6.12 fuzz made the same mistake first, which
+  is how it was recognised.
+- **A per-byte table cannot see a whole-name rule.** `{` and `}` are bare anywhere in a word and
+  quoted when they ARE the word; a table measured byte by byte at two positions records them as bare.
+  One-byte names are a fuzz stratum of their own.
+- ⭐ **Compare the whole output, not the columns you are working on.** 1.6.12's comparisons were
+  written for the new features and, run over whole listings, found four `ls` defects nobody had filed
+  — devices printing `st_size`, a missing `.:`, an empty section for an unreadable directory, and a
+  dropped exit status. The partial comparisons before them ("the columns through the owner", "the
+  text after `->`") were written to step around the date column, and stepped around those too.
+- **The host's filesystem can order two runs.** On a strictatime mount every read of a symlink bumps
+  its atime, so `stat LINK` under GNU changes what kriya's `stat LINK` reports next. Anything read
+  twice in sequence cannot have its atime compared.
 - **A test that cannot go red is not a test, and it is worth PROVING with a mutant.** All of `ls`'s
   quoted output once sat behind a pty; on a host without `script(1)` the block skipped and an `ls`
   that never quoted scored 21 passed / 0 failed. `--quoting-style` exists to move the algorithm onto

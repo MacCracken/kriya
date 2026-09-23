@@ -64,8 +64,11 @@ rules rather than re-deriving them.
 - **Neutral** — an invalid `$COLUMNS` falls back to 80 as GNU's does, but GNU also warns
   (`ls: ignoring invalid width in environment variable COLUMNS: 'abc'`) and kriya is silent. That
   is a new stderr shape and has to answer to
-  [architecture 001](../architecture/001-one-write-per-error-line.md) first; filed at roadmap
+  [architecture 001](../architecture/001-errno-message-policy.md) first; filed at roadmap
   1.6.10.
+  > **Resolved at 1.6.12.** kriya warns, in architecture 001's frame — rule 8, `report_note` —
+  > with GNU's words and the value in the operand slot: `kriya ls: abc: ignoring invalid width in
+  > environment variable COLUMNS`.
 
 ## Alternatives considered
 
@@ -77,7 +80,7 @@ rules rather than re-deriving them.
   wrong about its own width.
 - **Adopt GNU's base-0 parse so `-w 040` is 32.** Rejected. A user who writes `040` in a shell
   almost always means forty; C's leading-zero-is-octal rule is a language convention, not a
-  command-line one, and [ADR 0002](0002-argument-parsing-is-agent-safe.md) is built on the argument
+  command-line one, and [ADR 0002](0002-option-parsing-humans-and-agents.md) is built on the argument
   meaning what it looks like. Refusing a form is recoverable; silently halving a width is not.
 - **Saturate an out-of-range width instead of refusing.** Rejected: saturating quietly is how the
   wraparound bug read to the caller in the first place. An exit 2 says which operand was the

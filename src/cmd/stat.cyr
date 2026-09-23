@@ -14,48 +14,28 @@
 #                            "terse" format string; intended for
 #                            parsing — exact ordering documented below).
 #
-# Format specifiers (the M3 subset; covers the surface most scripts
-# touch):
-#   %n  file name (the operand as given)
-#   %s  size in bytes
-#   %a  permissions in octal (low 12 bits)
-#   %A  permissions in symbolic form (`-rwxr-xr-x`)
-#   %f  raw st_mode in hex (no `0x` prefix)
-#   %F  file type ("regular file" / "directory" / "symbolic link" /
-#                  "character special file" / "block special file" /
-#                  "fifo" / "socket" / "unknown")
-#   %u  numeric uid
-#   %g  numeric gid
-#   %i  inode number
-#   %h  hard-link count
-#   %d  device number, decimal
-#   %D  device number, hex (no prefix)
-#   %t  major device of st_rdev, hex
-#   %T  minor device of st_rdev, hex
-#   %b  number of 512-byte blocks allocated
-#   %B  the size of each block reported by %b (always 512 on Linux)
-#   %o  optimal I/O block size (st_blksize)
-#   %X  atime in seconds since epoch
-#   %Y  mtime in seconds since epoch
-#   %Z  ctime in seconds since epoch
-#   %%  literal `%`
+# Format specifiers — every one GNU's `stat` defines for a file: `%n %N %s %a
+# %A %f %F %u %U %g %G %i %h %d %D %r %R %t %T %b %B %o %m %x %X %y %Y %z %Z %w
+# %W %%`. ⭐ The last refusal, `%w`, went at 1.6.12: birth time comes from
+# statx(2), with `-` / `0` where the filesystem does not record one, as GNU
+# prints. ⚠ Except `%C`, the SELinux context, which prints `?` as an unknown
+# specifier does — GNU prints `?` too without SELinux, but exits 1 with "failed
+# to get security context" (roadmap 1.6.16).
 #
-# ⚠ %x / %y / %z LEFT this list at v1.2.5 — they render today (see CHANGELOG).
-#
-# ⭐ %U / %G shipped at 1.5.0 on `src/lib/userdb.cyr`, and %N at 1.5.3 on
-# `src/lib/quote.cyr`. %w waits on statx(2) (roadmap 1.6.12); `_st_is_deferred_spec`
-# below is the single list of specifiers kriya knows about and does not render.
-#   %w / %W       — birth time. Needs `statx(2)` not `stat(2)`.
+# A directive is GNU's printf shape, `%[flags][width][.precision][H|L]C` (1.6.12):
+#   - the flags a directive KEEPS depend on its kind — strings take `-`,
+#     unsigned numbers `'-0`, octal and hex `-#0`, signed `'-+ 0`; the rest are
+#     dropped, not refused;
+#   - precision on `%X %Y %Z %W` is FRACTIONAL SECONDS (`%.3Y`), not digits;
+#   - `H` / `L` before `d` or `r` select the major / minor number;
+#   - `%N` is quoted only if the format contains the two bytes `%N`, so
+#     `%-20N` alone prints the name bare — GNU decides once, per format;
+#   - `%%` with modifiers, or a format that ends inside a directive, is fatal:
+#     `invalid directive`, exit 1.
 #
 # Symlink policy: stat is purely informational. Default is lstat
 # (operates on the link itself) per POSIX / GNU; `-L` follows.
 # ADR 0003's matrix doesn't apply.
-
-# Set when a format asked for something kriya cannot render. `stat` used to emit
-# the specifier's own text and exit 0 — so `stat -c %y f` printed the two bytes
-# "%y" where a timestamp belonged, and a script substituting that into a
-# filename or a comparison got literal garbage back with every sign of success.
-var _st_bad: i64 = 0;
 
 var _st_spec    = 0;
 var _st_c_idx   = 0;
@@ -282,163 +262,445 @@ fn _st_render_time(sec, nsec, buf): i64 {
     return p;
 }
 
-fn _st_emit_spec(c, st, name): i64 {
-    var buf[64];
-    var n: i64 = 0;
-    if (c == 110) {  # n
-        k_write( 1, name, strlen(name));
-        return 0;
+# ── The conversion engine (1.6.12)
+#
+# ⛔ A FLAG OR A WIDTH PRINTED GARBAGE AND EXITED 0. The walker read `%` and then
+# ONE character, so `stat -c '%-10s'` treated `-` as an unknown specifier, wrote
+# `?`, and copied `10s` through as text: `?10s`, exit 0, where GNU prints
+# `1         `. `%04a`, `%5u`, `%.3Y` and `%Hd` all did the same — and GNU's own
+# DEFAULT output is built from exactly those (`Size: %-10s`, `(%04a/%10.10A)`),
+# which is why kriya's default output could not be GNU's.
+#
+# ⭐ Every conversion is rendered into a KIND and then formatted with the flags
+# GNU's `make_format` lets that kind keep:
+#   string    `%n %N %A %F %U %G %m %x %y %z %w`   `-` only; precision truncates
+#   unsigned  `%s %b %B %o %h %i %u %g %d %r`       `'-0`; precision = min digits
+#   octal     `%a`                                  `-#0`
+#   hex       `%f %D %R %t %T`                      `-#0`
+#   epoch     `%X %Y %Z %W`                         `'-+ 0`; ⚠ precision is the
+#             number of FRACTIONAL digits (`%.3Y` = `1790129976.548`), and a bare
+#             `.` means nine
+# `'` (grouping) and `I` (alternate digits) are accepted and change nothing: kriya
+# has no locale, and neither does GNU under `LC_ALL=C`.
+# ⚠ `H` / `L` before `d` or `r` select the device's MAJOR / MINOR number, in
+# decimal — `%Hd,%Ld` is GNU's `Device: 0,50`. Anywhere else they are just
+# unknown conversions.
+enum StKind {
+    ST_K_STR   = 0;
+    ST_K_INT   = 1;
+    ST_K_UINT  = 2;
+    ST_K_OCT   = 3;
+    ST_K_HEX   = 4;
+    ST_K_EPOCH = 5;
+    ST_K_RAW   = 6;    # written as-is, no width: `%%` and the unknown `?`
+    ST_K_NPAIR = 7;    # `%N` with a modifier: name and target padded SEPARATELY
+}
+
+var _st_kind = 0;
+var _st_ival = 0;      # the number, for the numeric kinds
+var _st_ens  = 0;      # nanoseconds, for ST_K_EPOCH
+var _st_sbuf = 0;      # the text, for ST_K_STR / ST_K_RAW
+var _st_slen = 0;
+var _st_tbuf = 0;      # ST_K_NPAIR: the symlink target, or 0
+var _st_tlen = 0;
+# 1 when the directive being rendered carries any flag, width or precision.
+var _st_nmod = 0;
+# ⚠ GNU quotes `%N` only when the FORMAT STRING CONTAINS THE SUBSTRING `%N` —
+# its `main` runs `if (strstr (format, "%N")) getenv_quoting_style ();`, and until
+# then the style is literal. Every observation fits: `-c %N` quotes; `-c %5N`
+# alone does not (no `%N` substring); `-c '%5N|%N'` quotes BOTH; and the DEFAULT
+# format, which is never checked, prints `  File: sp ace` bare.
+var _st_nq_armed = 0;
+
+fn _st_has_pctN(f): i64 {
+    var i: i64 = 0;
+    while (load8(f + i) != 0) {
+        if (load8(f + i) == 37) { if (load8(f + i + 1) == 78) { return 1; } }
+        i = i + 1;
     }
-    # %U / %G — the owner and group NAMES. ⚠ GNU prints the
-    # literal string `UNKNOWN` when the id has no entry, NOT the number and not
-    # an empty field; `%u` is the specifier that gives the number. Measured
-    # against coreutils 9.4 and 9.11 on a file owned by an unmapped uid.
-    if (c == 85) {   # U
+    return 0;
+}
+
+# `-L` and the birth time, set per file before its format runs.
+var _st_deref    = 0;
+var _st_btime_ok = 0;
+var _st_btime_s  = 0;
+var _st_btime_ns = 0;
+
+# ⛔ `%5%`, and a directive the format ENDS inside (`%-`), are fatal under GNU —
+# `stat: '%5%': invalid directive`, exit 1, with what came before already
+# written. kriya echoed them back as text at exit 0. A bare `%%`, and a bare
+# trailing `%`, stay a literal `%`.
+var _st_fatal = 0;
+
+# ⛔ `%w` / `%W` — BIRTH TIME, the specifier kriya knew about and could not
+# render: `stat(2)` has no field for it, `statx(2)` does. ⚠ A filesystem that does
+# not record it answers without STATX_BTIME in the mask, and GNU then prints `-`
+# for `%w` and `0` for `%W` — measured on /proc. The default output's `Birth:`
+# line and `-t`'s fifteenth field come from the same read.
+fn _st_load_btime(path): i64 {
+    _st_btime_ok = 0;
+    var sx[256];
+    var fl: i64 = 256;               # AT_SYMLINK_NOFOLLOW, unless -L
+    if (_st_deref == 1) { fl = 0; }
+    var r = k_statx(0 - 100, path, fl, 2048, &sx);     # mask STATX_BTIME
+    if (r != 0) { return 0; }
+    if ((load64(&sx) & 2048) == 0) { return 0; }
+    _st_btime_s = load64(&sx + 80);
+    _st_btime_ns = load64(&sx + 88) & 4294967295;
+    _st_btime_ok = 1;
+    return 0;
+}
+
+# ⭐ `%m` — the MOUNT POINT: the highest directory above the file still on the
+# file's device. GNU walks up with `stat` until `st_dev` changes; so does this,
+# over the canonical path of the file's directory. Measured: `/dev/null` is
+# `/dev`, `/proc/self/status` is `/proc`, `/etc/hostname` is `/`.
+fn _st_mount_point(path, st): i64 {
+    var dev = load64(st);
+    var start = path;
+    if (fs_is_dir(st) == 0) { start = path_dirname(path); }
+    var cur = alloc(4096);
+    if (fs_realpath(start, FS_REALPATH_REQUIRE_ALL, cur, 4096) < 0) { return "?"; }
+    var go: i64 = 1;
+    while (go == 1) {
+        if (streq(cur, "/") == 1) { go = 0; }
+        else {
+            var parent = path_dirname(cur);
+            var pst[144];
+            if (k_stat(parent, &pst) != 0) { go = 0; }
+            elif (load64(&pst) != dev) { go = 0; }
+            else { cur = parent; }
+        }
+    }
+    return cur;
+}
+
+fn _st_set_str(s, n): i64 {
+    _st_kind = ST_K_STR;
+    _st_sbuf = s;
+    _st_slen = n;
+    return 0;
+}
+
+fn _st_set_num(kind, v): i64 {
+    _st_kind = kind;
+    _st_ival = v;
+    return 0;
+}
+
+# Render conversion `c` (with `dmod` = 'H', 'L' or 0) into the kind registers.
+fn _st_render(c, dmod, st, name): i64 {
+    var buf = alloc(64);
+    if (c == 110) { return _st_set_str(name, strlen(name)); }             # n
+    if (c == 85) {                                                        # U
         var un = userdb_user_name(load64(st + 28) & 4294967295);
-        if (un == 0) { k_write( 1, "UNKNOWN", 7); }
-        else { k_write( 1, un, strlen(un)); }
-        return 0;
+        if (un == 0) { return _st_set_str("UNKNOWN", 7); }
+        return _st_set_str(un, strlen(un));
     }
-    if (c == 71) {   # G
+    if (c == 71) {                                                        # G
         var gn = userdb_group_name(load64(st + 32) & 4294967295);
-        if (gn == 0) { k_write( 1, "UNKNOWN", 7); }
-        else { k_write( 1, gn, strlen(gn)); }
-        return 0;
+        if (gn == 0) { return _st_set_str("UNKNOWN", 7); }
+        return _st_set_str(gn, strlen(gn));
     }
-    # %N — the quoted name, plus ` -> quoted target` for a symlink.
-    # ⚠ ALWAYS quotes, unlike `ls`, which leaves an unremarkable name bare:
-    # `stat -c %N plain` is `'plain'`. Same helper, one flag apart.
-    if (c == 78) {   # N
+    if (c == 78) {                                                        # N
+        # ⚠ ALWAYS quotes under `-c`, unlike `ls`; the DEFAULT format does not.
+        # ⛔ And NOTHING is quoted once the directive has a modifier: measured on
+        # 9.11, `%14N` is `     /dev/null` and `%-20N` pads the NAME and the
+        # TARGET separately — `sl/l2dir             -> dir                 `.
+        # ⚠ One byte of GNU is not reproduced: with `0`, `#`, `+` or space on a
+        # symlink, GNU appends a stray `s` to the target (`%0N` gives
+        # `sl/l2dir -> dirs`) — its format buffer re-suffixed. A corruption, not
+        # a behaviour.
+        if (_st_nmod == 1) {
+            _st_kind = ST_K_NPAIR;
+            var nl0 = strlen(name);
+            _st_sbuf = name;
+            _st_slen = nl0;
+            if (_st_nq_armed == 1) {
+                _st_sbuf = alloc(quote_bufsz(nl0));
+                _st_slen = quote_shell(name, nl0, QUOTE_ALWAYS, _st_sbuf);
+            }
+            _st_tbuf = 0;
+            _st_tlen = 0;
+            if (fs_is_lnk(st) == 1) {
+                var lb = alloc(4096);
+                var ln = k_readlink(name, lb, 4095);
+                if (ln > 0) {
+                    _st_tbuf = lb;
+                    _st_tlen = ln;
+                    if (_st_nq_armed == 1) {
+                        _st_tbuf = alloc(quote_bufsz(ln));
+                        _st_tlen = quote_shell(lb, ln, QUOTE_ALWAYS, _st_tbuf);
+                    }
+                }
+            }
+            return 0;
+        }
         var nlen = strlen(name);
-        var qb = alloc(quote_bufsz(nlen));
-        var qn = quote_shell(name, nlen, QUOTE_ALWAYS, qb);
-        k_write( 1, qb, qn);
+        var out = alloc(quote_bufsz(nlen) + 4 + quote_bufsz(4096));
+        var k: i64 = 0;
+        if (_st_nq_armed == 0) {
+            memcpy(out, name, nlen);
+            k = nlen;
+        } else {
+            k = quote_shell(name, nlen, QUOTE_ALWAYS, out);
+        }
         if (fs_is_lnk(st) == 1) {
             var tbuf = alloc(4096);
             var tn = k_readlink(name, tbuf, 4095);
             if (tn > 0) {
-                k_write( 1, " -> ", 4);
-                var tq = alloc(quote_bufsz(tn));
-                var tqn = quote_shell(tbuf, tn, QUOTE_ALWAYS, tq);
-                k_write( 1, tq, tqn);
+                memcpy(out + k, " -> ", 4);
+                k = k + 4;
+                if (_st_nq_armed == 0) {
+                    memcpy(out + k, tbuf, tn);
+                    k = k + tn;
+                } else {
+                    k = k + quote_shell(tbuf, tn, QUOTE_ALWAYS, out + k);
+                }
             }
         }
-        return 0;
+        return _st_set_str(out, k);
     }
-    if (c == 115) {  # s
-        n = _st_render_dec(load64(st + 48), &buf);
-    } else { if (c == 97) {  # a (octal perms)
-            n = _st_render_oct(load64(st + 24) & 4095, &buf);
-        } else { if (c == 65) {  # A (symbolic perms)
-                n = _st_render_symperm(load64(st + 24), &buf);
-            } else { if (c == 102) {  # f (hex raw mode — st_mode is 4 bytes, mask)
-                    n = _st_render_hex(load64(st + 24) & 4294967295, &buf);
-                } else { if (c == 70) {  # F (type name)
-                        var t = _st_type_name(load64(st + 24));
-                        k_write( 1, t, strlen(t));
-                        return 0;
-                    } else { if (c == 117) {  # u
-                            n = _st_render_dec(load64(st + 28) & 4294967295, &buf);
-                        } else { if (c == 103) {  # g
-                                n = _st_render_dec(load64(st + 32) & 4294967295, &buf);
-                            } else { if (c == 105) {  # i
-                                    n = _st_render_dec(load64(st + 8), &buf);
-                                } else { if (c == 104) {  # h
-                                        n = _st_render_dec(load64(st + 16), &buf);
-                                    } else { if (c == 100) {  # d (decimal)
-                                            n = _st_render_dec(load64(st + 0), &buf);
-                                        } else { if (c == 68) {  # D (hex)
-                                                n = _st_render_hex(load64(st + 0), &buf);
-                                            } else { if (c == 116) {  # t (major of rdev, hex)
-                                                    var rdev = load64(st + 40);
-                                                    # Linux major/minor encoding: major = ((rdev >> 8) & 0xfff) | ((rdev
-                                                    # >> 32) & ~0xfff)
-                                                    # Simpler subset: major = (rdev >> 8) & 0xfff for typical devices.
-                                                    n = _st_render_hex((rdev / 256) & 4095, &buf);
-                                                } else { if (c == 84) {  # T (minor of rdev, hex)
-                                                        var rdev2 = load64(st + 40);
-                                                        n = _st_render_hex(rdev2 & 255, &buf);
-                                                    } else { if (c == 98) {  # b (blocks)
-                                                            n = _st_render_dec(load64(st + 64), &buf);
-                                                            # B (block size — always 512 on Linux)
-                                                        } else { if (c == 66) {
-                                                                n = _st_render_dec(512, &buf);
-                                                            } else { if (c == 111) {  # o (st_blksize)
-                                                                    n = _st_render_dec(load64(st + 56), &buf);
-                                                                } else { if (c == 88) {  # X (atime)
-                                                                        n = _st_render_dec(load64(st + 72), &buf);
-                                                                    } else { if (c == 89) {  # Y (mtime)
-                                                                            n = _st_render_dec(load64(st + 88), &buf);
-                                                                        } else { if (c == 90) {  # Z (ctime)
-                                                                                n = _st_render_dec(load64(st + 104),
-                                                                                  &buf);
-                                                                                # # W (birth time — stat(2) can't see
-                                                                                # it;
-                                                                                # 0
-                                                                                # matches GNU when unavailable)
-                                                                            } else { if (c == 87) {
-                                                                                    n = _st_render_dec(0, &buf);
-                                                                                } else { if (c == 37) {  # literal %
-                                                                                        store8(&buf, 37);
-                                                                                        n = 1;
-                                                                                        # %x atime
-                                                                                    } elif (c == 120) {
-                                                                                        n = _st_render_time(
-                                                                                          load64(st + 72),
-                                                                                          load64(st + 80), &buf);
-                                                                                        # %y mtime
-                                                                                    } elif (c == 121) {
-                                                                                        n = _st_render_time(
-                                                                                          load64(st + 88),
-                                                                                          load64(st + 96), &buf);
-                                                                                        # %z ctime
-                                                                                    } elif (c == 122) {
-                                                                                        n = _st_render_time(
-                                                                                          load64(st + 104),
-                                                                                          load64(st + 112), &buf);
-                                                                                    } else {
-                                                                                        # # ⚠ Two different failures,
-                                                                                        # and
-                                                                                        # they deserve different
-                                                                                        # answers.
-                                                                                        if (_st_is_deferred_spec(c) == 1) {  #skip-lint
-                                                                                            # A REAL specifier kriya has
-                                                                                            # not implemented. Emitting
-                                                                                            # its source
-                                                                                            # text would be a wrong
-                                                                                            # answer dressed as output;
-                                                                                            # say so instead.
-                                                                                            k_write(2, "kriya stat: %",
-                                                                                              13);
-                                                                                            var eb[8];
-                                                                                            store8(&eb, c);
-                                                                                            k_write( 2, &eb, 1);
-                                                                                            k_write( 2, ": not implemented (see roadmap 1.6.12)\n", 39);  #skip-lint
-                                                                                            _st_bad = 1;
-                                                                                            n = 0;
-                                                                                        } else {
-                                                                                            # Genuinely unknown. GNU
-                                                                                            # prints '?' — verified
-                                                                                            # against `stat -c %@`,
-                                                                                            # which is what the previous
-                                                                                            # "emit the source bytes,
-                                                                                            # GNU behaviour"
-                                                                                            # comment here got wrong.
-                                                                                            store8(&buf, 63);
-                                                                                            n = 1;
-                                                                                        }
-                                                                                    } } } } } } } } } } } } } } } } } }
-            } } }
-    k_write( 1, &buf, n);
+    if (c == 70) {                                                        # F
+        # ⛔ `regular empty file` for size 0 — GNU's `file_type()` says so and
+        # kriya said `regular file` for every regular file (measured on /proc).
+        if (fs_is_reg(st) == 1) {
+            if (load64(st + 48) == 0) { return _st_set_str("regular empty file", 18); }
+        }
+        var t = _st_type_name(load64(st + 24));
+        return _st_set_str(t, strlen(t));
+    }
+    if (c == 65) {                                                        # A
+        var an = _st_render_symperm(load64(st + 24), buf);
+        return _st_set_str(buf, an);
+    }
+    if (c == 109) {                                                       # m
+        var mp = _st_mount_point(name, st);
+        return _st_set_str(mp, strlen(mp));
+    }
+    if (c == 120) { return _st_set_str(buf, _st_render_time(load64(st + 72), load64(st + 80), buf)); }   # x
+    if (c == 121) { return _st_set_str(buf, _st_render_time(load64(st + 88), load64(st + 96), buf)); }   # y
+    if (c == 122) { return _st_set_str(buf, _st_render_time(load64(st + 104), load64(st + 112), buf)); } # z
+    if (c == 119) {                                                       # w
+        if (_st_btime_ok == 0) { return _st_set_str("-", 1); }
+        return _st_set_str(buf, _st_render_time(_st_btime_s, _st_btime_ns, buf));
+    }
+    # ⚠ `%s` takes GNU's UNSIGNED flags: `%+s` is `1`, not `+1` (measured).
+    if (c == 115) { return _st_set_num(ST_K_UINT, load64(st + 48)); }    # s
+    if (c == 98)  { return _st_set_num(ST_K_UINT, load64(st + 64)); }    # b
+    if (c == 66)  { return _st_set_num(ST_K_UINT, 512); }                # B
+    if (c == 111) { return _st_set_num(ST_K_UINT, load64(st + 56)); }    # o
+    if (c == 104) { return _st_set_num(ST_K_UINT, load64(st + 16)); }    # h
+    if (c == 105) { return _st_set_num(ST_K_UINT, load64(st + 8)); }     # i
+    if (c == 117) { return _st_set_num(ST_K_UINT, load64(st + 28) & 4294967295); }   # u
+    if (c == 103) { return _st_set_num(ST_K_UINT, load64(st + 32) & 4294967295); }   # g
+    if (c == 100) {                                                       # d
+        var dv = load64(st);
+        if (dmod == 72) { dv = fs_dev_major(dv); }
+        if (dmod == 76) { dv = fs_dev_minor(dv); }
+        return _st_set_num(ST_K_UINT, dv);
+    }
+    if (c == 114) {                                                       # r
+        var rv = load64(st + 40);
+        if (dmod == 72) { rv = fs_dev_major(rv); }
+        if (dmod == 76) { rv = fs_dev_minor(rv); }
+        return _st_set_num(ST_K_UINT, rv);
+    }
+    if (c == 97)  { return _st_set_num(ST_K_OCT, load64(st + 24) & 4095); }            # a
+    if (c == 102) { return _st_set_num(ST_K_HEX, load64(st + 24) & 4294967295); }      # f
+    if (c == 68)  { return _st_set_num(ST_K_HEX, load64(st)); }                        # D
+    if (c == 82)  { return _st_set_num(ST_K_HEX, load64(st + 40)); }                   # R
+    if (c == 116) { return _st_set_num(ST_K_HEX, fs_dev_major(load64(st + 40))); }        # t
+    if (c == 84)  { return _st_set_num(ST_K_HEX, fs_dev_minor(load64(st + 40))); }        # T
+    if (c == 88) { _st_ens = load64(st + 80);  return _st_set_num(ST_K_EPOCH, load64(st + 72)); }   # X
+    if (c == 89) { _st_ens = load64(st + 96);  return _st_set_num(ST_K_EPOCH, load64(st + 88)); }   # Y
+    if (c == 90) { _st_ens = load64(st + 112); return _st_set_num(ST_K_EPOCH, load64(st + 104)); }  # Z
+    if (c == 87) {                                                        # W
+        if (_st_btime_ok == 0) { _st_ens = 0; return _st_set_num(ST_K_EPOCH, 0); }
+        _st_ens = _st_btime_ns;
+        return _st_set_num(ST_K_EPOCH, _st_btime_s);
+    }
+    _st_kind = ST_K_RAW;
+    if (c == 37) { _st_sbuf = "%"; }                                      # %%
+    else {
+        # Not a GNU conversion — GNU writes `?` (verified with `%@`). ⚠ `%C`
+        # lands here too: there is no SELinux context to read.
+        _st_sbuf = "?";
+    }
+    _st_slen = 1;
     return 0;
 }
 
-# Specifiers GNU defines and kriya does not yet render, as opposed to ones that  #skip-lint
-# are simply not specifiers. ⚠ The list keeps shrinking and the comment has to
-# shrink with it: %x/%y/%z left at v1.2.5, %U/%G at 1.5.0 (`src/lib/userdb.cyr`)
-# and %N at 1.5.3 (`src/lib/quote.cyr`). Only %w is left, on statx(2).
-fn _st_is_deferred_spec(c): i64 {  #skip-lint
-    if (c == 119) { return 1; }   # w
+fn _st_pad(n, ch): i64 {
+    var b[8];
+    store8(&b, ch);
+    while (n > 0) { k_write( 1, &b, 1); n = n - 1; }
+    return 0;
+}
+
+# One string under printf `%[-][width][.prec]s`.
+fn _st_emit_str(sb, len, fm, width, dotted, prec): i64 {
+    var sl = len;
+    if (dotted == 1) { if (prec < sl) { sl = prec; } }
+    var spad = width - sl;
+    if (fm == 0) { _st_pad(spad, 32); }
+    k_write( 1, sb, sl);
+    if (fm == 1) { _st_pad(spad, 32); }
+    return 0;
+}
+
+# Write the rendered conversion with its flags, width and precision applied.
+# `dotted` = 1 when a `.` was written; `prec` is its digits (0 when none).
+fn _st_emit_formatted(fm, fz, fp, fsp, fh, width, dotted, prec): i64 {
+    if (_st_kind == ST_K_RAW) {
+        k_write( 1, _st_sbuf, _st_slen);
+        return 0;
+    }
+    if (_st_kind == ST_K_STR) {
+        return _st_emit_str(_st_sbuf, _st_slen, fm, width, dotted, prec);
+    }
+    if (_st_kind == ST_K_NPAIR) {
+        _st_emit_str(_st_sbuf, _st_slen, fm, width, dotted, prec);
+        if (_st_tbuf != 0) {
+            k_write( 1, " -> ", 4);
+            _st_emit_str(_st_tbuf, _st_tlen, fm, width, dotted, prec);
+        }
+        return 0;
+    }
+    if (_st_kind == ST_K_EPOCH) { return _st_emit_epoch(fm, fz, fp, fsp, width, dotted, prec); }
+    # Numeric kinds: sign + prefix + digits, then the width.
+    var digits = alloc(96);
+    var dn: i64 = 0;
+    var v = _st_ival;
+    var neg: i64 = 0;
+    if (_st_kind == ST_K_INT) { if (v < 0) { neg = 1; v = 0 - v; } }
+    if (_st_kind == ST_K_OCT) { dn = _st_render_oct(v, digits); }
+    elif (_st_kind == ST_K_HEX) { dn = _st_render_hex(v, digits); }
+    else { dn = _st_render_dec(v, digits); }
+    var prefix = "";
+    if (_st_kind == ST_K_INT) {
+        if (neg == 1) { prefix = "-"; }
+        elif (fp == 1) { prefix = "+"; }
+        elif (fsp == 1) { prefix = " "; }
+    }
+    if (_st_kind == ST_K_HEX) {
+        if (fh == 1) { if (v != 0) { prefix = "0x"; } }
+    }
+    # Precision = minimum digits (printf). ⚠ `%#o` wants a leading 0 digit,
+    # which is a precision bump in printf terms.
+    var minw: i64 = 0;
+    if (dotted == 1) { minw = prec; }
+    if (_st_kind == ST_K_OCT) {
+        if (fh == 1) {
+            if (load8(digits) != 48) { if (minw < dn + 1) { minw = dn + 1; } }
+        }
+    }
+    var zl: i64 = 0;
+    if (minw > dn) { zl = minw - dn; }
+    # ⚠ printf's own rule: `%.0d` of zero prints no digit at all.
+    if (dotted == 1) {
+        if (prec == 0) { if (v == 0) { dn = 0; } }
+    }
+    var body = strlen(prefix) + zl + dn;
+    var wpad = width - body;
+    # `0` pads between the sign and the digits — but printf ignores it for an
+    # integer with a precision, and `-` overrides it.
+    var zero: i64 = fz;
+    if (fm == 1) { zero = 0; }
+    if (dotted == 1) { zero = 0; }
+    if (fm == 0) { if (zero == 0) { _st_pad(wpad, 32); } }
+    k_write( 1, prefix, strlen(prefix));
+    if (zero == 1) { _st_pad(wpad, 48); }
+    _st_pad(zl, 48);
+    k_write( 1, digits, dn);
+    if (fm == 1) { _st_pad(wpad, 32); }
+    return 0;
+}
+
+# printf `%[-+ 0][width]d` for `v`; returns the number of bytes written.
+fn _st_emit_int(v, fm, fz, fp, fsp, width): i64 {
+    var digits = alloc(32);
+    var neg: i64 = 0;
+    var a = v;
+    if (a < 0) { neg = 1; a = 0 - a; }
+    var dn = _st_render_dec(a, digits);
+    var prefix = "";
+    if (neg == 1) { prefix = "-"; }
+    elif (fp == 1) { prefix = "+"; }
+    elif (fsp == 1) { prefix = " "; }
+    var pl = strlen(prefix);
+    var wpad = width - pl - dn;
+    if (wpad < 0) { wpad = 0; }
+    var zero: i64 = fz;
+    if (fm == 1) { zero = 0; }
+    if (fm == 0) { if (zero == 0) { _st_pad(wpad, 32); } }
+    k_write( 1, prefix, pl);
+    if (zero == 1) { _st_pad(wpad, 48); }
+    k_write( 1, digits, dn);
+    if (fm == 1) { _st_pad(wpad, 32); }
+    return pl + dn + wpad;
+}
+
+# ⛔ GNU's `out_epoch_sec`, its arithmetic included. With a precision the width
+# is SPLIT: the integer part gets `width - 1 - prec`, the fraction the rest. With
+# `-` the integer gets no width at all and the fraction is padded by
+# `width - intlen - 1 - prec` — which can come out NEGATIVE and still pads,
+# because printf reads a negative `*` width as its magnitude: `%-12.3Y` is
+# `1790129976.548` plus TWO spaces, sixteen columns for a width of twelve.
+# Measured, and reproduced rather than corrected — it is GNU's output.
+# ⚠ Past nine fractional digits the rest are zeros: there is no finer clock.
+fn _st_emit_epoch(fm, fz, fp, fsp, width, dotted, prec): i64 {
+    var frac: i64 = 0;
+    if (dotted == 1) { frac = prec; }
+    var iw = width;
+    var iminus = fm;
+    if (frac > 0) {
+        if (width > 1) {
+            iw = 0;
+            var w_d = width - 1;
+            if (w_d > 1) {
+                var w = w_d - frac;
+                if (w > 1) {
+                    if (fm == 1) { iminus = 0; }
+                    else { iw = w; }
+                }
+            }
+        }
+    }
+    var ilen = _st_emit_int(_st_ival, iminus, fz, fp, fsp, iw);
+    if (frac > 0) {
+        var p9 = frac;
+        if (p9 > 9) { p9 = 9; }
+        var div: i64 = 1;
+        var k = p9;
+        while (k < 9) { div = div * 10; k = k + 1; }
+        var fsec = _st_ens / div;
+        k_write( 1, ".", 1);
+        var fb = alloc(16);
+        var j = p9 - 1;
+        while (j >= 0) {
+            store8(fb + j, 48 + (fsec % 10));
+            fsec = fsec / 10;
+            j = j - 1;
+        }
+        k_write( 1, fb, p9);
+        var trail = frac - p9;
+        # ⚠ GNU subtracts the CLAMPED digit count (at most nine), not the
+        # precision: `%-25.12Y` ends `697000` plus two spaces.
+        var tw: i64 = 0;
+        if (ilen < width) {
+            if (1 < width - ilen) { tw = width - ilen - 1 - p9; }
+        }
+        if (tw < 0) { tw = 0 - tw; }
+        _st_pad(trail, 48);
+        if (tw > trail) { _st_pad(tw - trail, 32); }
+    }
+    return 0;
+}
+
+fn _st_isdig(c): i64 {
+    if (c >= 48) { if (c <= 57) { return 1; } }
     return 0;
 }
 
@@ -447,16 +709,86 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
     while (load8(fmt + i) != 0) {
         var c = load8(fmt + i);
         if (c == 37) {
-            # %SPEC
+            var start = i;
             i = i + 1;
+            var fm: i64 = 0;
+            var fz: i64 = 0;
+            var fp: i64 = 0;
+            var fsp: i64 = 0;
+            var fh: i64 = 0;
+            var scanning: i64 = 1;
+            while (scanning == 1) {
+                var fc = load8(fmt + i);
+                if (fc == 45) { fm = 1; i = i + 1; }
+                elif (fc == 48) { fz = 1; i = i + 1; }
+                elif (fc == 43) { fp = 1; i = i + 1; }
+                elif (fc == 32) { fsp = 1; i = i + 1; }
+                elif (fc == 35) { fh = 1; i = i + 1; }
+                elif (fc == 39) { i = i + 1; }
+                elif (fc == 73) { i = i + 1; }
+                else { scanning = 0; }
+            }
+            var width: i64 = 0;
+            while (_st_isdig(load8(fmt + i)) == 1) {
+                width = width * 10 + (load8(fmt + i) - 48);
+                i = i + 1;
+            }
+            var dotted: i64 = 0;
+            var prec: i64 = 0;
+            if (load8(fmt + i) == 46) {
+                dotted = 1;
+                i = i + 1;
+                var any: i64 = 0;
+                while (_st_isdig(load8(fmt + i)) == 1) {
+                    prec = prec * 10 + (load8(fmt + i) - 48);
+                    i = i + 1;
+                    any = 1;
+                }
+                # ⚠ For an epoch, a bare `.` means NINE fractional digits.
+                if (any == 0) { prec = 0 - 1; }
+            }
+            var dmod: i64 = 0;
+            var mc = load8(fmt + i);
+            if (mc == 72) { dmod = 72; }
+            if (mc == 76) { dmod = 76; }
+            if (dmod != 0) {
+                var nx = load8(fmt + i + 1);
+                var dr: i64 = 0;
+                if (nx == 100) { dr = 1; }
+                if (nx == 114) { dr = 1; }
+                if (dr == 1) { i = i + 1; }
+                else { dmod = 0; }
+            }
             var sc = load8(fmt + i);
+            var bare: i64 = 0;
+            if (i == start + 1) { bare = 1; }
+            var endish: i64 = 0;
+            if (sc == 0) { endish = 1; }
+            if (sc == 37) { endish = 1; }
+            if (endish == 1) {
+                if (bare == 0) {
+                    var dl = i - start;
+                    if (sc == 37) { dl = dl + 1; }
+                    var dtext = alloc(dl + 1);
+                    memcpy(dtext, fmt + start, dl);
+                    store8(dtext + dl, 0);
+                    report_note("stat", dtext, "invalid directive");
+                    _st_fatal = 1;
+                    return 0;
+                }
+            }
             if (sc == 0) {
-                # Trailing lone '%' — emit as-is.
-                var bb[2];
-                store8(&bb, 37);
-                k_write( 1, &bb, 1);
+                k_write( 1, "%", 1);
             } else {
-                _st_emit_spec(sc, st, name);
+                _st_nmod = 0;
+                if (bare == 0) { _st_nmod = 1; }
+                if (dmod != 0) { _st_nmod = 1; }
+                _st_render(sc, dmod, st, name);
+                var p2 = prec;
+                if (p2 < 0) {
+                    if (_st_kind == ST_K_EPOCH) { p2 = 9; } else { p2 = 0; }
+                }
+                _st_emit_formatted(fm, fz, fp, fsp, fh, width, dotted, p2);
                 i = i + 1;
             }
         } else {
@@ -465,7 +797,6 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
                     i = i + 1;
                     var ec = load8(fmt + i);
                     var bb2[2];
-                    var emit: i64 = 1;
                     if (ec == 110)      { store8(&bb2, 10); }  # \n
                     else { if (ec == 116) { store8(&bb2, 9); }   # \t
                         else { if (ec == 114) { store8(&bb2, 13); }  # \r
@@ -476,7 +807,6 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
                                             else { if (ec == 0)   {
                                                     # Trailing lone backslash — emit as-is.
                                                     store8(&bb2, 92);
-                                                    emit = 1;
                                                 } else {
                                                     # Unknown — keep backslash + char.
                                                     store8(&bb2, 92);
@@ -507,9 +837,26 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
     return 0;
 }
 
-# Default multi-line format (epoch times — `%x`/`%y`/`%z` await chrono).
-fn _st_default_format(): i64 {
-    return "  File: %n\n  Size: %s\tBlocks: %b\tIO Block: %o\t%F\nDevice: %dh/%Dh\tInode: %i\tLinks: %h\nAccess: (%a/%A)  Uid: %u  Gid: %g\nAccess: %X\nModify: %Y\nChange: %Z\n";  #skip-lint
+# ⭐ GNU's default output, BUILT FROM GNU'S OWN FORMAT STRINGS (1.6.12). kriya's
+# used epoch seconds for every timestamp, `%dh/%Dh` for the device, bare numeric
+# ids and no `Birth:` line, under a comment saying the dates "await chrono" —
+# `%x`/`%y`/`%z` have rendered since v1.2.5. ⚠ A character or block device gets
+# `Links: %-5h Device type: %Hr,%Lr`, measured on /dev/null.
+fn _st_default_format(st): i64 {
+    var ty = load64(st + 24) & 61440;
+    var devline = "Device: %Hd,%Ld\tInode: %-11i Links: %h\n";
+    if (ty == 8192) { devline = "Device: %Hd,%Ld\tInode: %-11i Links: %-5h Device type: %Hr,%Lr\n"; }
+    if (ty == 24576) { devline = "Device: %Hd,%Ld\tInode: %-11i Links: %-5h Device type: %Hr,%Lr\n"; }
+    var head = "  File: %N\n  Size: %-10s\tBlocks: %-10b IO Block: %-6o %F\n";
+    var tail = "Access: (%04a/%10.10A)  Uid: (%5u/%8U)   Gid: (%5g/%8G)\nAccess: %x\nModify: %y\nChange: %z\n Birth: %w\n";  #skip-lint
+    var hl = strlen(head);
+    var dl = strlen(devline);
+    var tl = strlen(tail);
+    var f = alloc(hl + dl + tl + 1);
+    memcpy(f, head, hl);
+    memcpy(f + hl, devline, dl);
+    memcpy(f + hl + dl, tail, tl + 1);
+    return f;
 }
 
 # Terse format (GNU stat -t style — single line, space-separated).
@@ -531,8 +878,7 @@ fn cmd_stat(start: i64): i64 {
         return EXIT_USAGE;
     }
 
-    var deref: i64 = 0;
-    if (flags_get_bool(_st_spec, _st_L_idx) == 1) { deref = 1; }
+    if (flags_get_bool(_st_spec, _st_L_idx) == 1) { _st_deref = 1; }
     var terse: i64 = 0;
     if (flags_get_bool(_st_spec, _st_t_idx) == 1) { terse = 1; }
 
@@ -559,9 +905,15 @@ fn cmd_stat(start: i64): i64 {
             }
         }
     }
+    var dflt: i64 = 0;
+    if (fmt != 0) { _st_nq_armed = _st_has_pctN(fmt); }
     if (fmt == 0) {
         if (terse == 1) { fmt = _st_terse_format(); }
-        else            { fmt = _st_default_format(); }
+        else {
+            # The default format carries its own newlines.
+            dflt = 1;
+            auto_newline = 0;
+        }
     }
 
     var any_failed: i64 = 0;
@@ -570,7 +922,7 @@ fn cmd_stat(start: i64): i64 {
         var p = flags_positional(_st_spec, i);
         var st[144];
         var sr: i64 = 0;
-        if (deref == 1) {
+        if (_st_deref == 1) {
             sr = k_stat(p, &st);
         } else {
             sr = fs_lstat_at(0 - 100, p, &st);
@@ -579,12 +931,17 @@ fn cmd_stat(start: i64): i64 {
             _st_report(p, 0 - sr);
             any_failed = 1;
         } else {
-            _st_emit_format(fmt, &st, p, interpret_escapes, auto_newline);
+            _st_load_btime(p);
+            if (dflt == 1) {
+                _st_emit_format(_st_default_format(&st), &st, p, 0, 0);
+            } else {
+                _st_emit_format(fmt, &st, p, interpret_escapes, auto_newline);
+            }
+            if (_st_fatal == 1) { return EXIT_FAILURE; }
         }
         i = i + 1;
     }
 
     if (any_failed == 1) { return EXIT_FAILURE; }
-    if (_st_bad == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
 }
