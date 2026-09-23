@@ -388,6 +388,74 @@ for _a in "-maxdepth 2147483648" "-mindepth 2147483648" "-maxdepth 1844674407370
     expect_eq "...and by GNU" "yes" "$([ "$_grc" != 0 ] && echo yes || echo no)"
 done
 
+# --- 1.7.0: -exec … {} + ---------------------------------------------------
+#
+# ⭐ ONE COMMAND PER BATCH, counted as GNU's `buildcmd` counts: strlen + 1 per
+# argument, the command's own words included, up to 131,072 bytes. It was
+# refused ("missing ';'") until 1.7.0. `xp_same` compares the SORTED output and
+# the exit status: the order of paths inside a batch is the walk's.
+xp_same() {
+    _n=$1; shift
+    _k=0; timeout 60 "$BIN" find "$@" 2>/dev/null | sort > xp_k.out || true
+    timeout 60 "$BIN" find "$@" >/dev/null 2>&1 || _k=$?
+    _g=0; find "$@" 2>/dev/null | sort > xp_g.out || true
+    find "$@" >/dev/null 2>&1 || _g=$?
+    if cmp -s xp_k.out xp_g.out && [ "$_k" = "$_g" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        printf 'FAIL %s: GNU exit %s, kriya exit %s, output %s\n' "$_n" "$_g" "$_k" \
+            "$(cmp -s xp_k.out xp_g.out && echo same || echo differs)" >&2
+    fi
+}
+mkdir -p x17/sub && touch x17/a x17/b x17/sub/c
+xp_same "-exec echo {} +"              x17 -exec echo {} +
+xp_same "initial arguments"            x17 -exec echo X {} +
+xp_same "with a test before it"        x17 -name a -exec echo {} +
+xp_same "nothing matches: no command"  x17 -name zzz -exec echo {} +
+xp_same "{} + then another test"       x17 -exec echo {} + -name a
+xp_same "two batches"                  x17 -exec echo A {} + -exec echo B {} +
+xp_same "; and + together"             x17 -exec echo {} ';' -exec echo {} +
+xp_same "{} + -o -print"               x17 -exec echo {} + -o -print
+# The predicate is TRUE whatever the command does; its failure is the exit status.
+xp_same "a failing command, exit 1"    x17 -exec false {} +
+xp_same "...and -print still prints"   x17 -exec false {} + -print
+xp_same "exit 3 is a failure"          x17 -exec sh -c 'exit 3' sh {} +
+xp_same "killed by a signal"           x17 -exec sh -c 'kill -9 $$' sh {} +
+xp_same "not found"                    x17 -exec nosuch-cmd-1-7-0 {} +
+xp_same "no command word: {} runs"     x17 -exec {} +
+# ⚠ `+` ends the command ONLY straight after a bare `{}` (GNU 4.10's rule);
+# otherwise it is an argument and a `;` is still owed.
+xp_same "a + that is data"             x17 -name a -exec echo + ';'
+for _a in "-exec echo {} Y +" "-exec echo {}x +" "-exec echo x{} +" "-exec echo +" \
+          "-exec +" "-exec echo {} {} +" "-exec sh -c 'echo {}' sh {} +"; do
+    # shellcheck disable=SC2086
+    eval "expect_exit \"find $_a refused\" 2 \"$BIN\" find x17 $_a"
+    _grc=0
+    eval "find x17 $_a" >/dev/null 2>&1 || _grc=$?
+    expect_eq "...and by GNU" "yes" "$([ "$_grc" != 0 ] && echo yes || echo no)"
+done
+# Order: a batch runs when it fills, and whatever is left after the walk, in
+# expression order — after `-print`'s lines.
+expect_eq "batches after -print" "$(find x17 -exec echo {} + -print | tail -1 | wc -w)" \
+    "$("$BIN" find x17 -exec echo {} + -print | tail -1 | wc -w)"
+expect_eq "A before B" "$(find x17 -exec echo A {} + -exec echo B {} + | cut -c1)" \
+    "$("$BIN" find x17 -exec echo A {} + -exec echo B {} + | cut -c1)"
+# ⭐ THE BATCH SIZES ARE GNU's: 25,000 same-length paths, in a pinned environment
+# (the environment is part of the ceiling).
+mkdir -p x17b && (cd x17b && seq -f 'f%08g' 1 25000 | xargs touch)
+for _v0 in sh sh-with-a-long-argv0-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; do
+    expect_eq "batch sizes, argv0 $_v0" \
+        "$(env -i PATH=/usr/bin:/bin find x17b -type f -exec sh -c 'echo $#' $_v0 {} + | tr '\n' ' ')" \
+        "$(env -i PATH=/usr/bin:/bin "$BIN" find x17b -type f -exec sh -c 'echo $#' $_v0 {} + | tr '\n' ' ')"
+done
+expect_eq "two -exec + batches interleave" \
+    "$(env -i PATH=/usr/bin:/bin find x17b -type f -exec sh -c 'echo A$#' sh {} + -exec sh -c 'echo B$#' sh {} + | tr '\n' ' ')" \
+    "$(env -i PATH=/usr/bin:/bin "$BIN" find x17b -type f -exec sh -c 'echo A$#' sh {} + -exec sh -c 'echo B$#' sh {} + | tr '\n' ' ')"
+# Every path arrives, once.
+expect_eq "25,000 paths, each once" "25000" \
+    "$("$BIN" find x17b -type f -exec sh -c 'for f; do echo "$f"; done' sh {} + | sort -u | wc -l)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

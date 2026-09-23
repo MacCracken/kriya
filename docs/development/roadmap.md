@@ -38,7 +38,7 @@ watchlist in [`lessons.md`](lessons.md). The rest are shipped or dissolved into 
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | ARG_MAX argv chunking | **1.7.0** — batched exec |
+| **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.7.1** — `find` predicates |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.8.0** — floats |
 | **1.9.x** | Performance | niyama regex speed (upstream) | **1.9.0** — `wc -c` fast path |
 
@@ -51,13 +51,13 @@ risk: it changes what kriya *does*, so expect an ADR and GNU-comparison work per
 
 ## 1.7.x — Traversal, exec, filesystem reporting & syscall portability
 
-**Enabler:** ARG_MAX argv chunking, for 1.7.0. Everything here builds on the spawn helper
-(`src/lib/spawn.cyr`).
+**Enabler:** shipped at 1.7.0 — `src/lib/argbatch.cyr`, GNU's command-line accounting, beside the
+spawn helper (`src/lib/spawn.cyr`) everything here builds on.
 
-- **1.7.0 — Batched exec.** `find -exec ... +` (ARG_MAX chunking) and `xargs -L N` / `-x` /
-  `--show-limits`. All four are the same argv-accounting problem seen from two directions.
 - **1.7.1 — `find` predicates.** `-prune`, `-depth` (DFS post-order), `-perm`, `-H` (operand-only
   follow — the one [ADR 0003](../adr/0003-symlink-follow-policy.md) mode still refused).
+  - **GNU's `,` operator** (evaluate both, the result is the right one's) is missing: `find d
+    -type f -exec echo {} + , -print` is a usage error here. Measured at 1.7.0.
   - **`-uid` / `-gid` take `+N` and `-N`** in GNU (more than, less than), as `-mtime` and `-size`
     already do here through `_f_parse_signed_int`; kriya refuses them. And `-size Nw` (two-byte
     words) is GNU's too. Both measured at 1.6.16, when `-size` learned GNU's rounding.
@@ -66,6 +66,13 @@ risk: it changes what kriya *does*, so expect an ADR and GNU-comparison work per
   [ADR-0010](../adr/0010-rm-refuses-a-trailing-slash-symlink-operand.md) trailing-slash-symlink
   refusal** — a second deletion path that does not is a hole in both. `xargs -P N` (job-table
   management) and `-p` (interactive prompt, which must honour ADR 0002's no-hang-on-non-tty rule).
+  - ⚠ **`-P` needs the 1.7.0 batch builder to hand out command lines while others run** — today
+    it is one buffer, reused per batch. `--show-limits` already prints GNU's ceiling for it.
+  - **The prompting and per-directory forms that share `-p`'s tty rule**: `find -ok` / `-okdir`
+    (whose child gets `/dev/null` as stdin, since find reads the answers) and `-execdir`, which
+    GNU refuses `{}` in the command name for. Not taken today; measured at 1.7.0.
+  - **GNU `xargs`'s other inputs**: `-a FILE` (the child then keeps stdin), `-d DELIM`, `-E STR`
+    and `-o`. Refused today, as unknown options.
 - **1.7.3 — Usage reporting.** `du -x` (one-filesystem), `--exclude` / `--exclude-from`,
   `--inodes` and `-0`; `df -t TYPE` (POSIX-required); `env -S` split-string and `-C DIR`.
   - **The sparse inode set.** GNU's device-inode set costs about **one bit per counted file** —
@@ -76,7 +83,8 @@ risk: it changes what kriya *does*, so expect an ADR and GNU-comparison work per
     `kriya du -s /usr` peaks at **68 MB against GNU's 7.7 MB** with dedup switched off entirely.
     Measure it in the same pass.
 - **1.7.4 — Raw syscalls to stdlib wrappers.** kriya issues **40 distinct raw `syscall(N, …)`
-  numbers across 56 sites** (re-counted at 1.6.12), in x86-64 Linux numbering; 16 of those sites are
+  numbers across 56 sites** (re-counted at 1.6.12; 1.7.0 added `getrlimit`, 97, for ARG_MAX), in
+  x86-64 Linux numbering; 16 of those sites are
   the `*at()` family
   (`openat` 257, `mkdirat` 258, `newfstatat` 262, `unlinkat` 263, `utimensat` 280, …). ⭐ **The
   wrappers kriya asked for exist**: the stdlib has exposed `sys_openat`, `sys_mkdirat`,
@@ -343,7 +351,6 @@ What still gates the arcs. Ship the enabler and everything under it becomes smal
 
 | Enabler | Home | Unblocks | Slot |
 |---|---|---|---|
-| ARG_MAX argv chunking | `src/lib/` | `find -exec +`, `xargs -L` / `-x` | 1.7.0 |
 | Float formatting | `src/cmd/printf.cyr` | `printf %e/%f/%g/%a`, `seq -f` | 1.8.0 |
 | Byte-suffix parser | `src/lib/args.cyr` | `head -c 1K`, `tail -c 1K`, `sort -S` | 1.8.2 |
 | niyama regex speed | **upstream** | `grep` on metacharacter patterns (~160× GNU) | 1.9.2, gated |

@@ -155,6 +155,17 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   `FS_S_*` substitutions were built before the version bump and compared byte for byte with the
   committed 1.6.15 binary, on both targets, after every file: identical. A suite can only sample
   behaviour, while `cmp` covers every byte. It works only before the version string changes.
+- ⛔ **`set -e` swallowed a suite a THIRD time (1.6.15, 1.6.16, 1.7.0).** An `err=$(…)` that
+  captures a diagnostic takes the substitution's exit status; against a binary that refuses the
+  option under test, the capture fails and the WHOLE SCRIPT ends, printing no summary — which the
+  mutation run reports as an empty line, not as failures. Write `|| true` inside every capture of
+  a command that is allowed to fail.
+- ⛔ **A test compared against a DIFFERENT GNU invocation pins a belief, not a behaviour.**
+  `smoke-xargs.sh` checked kriya's `xargs echo` on empty input against GNU's `xargs
+  --no-run-if-empty echo`, beside a code comment saying modern GNU does not run the command. Both
+  were wrong: 4.9 and 4.11 run it once, as POSIX says. The test could only ever agree with the
+  comment. Compare the same command line on both sides; where kriya differs on purpose, assert
+  kriya's answer and say why.
 - ⛔ **`$(...)` drops NUL bytes, so a comparison through it can be vacuous.** `smoke-printf.sh`'s
   `%c empty` case passed from the day it was written: GNU prints a NUL for an empty `%c`
   argument, kriya printed nothing, and both came back from `$(...)` as the empty string. Found at
@@ -493,6 +504,21 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   do neither: they warn and DROP the operator. The decision (ADR 0022) was about a behaviour
   that does not exist until it was measured. It is the comment-is-a-claim rule applied to the
   roadmap.
+- ⭐ **When the behaviour is an ALGORITHM, read the reference's source, then prove the port on its
+  output.** GNU xargs's E2BIG retry produces batches of 130,938, 130,941, 98,202, 98,203 and
+  41,716 for one input — no measurement suggests that sequence, and no guess reproduces it. Read in
+  `lib/buildcmd.c` (halve until something runs, then bisect, remembering across batches) and ported
+  line for line, it matched on the first run, including the odd `130939 2 14363` tail of a larger
+  case. The sequence is now a smoke assertion: a port that drifts shows up as numbers.
+- ⛔ **Moving from slurping to streaming changes who owns stdin.** Once xargs reads its input as it
+  goes, a child that inherits stdin — `sh -c 'cat'` — reads the input meant for the commands after
+  it. GNU gives every child `/dev/null` (`prep_child_for_exec`); the old kriya never needed to,
+  because it had read everything first. Check what else inherits a descriptor whenever the reading
+  pattern changes.
+- ⚠ **A wrapper script changes the environment you are measuring.** `--show-limits` and the `-s`
+  ceiling depend on the environment's size, and running kriya through a `#!/bin/sh` wrapper added
+  106 bytes of `PWD`/`SHLVL` that GNU, run directly, did not have. Anything whose answer depends on
+  the environment is compared under `env -i`, with both binaries run directly.
 - ⛔ **...for EVERY utility the entry names, not the first.** 1.6.17's entry said GNU "fails both"
   `printf` and `stat` past INT_MAX. `printf` does, exit 1. GNU `stat` prints nothing for the field
   and EXITS 0, because it never checks `printf`'s result. The claim had been measured on one of the

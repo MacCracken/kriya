@@ -3,38 +3,62 @@
 # Argument shape:
 #   xargs [opts] [CMD [INITIAL_ARGS...]]
 #
-# When CMD is omitted, defaults to `/bin/echo`.
+# When CMD is omitted it is `echo`, found in PATH as any command is.
 #
 # Flags:
 #   -0 / --null            NUL-separated stdin items (pairs with find -print0)
-#   -n N / --max-args=N    use at most N items per exec
-#   -I REPLSTR             replace REPLSTR in CMD argv with the item; one exec
-#                          per item; implies -n 1 (POSIX behaviour)
-#   -r / --no-run-if-empty no exec when stdin had zero items (GNU default)
-#   -t / --verbose         trace each command to stderr before running
-#   -s N / --max-chars=N   cap argv+envp byte size per exec (default ~128 KiB)
+#   -n N / --max-args=N    use at most N items per command
+#   -L N / --max-lines=N   use at most N non-blank input LINES per command; a
+#                          line ending in a blank continues onto the next
+#   -I R / --replace=R     one command per input line, R replaced by the line
+#                          in each INITIAL_ARG (never in CMD itself)
+#   -s N / --max-chars=N   size of a command line, in bytes (default 131,072)
+#   -x / --exit            stop when a command line would outgrow -s, rather
+#                          than splitting it (implied by -L and -I)
+#   -r / --no-run-if-empty do not run CMD when the input has no items
+#   -t / --verbose         print each command to stderr before running it
+#   --show-limits          print the size limits, then run as usual
 #
-# Item splitting:
-#   default: whitespace (HT, LF, VT, FF, CR, SP), with backslash and
-#            single/double quote escape handling — POSIX-faithful.
-#   -I     : NEWLINE ONLY. POSIX gives a replacement string one LINE per
-#            invocation, so blanks inside a line are part of the item. Leading
-#            blanks are stripped, trailing ones are not (verified against GNU).
-#            Quote/backslash handling stays active.
-#   -0     : items are NUL-separated; no escape handling.
+# ⭐ THE ACCOUNTING IS GNU's `buildcmd`, to the byte, and it lives in
+# `src/lib/argbatch.cyr` beside `find -exec … +`, which counts the same way
+# (1.7.0). `-n`, `-L` and `-I` are LAST-WINS against each other with GNU's
+# warnings, which also means `-n 1` after `-I` changes nothing, as in GNU.
+#
+# ⛔ THE INPUT IS STREAMED, AS GNU's IS (1.7.0). It was read to EOF first, so
+# `yes | xargs -n1 echo | head` never ended and `find / -print0 | xargs -0 rm`
+# held every name before removing any. The child gets /dev/null as its stdin —
+# otherwise `sh -c 'cat'` would read the input meant for the commands after it.
+#
+# Item splitting — GNU's `read_line`, measured on 4.9 and 4.11:
+#   default: blanks (SPACE, TAB) and NEWLINE end an item. ⛔ VT, FF and CR do
+#            NOT — they are skipped only before an item starts; kriya split on
+#            them until 1.7.0. Quotes and backslash work as in the shell; an
+#            unmatched quote is FATAL, after running what was read before it.
+#   -I     : NEWLINE only, so blanks inside a line are part of the item. Leading
+#            blanks are stripped, trailing ones kept.
+#   -0     : items end at NUL, no escapes, and an EMPTY item is an argument
+#            (`printf 'a\0\0b\0'` is three). kriya dropped empty items.
 #
 # Option recognition STOPS AT THE FIRST OPERAND (`kriya_argv_option_end`),
 # because the operands here are another command's argv. Everything from that
 # point is passed to the child verbatim — its flags, and its `--`.
 #
-# Exit codes (subset of POSIX/GNU):
-#   0       all execs succeeded
-#   123     one or more child commands exited non-zero
-#   124     a child command exited with status 255 (GNU convention)
-#   125     a child command was killed by a signal
-#   126     command found but not executable
-#   127     command not found
-#   1       usage error or stdin read error
+# Exit codes (POSIX / GNU):
+#   0       all commands succeeded
+#   123     one or more commands exited 1-254
+#   124     a command exited 255; nothing more runs
+#   125     a command was killed by a signal; nothing more runs
+#   126     the command was found but could not be run; nothing more runs
+#   127     the command was not found; nothing more runs
+#   1       input xargs could not use: an unmatched quote, an item or command
+#           too long for -s, `-x` exceeded
+#   2       usage error (ADR 0008; GNU exits 1)
+#
+# ⚠ Deliberate divergences: usage errors exit 2; `-l[N]` is not taken, since
+# ADR 0002 has no optional values (`-L N` is the same thing) — and for the same
+# reason `--max-lines 1 echo` reads 1 as the value, where GNU's `--max-lines` is
+# `-l`'s long form and runs a command named `1`; the diagnostics are kriya's
+# frame around GNU's words.
 
 var _xa_spec     = 0;
 var _xa_zero_idx = 0;
@@ -43,9 +67,11 @@ var _xa_t_idx    = 0;
 var _xa_n_idx    = 0;
 var _xa_I_idx    = 0;
 var _xa_s_idx    = 0;
+var _xa_L_idx    = 0;
+var _xa_x_idx    = 0;
+var _xa_sl_idx   = 0;
 
 var _xa_path_env = 0;
-var _xa_env_vec  = 0;
 
 fn _xa_init_spec(): i64 {
     if (_xa_spec != 0) { return 0; }
@@ -53,9 +79,12 @@ fn _xa_init_spec(): i64 {
     _xa_zero_idx = flags_add_bool(s, 48,  "null",               0, "NUL-separated input");
     _xa_r_idx    = flags_add_bool(s, 114, "no-run-if-empty",    0, "skip exec when stdin had no items");
     _xa_t_idx    = flags_add_bool(s, 116, "verbose",            0, "echo each command to stderr");
-    _xa_n_idx    = flags_add_int (s, 110, "max-args",           0, "max items per exec");
+    _xa_n_idx    = flags_add_str (s, 110, "max-args",           0, "max items per command");
+    _xa_L_idx    = flags_add_str (s, 76,  "max-lines",          0, "max non-blank input lines per command");
     _xa_I_idx    = flags_add_str (s, 73,  "replace",            0, "replace REPLSTR in command args");
-    _xa_s_idx    = flags_add_int (s, 115, "max-chars",          0, "max argv+envp byte size per exec");
+    _xa_s_idx    = flags_add_str (s, 115, "max-chars",          0, "max bytes in a command line");
+    _xa_x_idx    = flags_add_bool(s, 120, "exit",               0, "exit if a command line would exceed -s");
+    _xa_sl_idx   = flags_add_bool(s, 0,   "show-limits",        0, "print the command-line size limits");
     _xa_spec = s;
     xargs_help_declare();
     return 0;
@@ -69,404 +98,678 @@ fn xargs_help_declare(): i64 {
       "xargs [OPTIONS] [COMMAND [ARG...]]");
     help_positional(0, HELP_POS_UNBOUNDED, "COMMAND,ARG");
     help_destructive(1);
-    help_operands("⚠ Option recognition stops at the first operand — everything after reaches COMMAND verbatim, including its own flags and its `--`.");  #skip-lint
+    help_operands("⚠ Option recognition stops at the first operand — everything after reaches COMMAND verbatim, including its own flags and its `--`. COMMAND runs once even for empty input unless -r is given. -I replaces REPLSTR in the ARGs, never in COMMAND itself.");  #skip-lint
+    help_exit(1, "unusable input: an unmatched quote, or a command line that cannot fit");
     help_exit(123, "a command exited non-zero");
     help_exit(124, "a command exited 255; xargs aborted");
     help_exit(125, "a command was killed by a signal");
     help_exit(126, "the command was found but not executable");
     help_exit(127, "the command was not found");
-    help_example("find . -name '*.o' | xargs rm --");
+    help_example("find . -name '*.o' -print0 | xargs -0 rm --");
     help_example("ls | xargs -I{} mv {} dest/");
     help_example("printf 'a\\nb\\n' | xargs -n1 echo");
+    help_example("xargs -L 1 --show-limits < /dev/null");
     return 0;
 }
 
-fn _xa_report(msg): i64 {
+# --- the run's state -----------------------------------------------------
+
+var _xa_ab          = 0;   # the command line being built (argbatch)
+var _xa_arg_max     = 0;   # the buffer size, -s
+var _xa_args_per    = 0;   # -n
+var _xa_lines_per   = 0;   # -L
+var _xa_repl        = 0;   # -I's REPLSTR, or 0
+var _xa_rplen       = 0;
+var _xa_exit_x      = 0;   # -x, and implied by -I and -L
+var _xa_trace       = 0;   # -t
+var _xa_always      = 1;   # 0 under -r
+var _xa_initial     = 1;   # GNU's `initial_args`: still pushing CMD's own words
+var _xa_executed    = 0;   # GNU's `procs_executed`
+var _xa_child_error = 0;   # 123 once a command exited 1-254
+var _xa_lineno      = 0;   # non-blank lines read since the last -L command
+var _xa_nullwarned  = 0;
+var _xa_eof         = 0;   # the reader's own EOF, as GNU's static `eof`
+var _xa_linebuf     = 0;
+var _xa_insertbuf   = 0;
+var _xa_exec_path   = 0;   # CMD resolved once; it never changes
+var _xa_read_failed = 0;
+
+# Buffered stdin.
+var _xa_ibuf = 0;
+var _xa_ilen = 0;
+var _xa_ipos = 0;
+var _xa_ieof = 0;
+
+fn _xa_note(msg): i64 {
     k_write( 2, "kriya xargs: ", 13);
     k_write( 2, msg, strlen(msg));
     k_write( 2, "\n", 1);
     return 0;
 }
 
-# --- env cache (same pattern as find) ---------------------------------
-
-fn _xa_env_get(): i64 {
-    if (_xa_env_vec != 0) { return _xa_env_vec; }
-    var v = vec_new();
-    var fd = k_open("/proc/self/environ", 0, 0);
-    if (fd < 0) { _xa_env_vec = v; return v; }
-    var cap: i64 = 4096;
-    var buf = alloc(cap);
-    var used: i64 = 0;
-    var loop: i64 = 1;
-    while (loop == 1) {
-        if (used + 4096 > cap) {
-            var newcap = cap * 2;
-            var newbuf = alloc(newcap);
-            memcpy(newbuf, buf, used);
-            buf = newbuf;
-            cap = newcap;
-        }
-        var n = k_read( fd, buf + used, 4096);
-        if (n < 0) {
-            if ((0 - n) == 4) { } else { loop = 0; }
-        } else {
-            if (n == 0) { loop = 0; }
-            else { used = used + n; }
-        }
-    }
-    k_close( fd);
-    var start: i64 = 0;
-    var i: i64 = 0;
-    while (i < used) {
-        if (load8(buf + i) == 0) {
-            if (i > start) { vec_push(v, buf + start); }
-            start = i + 1;
-        }
-        i = i + 1;
-    }
-    _xa_env_vec = v;
-    return v;
+# End xargs NOW with `code`, as GNU's `error (EXIT, …)` does: the commands still
+# to come never run.
+fn _xa_exit(code): i64 {
+    syscall(SYS_EXIT, code);
+    return 0;
 }
 
-# Thin wrapper over the shared resolver — see `fs_resolve_in_path` in
-# `src/lib/fs.cyr`, which is also what `find -exec` uses. This file used to
-# carry a byte-identical 45-line copy of it, so the CWD-execution hole below had
-# to be found and fixed twice.
-# ⚠ Returns 0 when the command is not found. The caller MUST NOT pass that to
-# exec — it reports 127 instead.
-fn _xa_resolve_exec(cmd): i64 {
-    return fs_resolve_in_path(cmd, _xa_path_env);
+fn _xa_die(msg): i64 {
+    _xa_note(msg);
+    _xa_exit(EXIT_FAILURE);
+    return 0;
 }
 
-# --- input parsing ----------------------------------------------------
-
-# Read all of stdin into a fresh buffer. Returns (ptr, length via *out_len).
-fn _xa_slurp_stdin(out_len_ptr): i64 {
-    var cap: i64 = 4096;
-    var buf = alloc(cap);
-    var used: i64 = 0;
-    var loop: i64 = 1;
-    while (loop == 1) {
-        if (used + 4096 > cap) {
-            var newcap = cap * 2;
-            var newbuf = alloc(newcap);
-            memcpy(newbuf, buf, used);
-            buf = newbuf;
-            cap = newcap;
-        }
-        var n = k_read( 0, buf + used, 4096);
-        if (n < 0) {
-            if ((0 - n) == 4) { } else { return n; }
-        } else {
-            if (n == 0) { loop = 0; }
-            else { used = used + n; }
+# One byte of stdin, or -1 at EOF. A read error is reported, and ends the input.
+fn _xa_getc(): i64 {
+    if (_xa_ipos >= _xa_ilen) {
+        if (_xa_ieof == 1) { return 0 - 1; }
+        var got: i64 = 0;
+        while (got == 0) {
+            var n = k_read( 0, _xa_ibuf, 65536);
+            if (n > 0) { _xa_ilen = n; _xa_ipos = 0; got = 1; }
+            elif (n == 0) { _xa_ieof = 1; return 0 - 1; }
+            elif (n != (0 - 4)) {
+                errmsg_report("xargs", "(stdin)", 0 - n);
+                _xa_read_failed = 1;
+                _xa_ieof = 1;
+                return 0 - 1;
+            }
         }
     }
-    store64(out_len_ptr, used);
-    return buf;
+    var c = load8(_xa_ibuf + _xa_ipos);
+    _xa_ipos = _xa_ipos + 1;
+    return c;
 }
 
-# Whitespace classifier — matches GNU xargs (HT, LF, VT, FF, CR, SP).
-fn _xa_is_ws(c): i64 {
-    if (c == 9)  { return 1; }
-    if (c == 10) { return 1; }
-    if (c == 11) { return 1; }
-    if (c == 12) { return 1; }
-    if (c == 13) { return 1; }
+fn _xa_is_space(c): i64 {
     if (c == 32) { return 1; }
+    if (c >= 9) { if (c <= 13) { return 1; } }
     return 0;
 }
 
-# Split `buf`[0..len] into items, pushing newly-alloc'd NUL-terminated
-# cstr copies into `out`. `zero_mode`=1 means NUL-separated input (no
-# escape handling); 0 means whitespace-separated with backslash and
-# single/double-quote semantics.
-#
-# ⛔ `line_mode`=1 SPLITS ON NEWLINE ONLY, and it is what `-I` requires. POSIX
-# says a replacement string consumes one LINE per invocation; kriya split on
-# blanks regardless, so `printf 'a b\n' | xargs -I{} rm -- {}` deleted files
-# named `a` and `b` and left `a b` untouched — the wrong files, silently. The
-# everyday `ls | xargs -I{} mv {} dest/` idiom mangled every name with a space
-# in it the same way.
-#
-# ⚠ Leading blanks are stripped but TRAILING ONES ARE NOT — verified against GNU,
-# which turns `"  a b  \n"` into `a b  `. Quote and backslash handling stay
-# active, so `"a b"` and `a\ b` both yield `a b`. Empty lines produce no item.
-# `-0` is unaffected: NUL splitting already means one item per record.
-fn _xa_split(buf, len, zero_mode, line_mode, out): i64 {
-    if (zero_mode == 1) {
-        var start: i64 = 0;
-        var i: i64 = 0;
-        while (i < len) {
-            if (load8(buf + i) == 0) {
-                if (i > start) {
-                    var slen = i - start;
-                    var s = alloc(slen + 1);
-                    memcpy(s, buf + start, slen);
-                    store8(s + slen, 0);
-                    vec_push(out, s);
-                }
-                start = i + 1;
-            }
-            i = i + 1;
-        }
-        if (start < len) {
-            var rlen = len - start;
-            var r = alloc(rlen + 1);
-            memcpy(r, buf + start, rlen);
-            store8(r + rlen, 0);
-            vec_push(out, r);
-        }
-        return 0;
-    }
-    # Whitespace-split with backslash + quoting.
-    var item_cap: i64 = 256;
-    var item = alloc(item_cap);
-    var item_len: i64 = 0;
-    var quote: i64 = 0;    # 0 none, 39 single, 34 double
-    var in_item: i64 = 0;
-    var i: i64 = 0;
-    while (i < len) {
-        var c = load8(buf + i);
-        var emit: i64 = 0;
-        if (quote == 0) {
-            # In line mode only a newline ends an item; blanks before the item
-            # begins are dropped, blanks inside it are kept.
-            var is_term: i64 = 0;
-            if (line_mode == 1) {
-                if (c == 10) { is_term = 1; }
-            } else {
-                if (_xa_is_ws(c) == 1) { is_term = 1; }
-            }
-            var skip_lead: i64 = 0;
-            if (line_mode == 1) {
-                if (in_item == 0) {
-                    if (is_term == 0) {
-                        if (c == 32) { skip_lead = 1; }
-                        if (c == 9)  { skip_lead = 1; }
-                    }
-                }
-            }
-            if (is_term == 1) {
-                if (in_item == 1) { emit = 1; }
-            } elif (skip_lead == 1) {
-                # leading blank, before the item starts — POSIX says ignore it
-            } elif (c == 92) {
-                # backslash: next byte literal
-                if (i + 1 < len) {
-                    if (item_len + 1 > item_cap) {
-                        var nc = item_cap * 2;
-                        var nb = alloc(nc);
-                        memcpy(nb, item, item_len);
-                        item = nb;
-                        item_cap = nc;
-                    }
-                    store8(item + item_len, load8(buf + i + 1));
-                    item_len = item_len + 1;
-                    in_item = 1;
-                    i = i + 1;
-                }
-            } elif (c == 39 || c == 34) {
-                quote = c;
-                in_item = 1;
-            } else {
-                if (item_len + 1 > item_cap) {
-                    var nc2 = item_cap * 2;
-                    var nb2 = alloc(nc2);
-                    memcpy(nb2, item, item_len);
-                    item = nb2;
-                    item_cap = nc2;
-                }
-                store8(item + item_len, c);
-                item_len = item_len + 1;
-                in_item = 1;
-            }
-        } else {
-            if (c == quote) {
-                quote = 0;
-            } else {
-                if (item_len + 1 > item_cap) {
-                    var nc3 = item_cap * 2;
-                    var nb3 = alloc(nc3);
-                    memcpy(nb3, item, item_len);
-                    item = nb3;
-                    item_cap = nc3;
-                }
-                store8(item + item_len, c);
-                item_len = item_len + 1;
-            }
-        }
-        if (emit == 1) {
-            var s = alloc(item_len + 1);
-            memcpy(s, item, item_len);
-            store8(s + item_len, 0);
-            vec_push(out, s);
-            item_len = 0;
-            in_item = 0;
-        }
-        i = i + 1;
-    }
-    if (in_item == 1) {
-        var s2 = alloc(item_len + 1);
-        memcpy(s2, item, item_len);
-        store8(s2 + item_len, 0);
-        vec_push(out, s2);
-    }
+fn _xa_is_blank(c): i64 {
+    if (c == 32) { return 1; }
+    if (c == 9) { return 1; }
     return 0;
 }
 
-# --- substring substitution -------------------------------------------
+# --- running a command -----------------------------------------------------
 
-# Return a fresh cstr where every occurrence of `pat` (length plen) in
-# `tok` is replaced with `repl` (length rlen). If pat is absent, returns
-# tok unchanged.
-fn _xa_substitute(tok, pat, plen, repl, rlen): i64 {
-    var tlen = strlen(tok);
-    # Count occurrences for sizing.
-    var count: i64 = 0;
+var _xa_qbuf = 0;
+var _xa_qcap = 0;
+
+# `-t`: the command on stderr, each argument shell-quoted when it needs it — GNU's
+# `print_args`, which uses the quoting `ls` does.
+fn _xa_print_args(argvp): i64 {
     var i: i64 = 0;
-    while (i + plen <= tlen) {
-        var mt: i64 = 1;
-        var k: i64 = 0;
-        while (k < plen) {
-            if (load8(tok + i + k) != load8(pat + k)) { mt = 0; k = plen; }
-            else { k = k + 1; }
-        }
-        if (mt == 1) { count = count + 1; i = i + plen; }
-        else { i = i + 1; }
-    }
-    if (count == 0) { return tok; }
-    var out_len = tlen + count * (rlen - plen);
-    var out = alloc(out_len + 1);
-    var oi: i64 = 0;
-    var ti: i64 = 0;
-    while (ti < tlen) {
-        var mt2: i64 = 0;
-        if (ti + plen <= tlen) {
-            mt2 = 1;
-            var k2: i64 = 0;
-            while (k2 < plen) {
-                if (load8(tok + ti + k2) != load8(pat + k2)) { mt2 = 0; k2 = plen; }
-                else { k2 = k2 + 1; }
-            }
-        }
-        if (mt2 == 1) {
-            memcpy(out + oi, repl, rlen);
-            oi = oi + rlen;
-            ti = ti + plen;
-        } else {
-            store8(out + oi, load8(tok + ti));
-            oi = oi + 1;
-            ti = ti + 1;
-        }
-    }
-    store8(out + oi, 0);
-    return out;
-}
-
-# --- exec runner ------------------------------------------------------
-
-fn _xa_emit_trace(args): i64 {
-    var n = vec_len(args);
-    var i: i64 = 0;
-    while (i < n) {
+    while (load64(argvp + i * 8) != 0) {
+        var a = load64(argvp + i * 8);
         if (i > 0) { k_write( 2, " ", 1); }
-        var a = vec_get(args, i);
-        k_write( 2, a, strlen(a));
+        var alen = strlen(a);
+        if (alen == 0) {
+            k_write( 2, "''", 2);
+        } else {
+            var need = quote_bufsz(alen);
+            if (need > _xa_qcap) {
+                _xa_qbuf = alloc(need);
+                _xa_qcap = need;
+            }
+            var qn = quote_shell(a, alen, QUOTE_IF_NEEDED, _xa_qbuf);
+            k_write( 2, _xa_qbuf, qn);
+        }
         i = i + 1;
     }
     k_write( 2, "\n", 1);
     return 0;
 }
 
-# Run `args` as a child; returns the GNU-shaped exit-code rollup the
-# caller folds into the invocation's final exit code (0 / 123-127).
-# Decimal to stderr, for the signal number in the diagnostic above.
-fn _xa_emit_num(v): i64 {
-    var buf[24];
-    var i: i64 = 23;
-    store8(&buf + i, 0);
-    if (v == 0) {
-        i = i - 1;
-        store8(&buf + i, 48);
+# Run one command line — GNU's `xargs_do_exec`. Returns 1 once it ran, whatever
+# its status, and 0 when execve said E2BIG, for the caller to try fewer.
+fn _xa_run(argvp): i64 {
+    if (_xa_trace == 1) { _xa_print_args(argvp); }
+    var first = load64(argvp);
+    if (_xa_exec_path == 0) {
+        # POSIX: 127 when the utility cannot be found. Reported here rather than
+        # handed to execve as a bare name, which the kernel would resolve
+        # against the current directory.
+        _xa_exec_path = fs_resolve_in_path(first, _xa_path_env);
+        if (_xa_exec_path == 0) {
+            report_note("xargs", first, "command not found");
+            _xa_exit(127);
+        }
     }
-    var n = v;
-    while (n > 0) {
-        i = i - 1;
-        store8(&buf + i, 48 + (n - (n / 10) * 10));
-        n = n / 10;
+    # ⛔ `k_spawn_argv`, not stdlib `exec_env`: that one dup2s /dev/null onto fd
+    # 2, so the child's diagnostics vanished, and it collapses every non-exit
+    # outcome to -1, so a signalled child was indistinguishable from a failed
+    # fork. POSIX requires xargs to tell five outcomes apart.
+    var r = k_spawn_argv(_xa_exec_path, argvp, ab_envp(), K_SPAWN_STDIN_NULL);
+    if (k_spawn_execfailed(r) == 1) {
+        var e = k_spawn_exec_errno(r);
+        if (e == 7) { return 0; }                   # E2BIG: fewer arguments
+        errmsg_report("xargs", first, e);
+        # ⛔ NOTHING MORE RUNS. kriya carried on to the next batch; GNU exits.
+        if (e == 2) { _xa_exit(127); }
+        _xa_exit(126);
     }
-    k_write( 2, &buf + i, 23 - i);
+    if (k_spawn_signalled(r) == 1) {
+        var sb = alloc(40);
+        memcpy(sb, "terminated by signal ", 21);
+        var sn = str_u64_digits(k_spawn_signal(r), 10, 0, sb + 21);
+        store8(sb + 21 + sn, 0);
+        report_note("xargs", first, sb);
+        _xa_exit(125);
+    }
+    if (k_spawn_exited(r) == 1) {
+        _xa_executed = 1;
+        var st = k_spawn_exit_status(r);
+        if (st == 255) {
+            # POSIX: a utility that exits 255 stops xargs, with a diagnostic.
+            report_note("xargs", first, "exited with status 255; aborting");
+            _xa_exit(124);
+        }
+        if (st != 0) { _xa_child_error = 123; }
+        return 1;
+    }
+    _xa_die("cannot fork");
+    return 1;
+}
+
+# Run what has been built — GNU's `bc_do_exec`, E2BIG retry included. ⚠ GNU
+# counts the list's terminating NULL as one more entry, and the arithmetic below
+# keeps that, so a retried batch splits where GNU's does.
+fn _xa_do_exec(): i64 {
+    var b = _xa_ab;
+    var init = ab_init_argc(b);
+    var argc = ab_argc(b);
+    var cmd_argc = argc + 1;
+    var limit = cmd_argc;
+    var done: i64 = 0;
+    var go: i64 = 1;
+    while (go == 1) {
+        var take = limit - init;
+        var avail = cmd_argc - init - done;
+        if (take > avail) { take = avail; }
+        var real = take;
+        if (init + done + take > argc) { real = argc - init - done; }
+        var argvp = ab_window(b, done, real);
+        if (_xa_run(argvp) == 1) {
+            limit = ab_update_limit(b, 1, limit);
+            done = done + take;
+        } else {
+            if (limit <= init + 1) {
+                _xa_die("can't call exec() due to argument size restrictions");
+            }
+            limit = ab_update_limit(b, 0, limit);
+        }
+        if (done + 1 >= cmd_argc - init) { go = 0; }
+    }
+    ab_clear(b);
     return 0;
 }
 
-fn _xa_exec_one(args, trace_mode): i64 {
-    if (vec_len(args) == 0) { return 0; }
-    if (trace_mode == 1) { _xa_emit_trace(args); }
-    var first = vec_get(args, 0);
-    var resolved = _xa_resolve_exec(first);
-    if (resolved == 0) {
-        # POSIX xargs: 127 when the utility cannot be found. Reported here rather
-        # than handed to execve as a bare name, which the kernel would resolve
-        # against the current directory.
-        k_write( 2, "kriya xargs: ", 13);
-        k_write( 2, first, strlen(first));
-        k_write( 2, ": command not found\n", 20);
-        return 127;
+# Would one more argument reach -n, or the most a command line can hold?
+fn _xa_count_full(initial): i64 {
+    var b = _xa_ab;
+    if (initial == 0) {
+        if (_xa_args_per > 0) {
+            if (ab_argc(b) - ab_init_argc(b) == _xa_args_per) { return 1; }
+        }
     }
-    # ⛔ DO NOT write `resolved` back into args[0]. It is the EXEC TARGET, not
-    # argv[0] — `execvp` resolves the name to decide what to run and hands the
-    # child argv[0] exactly as written. Overwriting made every child report
-    # itself by absolute path (`/usr/bin/rm:` where GNU says `rm:`); see
-    # `k_spawn_as` in src/lib/spawn.cyr.
-    var env = _xa_env_get();
-    # ⛔ `k_spawn`, NOT stdlib `exec_env`. That one dup2s /dev/null onto fd 2, so
-    # the child's diagnostics vanished, AND it collapses every non-exit outcome to
-    # -1, so a signalled child was indistinguishable from a failed fork. POSIX
-    # requires xargs to tell five outcomes apart; -1 cannot express them.
-    var r = k_spawn_as(resolved, args, env);
+    if (ab_argc(b) == ab_max_count(b)) { return 1; }
+    return 0;
+}
 
-    # POSIX exit-status ladder. ⚠ Each rung used to be wrong or unreachable:
-    # a signalled child reported 127 (should be 125) and a non-executable one
-    # reported 123 (should be 126), because both arrived as the same -1 or as the
-    # child's own `sys_exit(127)`.
-    if (k_spawn_execfailed(r) == 1) {
-        var e = k_spawn_exec_errno(r);
-        k_write( 2, "kriya xargs: ", 13);
-        k_write( 2, first, strlen(first));
-        k_write( 2, ": ", 2);
-        if (errmsg_is_known(e) == 1) {
-            var m = errmsg_for(e);
-            k_write( 2, m, strlen(m));
-        } else {
-            k_write( 2, "cannot execute", 14);
+# Add an argument of `len` bytes (its NUL included) — GNU's `bc_push_arg`: a
+# command line that cannot take it runs first, unless -x, -L or -I say it may
+# not be split.
+fn _xa_push(arg, len, initial): i64 {
+    var b = _xa_ab;
+    if (ab_fits(b, len) == 0) {
+        var only: i64 = initial;
+        if (ab_argc(b) == ab_init_argc(b)) { only = 1; }
+        if (only == 1) { _xa_die("cannot fit single argument within argument list size limit"); }
+        var strict: i64 = 0;
+        if (_xa_repl != 0) { strict = 1; }
+        if (_xa_exit_x == 1) {
+            if (_xa_lines_per > 0) { strict = 1; }
+            if (_xa_args_per > 0) { strict = 1; }
         }
-        k_write( 2, "\n", 1);
-        if (e == 13) { return 126; }        # EACCES  — found, not executable
-        if (e == 8)  { return 126; }        # ENOEXEC — found, not a valid image
-        return 127;                          # ENOENT and friends — not found
+        if (strict == 1) { _xa_die("argument list too long"); }
+        _xa_do_exec();
     }
-    if (k_spawn_signalled(r) == 1) {
-        k_write( 2, "kriya xargs: ", 13);
-        k_write( 2, first, strlen(first));
-        k_write( 2, ": terminated by signal ", 23);
-        _xa_emit_num(k_spawn_signal(r));
-        k_write( 2, "\n", 1);
-        return 125;
+    if (_xa_count_full(initial) == 1) { _xa_do_exec(); }
+    ab_push(b, arg, len);
+    if (_xa_count_full(initial) == 1) { _xa_do_exec(); }
+    if (initial == 1) {
+        # Under -I only the SIZE is remembered: every line starts from nothing.
+        if (_xa_repl != 0) { ab_set_init_chars(b, ab_chars(b)); }
+        else { ab_mark_initial(b); }
     }
-    if (k_spawn_exited(r) == 1) {
-        var st = k_spawn_exit_status(r);
-        if (st == 0)   { return 0; }
-        if (st == 255) {
-            k_write( 2, "kriya xargs: ", 13);
-            k_write( 2, first, strlen(first));
-            k_write( 2, ": exited with status 255; aborting\n", 35);
-            return 124;
+    return 0;
+}
+
+# GNU's `exec_if_possible`: before a fatal input error, run what was read.
+fn _xa_exec_if_possible(): i64 {
+    if (_xa_repl != 0) { return 0; }
+    if (_xa_initial == 1) { return 0; }
+    if (ab_pending(_xa_ab) == 0) { return 0; }
+    if (_xa_exit_x == 1) { return 0; }
+    _xa_do_exec();
+    return 0;
+}
+
+fn _xa_unmatched(quotc): i64 {
+    _xa_exec_if_possible();
+    if (quotc == 34) {
+        _xa_die("unmatched double quote; by default quotes are special to xargs unless you use the -0 option");  #skip-lint
+    }
+    _xa_die("unmatched single quote; by default quotes are special to xargs unless you use the -0 option");  #skip-lint
+    return 0;
+}
+
+# --- reading ------------------------------------------------------------
+
+# Append `c` to the item being read, unless it would outgrow the command line.
+fn _xa_append(p, c): i64 {
+    var endbuf = _xa_arg_max - ab_init_chars(_xa_ab) - 1;
+    if (p >= endbuf) {
+        _xa_exec_if_possible();
+        _xa_die("argument line too long");
+    }
+    store8(_xa_linebuf + p, c);
+    return p + 1;
+}
+
+# GNU's `read_line`: one LOGICAL line, each item pushed as it ends (none under
+# -I, where the line is the item). Returns the last item's length with its NUL,
+# or -1 at EOF.
+fn _xa_read_line(): i64 {
+    if (_xa_eof == 1) { return 0 - 1; }
+    var state: i64 = 1;          # 0 NORM, 1 SPACE, 2 QUOTE, 3 BACKSLASH
+    var prevc: i64 = 0 - 1;
+    var c: i64 = 0 - 1;
+    var quotc: i64 = 0;
+    var seen_arg: i64 = 0;
+    var p: i64 = 0;
+    while (1 == 1) {
+        prevc = c;
+        c = _xa_getc();
+        if (c < 0) {
+            _xa_eof = 1;
+            if (p == 0) { return 0 - 1; }
+            store8(_xa_linebuf + p, 0);
+            p = p + 1;
+            if (state == 2) { _xa_unmatched(quotc); }
+            if (_xa_repl == 0) { _xa_push(_xa_linebuf, p, _xa_initial); }
+            return p;
         }
-        return 123;
+        var append: i64 = 1;
+        if (state == 1) {
+            if (_xa_is_space(c) == 1) { append = 0; }
+            else { state = 0; }
+        }
+        if (append == 1) {
+            if (state == 0) {
+                if (c == 10) {
+                    # A line whose last byte is a blank continues onto the next.
+                    if (_xa_is_blank(prevc) == 0) { _xa_lineno = _xa_lineno + 1; }
+                    if (p == 0) {
+                        if (seen_arg == 0) {
+                            # A blank line.
+                            state = 1;
+                            append = 0;
+                        }
+                    }
+                    if (append == 1) {
+                        store8(_xa_linebuf + p, 0);
+                        p = p + 1;
+                        if (_xa_repl == 0) { _xa_push(_xa_linebuf, p, _xa_initial); }
+                        return p;
+                    }
+                } else {
+                    seen_arg = 1;
+                    if (_xa_repl == 0) {
+                        if (_xa_is_blank(c) == 1) {
+                            store8(_xa_linebuf + p, 0);
+                            p = p + 1;
+                            _xa_push(_xa_linebuf, p, _xa_initial);
+                            p = 0;
+                            state = 1;
+                            append = 0;
+                        }
+                    }
+                    if (append == 1) {
+                        if (c == 92) { state = 3; append = 0; }
+                        elif (c == 39) { state = 2; quotc = c; append = 0; }
+                        elif (c == 34) { state = 2; quotc = c; append = 0; }
+                    }
+                }
+            } elif (state == 2) {
+                if (c == 10) { _xa_unmatched(quotc); }
+                if (c == quotc) {
+                    state = 0;
+                    seen_arg = 1;
+                    append = 0;
+                }
+            } elif (state == 3) {
+                state = 0;
+            }
+        }
+        if (append == 1) {
+            if (c == 0) {
+                if (_xa_nullwarned == 0) {
+                    _xa_note("warning: a NUL character occurred in the input.  It cannot be passed through in the argument list.  Did you mean to use the --null option?");  #skip-lint
+                    _xa_nullwarned = 1;
+                }
+            }
+            p = _xa_append(p, c);
+        }
     }
-    return 127;                              # fork failed
+    return 0 - 1;
+}
+
+# GNU's `read_string`, for -0: an item ends at NUL, and every NUL ends one, so
+# an empty item is an argument like any other.
+fn _xa_read_string(): i64 {
+    if (_xa_eof == 1) { return 0 - 1; }
+    var p: i64 = 0;
+    while (1 == 1) {
+        var c = _xa_getc();
+        if (c < 0) {
+            _xa_eof = 1;
+            if (p == 0) { return 0 - 1; }
+            store8(_xa_linebuf + p, 0);
+            p = p + 1;
+            if (_xa_repl == 0) { _xa_push(_xa_linebuf, p, _xa_initial); }
+            return p;
+        }
+        if (c == 0) {
+            _xa_lineno = _xa_lineno + 1;
+            store8(_xa_linebuf + p, 0);
+            p = p + 1;
+            if (_xa_repl == 0) { _xa_push(_xa_linebuf, p, _xa_initial); }
+            return p;
+        }
+        p = _xa_append(p, c);
+    }
+    return 0 - 1;
+}
+
+var _xa_null_mode = 0;
+
+fn _xa_read(): i64 {
+    if (_xa_null_mode == 1) { return _xa_read_string(); }
+    return _xa_read_line();
+}
+
+# --- -I --------------------------------------------------------------------
+
+# Where REPLSTR starts in `a[0..al)`, or -1.
+fn _xa_find(a, al): i64 {
+    var i: i64 = 0;
+    while (i + _xa_rplen <= al) {
+        var k: i64 = 0;
+        var same: i64 = 1;
+        while (k < _xa_rplen) {
+            if (load8(a + i + k) != load8(_xa_repl + k)) { same = 0; k = _xa_rplen; }
+            else { k = k + 1; }
+        }
+        if (same == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# ARG with every REPLSTR replaced by the line — GNU's `bc_do_insert` — pushed as
+# one argument. A result that could never fit is *command too long*.
+fn _xa_insert(arg, line, lblen): i64 {
+    var al = strlen(arg);
+    var a = arg;
+    var out = _xa_insertbuf;
+    var p: i64 = 0;
+    var left = _xa_arg_max - 1;
+    if (_xa_rplen == 0) {
+        # ⚠ An EMPTY REPLSTR matches before every byte. GNU inserts the line
+        # there until the buffer runs out and says *command too long*; kriya gives
+        # the same answer without the loop.
+        if (al > 0) { _xa_die("command too long"); }
+        if (left <= lblen) { _xa_die("command too long"); }
+        memcpy(out, line, lblen);
+        p = lblen;
+        al = 0;
+    }
+    var go: i64 = 1;
+    if (al == 0) { go = 0; }
+    while (go == 1) {
+        var s = _xa_find(a, al);
+        var len = al;
+        if (s >= 0) { len = s; }
+        if (left <= len) { go = 0; }
+        else {
+            left = left - len;
+            memcpy(out + p, a, len);
+            p = p + len;
+            a = a + len;
+            al = al - len;
+            if (s >= 0) {
+                if (left <= lblen) { go = 0; }
+                else {
+                    left = left - lblen;
+                    memcpy(out + p, line, lblen);
+                    p = p + lblen;
+                    a = a + _xa_rplen;
+                    al = al - _xa_rplen;
+                }
+            }
+            if (al == 0) { go = 0; }
+        }
+    }
+    if (al > 0) { _xa_die("command too long"); }
+    store8(out + p, 0);
+    _xa_push(out, p + 1, 0);
+    return 0;
+}
+
+# --- options -----------------------------------------------------------------
+
+# "LEAD-X TAIL" as a fresh string, for a message naming an option letter.
+fn _xa_msg(lead, x, tail): i64 {
+    var ll = strlen(lead);
+    var tl = strlen(tail);
+    var m = alloc(ll + tl + 2);
+    memcpy(m, lead, ll);
+    store8(m + ll, x);
+    memcpy(m + ll + 1, tail, tl);
+    store8(m + ll + 1 + tl, 0);
+    return m;
+}
+
+# "value for -X option should be OP N".
+fn _xa_bound_msg(x, op, n): i64 {
+    var d[24];
+    var dn: i64 = 0;
+    var m = _xa_msg("value for -", x, op);
+    var ml = strlen(m);
+    var out = alloc(ml + 24);
+    memcpy(out, m, ml);
+    var at = ml;
+    if (n < 0) { store8(out + at, 45); at = at + 1; dn = str_u64_digits(0 - n, 10, 0, &d); }
+    else { dn = str_u64_digits(n, 10, 0, &d); }
+    memcpy(out + at, &d, dn);
+    store8(out + at + dn, 0);
+    return out;
+}
+
+# GNU's `parse_num`: `strtol`'s grammar, saturating, then the bounds. A malformed
+# value is a usage error; one out of bounds is too when `fatal`, and is clamped,
+# with the same message, when not (`-s`). `max` < 0 means no upper bound.
+fn _xa_parse_num(str, x, min, max, fatal): i64 {
+    var v: i64 = 0;
+    var r = kriya_parse_signed(str, &v);
+    if (r == (0 - 1)) {
+        report_note("xargs", str, _xa_msg("invalid number for -", x, " option"));
+        _xa_exit(EXIT_USAGE);
+    }
+    if (r == (0 - 2)) {
+        # strtol saturates at LONG_MAX, or LONG_MIN for a negative.
+        var i: i64 = 0;
+        while (_xa_is_space(load8(str + i)) == 1) { i = i + 1; }
+        if (load8(str + i) == 45) { v = (0 - KRIYA_COUNT_MAX) - 1; } else { v = KRIYA_COUNT_MAX; }
+    }
+    if (v < min) {
+        report_note("xargs", str, _xa_bound_msg(x, " option should be >= ", min));
+        if (fatal == 1) { _xa_exit(EXIT_USAGE); }
+        v = min;
+    } elif (max >= 0) {
+        if (v > max) {
+            report_note("xargs", str, _xa_bound_msg(x, " option should be <= ", max));
+            if (fatal == 1) { _xa_exit(EXIT_USAGE); }
+            v = max;
+        }
+    }
+    return v;
+}
+
+# GNU's `warn_mutually_exclusive`.
+fn _xa_exclusive(option, offending): i64 {
+    k_write( 2, "kriya xargs: warning: options ", 30);
+    k_write( 2, offending, strlen(offending));
+    k_write( 2, " and ", 5);
+    k_write( 2, option, strlen(option));
+    k_write( 2, " are mutually exclusive, ignoring previous ", 43);
+    k_write( 2, offending, strlen(offending));
+    k_write( 2, " value\n", 7);
+    return 0;
+}
+
+# Is expanded-argv token `tok` the option `-X` or `--long` (bare or `=VALUE`)?
+# Returns 0 for no, 1 for a value in the NEXT token, 2 for `--long=VALUE`.
+fn _xa_is_opt(tok, x, long): i64 {
+    if (load8(tok) != 45) { return 0; }
+    if (load8(tok + 1) == 45) {
+        var ll = strlen(long);
+        var k: i64 = 0;
+        while (k < ll) {
+            if (load8(tok + 2 + k) != load8(long + k)) { return 0; }
+            k = k + 1;
+        }
+        var e = load8(tok + 2 + ll);
+        if (e == 0) { return 1; }
+        if (e == 61) { return 2; }
+        return 0;
+    }
+    if (load8(tok + 1) == x) { if (load8(tok + 2) == 0) { return 1; } }
+    return 0;
+}
+
+# -n, -L, -I and -s IN THE ORDER GIVEN — GNU's option loop, so an option that
+# overrides an earlier one says so, and the last of -n, -L and -I wins.
+fn _xa_walk_options(posix_max): i64 {
+    var av = kriya_expanded_argv();
+    var n = kriya_expanded_argc();
+    var i: i64 = 1;
+    while (i < n) {
+        var tok = load64(av + i * 8);
+        var step: i64 = 1;
+        var val: i64 = 0;
+        var which: i64 = 0;
+        if (streq(tok, "--") == 1) { i = n; }
+        else {
+            var k = _xa_is_opt(tok, 110, "max-args");
+            if (k > 0) { which = 110; }
+            else {
+                k = _xa_is_opt(tok, 76, "max-lines");
+                if (k > 0) { which = 76; }
+                else {
+                    k = _xa_is_opt(tok, 73, "replace");
+                    if (k > 0) { which = 73; }
+                    else {
+                        k = _xa_is_opt(tok, 115, "max-chars");
+                        if (k > 0) { which = 115; }
+                    }
+                }
+            }
+            if (which != 0) {
+                if (k == 1) { val = load64(av + (i + 1) * 8); step = 2; }
+                else {
+                    var e: i64 = 2;
+                    while (load8(tok + e) != 61) { e = e + 1; }
+                    val = tok + e + 1;
+                }
+            } elif (load8(tok) == 45) {
+                # Any other option that takes a value takes the next token.
+                if (load8(tok + 1) != 45) {
+                    if (kriya_short_type(_xa_spec, load8(tok + 1)) > 0) { step = 2; }
+                }
+            }
+        }
+        if (which == 73) {
+            _xa_repl = val;
+            if (_xa_args_per != 0) { _xa_exclusive("--replace/-I/-i", "--max-args"); _xa_args_per = 0; }
+            if (_xa_lines_per != 0) { _xa_exclusive("--replace/-I/-i", "--max-lines"); _xa_lines_per = 0; }
+        }
+        if (which == 76) {
+            _xa_lines_per = _xa_parse_num(val, 76, 1, 0 - 1, 1);
+            if (_xa_args_per != 0) { _xa_exclusive("-L", "--max-args"); _xa_args_per = 0; }
+            if (_xa_repl != 0) { _xa_exclusive("-L", "--replace"); _xa_repl = 0; }
+        }
+        if (which == 110) {
+            _xa_args_per = _xa_parse_num(val, 110, 1, 0 - 1, 1);
+            if (_xa_lines_per != 0) { _xa_exclusive("--max-args/-n", "--max-lines"); _xa_lines_per = 0; }
+            if (_xa_repl != 0) {
+                # ⚠ `-I … -n 1` is quietly -I: GNU special-cases it (sv.gnu.org
+                # patch 1500).
+                if (_xa_args_per == 1) { _xa_args_per = 0; }
+                else { _xa_exclusive("--max-args/-n", "--replace"); _xa_repl = 0; }
+            }
+        }
+        if (which == 115) {
+            _xa_arg_max = _xa_parse_num(val, 115, 1, posix_max, 0);
+        }
+        i = i + step;
+    }
+    return 0;
+}
+
+# --show-limits, GNU's six lines on stderr, and its two for a terminal.
+fn _xa_show_num(label, v): i64 {
+    var d[24];
+    k_write( 2, label, strlen(label));
+    var dn = str_u64_digits(v, 10, 0, &d);
+    k_write( 2, &d, dn);
+    return 0;
+}
+
+fn _xa_show_limits(posix_max, cmd_name): i64 {
+    var env = ab_env_bytes();
+    _xa_show_num("Your environment variables take up ", env);
+    k_write( 2, " bytes\n", 7);
+    _xa_show_num("POSIX upper limit on argument length (this system): ", posix_max);
+    k_write( 2, "\n", 1);
+    _xa_show_num("POSIX smallest allowable upper limit on argument length (all systems): ", AB_POSIX_MIN);  #skip-lint
+    k_write( 2, "\n", 1);
+    # ⚠ The environment comes off twice, as it does in GNU: once in the upper
+    # limit already, once more here.
+    _xa_show_num("Maximum length of command we could actually use: ", posix_max - env);
+    k_write( 2, "\n", 1);
+    _xa_show_num("Size of command buffer we are actually using: ", _xa_arg_max);
+    k_write( 2, "\n", 1);
+    # ⚠ -P is roadmap 1.7.2; this is the ceiling it will have, GNU's INT_MAX.
+    _xa_show_num("Maximum parallelism (--max-procs must be no greater): ", 2147483647);
+    k_write( 2, "\n", 1);
+    if (k_isatty(0) == 1) {
+        k_write( 2, "\n", 1);
+        var t1 = "Execution of xargs will continue now, and it will try to read its input and run commands; if this is not what you wanted to happen, please type the end-of-file keystroke.\n";  #skip-lint
+        k_write( 2, t1, strlen(t1));
+        if (_xa_always == 1) {
+            k_write( 2, "Warning: ", 9);
+            k_write( 2, cmd_name, strlen(cmd_name));
+            var t2 = " will be run at least once.  If you do not want that to happen, then press the interrupt keystroke.\n";  #skip-lint
+            k_write( 2, t2, strlen(t2));
+        }
+    }
+    return 0;
 }
 
 # --- entry point ------------------------------------------------------
@@ -481,145 +784,100 @@ fn cmd_xargs(start: i64): i64 {
     # starting `-r` and recursively deleting what the `--` existed to protect.
     var cmd_at = kriya_argv_option_end(_xa_spec, start);
     if (kriya_args_parse_range(_xa_spec, start, cmd_at, 0) != 0) {
-        _xa_report("error: bad option (see ADR 0002 for accepted syntax)");
+        _xa_note("error: bad option (see ADR 0002 for accepted syntax)");
         return EXIT_USAGE;
     }
     _xa_path_env = getenv("PATH");
-    _xa_env_vec = 0;
 
-    var zero_mode = flags_get_bool(_xa_spec, _xa_zero_idx);
-    var no_empty  = flags_get_bool(_xa_spec, _xa_r_idx);
-    var trace     = flags_get_bool(_xa_spec, _xa_t_idx);
-    var n_max     = flags_get_int (_xa_spec, _xa_n_idx);
-    var repl_str  = flags_get_str (_xa_spec, _xa_I_idx);
-    var size_max  = flags_get_int (_xa_spec, _xa_s_idx);
-    if (size_max <= 0) { size_max = 131072; }
-
-    # -I implies -n 1; the REPLSTR also implies "one exec per item".
-    var per_item: i64 = 0;
-    if (repl_str != 0) {
-        if (load8(repl_str) != 0) {
-            per_item = 1;
-            n_max = 1;
-        } else { repl_str = 0; }
+    # GNU's `bc_init_controlinfo`: what the kernel allows, less the environment.
+    var posix_max = ab_posix_max();
+    if (posix_max < 0) {
+        _xa_note("environment is too large for exec");
+        return EXIT_FAILURE;
     }
+    _xa_arg_max = ab_default_buf(posix_max);
+    _xa_walk_options(posix_max);
 
-    # Default command: /bin/echo.
-    # ⚠ Taken from argv VERBATIM starting at `cmd_at`, not from
-    # `flags_positional` — the whole point of the boundary above is that these
-    # tokens were never interpreted, so `-r`, `-n 2` and `--` reach the child
-    # exactly as the user typed them.
+    _xa_null_mode = flags_get_bool(_xa_spec, _xa_zero_idx);
+    _xa_trace = flags_get_bool(_xa_spec, _xa_t_idx);
+    if (flags_get_bool(_xa_spec, _xa_r_idx) == 1) { _xa_always = 0; }
+    _xa_exit_x = flags_get_bool(_xa_spec, _xa_x_idx);
+    if (_xa_repl != 0) { _xa_exit_x = 1; _xa_rplen = strlen(_xa_repl); }
+    if (_xa_lines_per > 0) { _xa_exit_x = 1; }
+
+    # The command: argv VERBATIM from `cmd_at` — these tokens were never
+    # interpreted, so `-r`, `-n 2` and `--` reach the child as typed.
     var argv_n = kriya_argv_count();
-    var flat = kriya_argv_flat();
-    var cmd_base = vec_new();
-    if (cmd_at >= argv_n) {
-        vec_push(cmd_base, "/bin/echo");
+    var ncmd = argv_n - cmd_at;
+    var cmdv = alloc(8);
+    if (ncmd <= 0) {
+        store64(cmdv, "echo");
+        ncmd = 1;
     } else {
-        var ci = cmd_at;
-        while (ci < argv_n) {
-            vec_push(cmd_base, load64(flat + ci * 8));
+        cmdv = alloc(ncmd * 8);
+        var ci: i64 = 0;
+        while (ci < ncmd) {
+            store64(cmdv + ci * 8, kriya_arg(cmd_at + ci));
             ci = ci + 1;
         }
     }
-    var base_n = vec_len(cmd_base);
-    var repl_plen: i64 = 0;
-    if (repl_str != 0) { repl_plen = strlen(repl_str); }
 
-    # Slurp stdin.
-    var stdin_len: i64 = 0;
-    var stdin_buf = _xa_slurp_stdin(&stdin_len);
-    if (stdin_buf < 0) {
-        _xa_report("error reading stdin");
-        return EXIT_FAILURE;
-    }
+    if (flags_get_bool(_xa_spec, _xa_sl_idx) == 1) { _xa_show_limits(posix_max, load64(cmdv)); }
 
-    var items = vec_new();
-    _xa_split(stdin_buf, stdin_len, zero_mode, per_item, items);
-    var n_items = vec_len(items);
+    _xa_linebuf = alloc(_xa_arg_max + 1);
+    _xa_ibuf = alloc(65536);
+    _xa_ab = ab_new(_xa_arg_max, ab_max_arg_count(posix_max));
 
-    if (n_items == 0) {
-        if (no_empty == 1) { return EXIT_SUCCESS; }
-        # Default GNU pre-4.x ran once with no items; modern GNU defaults
-        # to --no-run-if-empty. We match modern GNU (no-run when empty).
-        return EXIT_SUCCESS;
-    }
-
-    var any_fail: i64 = 0;
-    var sticky_rc: i64 = 0;
-
-    # Per-item shape: -I REPLSTR. Each exec runs CMD-with-substitution + no
-    # extra items appended (since CMD itself absorbed the substitution).
-    if (per_item == 1) {
+    if (_xa_repl == 0) {
         var k: i64 = 0;
-        while (k < n_items) {
-            var it = vec_get(items, k);
-            var ilen = strlen(it);
-            var args = vec_new();
-            var bi: i64 = 0;
-            while (bi < base_n) {
-                var tok = vec_get(cmd_base, bi);
-                vec_push(args, _xa_substitute(tok, repl_str, repl_plen, it, ilen));
-                bi = bi + 1;
-            }
-            var r = _xa_exec_one(args, trace);
-            if (r != 0) { any_fail = 1; sticky_rc = r; }
-            # ⛔ 124 AND 125 ABORT THE WHOLE INVOCATION. POSIX: "if the utility
-            # exits with status 255, xargs shall write a diagnostic message and
-            # exit"; GNU stops on a signalled child too. kriya used to keep
-            # feeding the remaining items to a command that had already failed
-            # catastrophically — measured: three items still ran after the first
-            # died on SIGTERM, where GNU ran one.
-            if (r == 124) { k = n_items; }
-            elif (r == 125) { k = n_items; }
-            else { k = k + 1; }
+        while (k < ncmd) {
+            var t = load64(cmdv + k * 8);
+            _xa_push(t, strlen(t) + 1, 1);
+            k = k + 1;
         }
-        if (any_fail == 1) { return sticky_rc; }
-        return EXIT_SUCCESS;
-    }
-
-    # Batch shape: build chunks until -n is hit OR size cap would be
-    # exceeded (rough byte tally of argv).
-    var i: i64 = 0;
-    while (i < n_items) {
-        var args = vec_new();
-        var byte_tally: i64 = 0;
-        var bi2: i64 = 0;
-        while (bi2 < base_n) {
-            var t2 = vec_get(cmd_base, bi2);
-            vec_push(args, t2);
-            byte_tally = byte_tally + strlen(t2) + 1;
-            bi2 = bi2 + 1;
-        }
-        var added: i64 = 0;
-        var stop_batch: i64 = 0;
-        while (stop_batch == 0) {
-            if (i >= n_items) { stop_batch = 1; }
-            elif (n_max > 0 && added >= n_max) { stop_batch = 1; }
-            else {
-                var it2 = vec_get(items, i);
-                var ilen2 = strlen(it2);
-                if (added > 0 && byte_tally + ilen2 + 1 > size_max) {
-                    stop_batch = 1;
-                } else {
-                    vec_push(args, it2);
-                    byte_tally = byte_tally + ilen2 + 1;
-                    added = added + 1;
-                    i = i + 1;
+        _xa_initial = 0;
+        while (_xa_read() != (0 - 1)) {
+            if (_xa_lines_per > 0) {
+                if (_xa_lineno >= _xa_lines_per) {
+                    _xa_do_exec();
+                    _xa_lineno = 0;
                 }
             }
         }
-        if (added > 0) {
-            var rr = _xa_exec_one(args, trace);
-            if (rr != 0) { any_fail = 1; sticky_rc = rr; }
-            # Same abort rule as the -I loop above.
-            if (rr == 124) { i = n_items; }
-            if (rr == 125) { i = n_items; }
-        } else {
-            # No room for any item in a fresh batch — items oversized.
-            _xa_report("error: argv size cap reached with no room for the next item");
-            return EXIT_FAILURE;
+        # POSIX: the utility runs "one or more times" — once even for empty
+        # input, unless -r. ⛔ kriya never ran it, under a comment claiming that
+        # modern GNU does not either; 4.9 and 4.11 both do.
+        var run_last: i64 = 0;
+        if (ab_pending(_xa_ab) > 0) { run_last = 1; }
+        if (_xa_always == 1) { if (_xa_executed == 0) { run_last = 1; } }
+        if (run_last == 1) { _xa_do_exec(); }
+    } else {
+        _xa_insertbuf = alloc(_xa_arg_max + 1);
+        var len: i64 = 0;
+        var more: i64 = 1;
+        while (more == 1) {
+            len = _xa_read();
+            if (len == (0 - 1)) { more = 0; }
+            else {
+                ab_clear(_xa_ab);
+                ab_set_chars(_xa_ab, 0);
+                # ⛔ CMD ITSELF IS NEVER SUBSTITUTED — POSIX inserts the line "in
+                # arguments", and GNU skips the command name. kriya replaced it
+                # too, so the INPUT chose which program ran: `echo rm | xargs -I{}
+                # {} -rf dir` was `rm -rf dir`.
+                var c0 = load64(cmdv);
+                _xa_push(c0, strlen(c0) + 1, _xa_initial);
+                _xa_initial = 0;
+                var j: i64 = 1;
+                while (j < ncmd) {
+                    _xa_insert(load64(cmdv + j * 8), _xa_linebuf, len - 1);
+                    j = j + 1;
+                }
+                _xa_do_exec();
+            }
         }
     }
-    if (any_fail == 1) { return sticky_rc; }
+    if (_xa_child_error != 0) { return _xa_child_error; }
+    if (_xa_read_failed == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
 }

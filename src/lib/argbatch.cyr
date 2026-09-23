@@ -1,0 +1,303 @@
+# argbatch.cyr — building command lines that fit: the argument-list accounting
+# `find -exec … {} +` and `xargs` share (1.7.0).
+#
+# ⭐ ONE ACCOUNTING, GNU's `buildcmd`, MEASURED TO THE BYTE. A command line's
+# size is the sum of strlen + 1 over every argument, the command's own included,
+# and a batch is full when the next argument would take it past the buffer:
+# 131,072 bytes unless `xargs -s` says otherwise. `find d -exec sh -c 'echo $#'
+# sh {} +` over 25,000 twelve-byte paths runs 10,081 + 10,081 + 4,838 under GNU
+# 4.9, 4.11 and here; `seq -w 1 60000 | xargs sh -c 'echo $#' sh` runs 21,842 +
+# 21,842 + 16,316. Exactly equal still fits.
+#
+# ⚠ The buffer is capped by what the kernel takes, and that is not a constant.
+# ARG_MAX is glibc's `sysconf`: a quarter of the stack limit, at least 131,072
+# and at most 6,291,456, which is the kernel's own cap on argv + envp. Measured:
+# `ulimit -s` 256 KiB gives 131,072, 8 MiB 2,097,152, 64 MiB 6,291,456. Less the
+# environment and 2,048 bytes of headroom that POSIX asks xargs to keep, it is
+# the ceiling for `-s` and for the buffer.
+#
+# ⛔ AND IT IS A BUFFER, NOT A GROWING LIST. The pushed arguments are COPIED into
+# one allocation of the buffer's size and reused batch after batch, as GNU's
+# `argbuf` is. kriya's `xargs -n1` allocated a fresh argv, envp and vector per
+# command from a bump allocator that never frees: 80,000 commands peaked at
+# 84.5 MB, GNU at 18.4.
+
+enum ArgBatchLimit {
+    AB_HEADROOM      = 2048;      # POSIX: kept free for the child's own exports
+    AB_DEFAULT_BUF   = 131072;    # GNU's `bc_use_sensible_arg_max`
+    AB_POSIX_MIN     = 4096;      # _POSIX_ARG_MAX, the smallest any system has
+    AB_ARG_MAX_FLOOR = 131072;    # glibc's legacy ARG_MAX
+    AB_ARG_MAX_CAP   = 6291456;   # the kernel's 3/4 of an 8 MiB _STK_LIM
+}
+
+# ARG_MAX as glibc's `sysconf (_SC_ARG_MAX)` computes it: RLIMIT_STACK / 4,
+# clamped to [131,072, 6,291,456].
+# ⚠ agnos has no rlimits and its exec passes no arguments at all
+# (`lib/process_agnos.cyr`); it gets the floor.
+fn ab_sys_arg_max(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return AB_ARG_MAX_FLOOR;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var rl[16];
+    var r = syscall(97, 3, &rl);              # getrlimit(RLIMIT_STACK)
+    if (r != 0) { return AB_ARG_MAX_FLOOR; }
+    # Unsigned: RLIM_INFINITY is all ones, and `>>` is logical in Cyrius.
+    var q = load64(&rl) >> 2;
+    if (q > AB_ARG_MAX_CAP) { return AB_ARG_MAX_CAP; }
+    if (q < AB_ARG_MAX_FLOOR) { return AB_ARG_MAX_FLOOR; }
+    return q;
+    #endif
+}
+
+# --- the environment, read once -----------------------------------------
+
+var _ab_env_vec  = 0;   # vec of cstr
+var _ab_envp     = 0;   # NULL-terminated pointer array for execve
+var _ab_env_size = 0;   # sum of strlen + 1: GNU's `bc_size_of_environment`
+
+# ⭐ One reader where `find` and `xargs` each carried a copy of this loop.
+fn ab_env(): i64 {
+    if (_ab_env_vec != 0) { return _ab_env_vec; }
+    var v = vec_new();
+    var fd = k_open("/proc/self/environ", 0, 0);
+    if (fd < 0) { _ab_env_vec = v; return v; }
+    var cap: i64 = 4096;
+    var buf = alloc(cap);
+    var used: i64 = 0;
+    var loop: i64 = 1;
+    while (loop == 1) {
+        if (used + 4096 > cap) {
+            var newcap = cap * 2;
+            var newbuf = alloc(newcap);
+            memcpy(newbuf, buf, used);
+            buf = newbuf;
+            cap = newcap;
+        }
+        var n = k_read( fd, buf + used, 4096);
+        if (n < 0) {
+            if ((0 - n) == 4) { } else { loop = 0; }
+        } else {
+            if (n == 0) { loop = 0; }
+            else { used = used + n; }
+        }
+    }
+    k_close( fd);
+    var start: i64 = 0;
+    var i: i64 = 0;
+    while (i < used) {
+        if (load8(buf + i) == 0) {
+            if (i > start) {
+                vec_push(v, buf + start);
+                _ab_env_size = _ab_env_size + (i - start) + 1;
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    _ab_env_vec = v;
+    return v;
+}
+
+fn ab_env_bytes(): i64 {
+    ab_env();
+    return _ab_env_size;
+}
+
+# The environment as execve wants it, built once and shared by every child.
+fn ab_envp(): i64 {
+    if (_ab_envp != 0) { return _ab_envp; }
+    var v = ab_env();
+    var n = vec_len(v);
+    var p = alloc((n + 1) * 8);
+    var i: i64 = 0;
+    while (i < n) {
+        store64(p + i * 8, vec_get(v, i));
+        i = i + 1;
+    }
+    store64(p + n * 8, 0);
+    _ab_envp = p;
+    return p;
+}
+
+# The ceiling on a command line: ARG_MAX less the environment and the headroom,
+# GNU's `posix_arg_size_max` after `bc_init_controlinfo`. -1 when the
+# environment leaves no room, which GNU reports as *environment is too large
+# for exec*.
+fn ab_posix_max(): i64 {
+    var am = ab_sys_arg_max();
+    var env = ab_env_bytes();
+    if (env > am) { return 0 - 1; }
+    if (AB_HEADROOM + env >= am) { return 0 - 1; }
+    return am - env - AB_HEADROOM;
+}
+
+# GNU's default buffer, clamped to what this system allows.
+fn ab_default_buf(posix_max): i64 {
+    if (AB_DEFAULT_BUF > posix_max) { return posix_max; }
+    if (AB_DEFAULT_BUF < AB_POSIX_MIN) { return AB_POSIX_MIN; }
+    return AB_DEFAULT_BUF;
+}
+
+# The most arguments one command line may have: a pointer each.
+fn ab_max_arg_count(posix_max): i64 { return posix_max / 8 - 2; }
+
+# --- the builder ----------------------------------------------------------
+
+enum AbField {
+    AB_BUF       = 0;    # the argument bytes, `arg_max + 1` of them
+    AB_ARGV      = 8;    # pointers into AB_BUF, one slot more than AB_ARGC
+    AB_ARGV_CAP  = 16;
+    AB_ARGC      = 24;
+    AB_CHARS     = 32;   # strlen + 1, summed over AB_ARGV
+    AB_INIT_ARGC = 40;   # the command and its initial arguments
+    AB_INIT_CHARS = 48;
+    AB_ARG_MAX   = 56;
+    AB_MAX_COUNT = 64;
+    AB_OK_MAX    = 72;   # E2BIG bisection: largest argument count that ran
+    AB_FAIL_MIN  = 80;   #                  smallest that got E2BIG
+    AB_WORK      = 88;   # scratch argv for a retried window
+    AB_WORK_CAP  = 96;
+    AB_SIZE      = 104;
+}
+
+fn ab_new(arg_max, max_count): i64 {
+    var b = alloc(AB_SIZE);
+    store64(b + AB_BUF, alloc(arg_max + 1));
+    store64(b + AB_ARGV_CAP, 64);
+    store64(b + AB_ARGV, alloc(65 * 8));
+    store64(b + AB_ARGC, 0);
+    store64(b + AB_CHARS, 0);
+    store64(b + AB_INIT_ARGC, 0);
+    store64(b + AB_INIT_CHARS, 0);
+    store64(b + AB_ARG_MAX, arg_max);
+    store64(b + AB_MAX_COUNT, max_count);
+    store64(b + AB_OK_MAX, 0);
+    store64(b + AB_FAIL_MIN, 0);
+    store64(b + AB_WORK, 0);
+    store64(b + AB_WORK_CAP, 0);
+    return b;
+}
+
+fn ab_argc(b): i64 { return load64(b + AB_ARGC); }
+fn ab_chars(b): i64 { return load64(b + AB_CHARS); }
+fn ab_init_argc(b): i64 { return load64(b + AB_INIT_ARGC); }
+fn ab_arg_max(b): i64 { return load64(b + AB_ARG_MAX); }
+fn ab_max_count(b): i64 { return load64(b + AB_MAX_COUNT); }
+fn ab_arg(b, i): i64 { return load64(load64(b + AB_ARGV) + i * 8); }
+
+# Arguments pushed since the initial ones.
+fn ab_pending(b): i64 { return load64(b + AB_ARGC) - load64(b + AB_INIT_ARGC); }
+
+# Would `len` more bytes (strlen + 1) still fit?
+fn ab_fits(b, len): i64 {
+    if (load64(b + AB_CHARS) + len > load64(b + AB_ARG_MAX)) { return 0; }
+    return 1;
+}
+
+# Append `len` bytes of `s` (its NUL included). ⚠ The caller has checked
+# `ab_fits`; the copy is into the one buffer, so an unchecked push overruns it.
+fn ab_push(b, s, len): i64 {
+    var argc = load64(b + AB_ARGC);
+    var cap = load64(b + AB_ARGV_CAP);
+    if (argc + 1 >= cap) {
+        var ncap = cap * 2;
+        var na = alloc((ncap + 1) * 8);
+        memcpy(na, load64(b + AB_ARGV), argc * 8);
+        store64(b + AB_ARGV, na);
+        store64(b + AB_ARGV_CAP, ncap);
+    }
+    var chars = load64(b + AB_CHARS);
+    var dst = load64(b + AB_BUF) + chars;
+    memcpy(dst, s, len - 1);
+    store8(dst + len - 1, 0);
+    store64(load64(b + AB_ARGV) + argc * 8, dst);
+    store64(b + AB_ARGC, argc + 1);
+    store64(b + AB_CHARS, chars + len);
+    return 0;
+}
+
+# Everything pushed so far is the command and its initial arguments.
+fn ab_mark_initial(b): i64 {
+    store64(b + AB_INIT_ARGC, load64(b + AB_ARGC));
+    store64(b + AB_INIT_CHARS, load64(b + AB_CHARS));
+    return 0;
+}
+
+# Back to the initial arguments, for the next batch.
+fn ab_clear(b): i64 {
+    store64(b + AB_ARGC, load64(b + AB_INIT_ARGC));
+    store64(b + AB_CHARS, load64(b + AB_INIT_CHARS));
+    return 0;
+}
+
+# `xargs -I` builds every line's command from nothing: GNU keeps its initial
+# argument COUNT at zero there, while the size of the command name, pushed on
+# the first line, still shortens the lines read after it.
+fn ab_set_chars(b, v): i64 { store64(b + AB_CHARS, v); return 0; }
+fn ab_set_init_chars(b, v): i64 { store64(b + AB_INIT_CHARS, v); return 0; }
+fn ab_init_chars(b): i64 { return load64(b + AB_INIT_CHARS); }
+
+# The NULL-terminated argv for the initial arguments plus the pushed ones from
+# `from`, `count` of them. ⚠ The whole list is the builder's own array; a window
+# that skips pushed arguments is assembled in a scratch array, GNU's
+# `working_args`, so a retry after E2BIG never disturbs the list it retries.
+fn ab_window(b, from, count): i64 {
+    var init = load64(b + AB_INIT_ARGC);
+    var argv = load64(b + AB_ARGV);
+    # In place only for the WHOLE list: its terminator goes in the spare slot.
+    # A prefix would put the NULL over the next window's first pointer.
+    if (from == 0) {
+        if (init + count == load64(b + AB_ARGC)) {
+            store64(argv + (init + count) * 8, 0);
+            return argv;
+        }
+    }
+    var need = init + count + 1;
+    if (load64(b + AB_WORK_CAP) < need) {
+        store64(b + AB_WORK, alloc(need * 2 * 8));
+        store64(b + AB_WORK_CAP, need * 2);
+    }
+    var w = load64(b + AB_WORK);
+    memcpy(w, argv, init * 8);
+    memcpy(w + init * 8, argv + (init + from) * 8, count * 8);
+    store64(w + (init + count) * 8, 0);
+    return w;
+}
+
+# GNU's `update_limit`: after an exec that ran (`ok` = 1) or got E2BIG, the
+# argument count to try next. Halving until something runs, then bisecting
+# between the largest count that ran and the smallest that did not, remembered
+# across batches.
+fn ab_update_limit(b, ok, limit): i64 {
+    var okmax = load64(b + AB_OK_MAX);
+    var failmin = load64(b + AB_FAIL_MIN);
+    if (ok == 1) {
+        if (limit > okmax) { okmax = limit; store64(b + AB_OK_MAX, okmax); }
+    } else {
+        var take: i64 = 0;
+        if (failmin == 0) { take = 1; }
+        elif (limit < failmin) { take = 1; }
+        if (take == 1) { failmin = limit; store64(b + AB_FAIL_MIN, failmin); }
+    }
+    var bisect: i64 = 1;
+    if (okmax == 0) { bisect = 0; }
+    elif (failmin <= okmax) { bisect = 0; }
+    if (bisect == 0) {
+        if (ok == 1) { limit = limit + 1; }
+        else { limit = limit / 2; }
+    } else {
+        var shift = (failmin - okmax) / 2;
+        if (ok == 1) {
+            if (shift != 0) { limit = limit + shift; } else { limit = limit + 1; }
+        } else {
+            if (shift != 0) { limit = limit - shift; } else { limit = limit - 1; }
+        }
+    }
+    var init = load64(b + AB_INIT_ARGC);
+    if (init > 0) {
+        if (limit <= init + 1) { limit = init + 1; }
+    }
+    if (limit == 0) { limit = 1; }
+    return limit;
+}

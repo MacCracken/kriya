@@ -6,6 +6,135 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.7.0] - 2026-09-23 — batched exec
+
+The 1.7.0 slot, the first of the 1.7.x arc: `find -exec … {} +`, and `xargs -L`, `-x` and
+`--show-limits`. All four are one question — how full is a command line — and they now share one
+answer, GNU's `buildcmd`, ported to `src/lib/argbatch.cyr` from its source and checked against
+findutils 4.9 (CI's) and 4.11 (this box), down to the E2BIG retries. Measuring xargs for the new
+flags found it wrong in ways the slot did not name, the worst of them that the INPUT could choose
+which program `-I` ran.
+
+### ⛔ Breaking
+
+Every item is GNU's behaviour, and POSIX's where POSIX speaks
+([ADR 0026](docs/adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
+
+- **`xargs CMD` runs CMD once on empty input**, unless `-r`. It never ran, under a comment
+  claiming modern GNU does not either; GNU 4.9 and 4.11 both do, and POSIX says "one or more
+  times". **Migration:** add `-r`, as with GNU.
+- **`xargs -I` never substitutes into the command name**, only into its arguments. `echo rm |
+  xargs -I{} {} -rf dir` used to run `rm -rf dir`; it now looks for a program called `{}`, as GNU's
+  does.
+- **Items end at blanks and newline only.** VT, FF and CR split items; they are now part of one,
+  and skipped only before it starts.
+- **An unmatched quote is an error**, exit 1, after running what was read before it. It used to be
+  taken as ending at EOF.
+- **`xargs -0` passes empty items**: `printf 'a\0\0b\0'` is three arguments, as in GNU.
+- **A command that cannot be run stops xargs**, exit 127 or 126. It used to go on to the next
+  batch.
+- `-n 0` and `-L 0` are refused, exit 2.
+
+### Added
+
+- **`find -exec CMD … {} +`**: one command per batch of paths, as many as fit in 131,072 bytes.
+  The predicate is always true, and a command that fails, is not found or is killed makes find exit
+  1. `+` ends the command only straight after a bare `{}` (GNU 4.10's rule), and a second `{}` is
+  refused. Batches run as they fill; what is left runs after the walk, in expression order. Over
+  25,000 files it takes **48 ms, against 12,472 ms for `-exec … ;`** (GNU's `+`: 20 ms).
+- **`xargs -L N` / `--max-lines=N`**: N non-blank input lines per command; a line ending in a blank
+  continues onto the next.
+- **`xargs -x` / `--exit`**: stop rather than split a command line that outgrows `-s`. As in GNU,
+  it takes effect only with `-n`, `-L` or `-I`, and `-L` and `-I` imply it.
+- **`xargs --show-limits`**: GNU's six lines, byte for byte in any environment, at any stack limit
+  and on a terminal.
+- **`-n`, `-L` and `-I` are last-wins against each other**, with GNU's warnings; `-I … -n 1` stays
+  `-I`, as in GNU.
+
+### Fixed — ⛔ batches split where GNU's do
+
+xargs kept a byte tally of its own. Both utilities now count GNU's way:
+- the size is strlen + 1 per argument, the command's own included;
+- the buffer is 131,072 bytes (or `-s`), and exactly equal fits;
+- the ceiling is glibc's ARG_MAX — a quarter of the stack limit, clamped to [131,072, 6,291,456],
+  read with `getrlimit` — less the environment and 2,048 bytes; `-s` is clamped to it with GNU's
+  warning;
+- when execve still says E2BIG, since the kernel also counts pointers, xargs halves the batch and
+  then bisects, remembering across batches.
+
+The last is GNU's `bc_do_exec`, ported line for line, and it reproduces GNU's own batches:
+`seq 1 500000 | xargs -s 2000000 sh -c 'echo $#' sh` runs 130,938, 130,941, 98,202, 98,203 and
+41,716, under both.
+
+### Fixed — ⛔ xargs streams, in constant memory
+
+- **It read all of stdin before running anything**, so `yes | xargs -n1 echo | head` never ended.
+  It streams now, and each child reads `/dev/null` — otherwise a child like `sh -c 'cat'` would
+  read the input meant for the commands after it.
+- **Every command allocated fresh argument arrays** from an allocator that never frees. `xargs
+  -n1` over 80,000 items went from **84.6 MB to 18.4 MB** peak (GNU 18.3), and from 46.8 s to
+  42.6 s (GNU 52.8). The arguments are copied into one buffer of the batch's size, as GNU's are,
+  and the command is resolved once.
+- The default command is `echo`, found in PATH as any command is; it was `/bin/echo`, and `-t`
+  showed it.
+- `-t` shell-quotes each argument, as GNU's does.
+- A NUL in the input without `-0` warns once, as in GNU.
+
+### Changed
+
+- **`src/lib/argbatch.cyr`** holds the accounting, the environment (read once, where `find` and
+  `xargs` each had a copy of the reader) and the batch builder.
+- **`k_spawn_argv`** in `src/lib/spawn.cyr` runs a command from prepared arrays, with nothing
+  allocated per call, and can give the child `/dev/null` as stdin.
+- `find -exec … ;` now says *terminated by signal N* for a killed command, as GNU does. ⚠ It still
+  exits 1 for a command that cannot run or is killed, where GNU exits 0 in that form, and that is
+  now documented in its header.
+
+### Documentation
+
+- **[ADR 0026](docs/adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)**: batched exec
+  counts a command line as GNU does.
+- **Roadmap**: 1.7.0 retired, next up 1.7.1 (`find` predicates).
+  - 1.7.1 gains GNU's `,` operator.
+  - 1.7.2 gains `find -ok` / `-okdir` / `-execdir` and `xargs -a` / `-d` / `-E` / `-o`, with a note
+    that `-P` needs the builder to work while commands run.
+  - 1.7.4's raw-syscall count gains `getrlimit`.
+- **Lessons**:
+  - read the reference's source when the behaviour is an algorithm;
+  - streaming changes who owns stdin;
+  - a wrapper script changes the environment;
+  - a test compared against a different GNU invocation pins a belief;
+  - `set -e` swallowed a suite a third time.
+
+### Tests
+
+- Smoke **7,307 → 7,451** across 41 scripts:
+  - `smoke-xargs.sh` 69 → **167**, `smoke-find.sh` 137 → **172**;
+  - `smoke-help-json.sh` 1,834 → **1,845**, for the new options.
+  - Every new case compares stdout bytes and the exit status with GNU, and the batch sizes as
+    numbers: 25,000 paths under `find`, 60,000 items under `xargs`, `-s` at 1,000 and 20, and the
+    E2BIG sequence.
+- `kriya.tcyr` **737 → 764**: the builder's size rule and windows, and the bisection.
+- ⭐ **Run against the 1.6.17 binary, 74 of the new assertions fail**: `xargs` 54 and `find` 20.
+- ⭐ That run caught one harness fault first: two diagnostic captures without `|| true` ended
+  `smoke-xargs.sh` under `set -e` against a binary that refuses `-L`, printing no summary at all.
+
+### Release totals
+
+**7,451 smoke cases across 41 scripts** (from 7,307), **764 unit**, 18 POSIX. The rest of the
+gate is clean:
+- fuzz green under poison (1,127 / 201 / 201);
+- `cyrius lint`, `lint-deferrals.sh`, `lint-help-schema.sh` and `check-oracles.sh`;
+- `watchlist-scan.py`: 189 declarations, M15a 0, M15c the 3 known, M15d 0, M15i 0;
+- `vet` reports **56** deps (one more: `argbatch.cyr`), and both targets build warning-free.
+
+⭐ Verified in the `ubuntu:24.04` container (coreutils **9.4**, findutils **4.9**, grep **3.11**) as
+a non-root user: 39 of 41 scripts green, **4,946** cases, the E2BIG sequence and `--show-limits`
+included. The two exceptions need `python3`, which the image lacks.
+
+Binary 1,229,408 → **1,248,168** bytes on host (+18,760), 1,225,128 → **1,243,888** on agnos
+(+18,760).
+
 ## [1.6.17] - 2026-09-23 — `printf` and `stat` numbers
 
 The 1.6.17 slot, the last of the 1.6.x repair arc:

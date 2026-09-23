@@ -106,6 +106,39 @@ fn k_spawn(args, env): i64 {
     return k_spawn_as(vec_get(args, 0), args, env);
 }
 
+# `k_spawn_argv` flags.
+enum KSpawnFlag {
+    K_SPAWN_STDIN_NULL = 1;   # the child reads /dev/null, not our stdin
+}
+
+# Run `exec_path` with the NULL-terminated pointer arrays `argvp` and `envp`,
+# as they are — nothing is allocated per call (1.7.0).
+#
+# ⛔ `k_spawn_as` builds a fresh argv and envp array from vectors on every call,
+# and the allocator never frees: `xargs -n1` over 80,000 items peaked at 84.5 MB.
+# A caller that runs a command per item keeps its arrays and passes them here.
+#
+# ⛔ K_SPAWN_STDIN_NULL IS WHAT LETS XARGS STREAM. xargs reads its own stdin as
+# it goes, so a child that inherited it — `sh -c 'cat'` — would read the input
+# meant for the commands still to come. GNU's `prep_child_for_exec` gives the
+# child /dev/null; so does this. `find -exec` keeps stdin, as GNU's does.
+fn k_spawn_argv(exec_path, argvp, envp, flags): i64 {
+    if (load64(argvp) == 0) { return K_SPAWN_FORKFAIL; }
+    #ifdef CYRIUS_TARGET_AGNOS
+    # ⚠ agnos passes no arguments and no environment (`lib/process_agnos.cyr`);
+    # only the program runs, as `k_spawn_as`'s agnos arm says.
+    var v = vec_new();
+    vec_push(v, exec_path);
+    var ar = exec_vec(v);
+    if (ar < 0) { return K_SPAWN_FORKFAIL; }
+    if (ar > 255) { return 255; }
+    return ar;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return _k_spawn_core(exec_path, argvp, envp, flags);
+    #endif
+}
+
 # Linux arm of `k_spawn_as`. ⚠ The body stays inside `#ifndef CYRIUS_TARGET_AGNOS`
 # — it uses fork/pipe/fcntl/waitpid, none of which agnos provides with these
 # signatures. On agnos it compiles to the fall-through return and is never
@@ -134,6 +167,14 @@ fn _k_spawn_linux(exec_path, args, env): i64 {
     }
     store64(envp + envc * 8, 0);
 
+    return _k_spawn_core(cmd, argv, envp, 0);
+    #endif
+    return K_SPAWN_FORKFAIL;
+}
+
+# The fork, exec and wait, on prepared arrays. `flags` is KSpawnFlag bits.
+fn _k_spawn_core(cmd, argv, envp, flags): i64 {
+    #ifndef CYRIUS_TARGET_AGNOS
     # Two i32 fds in an 8-byte local. ⚠ `var fds[8]` is 8 BYTES here — a
     # function-local `var X[N]` is N bytes (roadmap M15a).
     var fds[8];
@@ -152,9 +193,17 @@ fn _k_spawn_linux(exec_path, args, env): i64 {
         return K_SPAWN_FORKFAIL;
     }
     if (pid == 0) {
-        # ⚠ fds 0/1/2 are deliberately NOT touched. That single omission is the
-        # entire stderr fix.
+        # ⚠ fds 1 and 2 are deliberately NOT touched — that single omission is
+        # the entire stderr fix — and fd 0 only when the caller asks.
         if (rfd >= 0) { k_close(rfd); }
+        if ((flags & K_SPAWN_STDIN_NULL) != 0) {
+            k_close(0);
+            var nfd = k_open("/dev/null", 0, 0);
+            if (nfd > 0) {
+                sys_dup2(nfd, 0);
+                k_close(nfd);
+            }
+        }
         var xr = sys_execve(cmd, argv, envp);
         # Only reachable when execve failed. Report the errno through the pipe;
         # its closure on success is what the parent reads as "it started".

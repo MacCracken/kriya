@@ -19,6 +19,9 @@
 #   -print          print the path + newline (default action when none given)
 #   -print0         print the path + NUL byte (-print0; pairs with xargs -0)
 #   -exec CMD... \; fork+exec for each match, `{}` substituted with the path
+#   -exec CMD... {} +   one command per BATCH of matches, as many as fit in
+#                   131,072 bytes (GNU's accounting, `src/lib/argbatch.cyr`);
+#                   always true, a failure is the exit status (1.7.0)
 #
 # Operators (precedence: ! > -a > -o; juxtaposition is implicit -a):
 #   ! EXPR / -not EXPR
@@ -34,8 +37,11 @@
 #
 # Exit codes:
 #   0   walk completed; predicates evaluated for every entry
-#   1   one or more entries failed to open / stat / exec
+#   1   one or more entries failed to open / stat / exec, or an `-exec … +`
+#       command failed
 #   2   usage error (bad expression, unknown predicate)
+# ⚠ One deliberate divergence: a `-exec … ;` command that cannot be run or is
+# killed makes find exit 1. GNU reports it and exits 0 in that form.
 
 var _find_spec    = 0;
 var _f_L_idx      = 0;
@@ -64,6 +70,7 @@ enum FindNode {
     F_N_PRINT     = 30,
     F_N_PRINT0    = 31,
     F_N_EXEC      = 32,
+    F_N_EXECPLUS  = 33,
 }
 
 enum FindSign {
@@ -79,7 +86,6 @@ var _f_pos       = 0;
 var _f_err       = 0;
 var _f_err_msg   = 0;
 var _f_now_secs  = 0;
-var _f_env_vec   = 0;   # cached /proc/self/environ as a vec of cstr*
 var _f_path_env  = 0;   # cached PATH (heap-copied at startup, stable across exec)
 
 # Walk state.
@@ -530,9 +536,15 @@ fn _f_parse_primary(): i64 {
     }
     if (streq(t, "-exec") == 1) {
         _f_consume();
-        # Collect argv tokens until the literal `;` terminator.
+        # Collect argv tokens until `;` — or until `+`, when the token before it
+        # is exactly `{}`: GNU's rule (Savannah bug 66365, findutils 4.10). Any
+        # other `+` is an ordinary argument, so `-exec echo {}x +` still wants
+        # its `;`, and `-exec echo + ;` prints a plus.
         var start_pos = _f_pos;
         var found_end: i64 = 0;
+        var plus: i64 = 0;
+        var prev_braces: i64 = 0;
+        var brace_count: i64 = 0;
         while (found_end == 0) {
             var tk = _f_tok();
             if (tk == 0) {
@@ -540,13 +552,32 @@ fn _f_parse_primary(): i64 {
                 return 0;
             }
             if (streq(tk, ";") == 1) { found_end = 1; }
-            else { _f_consume(); }
+            elif (prev_braces == 1) {
+                if (streq(tk, "+") == 1) { found_end = 1; plus = 1; }
+            }
+            if (found_end == 0) {
+                prev_braces = 0;
+                if (_f_has_braces(tk) == 1) {
+                    brace_count = brace_count + 1;
+                    if (streq(tk, "{}") == 1) { prev_braces = 1; }
+                }
+                _f_consume();
+            }
         }
         var end_pos = _f_pos;
-        _f_consume();  # eat the ';'
+        _f_consume();  # eat the terminator
         if (end_pos == start_pos) {
             _f_set_err("-exec needs at least one command argument");
             return 0;
+        }
+        if (plus == 1) {
+            # ⚠ EVERY token holding `{}` counts, the command's own included:
+            # `-exec sh -c 'echo {}' sh {} +` is refused, as in GNU.
+            if (brace_count > 1) {
+                _f_set_err("only one instance of {} is supported with -exec ... +");
+                return 0;
+            }
+            return _f_execplus_new(start_pos, end_pos - 1);
         }
         return _f_node_new(F_N_EXEC, start_pos, end_pos, 0);
     }
@@ -622,6 +653,7 @@ fn _f_has_action(n): i64 {
     if (n == 0) { return 0; }
     var k = load64(n);
     if (k == F_N_PRINT || k == F_N_PRINT0 || k == F_N_EXEC) { return 1; }
+    if (k == F_N_EXECPLUS) { return 1; }
     if (k == F_N_AND || k == F_N_OR) {
         if (_f_has_action(load64(n + 8))  == 1) { return 1; }
         if (_f_has_action(load64(n + 16)) == 1) { return 1; }
@@ -723,47 +755,137 @@ fn _f_eval_empty_predicate(path, stat_buf): i64 {
     return 0;
 }
 
-# Build the env vec once (lazy).
-fn _f_env_get(): i64 {
-    if (_f_env_vec != 0) { return _f_env_vec; }
-    var v = vec_new();
-    var fd = k_open("/proc/self/environ", 0, 0);
-    if (fd < 0) { _f_env_vec = v; return v; }
-    var cap: i64 = 4096;
-    var buf = alloc(cap);
-    var used: i64 = 0;
-    var loop: i64 = 1;
-    while (loop == 1) {
-        if (used + 4096 > cap) {
-            var newcap = cap * 2;
-            var newbuf = alloc(newcap);
-            memcpy(newbuf, buf, used);
-            buf = newbuf;
-            cap = newcap;
-        }
-        var n = k_read( fd, buf + used, 4096);
-        if (n < 0) {
-            if ((0 - n) == 4) {
-                # EINTR retry
-            } else { loop = 0; }
-        } else {
-            if (n == 0) { loop = 0; }
-            else { used = used + n; }
-        }
-    }
-    k_close( fd);
-    # Split on NUL — each entry is already NUL-terminated in the buffer.
-    var start: i64 = 0;
+# Does `tok` hold `{}` anywhere?
+fn _f_has_braces(tok): i64 {
     var i: i64 = 0;
-    while (i < used) {
-        if (load8(buf + i) == 0) {
-            if (i > start) { vec_push(v, buf + start); }
-            start = i + 1;
-        }
+    while (load8(tok + i) != 0) {
+        if (load8(tok + i) == 123) { if (load8(tok + i + 1) == 125) { return 1; } }
         i = i + 1;
     }
-    _f_env_vec = v;
-    return v;
+    return 0;
+}
+
+# --- -exec … {} + --------------------------------------------------------
+#
+# ⭐ ONE COMMAND PER BATCH OF PATHS, counted as GNU counts it: the builder in
+# `src/lib/argbatch.cyr`, 131,072 bytes of arguments, the command's own words
+# included (1.7.0). ⚠ The predicate is always TRUE; a command that fails, is not
+# found or is killed makes find exit 1, which is what POSIX asks of this form.
+# Batches run as they fill, and what is left runs after the walk, in the order
+# the `-exec`s were written.
+
+enum FindExecPlus {
+    F_XP_AB   = 0;     # the builder
+    F_XP_PATH = 8;     # the command, resolved once, when it has a name of its own
+    F_XP_SIZE = 16;
+}
+
+# A `-exec` node for the `+` form: the command and its initial arguments are
+# argv[lo..hi), and argv[hi] is the `{}` the batch replaces.
+fn _f_execplus_new(lo, hi): i64 {
+    var posix_max = ab_posix_max();
+    if (posix_max < 0) {
+        _f_report_usage("the environment is too large for exec()");
+        syscall(SYS_EXIT, EXIT_FAILURE);
+    }
+    var b = ab_new(ab_default_buf(posix_max), ab_max_arg_count(posix_max));
+    var i = lo;
+    while (i < hi) {
+        var tok = load64(_f_argv_flat + i * 8);
+        var len = strlen(tok) + 1;
+        if (ab_fits(b, len) == 0) {
+            _f_report_usage("cannot fit single argument within argument list size limit");
+            syscall(SYS_EXIT, EXIT_FAILURE);
+        }
+        ab_push(b, tok, len);
+        i = i + 1;
+    }
+    ab_mark_initial(b);
+    var st = alloc(F_XP_SIZE);
+    store64(st + F_XP_AB, b);
+    store64(st + F_XP_PATH, 0);
+    return _f_node_new(F_N_EXECPLUS, lo, hi, st);
+}
+
+# What a spawn result means for find: 1 when the command ran and exited 0. The
+# diagnostics are the same for both forms; `hard` = 1 (the `+` form) makes a
+# non-zero exit fail the whole run, as POSIX asks.
+fn _f_exec_outcome(r, name, hard): i64 {
+    if (k_spawn_execfailed(r) == 1) {
+        var e = k_spawn_exec_errno(r);
+        if (errmsg_is_known(e) == 1) { errmsg_report("find", name, e); }
+        else { report_note("find", name, "cannot execute"); }
+        _f_any_failed = 1;
+        return 0;
+    }
+    if (k_spawn_signalled(r) == 1) {
+        # GNU says so, in both forms; kriya said nothing.
+        var sb = alloc(40);
+        memcpy(sb, "terminated by signal ", 21);
+        var sn = str_u64_digits(k_spawn_signal(r), 10, 0, sb + 21);
+        store8(sb + 21 + sn, 0);
+        report_note("find", name, sb);
+        _f_any_failed = 1;
+        return 0;
+    }
+    if (k_spawn_exited(r) == 1) {
+        if (k_spawn_exit_status(r) == 0) { return 1; }
+        if (hard == 1) { _f_any_failed = 1; }
+        return 0;
+    }
+    _f_any_failed = 1;
+    return 0;
+}
+
+# Run the batch `st` holds, if it holds any path, and empty it.
+fn _f_execplus_run(st): i64 {
+    var b = load64(st + F_XP_AB);
+    if (ab_pending(b) == 0) { return 0; }
+    var argvp = ab_window(b, 0, ab_pending(b));
+    var name = load64(argvp);
+    # With no initial arguments the first PATH is the command (`-exec {} +`,
+    # which GNU runs as written), so only a named command is resolved once.
+    var exec_path = load64(st + F_XP_PATH);
+    if (exec_path == 0) {
+        exec_path = _f_resolve_exec(name);
+        if (ab_init_argc(b) > 0) { store64(st + F_XP_PATH, exec_path); }
+    }
+    if (exec_path == 0) {
+        report_note("find", name, "command not found");
+        _f_any_failed = 1;
+    } else {
+        _f_exec_outcome(k_spawn_argv(exec_path, argvp, ab_envp(), 0), name, 1);
+    }
+    ab_clear(b);
+    return 0;
+}
+
+# Add `path` to its batch, running the batch first when the path would not fit.
+fn _f_execplus_add(st, path): i64 {
+    var b = load64(st + F_XP_AB);
+    var len = strlen(path) + 1;
+    if (ab_fits(b, len) == 0) {
+        if (ab_pending(b) == 0) {
+            _f_report_usage("cannot fit single argument within argument list size limit");
+            syscall(SYS_EXIT, EXIT_FAILURE);
+        }
+        _f_execplus_run(st);
+    }
+    if (ab_argc(b) == ab_max_count(b)) { _f_execplus_run(st); }
+    ab_push(b, path, len);
+    if (ab_argc(b) == ab_max_count(b)) { _f_execplus_run(st); }
+    return 1;
+}
+
+# After the walk: every batch still holding paths runs, in expression order.
+fn _f_flush_execs(n): i64 {
+    if (n == 0) { return 0; }
+    var k = load64(n);
+    if (k == F_N_AND) { _f_flush_execs(load64(n + 8)); _f_flush_execs(load64(n + 16)); }
+    if (k == F_N_OR) { _f_flush_execs(load64(n + 8)); _f_flush_execs(load64(n + 16)); }
+    if (k == F_N_NOT) { _f_flush_execs(load64(n + 8)); }
+    if (k == F_N_EXECPLUS) { _f_execplus_run(load64(n + 24)); }
+    return 0;
 }
 
 # Thin wrapper over the shared resolver — see `fs_resolve_in_path` in
@@ -868,36 +990,15 @@ fn _f_run_exec(arg_lo, arg_hi, path): i64 {
         # child report itself by absolute path (`/usr/bin/rm:` where GNU says
         # `rm:`); see `k_spawn_as` in src/lib/spawn.cyr.
     }
-    var env = _f_env_get();
     # ⛔ `k_spawn`, NOT stdlib `exec_env` — that one dup2s /dev/null onto fd 2, so
     # the child could not report anything. `find rot -name '*.tmp' -exec rm {} \;`
     # on an unwritable directory printed NOTHING and exited 0 while deleting
     # nothing; GNU prints a "Permission denied" line per file.
-    var r = k_spawn_as(exec_path, args, env);
-    if (k_spawn_execfailed(r) == 1) {
-        var e = k_spawn_exec_errno(r);
-        k_write( 2, "kriya find: ", 12);
-        k_write( 2, vec_get(args, 0), strlen(vec_get(args, 0)));
-        k_write( 2, ": ", 2);
-        if (errmsg_is_known(e) == 1) {
-            var m = errmsg_for(e);
-            k_write( 2, m, strlen(m));
-        } else {
-            k_write( 2, "cannot execute", 14);
-        }
-        k_write( 2, "\n", 1);
-        _f_any_failed = 1;
-        return 0;
-    }
-    # POSIX: `-exec` is TRUE only when the utility exits 0. A signalled child is
-    # not a success, and it also makes the whole `find` invocation fail.
-    if (k_spawn_signalled(r) == 1) { _f_any_failed = 1; return 0; }
-    if (k_spawn_exited(r) == 1) {
-        if (k_spawn_exit_status(r) == 0) { return 1; }
-        return 0;
-    }
-    _f_any_failed = 1;
-    return 0;
+    var r = k_spawn_as(exec_path, args, ab_env());
+    # POSIX: `-exec` is TRUE only when the utility exits 0.
+    # ⚠ A command that could not run or was killed also makes find exit 1 — a
+    # kriya decision: GNU says so and exits 0 in this `;` form.
+    return _f_exec_outcome(r, vec_get(args, 0), 0);
 }
 
 # Evaluate AST node `n` for the given entry context.
@@ -1002,6 +1103,9 @@ fn _f_eval(n, ctx): i64 {
         var nz[2]; store8(&nz, 0);
         k_write( 1, &nz, 1);
         return 1;
+    }
+    if (k == F_N_EXECPLUS) {
+        return _f_execplus_add(load64(n + 24), path);
     }
     if (k == F_N_EXEC) {
         return _f_run_exec(load64(n + 8), load64(n + 16), path);
@@ -1137,7 +1241,6 @@ fn cmd_find(start: i64): i64 {
     _f_any_failed = 0;
     _f_err = 0;
     _f_err_msg = 0;
-    _f_env_vec = 0;
     _f_follow_mode = 0;
     # Snapshot PATH up-front, once, for every `-exec`. ⚠ It began as a
     # workaround: the stdlib `getenv` read /proc/self/environ into a stack
@@ -1250,6 +1353,7 @@ fn cmd_find(start: i64): i64 {
         _f_walk(p, 0, max_depth);
         pi = pi + 1;
     }
+    _f_flush_execs(_f_ast);
 
     if (_f_any_failed == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
@@ -1263,10 +1367,11 @@ fn find_help_declare(): i64 {
       "find [STARTPATH...] [EXPRESSION]");
     help_positional(0, HELP_POS_UNBOUNDED, "STARTPATH,EXPRESSION");
     help_destructive(1);
-    help_operands("Predicates combine with ! , -a and -o; parentheses group. The default action is -print. Symlinks are not followed unless -L is given (ADR 0003). ⚠ -regex/-iregex match the WHOLE PATH as written (leading `./` included) and default to POSIX BRE — GNU defaults to EMACS regex, where an unescaped `+` is a quantifier rather than a literal. Use -regextype posix-extended for `+`/`?`; -regextype emacs is refused by name (ADR 0005).");  #skip-lint
+    help_operands("Predicates combine with ! , -a and -o; parentheses group. The default action is -print. Symlinks are not followed unless -L is given (ADR 0003). ⚠ -regex/-iregex match the WHOLE PATH as written (leading `./` included) and default to POSIX BRE — GNU defaults to EMACS regex, where an unescaped `+` is a quantifier rather than a literal. Use -regextype posix-extended for `+`/`?`; -regextype emacs is refused by name (ADR 0005). `-exec CMD {} +` runs CMD once per batch of paths, as many as fit in 131,072 bytes, as GNU does; it is always true, and a CMD that fails makes find exit 1.");  #skip-lint
     help_exit(1, "an entry could not be read, or -exec reported failure");
     help_example("find . -name '*.log'");
     help_example("find /var -type f -size +1M");
     help_example("find . -name '*.tmp' -exec rm {} ';'");
+    help_example("find . -name '*.o' -exec rm -- {} +");
     return 0;
 }

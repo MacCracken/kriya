@@ -64,6 +64,9 @@ include "src/cmd/seq.cyr"
 # ⚠ M15e, PRE-EMPTIVELY (1.6.17). `printf.cyr` is here for its number reader,
 # `_pf_num`, which reports through `report.cyr` above and reads nothing else.
 include "src/cmd/printf.cyr"
+# ⚠ M15e, PRE-EMPTIVELY (1.7.0). The batch builder `find -exec +` and `xargs`
+# share; pure but for the rlimit and /proc/self/environ reads.
+include "src/lib/argbatch.cyr"
 
 # ⭐ The modes the real callers use, so a test reads as "FORMAT says this, `%b`
 # says that" rather than as a bitmask.
@@ -1453,6 +1456,52 @@ fn main() {
     assert_eq(_t_pfn("-0x10", 0), 0 - 16, "a sign before 0x");
     assert_eq(_t_pfn(0, 0), 0, "a MISSING argument is 0");
     assert_eq(_pf_failed, 0, "...and says nothing");
+
+    test_group("argbatch — GNU's buildcmd accounting (1.7.0)");
+    var sam = ab_sys_arg_max();
+    assert_eq(sam >= 131072, 1, "ARG_MAX: at least glibc's floor");
+    assert_eq(sam <= 6291456, 1, "...and at most the kernel's cap");
+    assert_eq(ab_default_buf(2095104), 131072, "the default buffer, 128 KiB");
+    assert_eq(ab_default_buf(129024), 129024, "clamped to a lower ceiling (256 KiB stack)");
+    assert_eq(ab_max_arg_count(2095104), 261886, "a pointer per argument, less two");
+    var ab1 = ab_new(20, 100);
+    ab_push(ab1, "echo", 5);
+    ab_mark_initial(ab1);
+    assert_eq(ab_fits(ab1, 15), 1, "5 + 15 = 20: exactly equal fits");
+    assert_eq(ab_fits(ab1, 16), 0, "21 does not");
+    ab_push(ab1, "abc", 4);
+    ab_push(ab1, "de", 3);
+    assert_eq(ab_pending(ab1), 2, "two pushed");
+    assert_eq(ab_chars(ab1), 12, "5 + 4 + 3");
+    var abw = ab_window(ab1, 0, 2);
+    assert_eq(streq(load64(abw + 8), "abc"), 1, "the whole list, in place");
+    assert_eq(load64(abw + 24), 0, "...NULL-terminated");
+    abw = ab_window(ab1, 0, 1);
+    assert_eq(load64(abw + 16), 0, "a prefix window ends after one");
+    assert_eq(streq(ab_arg(ab1, 2), "de"), 1, "...without clobbering the list");
+    abw = ab_window(ab1, 1, 1);
+    assert_eq(streq(load64(abw), "echo"), 1, "a later window keeps the command");
+    assert_eq(streq(load64(abw + 8), "de"), 1, "...then the arguments from there");
+    assert_eq(load64(abw + 16), 0, "...NULL-terminated");
+    ab_clear(ab1);
+    assert_eq(ab_pending(ab1), 0, "cleared back to the command");
+    assert_eq(ab_chars(ab1), 5, "...and its size");
+    var ab2 = ab_new(4096, 10000);
+    var abi: i64 = 0;
+    while (abi < 100) { ab_push(ab2, "xy", 3); abi = abi + 1; }
+    assert_eq(ab_argc(ab2), 100, "the pointer array grows past 64");
+    assert_eq(streq(ab_arg(ab2, 99), "xy"), 1, "...and keeps every pointer");
+    assert_eq(streq(ab_arg(ab2, 0), "xy"), 1, "...the first included");
+    # GNU's `update_limit`: halve until something runs, then bisect.
+    var ab3 = ab_new(100, 1000);
+    ab_push(ab3, "c", 2);
+    ab_mark_initial(ab3);
+    assert_eq(ab_update_limit(ab3, 0, 11), 5, "E2BIG, nothing ran yet: halve");
+    assert_eq(ab_update_limit(ab3, 0, 5), 2, "halve again");
+    assert_eq(ab_update_limit(ab3, 1, 2), 3, "it ran: bisect toward the failure");
+    assert_eq(ab_update_limit(ab3, 1, 3), 4, "...and again");
+    assert_eq(ab_update_limit(ab3, 0, 4), 3, "the failure moves down");
+    assert_eq(ab_update_limit(ab3, 0, 1), 2, "never under one argument past the command");
 
     return assert_summary();
 
