@@ -3,12 +3,20 @@
 # Argument shape:
 #   printf FORMAT [ARGUMENT...]
 #
+# ⭐ EVERY ARGUMENT IS DATA, a leading `-` included — ADR 0025 (1.6.17).
+# `--help` and `--version` are options only as the SOLE argument, and
+# a first `--` is dropped, as POSIX asks of a utility with no options; nothing
+# else is an option. So `printf '%d\n' -5` prints -5, `printf -x` prints `-x`,
+# and `printf '%s|' a -- b` prints the `--` — GNU's rule, measured on 9.4 and
+# 9.11. ⛔ The shared parser used to read them: `-5` was *bad option*, exit 2,
+# and a `--` among the arguments was DELETED from the output.
+#
 # Conversions (this ship):
 #   %d / %i    signed decimal integer
-#   %u         unsigned decimal (i64 reinterpreted)
+#   %u         unsigned decimal
 #   %o         unsigned octal
 #   %x / %X    unsigned hex (lower/upper)
-#   %c         first byte of the argument
+#   %c         first byte of the argument — a NUL byte when it is empty
 #   %s         string
 #   %b         string with `\\…` escape processing (POSIX printf-specific)
 #   %%         literal `%`
@@ -20,9 +28,45 @@
 #   #          alternate form: `0x` / `0X` prefix for `%x`/`%X`, leading
 #              `0` for `%o`
 #   0          zero-pad (ignored if `-` or precision given on ints)
+#   ' and I    grouping and locale digits — nothing, in kriya's C locale
+#
+# ⛔ GNU REFUSES A FLAG ITS CONVERSION CANNOT USE, AND SO DOES THIS (1.6.17):
+# `%#d`, `%0s`, `%'x` and `%.3c` are *invalid conversion specification*, exit 1
+# — kriya printed them. The length modifiers `l L h j t z` are read and
+# ignored, as GNU's are, where kriya refused them: every integer here is 64
+# bits, so `%ld` is `%d` and `%hhd 300` is 300. `%%` and `%b` take nothing
+# between them and the `%`, so `%5%` and `%-b` fail, and a FORMAT ending
+# inside a directive (`abc%`) is invalid too — GNU's answer to what POSIX
+# leaves unspecified.
 #
 # Width / precision: literal digits (`%5d`, `%.3s`) and `*` to consume
-# the next argument as an integer (`%*d`, `%.*s`, `%*.*d`).
+# the next argument as an integer (`%*d`, `%.*s`, `%*.*d`). A negative `*`
+# width left-justifies; a negative `*` precision is no precision.
+# ⛔ A FIELD TOO LARGE FOR GNU IS NOT PRINTED (1.6.17). The digits WRAPPED —
+# `%18446744073709551617d 5` printed `5` — and below the wrap a huge width was
+# a HANG: the padding was one `write(2)` per byte. GNU refuses an integer or `%c`
+# field past INT_MAX - 2 and a `%s` width past INT_MAX, then carries on with the
+# rest of the format and exits 1; so does this, naming the directive. A `*` value
+# outside int is FATAL, as GNU's is: *invalid field width* / *invalid
+# precision*. ⚠ A `%s` precision past INT_MAX is no limit (9.11; 9.4 refuses).
+#
+# ⛔ AN ARGUMENT IS READ AS GNU READS IT, AND WHAT IS NOT A NUMBER IS SAID
+# (1.6.17). `strtoimax` for `%d %i` and `*`, `strtoumax` for `%u %o %x %X`: blanks,
+# a sign, `0x` hex or `0` octal, or `'X` / `"X` for X's byte. POSIX then asks for
+# a diagnostic, the value read so far and a non-zero exit, and output carries on:
+#   `%d 99999999999999999999`   9223372036854775807, *numerical result out of range*
+#   `%u -1`                     18446744073709551615, and no diagnostic
+#   `%d 5x`                     5, *value not completely converted*
+#   `%d abc`, `%d ''`           0, *expected a numeric value*
+# It used to WRAP the first (7766279631452241919, exit 0), print a bare `-` for
+# 2^63, print NOTHING for `%u` past 2^63 — there was no unsigned path — and take
+# all three bad ones in silence.
+# ⚠ Version split: GNU 9.4 accepts `%d ''` as 0 at exit 0; 9.11, and this, do not.
+# ⚠ A character constant is its first BYTE — GNU's answer in the C locale. In a
+#   UTF-8 locale GNU reads the whole character.
+# ⚠ ONE DELIBERATE DIVERGENCE, TOWARD POSIX: after a conversion error, `\c`
+#   still exits 1. GNU's `\c` calls `exit (EXIT_SUCCESS)` whatever came before,
+#   and POSIX says such an error *shall not exit with a zero exit status*.
 #
 # Escape sequences in FORMAT (always honored — printf processes them
 # directly, unlike most utilities where `\n` in arg is literal):
@@ -38,26 +82,38 @@
 #
 # **Argument reuse**: when args exceed format specifiers, the FORMAT
 # is reapplied from the start until args are exhausted (POSIX). When
-# args are short, missing args default to 0 / "".
+# args are short, missing args default to 0 / "". A pass that uses NO
+# argument ends it, and whatever is left is named in a warning, as GNU does.
 #
 # Deferred (each named follow-up): (roadmap 1.8.0)
 #   %e / %E / %f / %F / %g / %G / %a / %A   floating-point conversions.
 #     Cyrius's float-printing story isn't settled, and most script
 #     usage hits `%d`/`%s`. Defer until a real consumer needs floats.
 #   Positional args `%N$s`.
+#   `%q`, GNU's shell-quoted string. Refused by name, as the floats are.
 #
 # ⚠ `\xHH` hex escape LEFT this list — it shipped and is documented above with
 # the rest of the escape table. A deferral block that keeps a shipped feature
 # reads as an admission of a gap that does not exist.
 
-# Set when a directive or escape could not be honoured. printf used to WARN on
-# stderr, write the bare conversion character to stdout and exit 0 — so a script
-# using `%f` got the letter "f" where a number belonged and believed it worked.
+# Set when a directive or escape could not be honoured, and processing STOPS.
+# printf used to WARN on stderr, write the bare conversion character to stdout
+# and exit 0 — so a script using `%f` got the letter "f" where a number belonged
+# and believed it worked.
 var _pf_bad: i64 = 0;
+# Set when something failed and output CARRIES ON: an argument that was not
+# entirely a number, a field too wide to print. Exit 1 at the end.
+var _pf_failed: i64 = 0;
+# Set by `\c`: nothing more is printed.
+var _pf_stop: i64 = 0;
+
+# The arguments: argv index of the first one after FORMAT, how many, and the
+# next to consume.
+var _pf_argv0: i64 = 0;
+var _pf_nargs: i64 = 0;
+var _pf_ai: i64 = 0;
 
 var _pf_spec = 0;
-var _pf_buf  = 0;
-var _PF_BUFSZ: i64 = 4096;  # per-conversion scratch
 
 fn _pf_init_spec(): i64 {
     if (_pf_spec != 0) { return 0; }
@@ -74,17 +130,13 @@ fn printf_help_declare(): i64 {
     help_begin("printf", "Format and print arguments.",
       "printf FORMAT [ARGUMENT...]");
     help_positional(1, HELP_POS_UNBOUNDED, "FORMAT,ARGUMENT");
-    help_operands("The FORMAT is reused until the arguments are exhausted. ⚠ Floating-point conversions are not implemented and fail rather than printing the conversion letter.");  #skip-lint
-    help_exit(1, "an invalid conversion or escape was found");
+    help_operands("Every argument is data, a leading - included (ADR 0025): --help and --version are options only as the sole argument, and a first -- is dropped. The FORMAT is reused until the arguments are exhausted. ⚠ Floating-point conversions and %q are not implemented and fail rather than printing the conversion letter.");  #skip-lint
+    help_exit(1, "a conversion or escape was invalid, or an argument was not entirely a number");
     help_example("printf '%s=%d\\n' a 1");
+    help_example("printf '%d\\n' -5");
     help_example("printf '%-10s|\\n' left");
     help_example("printf '\\x41\\n'");
     return 0;
-}
-
-fn _pf_buf_get(): i64 {
-    if (_pf_buf == 0) { _pf_buf = alloc(_PF_BUFSZ); }
-    return _pf_buf;
 }
 
 # Emit one byte to stdout.
@@ -101,109 +153,151 @@ fn _pf_puts(p, n): i64 {
     return 0;
 }
 
-fn _pf_pad(c, n): i64 {
-    var b[2];
-    store8(&b, c);
-    var i: i64 = 0;
-    while (i < n) {
-        k_write( 1, &b, 1);
-        i = i + 1;
-    }
-    return 0;
+# The next argument, or 0 once they have run out.
+fn _pf_next_arg(): i64 {
+    if (_pf_ai >= _pf_nargs) { return 0; }
+    var a = kriya_arg(_pf_argv0 + _pf_ai);
+    _pf_ai = _pf_ai + 1;
+    return a;
 }
 
-# Parse a signed decimal integer from `s` (null-terminated). Returns
-# 0 on null or empty. Octal (`0` prefix), hex (`0x`/`0X` prefix), and
-# POSIX char-constant `'X'` (returns X's byte value) all supported.
-fn _pf_parse_int(s): i64 {
+# The value of digit `c` in `base`, or -1.
+fn _pf_digit(c, base): i64 {
+    var d: i64 = 0 - 1;
+    if (c >= 48) { if (c <= 57) { d = c - 48; } }
+    if (c >= 97) { if (c <= 102) { d = c - 87; } }
+    if (c >= 65) { if (c <= 70) { d = c - 55; } }
+    if (d >= base) { return 0 - 1; }
+    return d;
+}
+
+# GNU's `vstrtoimax` (`uns` = 0) or `vstrtoumax` (`uns` = 1) of an argument: its
+# value, with GNU's diagnostic and exit status 1 when it is not all number. A
+# MISSING argument (`s` = 0) is 0 and says nothing, as in GNU.
+#
+# ⚠ The magnitude is accumulated UNSIGNED, up to 2^64 - 1, whatever the
+# conversion: `strtoumax` takes all of it and negates a `-` modulo 2^64 (`%u -1`
+# is 2^64 - 1), and `strtoimax` then needs one more bit than an i64 has for
+# -2^63. Out of range, the first saturates to 2^64 - 1 and the second to the
+# i64 end its sign points at.
+fn _pf_num(s, uns): i64 {
     if (s == 0) { return 0; }
-    if (load8(s) == 0) { return 0; }
-    # `'X` or `"X` form (POSIX): use byte value of X.
-    if (load8(s) == 39) { return load8(s + 1) & 255; }
-    if (load8(s) == 34) { return load8(s + 1) & 255; }
-    var pos: i64 = 0;
-    var neg: i64 = 0;
-    if (load8(s) == 45) { neg = 1; pos = 1; }
-    else { if (load8(s) == 43) { pos = 1; } }
-    var v: i64 = 0;
-    # Detect base.
-    var base: i64 = 10;
-    if (load8(s + pos) == 48) {
-        if (load8(s + pos + 1) == 120) { base = 16; pos = pos + 2; }
-        else { if (load8(s + pos + 1) == 88) { base = 16; pos = pos + 2; }
-            else { if (load8(s + pos + 1) != 0) { base = 8; pos = pos + 1; } } }
-    }
-    while (load8(s + pos) != 0) {
-        var c = load8(s + pos);
-        var d: i64 = 0 - 1;
-        if (c >= 48) { if (c <= 57) { d = c - 48; } }
-        if (base == 16) {
-            if (c >= 97) { if (c <= 102) { d = c - 87; } }
-            if (c >= 65) { if (c <= 70)  { d = c - 55; } }
+    var c0 = load8(s);
+    var cc: i64 = 0;
+    if (c0 == 39) { cc = 1; }
+    if (c0 == 34) { cc = 1; }
+    if (cc == 1) {
+        if (load8(s + 1) != 0) {
+            if (load8(s + 2) != 0) {
+                report_note("printf", s + 2, "warning: character(s) following character constant have been ignored");  #skip-lint
+            }
+            return load8(s + 1);
         }
-        if (d < 0) { pos = pos; pos = strlen(s); }
+    }
+    var i: i64 = 0;
+    var ws: i64 = 1;
+    while (ws == 1) {
+        var c = load8(s + i);
+        var sp: i64 = 0;
+        if (c == 32) { sp = 1; }
+        if (c >= 9) { if (c <= 13) { sp = 1; } }
+        if (sp == 1) { i = i + 1; } else { ws = 0; }
+    }
+    var neg: i64 = 0;
+    if (load8(s + i) == 45) { neg = 1; i = i + 1; }
+    elif (load8(s + i) == 43) { i = i + 1; }
+    # Base 0: `0x` then a hex digit is hex, a leading `0` is octal — and is
+    # itself a digit, so `0x` alone and `08` are 0 with junk after it.
+    var base: i64 = 10;
+    if (load8(s + i) == 48) {
+        base = 8;
+        var x = load8(s + i + 1);
+        var hx: i64 = 0;
+        if (x == 120) { hx = 1; }
+        if (x == 88) { hx = 1; }
+        if (hx == 1) {
+            if (_pf_digit(load8(s + i + 2), 16) >= 0) { base = 16; i = i + 2; }
+        }
+    }
+    # 2^64 - 1 is `limit * base + last`.
+    var limit: i64 = 1844674407370955161;
+    var last: i64 = 5;
+    if (base == 16) { limit = 1152921504606846975; last = 15; }
+    if (base == 8) { limit = 2305843009213693951; last = 7; }
+    var mag: i64 = 0;
+    var nd: i64 = 0;
+    var over: i64 = 0;
+    var more: i64 = 1;
+    while (more == 1) {
+        var d = _pf_digit(load8(s + i), base);
+        if (d < 0) { more = 0; }
         else {
-            if (d >= base) { pos = strlen(s); }
-            else {
-                v = v * base + d;
-                pos = pos + 1;
+            # Read unsigned: a magnitude with the top bit set is past every limit.
+            if (mag < 0) { over = 1; }
+            elif (mag > limit) { over = 1; }
+            elif (mag == limit) { if (d > last) { over = 1; } }
+            if (over == 0) { mag = mag * base + d; }
+            nd = nd + 1;
+            i = i + 1;
+        }
+    }
+    if (nd == 0) {
+        report_note("printf", s, "expected a numeric value");
+        _pf_failed = 1;
+        return 0;
+    }
+    var v: i64 = 0;
+    if (uns == 1) {
+        if (over == 1) { v = 0 - 1; }
+        elif (neg == 1) { v = 0 - mag; }
+        else { v = mag; }
+    } else {
+        if (over == 0) {
+            if (neg == 1) {
+                # Down to -2^63, whose magnitude is i64's minimum read unsigned.
+                if (mag < 0) {
+                    if (mag != (0 - KRIYA_COUNT_MAX) - 1) { over = 1; }
+                }
+                v = 0 - mag;
+            } else {
+                if (mag < 0) { over = 1; }
+                v = mag;
             }
         }
+        if (over == 1) {
+            if (neg == 1) { v = (0 - KRIYA_COUNT_MAX) - 1; } else { v = KRIYA_COUNT_MAX; }
+        }
     }
-    if (neg == 1) { v = 0 - v; }
+    if (over == 1) {
+        errmsg_report("printf", s, 34);                  # ERANGE
+        _pf_failed = 1;
+    } elif (load8(s + i) != 0) {
+        report_note("printf", s, "value not completely converted");
+        _pf_failed = 1;
+    }
     return v;
 }
 
-# Render an integer in the given base into `buf`. Returns digit count.
-# Always positive; sign handled by caller. Uppercase for `upper == 1`.
-fn _pf_render_int_base(v, base, upper, buf): i64 {
-    if (v == 0) { store8(buf, 48); return 1; }
-    var tmp[64];
-    var n: i64 = 0;
-    var rem = v;
-    while (rem > 0) {
-        var d = rem - (rem / base) * base;
-        var c: i64 = 48;
-        if (d < 10) { c = 48 + d; }
-        else {
-            if (upper == 1) { c = 55 + d; }
-            else            { c = 87 + d; }
-        }
-        store8(&tmp + n, c);
-        rem = rem / base;
-        n = n + 1;
-    }
-    var i: i64 = 0;
-    while (i < n) {
-        store8(buf + i, load8(&tmp + n - 1 - i));
-        i = i + 1;
-    }
-    return n;
-}
-
-# Emit a signed integer with full flag/width/precision processing.
-# `left`, `plus`, `space`, `hash`, `zero` are flag booleans.
+# Emit an integer with full flag/width/precision processing. `v` is SIGNED when
+# `signed_conv` = 1 (`%d %i`) and a 64-bit unsigned pattern otherwise.
 # `width` < 0 → unspecified. `prec` < 0 → unspecified.
-# `unsigned_mode` = 1 forces non-negative interpretation (for `%u`).
 # `base` is 10/8/16. `upper` only relevant for hex.
-fn _pf_emit_int(v, base, upper, left, plus, space, hash, zero, width, prec, unsigned_mode): i64 {
+fn _pf_emit_int(v, signed_conv, base, upper, left, plus, space, hash, zero, width, prec): i64 {
     var sign_char: i64 = 0;  # 0 = none, else literal byte
-    var abs_v = v;
-    if (unsigned_mode == 0) {
-        if (base == 10) {
-            if (v < 0) {
-                sign_char = 45;  # '-'
-                abs_v = 0 - v;
-            } else {
-                if (plus == 1)  { sign_char = 43; }     # '+'
-                else { if (space == 1) { sign_char = 32; } }
-            }
+    var mag = v;
+    if (signed_conv == 1) {
+        if (v < 0) {
+            sign_char = 45;  # '-'
+            mag = 0 - v;     # i64's minimum stays itself, and reads right unsigned
+        } else {
+            if (plus == 1)  { sign_char = 43; }     # '+'
+            else { if (space == 1) { sign_char = 32; } }
         }
     }
 
     # Render digits.
-    var digits[64];
-    var dn = _pf_render_int_base(abs_v, base, upper, &digits);
+    var digits[24];
+    var dn = str_u64_digits(mag, base, upper, &digits);
 
     # Apply precision: minimum digit count = prec.
     var digit_pad_zeros: i64 = 0;
@@ -213,7 +307,7 @@ fn _pf_emit_int(v, base, upper, left, plus, space, hash, zero, width, prec, unsi
         zero = 0;
         # Special case: precision 0 + value 0 → emit nothing for the digits.
         if (prec == 0) {
-            if (abs_v == 0) {
+            if (mag == 0) {
                 dn = 0;
             }
         }
@@ -244,7 +338,7 @@ fn _pf_emit_int(v, base, upper, left, plus, space, hash, zero, width, prec, unsi
                 }
             }
         } else { if (base == 16) {
-                if (abs_v != 0) {
+                if (mag != 0) {
                     store8(&alt_buf, 48);  # '0'
                     if (upper == 1) { store8(&alt_buf + 1, 88); }
                     else            { store8(&alt_buf + 1, 120); }
@@ -270,42 +364,38 @@ fn _pf_emit_int(v, base, upper, left, plus, space, hash, zero, width, prec, unsi
         # left-justify: content then padding.
         if (sign_char != 0) { _pf_putc(sign_char); }
         if (alt_prefix_len > 0) { _pf_puts(alt_prefix, alt_prefix_len); }
-        _pf_pad(48, digit_pad_zeros);
+        k_write_fill(1, 48, digit_pad_zeros);
         if (dn > 0) { _pf_puts(&digits, dn); }
-        _pf_pad(32, pad);
+        k_write_fill(1, 32, pad);
     } else {
         if (pad_char == 48) {
             # zero-padding goes AFTER sign/prefix.
             if (sign_char != 0) { _pf_putc(sign_char); }
             if (alt_prefix_len > 0) { _pf_puts(alt_prefix, alt_prefix_len); }
-            _pf_pad(48, pad);
-            _pf_pad(48, digit_pad_zeros);
+            k_write_fill(1, 48, pad);
+            k_write_fill(1, 48, digit_pad_zeros);
             if (dn > 0) { _pf_puts(&digits, dn); }
         } else {
-            _pf_pad(32, pad);
+            k_write_fill(1, 32, pad);
             if (sign_char != 0) { _pf_putc(sign_char); }
             if (alt_prefix_len > 0) { _pf_puts(alt_prefix, alt_prefix_len); }
-            _pf_pad(48, digit_pad_zeros);
+            k_write_fill(1, 48, digit_pad_zeros);
             if (dn > 0) { _pf_puts(&digits, dn); }
         }
     }
     return 0;
 }
 
-# Emit a string with flags applied. `prec` truncates length.
-fn _pf_emit_str(s, left, width, prec): i64 {
-    var slen = 0;
-    if (s != 0) { slen = strlen(s); }
-    if (prec >= 0) { if (slen > prec) { slen = prec; } }
+# Emit `slen` bytes of `s` with flags applied — a LENGTH, not a NUL, so that
+# `%c` can print the NUL byte GNU prints for an empty argument. `prec` truncates.
+fn _pf_emit_str(s, slen, left, width, prec): i64 {
+    var n = slen;
+    if (prec >= 0) { if (n > prec) { n = prec; } }
     var pad: i64 = 0;
-    if (width > 0) { if (slen < width) { pad = width - slen; } }
-    if (left == 1) {
-        if (slen > 0) { _pf_puts(s, slen); }
-        _pf_pad(32, pad);
-    } else {
-        _pf_pad(32, pad);
-        if (slen > 0) { _pf_puts(s, slen); }
-    }
+    if (width > n) { pad = width - n; }
+    if (left == 0) { k_write_fill(1, 32, pad); }
+    if (n > 0) { _pf_puts(s, n); }
+    if (left == 1) { k_write_fill(1, 32, pad); }
     return 0;
 }
 
@@ -373,14 +463,6 @@ fn _pf_emit_escape(s, i, slen, out_len_p): i64 {
     return _pf_emit_decoded(s, i, slen, _pf_esc_mode_fmt(), out_len_p);
 }
 
-# One byte to stderr — the conversion letter inside a diagnostic.
-fn _pf_errc(c): i64 {
-    var b[8];
-    store8(&b, c);
-    k_write( 2, &b, 1);
-    return 0;
-}
-
 # e E f F g G a A — the conversions kriya does not implement, as opposed to ones
 # that are simply invalid. Worth telling apart in the diagnostic.
 fn _pf_is_float_conv(c): i64 {
@@ -395,248 +477,279 @@ fn _pf_is_float_conv(c): i64 {
     return 0;
 }
 
-fn _pf_process(fmt, arg_count): i64 {
-    var slen = strlen(fmt);
-    var args_idx: i64 = 0;
-    var stop: i64 = 0;
-    var loop_outer: i64 = 1;
+# l L h j t z — length modifiers, read past and ignored.
+fn _pf_is_length_mod(c): i64 {
+    if (c == 108) { return 1; }   # l
+    if (c == 76)  { return 1; }   # L
+    if (c == 104) { return 1; }   # h
+    if (c == 106) { return 1; }   # j
+    if (c == 116) { return 1; }   # t
+    if (c == 122) { return 1; }   # z
+    return 0;
+}
 
-    while (loop_outer == 1) {
-        var any_conversion: i64 = 0;
+# 1 if conversion `c` survives the directive's flags and precision — GNU's `ok`
+# table: `'` and `I` rule out `a A c e E o s x X`, `#` rules out `c d i s u`, `0`
+# rules out `c s`, and a precision rules out `c`.
+fn _pf_conv_ok(c, hash, zero, quote, dotted): i64 {
+    if (c == 100) { return 1 - hash; }           # d
+    if (c == 105) { return 1 - hash; }           # i
+    if (c == 117) { return 1 - hash; }           # u
+    if (c == 111) { return 1 - quote; }          # o
+    if (c == 120) { return 1 - quote; }          # x
+    if (c == 88)  { return 1 - quote; }          # X
+    if (c == 115) {                              # s
+        if (hash == 1) { return 0; }
+        if (zero == 1) { return 0; }
+        return 1 - quote;
+    }
+    if (c == 99) {                               # c
+        if (hash == 1) { return 0; }
+        if (zero == 1) { return 0; }
+        if (dotted == 1) { return 0; }
+        return 1 - quote;
+    }
+    if (_pf_is_float_conv(c) == 1) {
+        if (c == 97) { return 1 - quote; }       # a
+        if (c == 65) { return 1 - quote; }       # A
+        if (c == 101) { return 1 - quote; }      # e
+        if (c == 69) { return 1 - quote; }       # E
+        return 1;
+    }
+    return 0;
+}
+
+# The directive's text, `%` through `fmt + end` exclusive, for a diagnostic.
+fn _pf_spec_text(fmt, start, end): i64 {
+    var n = end - start;
+    var t = alloc(n + 1);
+    memcpy(t, fmt + start, n);
+    store8(t + n, 0);
+    return t;
+}
+
+# A failure that STOPS printf, named by `what`.
+fn _pf_fatal(what, message): i64 {
+    report_note("printf", what, message);
+    _pf_bad = 1;
+    return 0;
+}
+
+# Digits at `fmt + i` as a width or precision, SATURATING just past INT_MAX —
+# every larger value gets the same answer. Stored at `out_p` only when there is
+# a digit; returns the index after them.
+fn _pf_field_digits(fmt, i, out_p): i64 {
+    var v: i64 = 0;
+    var any: i64 = 0;
+    var more: i64 = 1;
+    while (more == 1) {
+        var c = load8(fmt + i);
+        if (c < 48) { more = 0; }
+        elif (c > 57) { more = 0; }
+        else {
+            v = v * 10 + (c - 48);
+            if (v > 2147483647) { v = 2147483648; }
+            any = 1;
+            i = i + 1;
+        }
+    }
+    if (any == 1) { store64(out_p, v); }
+    return i;
+}
+
+# The directive at `fmt + i`, which is the `%`: read it, check it against GNU's
+# table, take its arguments and print it. Returns the index after it.
+fn _pf_directive(fmt, i): i64 {
+    var start = i;
+    i = i + 1;
+    var c0 = load8(fmt + i);
+    # `%%` and `%b` (and GNU's `%q`) are recognised BEFORE any flag, so nothing
+    # may stand between them and the `%`: `%5%` and `%-b` fail the table below.
+    if (c0 == 37) { _pf_putc(37); return i + 1; }
+    if (c0 == 98) {
+        if (_pf_emit_b(_pf_next_arg()) == 1) { _pf_stop = 1; }
+        return i + 1;
+    }
+    if (c0 == 113) {
+        _pf_fatal("%q", "shell-quoting conversion is not implemented");
+        return i + 1;
+    }
+    var left: i64 = 0;
+    var plus: i64 = 0;
+    var space: i64 = 0;
+    var hash: i64 = 0;
+    var zero: i64 = 0;
+    var quote: i64 = 0;
+    var scanning: i64 = 1;
+    while (scanning == 1) {
+        var f = load8(fmt + i);
+        if (f == 45) { left = 1; }
+        elif (f == 43) { plus = 1; }
+        elif (f == 32) { space = 1; }
+        elif (f == 35) { hash = 1; }
+        elif (f == 48) { zero = 1; }
+        elif (f == 39) { quote = 1; }
+        elif (f == 73) { quote = 1; }
+        else { scanning = 0; }
+        if (scanning == 1) { i = i + 1; }
+    }
+    # Width. A `*` value outside int is fatal here; one too large to PRINT is
+    # decided below, once the conversion is known. `wtext` names a `*` value.
+    var width: i64 = 0 - 1;
+    var wtext: i64 = 0;
+    if (load8(fmt + i) == 42) {
+        i = i + 1;
+        width = 0;
+        var wa = _pf_next_arg();
+        if (wa != 0) {
+            var wv = _pf_num(wa, 0);
+            if (wv > 2147483647) { _pf_fatal(wa, "invalid field width"); return i; }
+            if (wv < (0 - 2147483647) - 1) { _pf_fatal(wa, "invalid field width"); return i; }
+            wtext = wa;
+            # INT_MIN is inside the range GNU checks, and its magnitude is not.
+            if (wv < 0) { left = 1; width = 0 - wv; } else { width = wv; }
+        }
+    } else {
+        i = _pf_field_digits(fmt, i, &width);
+    }
+    # Precision, the same way.
+    var prec: i64 = 0 - 1;
+    var dotted: i64 = 0;
+    var ptext: i64 = 0;
+    if (load8(fmt + i) == 46) {
+        i = i + 1;
+        dotted = 1;
+        if (load8(fmt + i) == 42) {
+            i = i + 1;
+            prec = 0;
+            var pa = _pf_next_arg();
+            if (pa != 0) {
+                var pv = _pf_num(pa, 0);
+                if (pv > 2147483647) { _pf_fatal(pa, "invalid precision"); return i; }
+                ptext = pa;
+                if (pv < 0) { prec = 0 - 1; } else { prec = pv; }
+            }
+        } else {
+            prec = 0;
+            i = _pf_field_digits(fmt, i, &prec);
+        }
+    }
+    var lm: i64 = 1;
+    while (lm == 1) {
+        if (_pf_is_length_mod(load8(fmt + i)) == 1) { i = i + 1; } else { lm = 0; }
+    }
+    var conv = load8(fmt + i);
+    var end = i;
+    if (conv != 0) { end = i + 1; }
+    if (_pf_conv_ok(conv, hash, zero, quote, dotted) == 0) {
+        # ⛔ NOT A WARNING, AND NOTHING GOES TO STDOUT. This used to write a
+        # warning, emit the bare conversion letter (dropping the `%`) and exit 0
+        # — so `printf '%f' 1.5` produced the text "f" and reported success. GNU
+        # exits 1 on an invalid conversion and prints nothing for it.
+        _pf_fatal(_pf_spec_text(fmt, start, end), "invalid conversion specification");
+        return end;
+    }
+    if (_pf_is_float_conv(conv) == 1) {
+        # A named kriya gap, not a user typo, so it gets its own message.
+        _pf_fatal(_pf_spec_text(fmt, start, end), "floating-point conversions are not implemented");
+        return end;
+    }
+    i = end;
+    var arg = _pf_next_arg();
+    var uns: i64 = 1;
+    var numeric: i64 = 1;
+    if (conv == 100) { uns = 0; }
+    if (conv == 105) { uns = 0; }
+    if (conv == 99) { numeric = 0; }
+    if (conv == 115) { numeric = 0; }
+    var v: i64 = 0;
+    # Read even when the field is not printed: a bad argument is still reported.
+    if (numeric == 1) { v = _pf_num(arg, uns); }
+    # ⚠ THE LIMITS ARE GNU printf's, MEASURED, AND NOT INT_MAX FOR EVERY
+    # CONVERSION: an integer or `%c` field is refused past INT_MAX - 2
+    # (`%2147483645d` prints two gigabytes, `%2147483646d` nothing), while `%s`
+    # takes a width up to INT_MAX, and a precision past it means no limit at all.
+    # ⚠ That last one is 9.11's; 9.4 refuses it. GNU `stat` differs again.
+    var lim: i64 = 2147483645;
+    if (conv == 115) {
+        lim = 2147483647;
+        if (prec > 2147483647) { prec = 0 - 1; }
+    }
+    if (width > lim) {
+        if (wtext == 0) { wtext = _pf_spec_text(fmt, start, end); }
+        report_note("printf", wtext, "invalid field width");
+        _pf_failed = 1;
+        return i;
+    }
+    if (prec > lim) {
+        if (ptext == 0) { ptext = _pf_spec_text(fmt, start, end); }
+        report_note("printf", ptext, "invalid precision");
+        _pf_failed = 1;
+        return i;
+    }
+    if (conv == 99) {
+        var cb[8];
+        store8(&cb, 0);
+        if (arg != 0) { store8(&cb, load8(arg)); }
+        _pf_emit_str(&cb, 1, left, width, 0 - 1);
+        return i;
+    }
+    if (conv == 115) {
+        var sl: i64 = 0;
+        if (arg != 0) { sl = strlen(arg); }
+        _pf_emit_str(arg, sl, left, width, prec);
+        return i;
+    }
+    var base: i64 = 10;
+    var upper: i64 = 0;
+    if (conv == 111) { base = 8; }
+    if (conv == 120) { base = 16; }
+    if (conv == 88) { base = 16; upper = 1; }
+    _pf_emit_int(v, 1 - uns, base, upper, left, plus, space, hash, zero, width, prec);
+    return i;
+}
+
+fn _pf_process(fmt): i64 {
+    var slen = strlen(fmt);
+    var go: i64 = 1;
+    while (go == 1) {
+        var used_before = _pf_ai;
         var i: i64 = 0;
         while (i < slen) {
             # ⚠ A bad escape or directive STOPS processing, matching GNU: output
             # already written stays (`printf 'abc\xZdef'` emits "abc"), but
             # nothing after the error is emitted. Without this the offending
             # bytes were printed as literals — `\xZ` left a stray `Z` on stdout.
-            if (stop == 1) { i = slen; }
+            if (_pf_stop == 1) { i = slen; }
             elif (_pf_bad == 1) { i = slen; }
             else {
                 var b = load8(fmt + i);
                 if (b == 92) {
                     # ⚠ `\c` cancels the rest of the output HERE too, not just in
-                    # `%b` — GNU exits 0 on the spot, argument reuse included.
+                    # `%b` — GNU exits on the spot, argument reuse included.
                     var elen_box[8];
-                    if (_pf_emit_escape(fmt, i, slen, &elen_box) == 1) { stop = 1; }
+                    if (_pf_emit_escape(fmt, i, slen, &elen_box) == 1) { _pf_stop = 1; }
                     i = i + load64(&elen_box);
+                } elif (b == 37) {
+                    i = _pf_directive(fmt, i);
                 } else {
-                    if (b == 37) {
-                        i = i + 1;
-                        # Flags.
-                        var left: i64 = 0;
-                        var plus: i64 = 0;
-                        var space: i64 = 0;
-                        var hash: i64 = 0;
-                        var zero: i64 = 0;
-                        var done_flags: i64 = 0;
-                        while (done_flags == 0) {
-                            var f = load8(fmt + i);
-                            if (f == 45)      { left = 1; i = i + 1; }
-                            else { if (f == 43) { plus = 1; i = i + 1; }
-                                else { if (f == 32) { space = 1; i = i + 1; }
-                                    else { if (f == 35) { hash = 1; i = i + 1; }
-                                        else { if (f == 48) { zero = 1; i = i + 1; }
-                                            else { done_flags = 1; } } } } }
-                        }
-                        # Width.
-                        var width: i64 = 0 - 1;
-                        if (load8(fmt + i) == 42) {
-                            i = i + 1;
-                            var warg = "0";
-                            if (args_idx < arg_count) {
-                                warg = flags_positional(_pf_spec, args_idx + 1);
-                                args_idx = args_idx + 1;
-                            }
-                            width = _pf_parse_int(warg);
-                            if (width < 0) {
-                                left = 1;
-                                width = 0 - width;
-                            }
-                        } else {
-                            var wv: i64 = 0;
-                            var wany: i64 = 0;
-                            var wdone: i64 = 0;
-                            while (wdone == 0) {
-                                var wc = load8(fmt + i);
-                                if (wc < 48) { wdone = 1; }
-                                else { if (wc > 57) { wdone = 1; }
-                                    else {
-                                        wv = wv * 10 + (wc - 48);
-                                        wany = 1;
-                                        i = i + 1;
-                                    } }
-                            }
-                            if (wany == 1) { width = wv; }
-                        }
-                        # Precision.
-                        var prec: i64 = 0 - 1;
-                        if (load8(fmt + i) == 46) {
-                            i = i + 1;
-                            if (load8(fmt + i) == 42) {
-                                i = i + 1;
-                                var parg = "0";
-                                if (args_idx < arg_count) {
-                                    parg = flags_positional(_pf_spec, args_idx + 1);
-                                    args_idx = args_idx + 1;
-                                }
-                                prec = _pf_parse_int(parg);
-                                if (prec < 0) { prec = 0 - 1; }
-                            } else {
-                                var pv: i64 = 0;
-                                var pdone: i64 = 0;
-                                var pany: i64 = 0;
-                                while (pdone == 0) {
-                                    var pc = load8(fmt + i);
-                                    if (pc < 48) { pdone = 1; }
-                                    else { if (pc > 57) { pdone = 1; }
-                                        else {
-                                            pv = pv * 10 + (pc - 48);
-                                            pany = 1;
-                                            i = i + 1;
-                                        } }
-                                }
-                                prec = pv;
-                                if (pany == 0) { prec = 0; }
-                            }
-                        }
-                        # Conversion.
-                        var conv = load8(fmt + i);
-                        if (conv == 0) {
-                            # Trailing '%' — emit literally per POSIX.
-                            _pf_putc(37);
-                        } else {
-                            i = i + 1;
-                            if (conv == 37) {
-                                _pf_putc(37);
-                            } else { if (conv == 99) {
-                                    # %c: first byte of next arg, padded.
-                                    var s = "";
-                                    if (args_idx < arg_count) {
-                                        s = flags_positional(_pf_spec, args_idx + 1);
-                                        args_idx = args_idx + 1;
-                                    }
-                                    var ch: i64 = 0;
-                                    if (s != 0) { if (load8(s) != 0) { ch = load8(s); } }
-                                    var ch_buf[2];
-                                    store8(&ch_buf, ch);
-                                    _pf_emit_str(&ch_buf, left, width, 1);
-                                    any_conversion = 1;
-                                } else { if (conv == 115) {
-                                        var s: i64 = 0;
-                                        if (args_idx < arg_count) {
-                                            s = flags_positional(_pf_spec, args_idx + 1);
-                                            args_idx = args_idx + 1;
-                                        }
-                                        _pf_emit_str(s, left, width, prec);
-                                        any_conversion = 1;
-                                    } else { if (conv == 98) {
-                                            var s: i64 = 0;
-                                            if (args_idx < arg_count) {
-                                                s = flags_positional(_pf_spec, args_idx + 1);
-                                                args_idx = args_idx + 1;
-                                            }
-                                            if (_pf_emit_b(s) == 1) { stop = 1; }
-                                            any_conversion = 1;
-                                        } else { if (conv == 100) {
-                                                var s = "0";
-                                                if (args_idx < arg_count) {
-                                                    s = flags_positional(_pf_spec, args_idx + 1);
-                                                    args_idx = args_idx + 1;
-                                                }
-                                                var v = _pf_parse_int(s);
-                                                _pf_emit_int(v, 10, 0, left, plus, space, hash, zero, width, prec, 0);
-                                                any_conversion = 1;
-                                            } else { if (conv == 105) {
-                                                    var s = "0";
-                                                    if (args_idx < arg_count) {
-                                                        s = flags_positional(_pf_spec, args_idx + 1);
-                                                        args_idx = args_idx + 1;
-                                                    }
-                                                    var v = _pf_parse_int(s);
-                                                    _pf_emit_int(v,
-                                                      10, 0, left, plus, space, hash, zero, width, prec, 0);
-                                                    any_conversion = 1;
-                                                } else { if (conv == 117) {
-                                                        var s = "0";
-                                                        if (args_idx < arg_count) {
-                                                            s = flags_positional(_pf_spec, args_idx + 1);
-                                                            args_idx = args_idx + 1;
-                                                        }
-                                                        var v = _pf_parse_int(s);
-                                                        _pf_emit_int(v, 10, 0, left, plus, space, hash, zero, width,
-                                                          prec, 1);
-                                                        any_conversion = 1;
-                                                    } else { if (conv == 111) {
-                                                            var s = "0";
-                                                            if (args_idx < arg_count) {
-                                                                s = flags_positional(_pf_spec, args_idx + 1);
-                                                                args_idx = args_idx + 1;
-                                                            }
-                                                            var v = _pf_parse_int(s);
-                                                            _pf_emit_int(v, 8, 0, left, plus, space, hash, zero, width,
-                                                              prec, 1);
-                                                            any_conversion = 1;
-                                                        } else { if (conv == 120) {
-                                                                var s = "0";
-                                                                if (args_idx < arg_count) {
-                                                                    s = flags_positional(_pf_spec, args_idx + 1);
-                                                                    args_idx = args_idx + 1;
-                                                                }
-                                                                var v = _pf_parse_int(s);
-                                                                _pf_emit_int(v, 16, 0, left, plus, space, hash, zero,
-                                                                  width, prec, 1);
-                                                                any_conversion = 1;
-                                                            } else { if (conv == 88) {
-                                                                    var s = "0";
-                                                                    if (args_idx < arg_count) {
-                                                                        s = flags_positional(_pf_spec, args_idx + 1);
-                                                                        args_idx = args_idx + 1;
-                                                                    }
-                                                                    var v = _pf_parse_int(s);
-                                                                    _pf_emit_int(v, 16, 1, left, plus, space, hash,
-                                                                      zero, width, prec, 1);
-                                                                    any_conversion = 1;
-                                                                } else {
-                                                                    # # ⛔ NOT A WARNING, AND NOTHING GOES TO STDOUT.
-                                                                    # This
-                                                                    # used to
-                                                                    # write a warning to stderr, emit the bare
-                                                                    # conversion letter
-                                                                    # to stdout (dropping the `%`) and exit 0 — so
-                                                                    # `printf '%f'
-                                                                    # 1.5` produced the text "f" and reported success.
-                                                                    # GNU exits 1
-                                                                    # on an invalid conversion and prints nothing.
-                                                                    # The float conversions get their own message: they
-                                                                    # are a
-                                                                    # named kriya gap, not a user typo.
-                                                                    _pf_bad = 1;
-                                                                    if (_pf_is_float_conv(conv) == 1) {
-                                                                        k_write( 2, "kriya printf: %", 15);
-                                                                        _pf_errc(conv);
-                                                                        k_write( 2, ": floating-point conversions are not implemented\n", 49);  #skip-lint
-                                                                    } else {
-                                                                        k_write( 2, "kriya printf: %", 15);
-                                                                        _pf_errc(conv);
-                                                                        k_write(2,
-                                                                          ": invalid conversion specification\n", 35);
-                                                                    }
-                                                                } } } } } } } } } }
-                        }
-                    } else {
-                        _pf_putc(b);
-                        i = i + 1;
-                    }
+                    _pf_putc(b);
+                    i = i + 1;
                 }
             }
         }
-        # End-of-format pass.
-        if (_pf_bad == 1) { loop_outer = 0; }
-        if (stop == 1) { loop_outer = 0; }
-        else {
-            if (any_conversion == 0) { loop_outer = 0; }
-            else {
-                if (args_idx >= arg_count) { loop_outer = 0; }
+        # GNU reapplies the FORMAT while a pass uses an argument and some remain.
+        if (_pf_bad == 1) { go = 0; }
+        elif (_pf_stop == 1) { go = 0; }
+        elif (_pf_ai == used_before) { go = 0; }
+        elif (_pf_ai >= _pf_nargs) { go = 0; }
+    }
+    # A pass that used no argument left the rest unused; GNU names the first.
+    if (_pf_bad == 0) {
+        if (_pf_stop == 0) {
+            if (_pf_ai < _pf_nargs) {
+                report_note("printf", kriya_arg(_pf_argv0 + _pf_ai),
+                  "warning: ignoring excess arguments, starting with this one");
             }
         }
     }
@@ -645,26 +758,27 @@ fn _pf_process(fmt, arg_count): i64 {
 
 fn cmd_printf(start: i64): i64 {
     _pf_init_spec();
-    if (kriya_args_parse(_pf_spec, start) != 0) {
-        k_write( 2, "kriya printf: error: bad option (see ADR 0002 for accepted syntax)\n", 67);
-        return EXIT_USAGE;
+    # ⛔ NOT `kriya_args_parse` (ADR 0025): printf has no options for a `-5` or a
+    # `--` to be, so nothing after the utility name is one — except `--help` and
+    # `--version` ALONE, and a leading `--`, dropped as POSIX XCU 1.4 asks.
+    help_if_sole(_pf_spec, start);
+    var n = kriya_argv_count();
+    var first = start;
+    if (first < n) {
+        if (streq(kriya_arg(first), "--") == 1) { first = first + 1; }
     }
-
-    var npos = flags_positional_count(_pf_spec);
-    if (npos < 1) {
+    if (first >= n) {
         k_write( 2, "kriya printf: error: missing FORMAT\n", 36);
         return EXIT_USAGE;
     }
 
-    var fmt = flags_positional(_pf_spec, 0);
-
-    # ⚠ FORMAT is positional 0 and is NOT an argument. `_pf_process` takes the
-    # argument COUNT, not the positional count, and reaches the pool through
-    # `flags_positional(_pf_spec, args_idx + 1)` — the `+ 1` at each of its call
-    # sites is what skips FORMAT, so args_idx stays a plain 0-based argument
-    # index and the exhaustion test `args_idx >= arg_count` needs no offset.
-    var arg_count = npos - 1;
-    _pf_process(fmt, arg_count);
+    # ⚠ FORMAT is NOT an argument: the arguments start one past it, and
+    # `_pf_ai` stays a plain 0-based argument index.
+    _pf_argv0 = first + 1;
+    _pf_nargs = n - first - 1;
+    _pf_ai = 0;
+    _pf_process(kriya_arg(first));
     if (_pf_bad == 1) { return EXIT_FAILURE; }
+    if (_pf_failed == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
 }

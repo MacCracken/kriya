@@ -1,4 +1,4 @@
-# str.cyr — C-string backslash-escape decoding, shared.
+# str.cyr — C-string backslash-escape decoding, and unsigned digits, shared.
 #
 # ⭐ LIFTED OUT OF `src/cmd/printf.cyr` so printf's FORMAT path, printf's `%b`
 # and (next) `echo -e` decode escapes through ONE table. printf carried two
@@ -190,4 +190,42 @@ fn str_escape_decode(s, i, slen, mode, out): i64 {
     store64(out + STR_ESC_O_BYTE, nx);
     store64(out + STR_ESC_O_LEN, 2);
     return STR_ESC_LITERAL;
+}
+
+# --- unsigned digits ---
+
+# `v` as UNSIGNED digits in `base` (8, 10 or 16) into `buf`, which must hold 22
+# bytes; returns how many. `upper` = 1 for `A`-`F`.
+#
+# ⛔ AN i64 WITH THE TOP BIT SET IS 2^63 TO 2^64 - 1 HERE, never a negative. The
+# three copies this replaces looped `while (rem > 0)`, so `printf %u
+# 18446744073709551615` printed NOTHING, and a caller that negated a negative
+# first still lost i64's minimum, whose magnitude negates to itself (1.6.17).
+# ⚠ `>>` is LOGICAL in Cyrius; base 10 halves first so that the division is of
+# a non-negative number — `(v >> 1) / 5` is `v / 10` read unsigned.
+fn str_u64_digits(v, base, upper, buf): i64 {
+    if (v == 0) { store8(buf, 48); return 1; }
+    var tmp[24];
+    var n: i64 = 0;
+    var rem = v;
+    while (rem != 0) {
+        var q: i64 = 0;
+        if (base == 16) { q = rem >> 4; }
+        elif (base == 8) { q = rem >> 3; }
+        else { q = (rem >> 1) / 5; }
+        var d = rem - q * base;
+        var c = 48 + d;
+        if (d > 9) {
+            if (upper == 1) { c = 55 + d; } else { c = 87 + d; }
+        }
+        store8(&tmp + n, c);
+        rem = q;
+        n = n + 1;
+    }
+    var i: i64 = 0;
+    while (i < n) {
+        store8(buf + i, load8(&tmp + n - 1 - i));
+        i = i + 1;
+    }
+    return n;
 }

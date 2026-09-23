@@ -349,7 +349,7 @@ fn _ln_count_target_dir(start: i64): i64 {
     var seen: i64 = 0;
     var no_more: i64 = 0;
     while (i < n) {
-        var tok = argv(i);
+        var tok = kriya_arg(i);
         var tlen = strlen(tok);
         if (no_more == 0) {
             if (tlen >= 2) {

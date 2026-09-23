@@ -109,7 +109,7 @@ fn _echo_emit_escaped(arg): i64 {
 fn cmd_echo(start: i64): i64 {
     _echo_init_spec();
     echo_help_declare();
-    help_if_requested(_echo_spec, start);
+    help_if_sole(_echo_spec, start);
     var n = kriya_argv_count();
     var i = start;
     var omit_newline: i64 = 0;
@@ -118,7 +118,7 @@ fn cmd_echo(start: i64): i64 {
 
     while (scanning == 1) {
         if (i >= n) { scanning = 0; continue; }
-        var tok = argv(i);
+        var tok = kriya_arg(i);
         if (_echo_is_cluster(tok) == 0) { scanning = 0; continue; }
         # ⚠ Applying the letters left to right IS the last-one-wins rule for
         # `-e` / `-E`, and it holds across cluster boundaries as well as
@@ -138,7 +138,7 @@ fn cmd_echo(start: i64): i64 {
     var stopped: i64 = 0;
     while (i < n) {
         if (stopped == 1) { i = n; continue; }
-        var arg = argv(i);
+        var arg = kriya_arg(i);
         if (i > first) { k_write( 1, " ", 1); }
         if (interpret == 1) {
             stopped = _echo_emit_escaped(arg);

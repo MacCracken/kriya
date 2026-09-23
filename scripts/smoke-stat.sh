@@ -337,6 +337,47 @@ esac
 # ⚠ An UNKNOWN directive is still `?` at exit 0, as GNU's is.
 expect_eq "stat %@ stays ? at exit 0" "0|?" "$(r=0; o=$("$BIN" stat -c %@ c16f) || r=$?; echo "$r|$o")"
 
+# --- 1.6.17: a width or precision past INT_MAX ------------------------------
+#
+# ⛔ THEY WRAPPED: `%18446744073709551617n` was a width of 1 and printed the name
+# at exit 0 — and below the wrap a large one HUNG, the padding one `write(2)` per
+# byte. GNU hands the field to glibc, which refuses one past INT_MAX, and prints
+# NOTHING in its place, the rest of the format going on. ⚠ And GNU EXITS 0: it
+# never checks. kriya prints GNU's bytes and exits 1, deliberately — a field
+# that was asked for and not printed is a failure — so the bytes are compared
+# and kriya's exit status is asserted.
+st17() {   # st17 <label> <stat args...>
+    _l=$1; shift
+    _grc=0; (cd d612 && stat "$@") > st17_g.out 2>/dev/null || _grc=$?
+    _krc=0; (cd d612 && timeout 10 "$BIN" stat "$@") > st17_k.out 2>/dev/null || _krc=$?
+    if cmp -s st17_g.out st17_k.out && [ "$_grc:$_krc" = "0:1" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        printf 'FAIL stat %s: GNU exit %s, kriya exit %s (want 0, 1), bytes %s\n' "$_l" \
+            "$_grc" "$_krc" "$(cmp -s st17_g.out st17_k.out && echo same || echo differ)" >&2
+    fi
+}
+for _f in '%18446744073709551617n' '%2147483648n' 'a%2147483648nb' '%9223372036854775807s' \
+          '%.2147483648n' '%.18446744073709551617s' '%2147483648s' '%-2147483648a|' \
+          '%2147483648Y' '%2147483648.0Y' '%2147483648X|%n' '%.2147483648i|%i'; do
+    st17 "-c '$_f'" -c "$_f" f
+done
+st17 "--printf, two files" --printf '%2147483648n|%n\n' f f
+# ⚠ `timeout`: a regression here pads two gigabytes a byte at a time.
+err=$(cd d612 && timeout 10 "$BIN" stat -c '%2147483648n' f 2>&1 >/dev/null || true)
+expect_eq "the field is named" "kriya stat: %2147483648n: invalid field width" "$err"
+err=$(cd d612 && timeout 10 "$BIN" stat -c '%.2147483648n' f 2>&1 >/dev/null || true)
+expect_eq "the precision is named" "kriya stat: %.2147483648n: invalid precision" "$err"
+# ⚠ Up to INT_MAX a field prints, a buffer at a time: 100,000,000 columns took
+# 50 s. Each is summed on both sides rather than held.
+for _f in '%100000000n|' '%-100000000n|' '%.100000000i|' '%100000000Y|' \
+          '%-100000000.3Y|' '%100000000.3Y|' '%.100000000Y|'; do
+    expect_eq "stat -c '$_f', fast" \
+        "$(cd d612 && stat -c "$_f" f | cksum)" \
+        "$(cd d612 && timeout 10 "$BIN" stat -c "$_f" f | cksum)"
+done
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

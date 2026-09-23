@@ -129,6 +129,14 @@ expect_exit "echo -e"      0 "$BIN" echo -e 'a\tb'
 expect_exit "echo \\c"     0 "$BIN" echo -e 'a\cb'
 expect_exit "echo -x"      0 "$BIN" echo -x
 
+# --- 100,000 arguments (1.6.17) ---
+# ⛔ QUADRATIC IN THE ARGUMENT COUNT until 1.6.17: each argument was read with
+# the stdlib's `argv(i)`, which walks the whole command line from its start on
+# every call. 20,000 arguments took 2.8 s; these would take over a minute.
+# `timeout` turns a regression into a failure rather than a slow pass.
+n=$(timeout 10 "$BIN" echo $(seq 100000) | wc -w)
+expect_eq "echo over 100,000 arguments" "100000" "$n"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

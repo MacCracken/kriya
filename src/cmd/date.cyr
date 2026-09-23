@@ -419,7 +419,7 @@ fn cmd_date(start: i64): i64 {
     var fmt: i64 = 0;
     var i = start;
     while (i < n_argv) {
-        var tok = argv(i);
+        var tok = kriya_arg(i);
         var tlen = strlen(tok);
         if (tlen >= 1) {
             if (load8(tok) == 43) {              # `+`

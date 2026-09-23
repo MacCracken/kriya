@@ -223,6 +223,37 @@ fn k_write(fd, buf, n): i64 {
     #endif
 }
 
+# `count` copies of the byte `ch` on `fd`, a buffer at a time. Returns `count`,
+# the bytes written before a short write, or the negative errno of a failed one.
+#
+# ⛔ THREE PADDERS WROTE ONE BYTE PER SYSTEM CALL: `nl`'s (buffered at 1.6.16),
+# `printf`'s and `stat`'s. `printf %100000000d 5` took 50 s against GNU's 31 ms,
+# and a width near 2^63 never finished at all (1.6.17).
+# ⚠ It stops at the first failed write: a two-gigabyte field on a closed pipe
+# must not turn into half a million failing system calls.
+var _k_fill_buf = 0;
+var _k_fill_ch  = 256;     # the byte the buffer holds; 256 = none yet
+
+fn k_write_fill(fd, ch, count): i64 {
+    if (count <= 0) { return 0; }
+    if (_k_fill_buf == 0) { _k_fill_buf = alloc(4096); }
+    if (_k_fill_ch != ch) {
+        var k: i64 = 0;
+        while (k < 4096) { store8(_k_fill_buf + k, ch); k = k + 1; }
+        _k_fill_ch = ch;
+    }
+    var left = count;
+    while (left > 0) {
+        var chunk = left;
+        if (chunk > 4096) { chunk = 4096; }
+        var r = k_write(fd, _k_fill_buf, chunk);
+        if (r < 0) { return r; }
+        if (r < chunk) { return count - left + r; }
+        left = left - chunk;
+    }
+    return count;
+}
+
 fn k_close(fd): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return syscall(SYS_CLOSE, fd);                 # agnos #6

@@ -80,7 +80,7 @@ fn cmd_sleep(start: i64): i64 {
     var failed: i64 = 0;
     var saturated: i64 = 0;
     while (i < n) {
-        var tok = argv(i);
+        var tok = kriya_arg(i);
         var consumed: i64 = 0;
         # ⚠ `--` ENDS THE OPTIONS, and until 1.6.3 it was counted as an operand:
         # `kriya sleep -- 0.1` reported "too many operands" for a command line

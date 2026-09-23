@@ -2,7 +2,7 @@
 # Args ignored per POSIX.
 fn cmd_false(start: i64): i64 {
     false_help_declare();
-    help_if_requested(0, start);
+    help_if_sole(0, start);
     return EXIT_FAILURE;
 }
 

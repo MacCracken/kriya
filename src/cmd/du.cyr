@@ -528,7 +528,7 @@ fn cmd_du(start: i64): i64 {
 
     var i = start;
     while (i < n_argv) {
-        var tok = argv(i);
+        var tok = kriya_arg(i);
         var tlen = strlen(tok);
         if (no_more_opts == 0) {
             if (tlen >= 2) {
@@ -566,7 +566,7 @@ fn cmd_du(start: i64): i64 {
                                         k_write( 2, "kriya du: error: --max-depth requires an argument\n", 50);
                                         return EXIT_USAGE;
                                     }
-                                    darg = argv(i);
+                                    darg = kriya_arg(i);
                                 }
                                 var dval = _du_depth_value(darg);
                                 if (dval < 0) { return EXIT_USAGE; }
@@ -646,7 +646,7 @@ fn cmd_du(start: i64): i64 {
                                                                                 k_write( 2, "kriya du: error: -d requires an argument\n", 41);  #skip-lint
                                                                                 return EXIT_USAGE;
                                                                             }
-                                                                            sarg = argv(i + 1);
+                                                                            sarg = kriya_arg(i + 1);
                                                                             consumed_next = 1;
                                                                         }
                                                                         var dval = _du_depth_value(sarg);

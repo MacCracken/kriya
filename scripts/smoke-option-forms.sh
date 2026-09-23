@@ -201,6 +201,20 @@ case "$err" in
 esac
 expect_exit "tail --follow=bogus refused"   2 "$BIN" tail --follow=bogus nums
 
+# --- the argument table is built in one pass (1.6.17) ------------------
+# ⛔ It was QUADRATIC, for every utility: one stdlib `argv(i)` per argument, each
+# a walk from the first byte of the command line. `rm -f` over 20,000 missing
+# names took 1.45 s where GNU's takes 73 ms, and `true` 1.4 s. `timeout` makes a
+# regression fail here instead of passing slowly.
+mkdir -p many && cd many
+rc=0; timeout 10 "$BIN" true $(seq 100000) || rc=$?
+expect_eq "true over 100,000 arguments" "0" "$rc"
+rc=0; timeout 10 "$BIN" rm -f $(seq 100000) || rc=$?
+expect_eq "rm -f over 100,000 missing operands" "0" "$rc"
+n=$(timeout 10 "$BIN" basename -a $(seq 100000) | wc -l)
+expect_eq "basename -a over 100,000 operands" "100000" "$n"
+cd ..
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

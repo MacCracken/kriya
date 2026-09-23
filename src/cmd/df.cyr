@@ -598,7 +598,7 @@ fn cmd_df(start: i64): i64 {
     var n_operands: i64 = 0;
     var i = start;
     while (i < n_argv) {
-        var tok = argv(i);
+        var tok = kriya_arg(i);
         var tlen = strlen(tok);
         if (tlen >= 2) {
             if (load8(tok) == 45) {

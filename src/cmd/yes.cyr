@@ -20,7 +20,7 @@ fn cmd_yes(start: i64): i64 {
     }
     var i = start;
     while (i < n) {
-        var arg = argv(i);
+        var arg = kriya_arg(i);
         var alen = strlen(arg);
         if (blen + alen + 1 < 8192) {
             memcpy(buf + blen, arg, alen);

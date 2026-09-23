@@ -47,7 +47,7 @@ POSIX gives a floor: short flags, `--` terminator, exit 2 on usage error. GNU ad
 | Long with value (separate) | `--count 10` | |
 | Long with value (attached) | `--count=10` | **Canonical agent form.** |
 | Positional terminator | `--` | Everything after is positional, even `-x`. |
-| Negative-number positional | `cmd -- -5` | Use the terminator. Raw `-5` is rejected as an unknown short flag. |
+| Negative-number positional | `cmd -- -5` | Use the terminator. Raw `-5` is rejected as an unknown short flag. ⚠ Two exemptions, each owning its reason: `seq`'s grammar takes a negative operand, and `printf` has no options at all ([ADR 0025](0025-printf-takes-every-argument-as-data.md)). |
 
 ### Help and capability discovery
 

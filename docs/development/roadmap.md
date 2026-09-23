@@ -13,7 +13,7 @@
 
 | Section | Answers | Use it when |
 |---|---|---|
-| **Arcs** (1.6.x → 1.9.x) | *What ships next?* | Picking up work |
+| **Arcs** (1.7.x → 1.9.x) | *What ships next?* | Picking up work |
 | **Non-goals** | *Why will this never ship?* | Before re-adding something that looks missing |
 | **Gated** | *Why isn't this moving?* | Asking why an item is not in an arc |
 | **Standing** | *What must I re-check every time?* | Bumping the toolchain pin |
@@ -38,47 +38,14 @@ watchlist in [`lessons.md`](lessons.md). The rest are shipped or dissolved into 
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.6.x** | GNU-parity leftovers and cleanup | — | **1.6.17** — `printf` and `stat` numbers |
 | **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | ARG_MAX argv chunking | **1.7.0** — batched exec |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.8.0** — floats |
 | **1.9.x** | Performance | niyama regex speed (upstream) | **1.9.0** — `wc -c` fast path |
 
 No arc depends on another; they can be resequenced by consumer demand, and the M10 boot-burn
-(§ Gated) is the signal most likely to do it. ⚠ **1.6.x is repair** — small, measured against GNU,
-test-first. **1.7.x onward is new capability**, a different kind of risk: it changes what kriya
-*does*, so expect an ADR and GNU-comparison work per item.
-
----
-
-## 1.6.x — GNU-parity leftovers and cleanup
-
-What the closed arcs and the release audits left open. One release per entry; every item was
-measured against GNU when it was filed and re-confirmed open at 1.6.11.
-
-- **1.6.17 — `printf` and `stat` numbers.** Measured at 1.6.16, which fixed the same defect —
-  a decimal parser that wraps — everywhere else, and left these two because their number handling
-  is a layer of its own:
-  - ⛔ **A width or precision wraps past 2^64**: `printf %18446744073709551617d 5` prints `5`, and
-    `stat -c %18446744073709551617n f` prints `f`. GNU fails both (glibc refuses a field past
-    `INT_MAX`; `printf`'s `*` form says *invalid field width*). ⚠ Below the wrap it is a hang, not
-    an answer: `printf %9223372036854775807d 5` never finishes, because `_pf_putc`, `_pf_pad` and
-    `stat`'s `_st_pad` write ONE BYTE PER SYSTEM CALL — a width of 100,000,000 takes 50 s against
-    GNU's 31 ms. `nl` had the same padding and 1.6.16 buffered it; these two want the same.
-  - ⛔ **`%d`'s argument wraps too**: `printf %d 99999999999999999999` prints 7766279631452241919
-    at exit 0, where GNU prints 9223372036854775807 with *Numerical result out of range* and exits
-    1. `%d 9223372036854775808` prints a bare `-`, and `%u` / `%x` / `%o` of anything from 2^63
-    up print NOTHING (`%u 18446744073709551615`), since `_pf_render_int_base` has no unsigned
-    path.
-  - **GNU's conversion diagnostics are missing**: `%d 5x` is *value not completely converted*,
-    and `%d abc` or `%d ''` is *expected a numeric value* — each printed, each exit 1. kriya
-    prints `5`, `0` and `0` at exit 0. `%d ' 5'` is 5 in GNU and 0 here.
-  - ⚠ **Decide: a negative argument needs `--`.** `printf '%d\n' -5` is *bad option*, exit 2,
-    by [ADR 0002](../adr/0002-option-parsing-humans-and-agents.md)'s rule for negative
-    positionals — which `seq` is exempt from, and which protects nothing here: `printf` has no
-    options but `--help` / `--version`, and POSIX and GNU both take every argument after FORMAT
-    as data. `smoke-printf.sh` writes `--` today.
-  - **`nl -i` and `-v` refuse a negative**, where GNU counts down and starts below zero
-    (`nl -v -1` numbers from -1). The counter is an i64 already; the number emitter is not signed.
+(§ Gated) is the signal most likely to do it. ⚠ **The repair arc, 1.6.x, closed at 1.6.17**: every
+GNU-parity leftover it held has shipped. What remains is **new capability**, a different kind of
+risk: it changes what kriya *does*, so expect an ADR and GNU-comparison work per item.
 
 ---
 
@@ -150,6 +117,11 @@ measured against GNU when it was filed and re-confirmed open at 1.6.11.
 
 - **1.8.0 — Floats.** `printf %e` / `%E` / `%f` / `%F` / `%g` / `%G` / `%a` / `%A` — refused by name
   today — plus positional `%N$s`. `seq -f FORMAT` rides directly on it.
+  - ⚠ **`%N$s` is GNU 9.11's, not 9.4's** (measured at 1.6.17: 9.4 says *invalid conversion
+    specification*, as kriya does), so the container's GNU cannot be its oracle.
+  - **GNU's `%q`** — the argument shell-quoted — is refused by name since 1.6.17. GNU uses
+    `shell_escape_quoting_style`, which `src/lib/quote.cyr` already renders for `ls`; ⚠ except
+    that `ls` never quotes an empty name, and `%q ''` is `''`.
 - **1.8.1 — Sort keys.**
   - ⛔ **First, a wrong answer: a repeated `-k` keeps only the LAST key.** `sort -k2,2 -k1,1` sorts
     exactly as `sort -k1,1` does and exits 0, where GNU sorts by field 2 then field 1 (measured at
@@ -224,8 +196,10 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
   (number, padding, separator, text, newline): **836 ms against GNU's 42 ms** on 500,000 lines,
   measured at 1.6.16. That release buffered `nl`'s padding, which had been one call PER BYTE (a
   20 MB `-w 1000000` run went 7,148 → 3 ms), but the per-line calls remain. `printf` and `stat`
-  share the shape (roadmap 1.6.17 has their per-byte padding). One shared stdout buffer, flushed
-  at exit and on a write error, serves all three.
+  share the shape: 1.6.17 gave them `nl`'s padding, now `k_write_fill` in `src/lib/sys.cyr` (a
+  100,000,000-column field went from about 50 s to 84 ms through a pipe, GNU's 98), but `printf`
+  still writes each literal byte of its FORMAT in its own call, and `stat` each literal character
+  of its format. One shared stdout buffer, flushed at exit and on a write error, serves all three.
 
 ---
 

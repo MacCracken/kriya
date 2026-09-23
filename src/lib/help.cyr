@@ -685,6 +685,18 @@ fn help_format_dispatch(spec, tok): i64 {
     return 0;
 }
 
+# `help_if_requested`, but only when that argument is the ONLY one — GNU's rule
+# for the utilities whose arguments are all data: `echo`, `printf`, `true`,
+# `false`.
+#
+# ⛔ THEY TOOK A FIRST `--help` WITH ANYTHING AFTER IT (1.6.17): `echo --help foo`
+# printed the manual where GNU prints `--help foo`, and `false --version x` exited
+# 0 where GNU's exits 1. GNU tests `argc == 2` in all four.
+fn help_if_sole(spec, start: i64): i64 {
+    if (kriya_argv_count() - start != 1) { return 0; }
+    return help_if_requested(spec, start);
+}
+
 # Render and exit if argv[start..] asks for help. For the utilities that walk
 # argv themselves and never reach `kriya_args_parse` — they call this first.
 # `spec` may be 0; OPTIONS is then omitted.

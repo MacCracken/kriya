@@ -206,9 +206,34 @@ for _o in -i -v -w -l; do
 done
 expect_exit "nl -w 0 refused"          2 timeout 10 "$BIN" nl -w 0 three
 expect_exit "nl -w 2147483648 refused" 2 timeout 10 "$BIN" nl -w 2147483648 three
-# ⚠ Deliberate: GNU takes a NEGATIVE -i and -v, kriya refuses both.
-expect_exit "nl -v -1 refused (GNU: numbers from -1)" 2 timeout 10 "$BIN" nl -v -1 three
-expect_exit "nl -i -1 refused (GNU: counts down)"     2 timeout 10 "$BIN" nl -i -1 three
+# ⛔ A NEGATIVE -i OR -v WAS REFUSED, exit 2, until 1.6.17. GNU counts down and
+# starts below zero, formatting with printf's `%*jd`: the width counts the sign
+# and `rz` puts the zeros after it.
+nl_same "-v -1"                          three -v -1
+nl_same "-v -1 rz (sign, then zeros)"    three -v -1 -n rz -w 4
+nl_same "-v -1 ln"                       three -v -1 -n ln -w 4
+nl_same "-v -2 rn, the sign fills -w 2"  three -v -2 -n rn -w 2
+nl_same "-i -1 counts down"              three -i -1
+nl_same "-i -5 -v 3"                     three -i -5 -v 3
+nl_same "-i -1 -v 0 rz"                  three -i -1 -v 0 -n rz -w 3
+nl_same "-v ' -1' (blanks, then a sign)" three -v ' -1'
+nl_same "-v -0 is zero"                  three -v -0 -n rz
+nl_same "-v i64 min, counting up"        three -v -9223372036854775808
+nl_same "-v i64 min rz"                  three -v -9223372036854775808 -n rz -w 30
+# ⚠ The overflow runs BOTH ways now, and the number that fits still prints.
+nl_same "-v min+1 -i -1 overflows below" three -v -9223372036854775807 -i -1
+nl_same "-v min -i -1, one line"         three -v -9223372036854775808 -i -1 -n rz
+nl_same "-i min from 0"                  three -i -9223372036854775808 -v 0
+nl_same "-i min from -1"                 three -i -9223372036854775808 -v -1
+nl_same "-i min from 1"                  three -i -9223372036854775808
+nl_same "a section resets it, below"     reset -v -9223372036854775808 -i -1 -n ln -w 30
+for _v in -9223372036854775809 -99999999999999999999 '- 1' +-1 -+1 -; do
+    for _o in -i -v; do
+        expect_exit "nl $_o '$_v' refused" 2 timeout 10 "$BIN" nl $_o "$_v" three
+        _grc=0; nl $_o "$_v" three >/dev/null 2>&1 || _grc=$?
+        expect_eq "...and by GNU" "yes" "$([ "$_grc" != 0 ] && echo yes || echo no)"
+    done
+done
 # ⛔ THE PADDING WAS ONE WRITE PER BYTE: `-w 2147483647`, which GNU prints, never
 # finished. A wide field is a buffer at a time now.
 nl_same "-w 100000 pads in chunks"  three -w 100000

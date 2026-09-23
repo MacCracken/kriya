@@ -174,6 +174,18 @@ expect_eq "xargs --version is xargs' own, and does not hang" "0" "$rc"
 expect_eq "xargs --version names xargs" "xargs (kriya) $VER" \
     "$(timeout 5 "$BIN" xargs --version </dev/null 2>&1)"
 
+# --- `--help` only ALONE, where the arguments are data (1.6.17) --------
+# ⛔ `echo --help foo` printed the MANUAL, and `false --version x` exited 0. GNU
+# tests `argc == 2` in echo, printf, true and false, so a `--help` with anything
+# after it is an operand — printed by echo and printf, ignored by true and false.
+for u in echo printf true false; do
+    for a in --help --version --help=json; do
+        g=0; /usr/bin/$u "$a" foo > g.out 2>/dev/null || g=$?
+        k=0; "$BIN" $u "$a" foo > k.out 2>/dev/null || k=$?
+        expect_eq "$u $a foo" "$g|$(cat g.out)" "$k|$(cat k.out)"
+    done
+done
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

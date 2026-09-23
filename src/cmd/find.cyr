@@ -1154,7 +1154,7 @@ fn cmd_find(start: i64): i64 {
     _f_argv_n = slice_n;
     var fi: i64 = 0;
     while (fi < slice_n) {
-        store64(_f_argv_flat + fi * 8, argv(start + fi));
+        store64(_f_argv_flat + fi * 8, kriya_arg(start + fi));
         fi = fi + 1;
     }
 

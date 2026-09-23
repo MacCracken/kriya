@@ -77,67 +77,13 @@ fn _st_report(operand, errno): i64 { return errmsg_report("stat", operand, errno
 
 # --- integer rendering helpers ---
 
-# Render `v` as decimal digits into `buf`. Returns the byte count.
-fn _st_render_dec(v, buf): i64 {
-    if (v == 0) { store8(buf, 48); return 1; }
-    var tmp[32];
-    var n: i64 = 0;
-    var rem = v;
-    while (rem > 0) {
-        store8(&tmp + n, 48 + (rem - (rem / 10) * 10));
-        rem = rem / 10;
-        n = n + 1;
-    }
-    # tmp holds digits in reverse; copy into buf in forward order.
-    var i: i64 = 0;
-    while (i < n) {
-        store8(buf + i, load8(&tmp + n - 1 - i));
-        i = i + 1;
-    }
-    return n;
-}
-
-# Render `v` as octal digits into `buf`. Returns the byte count.
-fn _st_render_oct(v, buf): i64 {
-    if (v == 0) { store8(buf, 48); return 1; }
-    var tmp[32];
-    var n: i64 = 0;
-    var rem = v;
-    while (rem > 0) {
-        store8(&tmp + n, 48 + (rem & 7));
-        rem = rem / 8;
-        n = n + 1;
-    }
-    var i: i64 = 0;
-    while (i < n) {
-        store8(buf + i, load8(&tmp + n - 1 - i));
-        i = i + 1;
-    }
-    return n;
-}
-
-# Render `v` as lowercase hex into `buf`. Returns the byte count.
-fn _st_render_hex(v, buf): i64 {
-    if (v == 0) { store8(buf, 48); return 1; }
-    var tmp[32];
-    var n: i64 = 0;
-    var rem = v;
-    while (rem > 0) {
-        var d = rem & 15;
-        var c: i64 = 48;
-        if (d < 10) { c = 48 + d; }
-        else        { c = 87 + d; }  # 'a' + (d - 10)
-        store8(&tmp + n, c);
-        rem = rem / 16;
-        n = n + 1;
-    }
-    var i: i64 = 0;
-    while (i < n) {
-        store8(buf + i, load8(&tmp + n - 1 - i));
-        i = i + 1;
-    }
-    return n;
-}
+# `v` as decimal, octal or lowercase hex digits into `buf`; the byte count.
+# ⚠ UNSIGNED, through `str_u64_digits`: GNU prints these with `%ju` / `%jo` /
+# `%jx`, and the three copies this replaced looped `while (rem > 0)`, so a value
+# with the top bit set printed no digits at all (1.6.17).
+fn _st_render_dec(v, buf): i64 { return str_u64_digits(v, 10, 0, buf); }
+fn _st_render_oct(v, buf): i64 { return str_u64_digits(v, 8, 0, buf); }
+fn _st_render_hex(v, buf): i64 { return str_u64_digits(v, 16, 0, buf); }
 
 # --- mode-bit helpers ---
 
@@ -334,6 +280,8 @@ var _st_fatal = 0;
 # 1 once a `%C` could not be read: GNU prints `?` in its place, goes on, and
 # exits 1 (1.6.16).
 var _st_ctx_failed = 0;
+# 1 once a field was too wide to print: nothing in its place, and exit 1.
+var _st_field_failed = 0;
 
 # ⛔ `%w` / `%W` — BIRTH TIME, the specifier kriya knew about and could not
 # render: `stat(2)` has no field for it, `statx(2)` does. ⚠ A filesystem that does
@@ -571,12 +519,9 @@ fn _st_context(name): i64 {
     return _st_set_str("?", 1);
 }
 
-fn _st_pad(n, ch): i64 {
-    var b[8];
-    store8(&b, ch);
-    while (n > 0) { k_write( 1, &b, 1); n = n - 1; }
-    return 0;
-}
+# ⛔ ONE `write(2)` PER BYTE until 1.6.17: a width of 100,000,000 took 50 s,
+# where GNU takes 31 ms. `k_write_fill` is `nl`'s and `printf`'s too.
+fn _st_pad(n, ch): i64 { return k_write_fill(1, ch, n); }
 
 # One string under printf `%[-][width][.prec]s`.
 fn _st_emit_str(sb, len, fm, width, dotted, prec): i64 {
@@ -767,9 +712,14 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
                 elif (fc == 73) { i = i + 1; }
                 else { scanning = 0; }
             }
+            # ⛔ The digits WRAPPED until 1.6.17 — `%18446744073709551617n` was a
+            # width of 1 and printed the name — and below the wrap a huge width
+            # was a hang. They SATURATE just past INT_MAX now, and a field past
+            # it is dropped below, as GNU's is.
             var width: i64 = 0;
             while (_st_isdig(load8(fmt + i)) == 1) {
                 width = width * 10 + (load8(fmt + i) - 48);
+                if (width > 2147483647) { width = 2147483648; }
                 i = i + 1;
             }
             var dotted: i64 = 0;
@@ -780,6 +730,7 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
                 var any: i64 = 0;
                 while (_st_isdig(load8(fmt + i)) == 1) {
                     prec = prec * 10 + (load8(fmt + i) - 48);
+                    if (prec > 2147483647) { prec = 2147483648; }
                     i = i + 1;
                     any = 1;
                 }
@@ -827,7 +778,37 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
                 if (p2 < 0) {
                     if (_st_kind == ST_K_EPOCH) { p2 = 9; } else { p2 = 0; }
                 }
-                _st_emit_formatted(fm, fz, fp, fsp, fh, width, dotted, p2);
+                var w2 = width;
+                # ⚠ GNU's `out_epoch_sec` reads a fractional epoch's width and
+                # precision with `strtol` and CLAMPS both to INT_MAX, so those
+                # always print; every other field goes to glibc as written.
+                if (_st_kind == ST_K_EPOCH) {
+                    if (p2 > 0) {
+                        if (p2 > 2147483647) { p2 = 2147483647; }
+                        if (w2 > 2147483647) { w2 = 2147483647; }
+                    }
+                }
+                # ⛔ PAST INT_MAX glibc refuses the field and GNU `stat` prints
+                # nothing in its place — AND EXITS 0, because it never checks. The
+                # bytes are GNU's here; the exit status is not, deliberately: a
+                # field that was asked for and not printed is a failure (1.6.17).
+                var bad_what: i64 = 0;
+                if (_st_kind != ST_K_RAW) {
+                    if (w2 > 2147483647) { bad_what = "invalid field width"; }
+                    elif (dotted == 1) {
+                        if (p2 > 2147483647) { bad_what = "invalid precision"; }
+                    }
+                }
+                if (bad_what != 0) {
+                    var bl = i + 1 - start;
+                    var btext = alloc(bl + 1);
+                    memcpy(btext, fmt + start, bl);
+                    store8(btext + bl, 0);
+                    report_note("stat", btext, bad_what);
+                    _st_field_failed = 1;
+                } else {
+                    _st_emit_formatted(fm, fz, fp, fsp, fh, w2, dotted, p2);
+                }
                 i = i + 1;
             }
         } else {
@@ -983,5 +964,6 @@ fn cmd_stat(start: i64): i64 {
 
     if (any_failed == 1) { return EXIT_FAILURE; }
     if (_st_ctx_failed == 1) { return EXIT_FAILURE; }
+    if (_st_field_failed == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
 }

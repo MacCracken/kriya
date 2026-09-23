@@ -2,7 +2,7 @@
 # Args ignored per POSIX (true takes none, but extras must not fail).
 fn cmd_true(start: i64): i64 {
     true_help_declare();
-    help_if_requested(0, start);
+    help_if_sole(0, start);
     return EXIT_SUCCESS;
 }
 

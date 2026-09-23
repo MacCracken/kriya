@@ -6,6 +6,194 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.17] - 2026-09-23 — `printf` and `stat` numbers
+
+The 1.6.17 slot, the last of the 1.6.x repair arc:
+- `printf` and `stat` widths that wrapped past 2^64 and padded a byte per `write(2)`;
+- `printf` arguments that wrapped, had no unsigned path, and were read without GNU's diagnostics;
+- `nl`'s refused negatives;
+- the decision on negative `printf` arguments, which ADR 0002 made options.
+
+Everything was measured against GNU coreutils 9.11 (this box) and 9.4 (CI's) first. A 9,000-case
+differential fuzz then found what the hand-written cases missed: GNU's field limits are not INT_MAX
+for every conversion, and `printf`'s directive grammar diverged in both directions. Timing the
+rewrite against the old binary found a bigger defect underneath: every utility was quadratic in
+its argument count.
+
+### ⛔ Breaking
+
+- **`printf` takes every argument as data**
+  ([ADR 0025](docs/adr/0025-printf-takes-every-argument-as-data.md)). This is GNU's rule:
+  `--help`, `--help=FORMAT` and `--version` are options only as the SOLE argument, a first `--` is
+  dropped, and nothing else is an option.
+  - `printf '%d\n' -5` prints -5. It used to be *bad option*, exit 2.
+  - A `--` among the arguments is printed. It used to be DELETED at exit 0, so
+    `printf '%s|' a -- b` printed `a|b|`.
+  - The sole-argument rule applies to `echo`, `true` and `false` as well, as in GNU:
+    `echo --help foo` prints `--help foo` (it printed the manual), and `false --version x` exits 1.
+  - **Migration:** none for a script that wrote `--` first; that form still works.
+- **`printf` refuses the directives GNU refuses**: `%#d`, `%0s`, `%.3c`, `%'x`, `%5%`, `%-b`, and
+  a FORMAT that ends inside a directive (`abc%`). Each exits 1 after the output before it. `abc%`
+  used to print `abc%`. **Migration:** `%%` for a literal percent sign.
+- **`printf` says when an argument is not entirely a number**, and exits 1, as POSIX requires:
+  `%d 5x` prints 5, `%d abc` and `%d ''` print 0, and each is reported. A number out of range
+  prints the nearest one and says *numerical result out of range*.
+- **A field too large to print is left out, and the exit status is 1**, in `printf` (as GNU) and
+  in `stat` (where GNU exits 0).
+
+### Fixed — ⛔ `printf`'s numbers
+
+| input | before | now |
+|---|---|---|
+| `%d 99999999999999999999` | 7766279631452241919, exit 0 | 9223372036854775807, *out of range*, exit 1 |
+| `%d 9223372036854775808` | a bare `-` | 9223372036854775807, exit 1 |
+| `%u 18446744073709551615` | nothing at all | 18446744073709551615 |
+| `%u -1`, `%x -1` | *bad option*, exit 2 | 18446744073709551615, `ffffffffffffffff` |
+| `%d 5x` | 5, exit 0 | 5, *value not completely converted*, exit 1 |
+| `%d abc`, `%d ''` | 0, exit 0 | 0, *expected a numeric value*, exit 1 |
+| `%d ' 5'` | 0 | 5 |
+| `%18446744073709551617d 5` | `5` | nothing, *invalid field width*, exit 1 |
+| `%*d 2147483648 5` | pads two gigabytes, a byte per call | *invalid field width*, fatal, as in GNU |
+
+Arguments are read as GNU reads them: `strtoimax` for `%d %i` and `*`, and `strtoumax` for
+`%u %o %x %X`, so blanks, a sign, `0x` hex, `0` octal and `'X` all work. The magnitude is
+accumulated unsigned, so `%u -1` is 2^64 − 1, as GNU's `strtoumax` makes it, and -2^63 is
+reachable.
+Digits render unsigned, through the new `str_u64_digits`.
+
+- ⚠ **GNU's field limits, measured.** An integer or `%c` field is refused past INT_MAX − 2
+  (`%2147483645d` prints two gigabytes, `%2147483646d` nothing). `%s` takes a width up to
+  INT_MAX. A `*` value outside int is fatal: *invalid field width* / *invalid precision*.
+- ⚠ **Version split:** 9.11 reads a `%s` precision past INT_MAX as no limit, and 9.4 refuses the
+  field. `%d ''` is 0 at exit 0 in 9.4 and an error in 9.11. kriya's answers are 9.11's, asserted
+  directly.
+- ⚠ **One deliberate divergence, toward POSIX:** after a conversion error, `\c` still exits 1.
+  GNU's `\c` exits 0 whatever came before it, and POSIX says such an error *shall not exit with a
+  zero exit status*.
+
+### Fixed — ⛔ `printf`'s directive grammar is GNU's
+
+- **Length modifiers were refused.** `%ld`, `%lld`, `%hhd`, `%jd`, `%zd` and `%Lx` exited 1. They
+  are read and ignored now, as in GNU; every integer is 64 bits, so `%hhd 300` is 300.
+- **The `'` and `I` flags were refused.** They are accepted for `%d %i %u`, and change nothing in
+  kriya's C locale.
+- **Flags GNU refuses were printed**, and so were `%5%`, `%-b`, `%5b`, and a trailing `%`. All are
+  refused now, per GNU's table (see Breaking).
+- **`%c` of an empty argument printed nothing.** It prints a NUL byte, as GNU's does. ⛔ The smoke
+  case that should have caught this compared through `$(...)`, which drops NULs, so it passed.
+- **An invalid directive is named whole** (`%5Z`, not `%Z`).
+- **GNU's two warnings**: *ignoring excess arguments* when a pass uses no argument, and characters
+  after a character constant. Neither changes the exit status.
+- `%q` is refused by name, as the floats are (roadmap 1.8.0), rather than as invalid.
+
+### Fixed — ⛔ `stat`'s widths
+
+- **The digits wrapped.** `stat -c %18446744073709551617n f` printed `f`.
+- **Past INT_MAX the field is left out**, as in GNU, and the rest of the format goes on. ⚠ GNU
+  then exits 0, because it never checks `printf`'s result. kriya exits 1 and names the directive,
+  deliberately: a field that was asked for and not printed is a failure.
+- A fractional epoch (`%.NY`) is the exception: GNU clamps its width and precision to INT_MAX, and
+  so does this.
+- **Padding was one `write(2)` per byte.** Ten million columns took 3,628 ms; a hundred million
+  take 10 ms now (GNU 13).
+- Numbers render unsigned, so a value with the top bit set is no longer printed as no digits.
+
+### Fixed — padding, in all three
+
+`nl`'s 4 KiB fill from 1.6.16 is now `k_write_fill` in `src/lib/sys.cyr`, and `printf` and `stat`
+use it too. It stops at the first failed write. `printf '%100000000d'` went from about 50 s to
+**84 ms** through a pipe (GNU 98 ms), and 10 ms to `/dev/null` (GNU 11).
+
+### Fixed — ⛔ every utility was quadratic in its argument count
+
+On Linux the stdlib's `argv(i)` walks `/proc/self/cmdline` from its first byte on every call, and
+kriya built its argument table with one call per argument. Every utility paid for it before doing
+anything, and `echo` paid twice, because it read its arguments the same way again. Found because
+the rewritten `printf` used `argv(i)` too, and came out twice as slow as the code it replaced.
+
+| 20,000 arguments | 1.6.16 | now | GNU |
+|---|---|---|---|
+| `rm -f` of missing names | 1,451 ms | 67 ms | 73 ms |
+| `echo` | 2,789 ms | 25 ms | 9 ms |
+| `printf '%s\n'` | 1,404 ms | 28 ms | 11 ms |
+| `true` | 1,386 ms | 9 ms | — |
+
+The table is built in one pass now, since the arguments sit end to end in that buffer. That is on
+Linux only; agnos's `argv(i)` reads a pointer table and was O(1) already. `kriya_arg(i)` is the O(1)
+accessor, and the eleven utilities that looped over `argv(i)` use it: `date`, `df`, `du`, `echo`,
+`env`, `find`, `ln`, `printf`, `seq`, `sleep` and `yes`.
+
+### Added
+
+- **`nl -i` and `-v` take negatives**, as GNU's do. `-i -1` counts down and `-v -1` starts below
+  zero. The width counts the sign, and `rz` puts the zeros after it (`-001`), as GNU's `%0*jd`
+  does. The overflow check now runs in both directions. The new `kriya_parse_signed` in
+  `src/lib/args.cyr` reads the whole i64 range, -2^63 included. Both were refused, exit 2.
+- **`scripts/difffuzz-printf.py`**: random FORMATs (flags, widths, `*`, precisions, length
+  modifiers, fields past INT_MAX) against GNU's `printf`, with number-shaped arguments. It runs
+  9,000 cases over three seeds with 0 differences, and four known classes are skipped by name.
+
+### Changed
+
+- **One implementation each, where there were several**:
+  - `k_write_fill` (three padders);
+  - `str_u64_digits` in `src/lib/str.cyr` (five digit renderers: `printf`'s, `nl`'s, and
+    `stat`'s three);
+  - `help_if_sole` in `src/lib/help.cyr` (the sole-argument help rule);
+  - `kriya_arg` in `src/lib/args.cyr` (every loop over the arguments).
+
+### Documentation
+
+- **[ADR 0025](docs/adr/0025-printf-takes-every-argument-as-data.md)**: `printf` takes every
+  argument as data. ADR 0002's negative-number row names its two exemptions.
+- **Roadmap**: 1.6.17 retired, and with it the **1.6.x repair arc**. Next up 1.7.0 (batched exec).
+  - 1.8.0 gains GNU's `%q` and a note that `%N$s` is 9.11-only.
+  - 1.9.5's buffered output now names what padding left: `printf`'s and `stat`'s literal bytes.
+- **Lessons**:
+  - `$(...)` drops NULs;
+  - a mutation run swaps the binary, never the scripts;
+  - a roadmap's claim must be measured for every utility it names;
+  - a limit is not INT_MAX until each conversion is measured;
+  - a terminator is data where there are no options;
+  - where GNU and POSIX disagree, POSIX is the floor;
+  - a stdlib accessor's cost is part of its contract.
+
+### Tests
+
+- Smoke **6,895 → 7,307** across 41 scripts:
+  - `smoke-printf.sh` 98 → **433**, `smoke-nl.sh` 97 → **136**, `smoke-stat.sh` 121 → **143**;
+  - `smoke-help.sh` 329 → **341**, `smoke-option-forms.sh` 56 → **59**, `smoke-echo.sh`
+    130 → **131**. These last two and `smoke-printf.sh` pin 100,000 arguments under `timeout`.
+  - Every new `printf` case compares stdout BYTES and the exit status with GNU.
+- `kriya.tcyr` **661 → 737**: `kriya_parse_signed`, `str_u64_digits` and `printf`'s number reader.
+- ⭐ **Run against the 1.6.16 binary, 281 of the new assertions fail**: `printf` 226, `stat` 22,
+  `nl` 17, `help` 12, `option-forms` 3 and `echo` 1.
+- ⭐ That run caught two harness faults first:
+  - The first attempt used `git stash`, which swapped the scripts back along with the source. It
+    tested the old suite against the old binary, and passed.
+  - The second attempt HUNG on three diagnostic-capturing calls without `timeout`: the old binary
+    padded two gigabytes a byte at a time.
+- ⛔ `smoke-printf.sh`'s `%c empty` case had been vacuous since it was written: `$(...)` drops the
+  NUL GNU prints, so it compared nothing. It compares bytes now.
+
+### Release totals
+
+**7,307 smoke cases across 41 scripts** (from 6,895), **737 unit**, 18 POSIX. The rest of the
+gate is clean:
+- fuzz green under poison (1,127 / 201 / 201);
+- `cyrius lint`, `lint-deferrals.sh`, `lint-help-schema.sh` and `check-oracles.sh`;
+- `watchlist-scan.py`: 187 declarations, M15a 0, M15c the 3 known, M15d 0, M15i 0;
+- `vet` reports **55** deps, and both targets build warning-free.
+
+The differential fuzzers pass: `difffuzz-printf.py` 9,000 cases over three seeds and
+`difffuzz-stat-format.py` 3,000 formats, 0 unexplained.
+
+⭐ Verified in the `ubuntu:24.04` container (coreutils **9.4**, grep **3.11**) as a non-root user:
+39 of 41 scripts green, **4,813** cases. The two exceptions need `python3`, which the image lacks.
+
+Binary 1,224,904 → **1,229,408** bytes on host (+4,504), 1,220,624 → **1,225,128** on agnos
+(+4,504).
+
 ## [1.6.16] - 2026-09-23 — cleanup, and the numbers that wrapped
 
 The 1.6.16 slot: nine cleanup items, each measured against GNU coreutils 9.11 (this box) and 9.4

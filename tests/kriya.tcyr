@@ -61,6 +61,9 @@ include "src/lib/report.cyr"
 include "src/cmd/sort.cyr"
 include "src/cmd/cut.cyr"
 include "src/cmd/seq.cyr"
+# ⚠ M15e, PRE-EMPTIVELY (1.6.17). `printf.cyr` is here for its number reader,
+# `_pf_num`, which reports through `report.cyr` above and reads nothing else.
+include "src/cmd/printf.cyr"
 
 # ⭐ The modes the real callers use, so a test reads as "FORMAT says this, `%b`
 # says that" rather than as a bitmask.
@@ -74,6 +77,20 @@ include "src/cmd/seq.cyr"
 var MODE_FMT  = 14;  # ALLOW_C | ALLOW_X | DQUOTE            — printf FORMAT
 var MODE_B    = 15;  # ...| OCTAL_PREFIX                     — printf %b
 var MODE_ECHO = 7;   # ALLOW_C | ALLOW_X | OCTAL_PREFIX      — echo -e (no DQUOTE)
+
+# `str_u64_digits` of `v`, compared with `want`: 1 when they are the same bytes.
+fn _t_u64(v, base, upper, want): i64 {
+    var b[32];
+    var n = str_u64_digits(v, base, upper, &b);
+    store8(&b + n, 0);
+    return streq(&b, want);
+}
+
+# `_pf_num` from a clean slate; `_pf_failed` then says whether it objected.
+fn _t_pfn(s, uns): i64 {
+    _pf_failed = 0;
+    return _pf_num(s, uns);
+}
 
 # Decode the escape at the START of `lit`, which must begin with a backslash.
 # `strlen` for the bound is the same thing printf's callers pass.
@@ -1350,6 +1367,92 @@ fn main() {
     # in the high half; the type mask must not care.
     store64(&dsb + 24, (1000 << 32) + 8192 + 438);
     assert_eq(fs_is_dev(&dsb), 1, "...with a uid in the high half");
+
+    test_group("kriya_parse_signed — i64, both ends, never a wrap (1.6.17)");
+    var sv: i64 = 7;
+    assert_eq(kriya_parse_signed("-1", &sv), 0, "-1 parses");
+    assert_eq(sv, 0 - 1, "...to -1");
+    assert_eq(kriya_parse_signed("-9223372036854775808", &sv), 0, "i64's minimum parses");
+    assert_eq(sv, (0 - KRIYA_COUNT_MAX) - 1, "...to itself, though its magnitude is no i64");
+    assert_eq(kriya_parse_signed("-9223372036854775809", &sv), 0 - 2, "one below it: -2");
+    assert_eq(kriya_parse_signed("-92233720368547758080", &sv), 0 - 2, "the minimum, then a digit: -2");
+    assert_eq(kriya_parse_signed("9223372036854775807", &sv), 0, "the ceiling parses");
+    assert_eq(sv, KRIYA_COUNT_MAX, "...to the ceiling");
+    assert_eq(kriya_parse_signed("9223372036854775808", &sv), 0 - 2, "one past it: -2");
+    assert_eq(kriya_parse_signed("-99999999999999999999", &sv), 0 - 2, "far below: -2");
+    assert_eq(kriya_parse_signed(" -5", &sv), 0, "GNU's blank, then the sign");
+    assert_eq(sv, 0 - 5, "...-5");
+    assert_eq(kriya_parse_signed("+5", &sv), 0, "a plus");
+    assert_eq(sv, 5, "...5");
+    assert_eq(kriya_parse_signed("-0", &sv), 0, "-0 parses");
+    assert_eq(sv, 0, "...to 0");
+    sv = 7;
+    assert_eq(kriya_parse_signed("-", &sv), 0 - 1, "a sign alone: -1");
+    assert_eq(kriya_parse_signed("- 1", &sv), 0 - 1, "a blank after the sign: -1");
+    assert_eq(kriya_parse_signed("+-1", &sv), 0 - 1, "two signs: -1");
+    assert_eq(kriya_parse_signed("", &sv), 0 - 1, "empty: -1");
+    assert_eq(kriya_parse_signed("1x", &sv), 0 - 1, "trailing junk: -1");
+    assert_eq(sv, 7, "a refusal stores nothing");
+
+    test_group("str_u64_digits — unsigned, all 64 bits (1.6.17)");
+    assert_eq(_t_u64(0, 10, 0, "0"), 1, "zero");
+    # ⛔ The three copies this replaced printed NO DIGITS for any of the next three.
+    assert_eq(_t_u64(0 - 1, 10, 0, "18446744073709551615"), 1, "all ones is 2^64 - 1");
+    assert_eq(_t_u64((0 - KRIYA_COUNT_MAX) - 1, 10, 0, "9223372036854775808"), 1, "the top bit alone");
+    assert_eq(_t_u64(0 - 1, 8, 0, "1777777777777777777777"), 1, "octal: 22 digits");
+    assert_eq(_t_u64(KRIYA_COUNT_MAX, 10, 0, "9223372036854775807"), 1, "i64's maximum");
+    assert_eq(_t_u64(0 - 1, 16, 0, "ffffffffffffffff"), 1, "hex");
+    assert_eq(_t_u64(0 - 1, 16, 1, "FFFFFFFFFFFFFFFF"), 1, "hex, upper case");
+    assert_eq(_t_u64(1234567890, 10, 0, "1234567890"), 1, "an ordinary number");
+    assert_eq(_t_u64(8, 8, 0, "10"), 1, "octal 10");
+    assert_eq(_t_u64(10, 16, 0, "a"), 1, "hex a");
+
+    test_group("_pf_num — GNU's strtoimax / strtoumax, and their verdicts (1.6.17)");
+    # ⛔ `%d 99999999999999999999` was 7766279631452241919 at exit 0.
+    assert_eq(_t_pfn("99999999999999999999", 0), KRIYA_COUNT_MAX, "%d saturates");
+    assert_eq(_pf_failed, 1, "...and fails");
+    assert_eq(_t_pfn("9223372036854775808", 0), KRIYA_COUNT_MAX, "2^63 saturates (was a bare -)");
+    assert_eq(_pf_failed, 1, "...and fails");
+    assert_eq(_t_pfn("-9223372036854775808", 0), (0 - KRIYA_COUNT_MAX) - 1, "i64's minimum");
+    assert_eq(_pf_failed, 0, "...is a number");
+    assert_eq(_t_pfn("-9223372036854775809", 0), (0 - KRIYA_COUNT_MAX) - 1, "below it saturates");
+    assert_eq(_pf_failed, 1, "...and fails");
+    assert_eq(_t_pfn("18446744073709551615", 1), 0 - 1, "%u takes all 64 bits");
+    assert_eq(_pf_failed, 0, "...without a word");
+    assert_eq(_t_pfn("18446744073709551616", 1), 0 - 1, "%u saturates at 2^64 - 1");
+    assert_eq(_pf_failed, 1, "...and fails");
+    assert_eq(_t_pfn("-1", 1), 0 - 1, "%u -1 is 2^64 - 1");
+    assert_eq(_pf_failed, 0, "...a number");
+    assert_eq(_t_pfn("-18446744073709551615", 1), 1, "strtoumax negates modulo 2^64");
+    assert_eq(_t_pfn("-18446744073709551616", 1), 0 - 1, "...until the magnitude overflows");
+    assert_eq(_pf_failed, 1, "...which fails");
+    assert_eq(_t_pfn("0x7fffffffffffffff", 0), KRIYA_COUNT_MAX, "hex");
+    assert_eq(_t_pfn("0x8000000000000000", 0), KRIYA_COUNT_MAX, "hex past i64 saturates %d");
+    assert_eq(_pf_failed, 1, "...and fails");
+    assert_eq(_t_pfn("-0x8000000000000000", 0), (0 - KRIYA_COUNT_MAX) - 1, "negative hex minimum");
+    assert_eq(_t_pfn("0xffffffffffffffff", 1), 0 - 1, "hex, all 64 bits unsigned");
+    assert_eq(_t_pfn("01777777777777777777777", 1), 0 - 1, "octal, all 64 bits");
+    assert_eq(_pf_failed, 0, "...a number");
+    assert_eq(_t_pfn("02000000000000000000000", 1), 0 - 1, "octal past 2^64 saturates");
+    assert_eq(_pf_failed, 1, "...and fails");
+    assert_eq(_t_pfn("5x", 0), 5, "5x reads 5");
+    assert_eq(_pf_failed, 1, "...not completely converted");
+    assert_eq(_t_pfn("abc", 0), 0, "abc reads 0");
+    assert_eq(_pf_failed, 1, "...not a number");
+    assert_eq(_t_pfn("", 0), 0, "'' reads 0");
+    assert_eq(_pf_failed, 1, "...not a number (GNU 9.11; 9.4 took it)");
+    assert_eq(_t_pfn(" 5", 0), 5, "a leading blank (was 0)");
+    assert_eq(_pf_failed, 0, "...is allowed");
+    assert_eq(_t_pfn("08", 0), 0, "08: octal, then an 8");
+    assert_eq(_pf_failed, 1, "...not completely converted");
+    assert_eq(_t_pfn("0x", 0), 0, "0x: a zero, then an x");
+    assert_eq(_pf_failed, 1, "...not completely converted");
+    assert_eq(_t_pfn("'A", 0), 65, "a character constant");
+    assert_eq(_t_pfn("'", 0), 0, "a quote alone");
+    assert_eq(_pf_failed, 1, "...is not one");
+    assert_eq(_t_pfn("-0x10", 0), 0 - 16, "a sign before 0x");
+    assert_eq(_t_pfn(0, 0), 0, "a MISSING argument is 0");
+    assert_eq(_pf_failed, 0, "...and says nothing");
 
     return assert_summary();
 

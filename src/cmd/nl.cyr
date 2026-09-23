@@ -10,13 +10,13 @@
 #             TYPE is `a` number all, `t` number non-empty only,
 #             `n` number none, or `pBRE` number lines matching a BRE.
 #   -d DELIM  section delimiter (default `\:`).
-#   -i N      number increment (default 1).
+#   -i N      number increment (default 1); negative counts down.
 #   -l N      with TYPE `a` only: count N consecutive empty lines as one.
 #   -n FMT    number format: `ln` left-justified, `rn` right-justified
 #             unpadded (default), `rz` right-justified zero-padded.
 #   -p        do not reset numbering at section boundaries.
 #   -s SEP    separator between number and line (default TAB).
-#   -v N      starting line number (default 1).
+#   -v N      starting line number (default 1); may be negative.
 #   -w N      number column width (default 6).
 #
 # Sections. A line whose ENTIRE content is the delimiter repeated three
@@ -163,29 +163,20 @@ fn _nl_line_get(): i64 {
 # operand so a name containing a newline cannot split the diagnostic in two.
 fn _nl_report(operand, errno): i64 { return errmsg_report("nl", operand, errno); }
 
-# Render `v` as decimal into `buf`. Returns byte count.
-fn _nl_render_dec(v, buf): i64 {
-    if (v == 0) { store8(buf, 48); return 1; }
-    var tmp[32];
-    var n: i64 = 0;
-    var rem = v;
-    while (rem > 0) {
-        store8(&tmp + n, 48 + (rem - (rem / 10) * 10));
-        rem = rem / 10;
-        n = n + 1;
-    }
-    var i: i64 = 0;
-    while (i < n) {
-        store8(buf + i, load8(&tmp + n - 1 - i));
-        i = i + 1;
-    }
-    return n;
-}
-
-# fmt encoded as small int: 0 = rn, 1 = ln, 2 = rz.
+# fmt encoded as small int: 0 = rn, 1 = ln, 2 = rz. The number is SIGNED: `-v`
+# and `-i` take negatives, as GNU's do (1.6.17), and GNU formats with printf's
+# `%*jd` / `%-*jd` / `%0*jd`, so the width counts the sign and `rz` puts the
+# zeros AFTER it — `-v -1 -n rz -w 4` is `-001`.
 fn _nl_emit_number(num, fmt, width): i64 {
     var buf[32];
-    var n = _nl_render_dec(num, &buf);
+    var n: i64 = 0;
+    var mag = num;
+    if (num < 0) {
+        store8(&buf, 45);
+        n = 1;
+        mag = 0 - num;    # i64's minimum stays itself, and reads right unsigned
+    }
+    n = n + str_u64_digits(mag, 10, 0, &buf + n);
     if (n >= width) {
         # Number is at least as wide as the column — print bare digits.
         k_write( 1, &buf, n);
@@ -195,44 +186,31 @@ fn _nl_emit_number(num, fmt, width): i64 {
     if (fmt == 1) {
         # Left-justified: digits then spaces.
         k_write( 1, &buf, n);
-        _nl_emit_pad(32, pad);
+        k_write_fill(1, 32, pad);
+    } elif (fmt == 2) {
+        # Right-justified, zero-padded: the sign first, then the zeros.
+        if (num < 0) {
+            k_write( 1, &buf, 1);
+            k_write_fill(1, 48, pad);
+            k_write( 1, &buf + 1, n - 1);
+        } else {
+            k_write_fill(1, 48, pad);
+            k_write( 1, &buf, n);
+        }
     } else {
-        # Right-justified. fmt 0 (rn) pads with space; fmt 2 (rz) with '0'.
-        var pad_char: i64 = 32;
-        if (fmt == 2) { pad_char = 48; }
-        _nl_emit_pad(pad_char, pad);
+        k_write_fill(1, 32, pad);
         k_write( 1, &buf, n);
     }
     return 0;
 }
 
-# `count` copies of the byte `ch`, a buffer at a time.
-#
-# ⛔ IT WAS ONE `write(2)` PER BYTE until 1.6.16, so the padding cost a system
-# call per column: `nl -w 2147483647`, which GNU prints, never finished here.
-var _nl_pad_buf = 0;
-var _nl_pad_ch  = 0 - 1;
-
-fn _nl_emit_pad(ch, count): i64 {
-    if (_nl_pad_buf == 0) { _nl_pad_buf = alloc(4096); }
-    if (_nl_pad_ch != ch) {
-        var k: i64 = 0;
-        while (k < 4096) { store8(_nl_pad_buf + k, ch); k = k + 1; }
-        _nl_pad_ch = ch;
-    }
-    var left = count;
-    while (left > 0) {
-        var chunk = left;
-        if (chunk > 4096) { chunk = 4096; }
-        k_write( 1, _nl_pad_buf, chunk);
-        left = left - chunk;
-    }
-    return 0;
-}
-
 # Emit `width` spaces (used for unnumbered lines).
+#
+# ⛔ The padding was ONE `write(2)` PER BYTE until 1.6.16, so `nl -w
+# 2147483647`, which GNU prints, never finished here. It is `k_write_fill` now,
+# which `printf` and `stat` share since 1.6.17.
 fn _nl_emit_blank_column(width): i64 {
-    return _nl_emit_pad(32, width);
+    return k_write_fill(1, 32, width);
 }
 
 # Process one line. `body_type`: 0=all, 1=non-empty, 2=none.
@@ -350,8 +328,13 @@ fn _nl_emit_line(st, line, len): i64 {
         }
         var c = load64(st + NL_S_COUNTER);
         _nl_emit_number(c, load64(st + NL_S_FMT), width);
+        # ⚠ In BOTH directions since the increment can be negative (1.6.17):
+        # GNU's `ckd_add` fails past either end of i64.
         var inc = load64(st + NL_S_INCREMENT);
-        if (c > KRIYA_COUNT_MAX - inc) {
+        var over: i64 = 0;
+        if (inc > 0) { if (c > KRIYA_COUNT_MAX - inc) { over = 1; } }
+        if (inc < 0) { if (c < (0 - KRIYA_COUNT_MAX) - 1 - inc) { over = 1; } }
+        if (over == 1) {
             store64(st + NL_S_OVERFLOW, 1);
         } else {
             store64(st + NL_S_COUNTER, c + inc);
@@ -599,13 +582,14 @@ fn cmd_nl(start: i64): i64 {
     # `nl -v 99999999999999999999` started at 7766279631452241919 and `-w
     # 18446744073709551617` was a width of 1 — and an EMPTY value was skipped as
     # if absent, so `nl -i '' f` numbered at exit 0 where GNU refuses. Each now
-    # takes GNU's shape (blanks, a `+`, digits), GNU's words, and GNU's answer to
+    # takes GNU's shape (blanks, a sign, digits), GNU's words, and GNU's answer to
     # a large value: `-i`, `-v` and `-w` refuse it, `-l` saturates it.
-    # ⚠ GNU also takes a NEGATIVE `-i` and `-v`; kriya refuses both, exit 2.
+    # ⭐ `-i` and `-v` are SIGNED, as GNU's are (1.6.17): `-i -1` counts down and
+    # `-v -1` starts below zero. They were refused, exit 2, until then.
     var i_arg = flags_get_str(_nl_spec, _nl_i_idx);
     if (i_arg != 0) {
-        var iv = kriya_parse_bounded(i_arg, KRIYA_COUNT_MAX);
-        if (iv < 0) {
+        var iv: i64 = 0;
+        if (kriya_parse_signed(i_arg, &iv) != 0) {
             report_note("nl", i_arg, "invalid line number increment");
             return EXIT_USAGE;
         }
@@ -661,8 +645,8 @@ fn cmd_nl(start: i64): i64 {
 
     var v_arg = flags_get_str(_nl_spec, _nl_v_idx);
     if (v_arg != 0) {
-        var vv = kriya_parse_bounded(v_arg, KRIYA_COUNT_MAX);
-        if (vv < 0) {
+        var vv: i64 = 0;
+        if (kriya_parse_signed(v_arg, &vv) != 0) {
             report_note("nl", v_arg, "invalid starting line number");
             return EXIT_USAGE;
         }

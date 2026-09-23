@@ -155,6 +155,19 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   `FS_S_*` substitutions were built before the version bump and compared byte for byte with the
   committed 1.6.15 binary, on both targets, after every file: identical. A suite can only sample
   behaviour, while `cmp` covers every byte. It works only before the version string changes.
+- ⛔ **`$(...)` drops NUL bytes, so a comparison through it can be vacuous.** `smoke-printf.sh`'s
+  `%c empty` case passed from the day it was written: GNU prints a NUL for an empty `%c`
+  argument, kriya printed nothing, and both came back from `$(...)` as the empty string. Found at
+  1.6.17 when kriya started printing the NUL and bash warned about it. Compare bytes through a
+  file, as `same` does, whenever the output can hold a NUL or end in a newline that matters.
+- ⛔ **A mutation run is the scripts of NOW against the binary of THEN, and nothing may swap both.**
+  1.6.17's first attempt used `git stash`, which put the OLD scripts back with the old source: the
+  old suite passed against the old binary, 98 of 98, a verdict on nothing. Copy `scripts/` and
+  `git show HEAD:kriya` into a scratch directory instead, as 1.6.16 did, and leave git alone.
+  ⚠ The second run then hung: three new `err=$(...)` lines captured a diagnostic without
+  `timeout`, and the old binary padded two gigabytes a byte at a time. Every call that can pad needs
+  `timeout`, the diagnostic-capturing ones included. ⚠ And `pkill -f PATTERN` kills the shell
+  running it when PATTERN is in that shell's own command line. Kill by PID.
 
 - ⛔ *An adversarial review pass is worth more than the tests written beside the feature, again.*
   **Fifteen** real defects and none refuted — thirteen fixed in the release, two filed as follow-ups —
@@ -432,6 +445,14 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 - ⛔ **A mechanical rewrite must not reach its own wrapper.** Replacing every `k_write( 1, ` in
   `ls.cyr` with `_ls_out(` also rewrote `_ls_out`'s body into a call to itself, and every `ls` hung.
   Exclude the wrapper from the substitution, then read the wrapper.
+- ⛔ **A stdlib accessor's cost is part of its contract, and `argv(i)` is O(argv bytes) on Linux.**
+  It walks `/proc/self/cmdline` from its first byte to the i-th NUL on every call. kriya built its
+  argument table with one call per argument, so EVERY utility was quadratic in its argument count:
+  `rm -f` over 20,000 names took 1.45 s against GNU's 73 ms, and `echo`, which then indexed that way
+  again, 2.8 s. Found at 1.6.17 only because a rewrite of `printf` that switched to `argv(i)` came
+  out twice as slow as the code it replaced. ⭐ Time a change against the binary it replaces, at a
+  size where a complexity class shows, not only at the size the tests use. `kriya_arg(i)` is the
+  O(1) accessor.
 
 ## Discoverability and single sources of truth
 
@@ -472,6 +493,24 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   do neither: they warn and DROP the operator. The decision (ADR 0022) was about a behaviour
   that does not exist until it was measured. It is the comment-is-a-claim rule applied to the
   roadmap.
+- ⛔ **...for EVERY utility the entry names, not the first.** 1.6.17's entry said GNU "fails both"
+  `printf` and `stat` past INT_MAX. `printf` does, exit 1. GNU `stat` prints nothing for the field
+  and EXITS 0, because it never checks `printf`'s result. The claim had been measured on one of the
+  two and written down for both. kriya's `stat` prints GNU's bytes and exits 1, by decision.
+- ⛔ **A limit is not INT_MAX until each conversion has been measured at its edge.** GNU `printf`
+  refuses an integer or `%c` field past INT_MAX − 2 (`%2147483645d` prints two gigabytes,
+  `%2147483646d` nothing) and takes a `%s` width up to INT_MAX. 9.11 reads a `%s` precision past
+  INT_MAX as no limit where 9.4 refuses the field. GNU `stat` takes every field up to exactly
+  INT_MAX. None of it was among the hand-written cases: the 3,000-case differential fuzz
+  (`scripts/difffuzz-printf.py`) found the first two in one run. Probe a boundary's neighbours,
+  one conversion at a time, on both versions.
+- ⛔ **A terminator is data in a utility that has no options.** The shared parser consumed a `--`
+  wherever it stood, so `printf '%s|' a -- b` lost the `--` at exit 0. That is a silent change to
+  the DATA, and it hid because every test put `--` first, where it is an option.
+  [ADR 0025](../adr/0025-printf-takes-every-argument-as-data.md) takes `printf` off the parser.
+- ⭐ **Where GNU and POSIX disagree, POSIX is the floor.** GNU's `\c` exits 0 after a conversion
+  error; POSIX says such an error *shall not exit with a zero exit status*. kriya exits 1, the
+  suite asserts it, and the fuzz skips that one class by name rather than loosening its oracle.
 - ⛔ **A check made after the search inherits the engine's choice of match.** `grep -x` and `-w`
   asked "is THIS match the whole line / a word" of the one match niyama returned, and niyama is
   leftmost-first. So a line where a LATER alternative qualified was rejected, silently
