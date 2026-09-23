@@ -126,7 +126,7 @@ M1 closed at v0.2.0; M2 closed at v0.3.0; M3 closed at v0.4.0; M4 closed at v0.5
 | `src/lib/args.cyr` | implemented — flat-argv builder + stdlib `flags_parse` wrapper + `kriya_parse_nonneg_int` |
 | `src/cmd/*.cyr` | 38 of ~40 — M1 (6) + M2 (7) + M3 (7) + M4 (10) + M5 (3) + M6 (5: `seq`, `env`, `date`, `du`, `df`) |
 | `src/lib/fs.cyr` | implemented — `*at()`-family wrappers, `getdents64` iteration, type predicates, AT/S_IF/DT constants. Foundation for cp -R / mv / rm -r per ADR 0003. Adds `fs_rename`/`fs_renameat`/`fs_realpath` (3-mode canonicalization); at v1.6.0 the `(st_dev, st_ino)` set `fs_inoset_*`, the walk-ancestor stack `fs_dirstack_*` and `fs_nlink`/`fs_dev`/`fs_ino` (ADR 0012); at v1.6.1 the fd-to-fd `fs_xattr_copy` plus the pure `fs_xattr_list_next` walk (ADR 0013). |
-| `src/lib/str.cyr` | implemented — `str_escape_decode`, the C-string backslash-escape table. PURE (bytes in, one verdict out; the caller emits), parameterised by three mode bits: `STR_ESC_OCTAL_PREFIX` (`\0ddd` prefix rule for `%b`/`echo` vs FORMAT's 3-digits-total), `STR_ESC_ALLOW_C`, `STR_ESC_ALLOW_X`. Consumed by both of `printf`'s escape paths; `echo -e` next (roadmap 1.4.4). |
+| `src/lib/str.cyr` | implemented — `str_escape_decode`, the C-string backslash-escape table. PURE (bytes in, one verdict out; the caller emits), parameterised by three mode bits: `STR_ESC_OCTAL_PREFIX` (`\0ddd` prefix rule for `%b`/`echo` vs FORMAT's 3-digits-total), `STR_ESC_ALLOW_C`, `STR_ESC_ALLOW_X`. Consumed by both of `printf`'s escape paths and by `echo -e` (1.4.4). |
 | `src/lib/protected.cyr` | implemented — `protected_paths[]` table with `/`, canonicalization via `path_normalize` + getcwd, `is_protected_path()` membership check. Per ADR 0004, only consumed by `rm` today. |
 
 ## Per-utility status (will grow with each milestone)
@@ -333,63 +333,26 @@ M5 was resumed on 2026-05-17 by user request, pre-boot-burn. All three utilities
 
 ### Post-1.0 — sequenced in roadmap.md
 
-[`roadmap.md`](roadmap.md) is **open work only** — shipped milestones were removed at v1.2.5, because
-the record of what landed belongs in `CHANGELOG.md` and here, not in a plan. It sequences the
-remaining work into **arcs batched by shared enabler**: shipping the enabler *is* the release, and one
-round of test work then serves the whole batch.
+[`roadmap.md`](roadmap.md) is **open work only**, forward-facing; what shipped is in `CHANGELOG.md`
+and the version entries above. As of 1.6.11 it sequences four independent arcs, every item in its
+own release slot:
 
-**The 1.2.x correctness arc is closed** — 1.2.0 option handling, 1.2.1 accepts-and-lies, 1.2.2 the
-spawn helper, 1.2.3 walk safety, 1.2.4 destructive-verb semantics, 1.2.5 the chrono batch, 1.2.6 the
-last three P-1 defects. **All ten M17 defects are fixed and the bucket is retired.**
-
-⭐ **Four arcs are now closed**: 1.2.x correctness, **1.3.x discoverability** (`--help`,
-`--help=json`, `kriya --list`, `--version`, and a CI that can fail), **1.4.x pattern & text parity**
-(grep context, shared glob, multibyte `cut`, `uniq --group`, `nl` sections, `echo -e`, the `-i`
-bracket quirk) and **1.5.x identity & listing** (passwd/group, `ls` sort keys, `--color`, quoting).
-Each closed section in `roadmap.md` keeps only its NON-GOALS, its still-open leftovers and its
-carry-forward lessons — the account of what shipped lives in `CHANGELOG.md` and in the version
-entries above.
-
-⚠ **The next arc is 1.6.x (file-op completeness)**, gated on an inode-set helper in `src/lib/fs.cyr`
-and an fd-anchored xattr API. ⛔ Nothing blocks it: the arcs are independent by construction and can
-be resequenced by consumer demand. **1.5.4** is a small optional cleanup pass over the `ls`/`stat`
-output leftovers if a consumer asks for them first.
-
-⚠ Everything below is **new capability rather than defect repair** — a different kind of risk. These
-change what kriya *does*, not what it gets wrong, so expect more ADRs and more GNU-comparison work per
-item than 1.2.x needed.
-
-Then, in order — resequencable, since no arc depends on another:
-
-| Arc | Theme | Enabler |
+| Arc | Theme | Next up |
 |---|---|---|
-| **1.3.x** | Discoverability — `--help`, `--help=json`, `kriya --list` | spec-renderer atop `flags.cyr` |
-| **1.4.x** | Pattern & text parity — grep context/glob, multi-byte text | UTF-8 decoder, shared glob |
-| **1.5.x** | Identity & listing — user/group names, `ls` sort keys, colour | passwd/group parser |
-| **1.6.x** | File-op completeness — hard links, xattrs, `ln` flags | inode-set helper, xattr API |
-| **1.7.x** | Traversal, exec & FS reporting — `find`/`xargs`/`du`/`df`/`env` | spawn helper ✅, ARG_MAX chunking |
-| **1.8.x** | Parsers & numerics — floats, sort keys, size suffixes, `date -d` | float formatting, byte-suffix parser |
-| **1.9.x** | Performance — the measured gaps in `docs/benchmarks.md` | niyama literal fast path (upstream) |
+| **1.6.x** | GNU-parity leftovers and cleanup (1.6.12–1.6.16) | 1.6.12 — `ls` / `stat` output fidelity |
+| **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | 1.7.0 — batched exec |
+| **1.8.x** | Parsers & numerics | 1.8.0 — floats |
+| **1.9.x** | Performance | 1.9.0 — `wc -c` fast path |
 
-⚠ **1.3.x is first because a consumer is waiting**, not because it is hardest: agnoshi's
-tab-completion needs `kriya --list` and `<util> --help=json`.
+**Gated, off the sequence:** M10 consumer-burn (the AGNOS boot-burn — a parallel signal that may
+resequence everything above), M11 niyama regex gaps (the GNU BRE operators, and BRE
+backreferences), and upstream chrono tzfile (`date` local time). ⚠ Re-verified at 1.6.11: the
+octal-literal and `*at()` proposals M11 used to carry both landed upstream in June (cyrius 6.0.62
+and 6.1.3) and are scheduled now (1.6.16, 1.7.4); M14's `getenv` gate cleared at 6.5.36 (1.6.16);
+and M16's agnos build is done, leaving its consumer to M10.
 
-⚠ **Re-check the enabler before scheduling around it.** The 1.2.5 chrono batch was filed as fully
-upstream-gated and was two-thirds actionable — chrono's `dt_format` covers fewer specifiers than
-kriya's own `date`, and the "missing" duration parser was never coming.
-
-**Gated, off the sequence:** M10 consumer-burn (AGNOS boot-burn — a parallel signal that may
-resequence everything above once it lands), M11 Cyrius proposal sweeps (octal literals, `*at()`
-wrappers — both re-verified still absent at pin 6.5.35), M14 stdlib `getenv` post-fork bug (its upstream half
-fixed at 6.5.36 — see roadmap M14), upstream
-chrono tzfile (`date` local time), M16 AGNOS as a build target.
-
-**Standing:** M15, the codegen/toolchain-interaction watchlist — never closes; re-run its mechanical
-detections at every pin bump. Headline entry: a function-local `var X[N]` is N **bytes** while module
-scope is N×8, the rule behind both the v1.1.9 `find` smash and the v1.1.11 `k_access` one.
-
-⚠ The **M-numbers are historical identifiers, not a live index** — `CHANGELOG.md` references them, so
-the roadmap carries a table mapping each dissolved bucket to where its work went.
+**Standing:** M15, the compiler watchlist in [`lessons.md`](lessons.md) — never closes; re-run its
+detections at every pin bump.
 
 ## Next
 

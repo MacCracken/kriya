@@ -32,7 +32,7 @@
 # (`'é'`) while still escaping invalid ones. kriya is byte-oriented here, so it
 # matches GNU under C and is more verbose than GNU under UTF-8 — never wrong,
 # since the escaped form round-trips identically. Recorded as a measured choice
-# rather than an accident (roadmap 1.5.x).
+# rather than an accident (roadmap § Non-goals).
 
 enum QuoteStyle {
     # `ls` leaves a name bare when nothing needs quoting; `stat %N` always

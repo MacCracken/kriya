@@ -77,7 +77,7 @@ else
     #
     # ⚠ The comment here used to justify that by saying attached short values
     # (`-n2`) and the obsolescent bare-digit form (`head -2`) were "named
-    # follow-ups under roadmap M12b". **All three spellings work today** —
+    # follow-ups under" the M12b bucket. **All three spellings work today** —
     # measured at 1.6.6 — and M12b is a retired bucket. The reason survived the
     # thing it was reasoning about by several releases.
 

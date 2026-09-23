@@ -623,7 +623,7 @@ same_ls "a cluster resolves too"     -1C -w 20
 # ⚠ COMPARED kriya-TO-kriya, DELIBERATELY. The rule under test is "`-1` has no
 # effect after `-l`", and `ls -l`'s BYTES still differ from GNU's for two
 # pre-existing reasons this release does not touch — no `total N` line and a
-# different mtime format (both filed at roadmap 1.6.10). Comparing full `-l`
+# different mtime format (both filed at roadmap 1.6.12). Comparing full `-l`
 # output against GNU would fail for those reasons and say nothing about ordering.
 _l_only=$(env -u COLUMNS "$BIN" ls -l colw)
 expect_eq "-l then -1 stays long" "$_l_only" "$(env -u COLUMNS "$BIN" ls -l -1 colw)"
@@ -695,12 +695,12 @@ same_lsd "...(the wider one)"              tiny -C -w 76
 # the same request that are not equivalent, which is why both are pinned.
 # ⚠ CLASSIFIES THE FORMAT, IT DOES NOT COMPARE `-l`'s BYTES. Those still differ
 # from GNU's for two pre-existing reasons out of scope here — no `total N` line
-# and a different mtime rendering, both filed at roadmap 1.6.10 — so a byte
+# and a different mtime rendering, both filed at roadmap 1.6.12 — so a byte
 # comparison would go red for reasons that say nothing about which format won.
 same_fmt() {  # same_fmt <name> <arg...>
     _n=$1; shift
     # ⚠ CLASSIFIES THE WHOLE OUTPUT, NOT LINE 1. GNU's long listing opens with
-    # `total N` and kriya's does not (roadmap 1.6.10), so a line-1 test reads
+    # `total N` and kriya's does not (roadmap 1.6.12), so a line-1 test reads
     # GNU's long output as "not long" and every comparison inverts.
     _cls() {
         case "$1" in

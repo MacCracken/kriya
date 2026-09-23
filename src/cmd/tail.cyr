@@ -17,7 +17,7 @@
 # `-n`) or the byte at offset `size - N` (for `-c`). This is the
 # straightforward path that works for both seekable files and pipes.
 # A seek-back-from-end fast path for huge files is a clearly-named
-# follow-up — see deferrals below. (roadmap 1.9.x)
+# follow-up — see deferrals below. (roadmap 1.9.1)
 #
 # Cap: if input exceeds 16 MiB, the buffer is truncated to the LAST
 # 16 MiB (head bytes discarded). For `-n N` this means the result is
@@ -32,10 +32,11 @@
 #   -f on MULTIPLE files     the single-file restriction is real and enforced;
 #                            `tail -f a b` errors (see _tail_report_usage below).
 #   -F                       --follow=name --retry compound.
-#   -n +N / -c +N            start-from-line/byte semantics.
+#   -n +N / -c +N            start-from-line/byte semantics (roadmap 1.6.15).
 #   --pid=PID                terminate when PID exits (with -f).
 #   k/M/G suffixes           on N — shared with head; one parser when extracted.
-#   Seek-from-end fast path  for large seekable files (avoids the 16MB cap).
+#   Seek-from-end fast path  for large seekable files (avoids the 16MB cap),
+#                            and a ring buffer for pipes (roadmap 1.9.1).
 
 var _tail_spec  = 0;
 var _tail_n_idx = 0;

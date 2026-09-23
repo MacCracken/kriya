@@ -45,7 +45,7 @@
 # ⚠ GNU's `-NUM` shorthand (`grep -3` for `-C 3`) is NOT implemented. It needs a
 # bare `-DIGIT` to be read as an option rather than an operand — the same shape
 # `seq -5` handles with a dedicated argv walk — and grep goes through the shared
-# parser, where a digit is not a registered short. Deferred, roadmap 1.4.x.
+# parser, where a digit is not a registered short. Deferred, roadmap 1.6.14.
 #   -s   suppress filesystem-error messages
 #   -h / -H   filename header control (auto when 2+ operands or -r)
 #   -o   emit only the matched substring(s) on each matching line
@@ -152,7 +152,7 @@ fn grep_help_declare(): i64 {
     help_begin("grep", "Search files for lines matching a pattern.",
       "grep [OPTIONS] PATTERN [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "PATTERN,FILE");
-    help_operands("PATTERN is an operand only when neither -e nor -f supplies it. BRE by default; -E for ERE, -F for fixed strings. ⚠ Context lines print with `-` where matching lines print `:`, and `--` separates non-adjacent groups. ⚠ -r skips symlinks (ADR 0003). -P is rejected (ADR 0005). GNU's -NUM shorthand is not implemented (roadmap 1.4.x). ⚠ --include/--exclude: the RIGHTMOST matching one wins, and a name matching neither is decided by the FIRST option's type — so `--exclude=X --include=*.c` searches everything while `--include=*.c --exclude=X` searches only .c files. Under -r the glob sees the BASE NAME (a pattern with `/` never matches); for a command-line operand it sees the path as typed and each `/`-suffix. Directories are never filtered.");  #skip-lint
+    help_operands("PATTERN is an operand only when neither -e nor -f supplies it. BRE by default; -E for ERE, -F for fixed strings. ⚠ Context lines print with `-` where matching lines print `:`, and `--` separates non-adjacent groups. ⚠ -r skips symlinks (ADR 0003). -P is rejected (ADR 0005). GNU's -NUM shorthand is not implemented (roadmap 1.6.14). ⚠ --include/--exclude: the RIGHTMOST matching one wins, and a name matching neither is decided by the FIRST option's type — so `--exclude=X --include=*.c` searches everything while `--include=*.c --exclude=X` searches only .c files. Under -r the glob sees the BASE NAME (a pattern with `/` never matches); for a command-line operand it sees the path as typed and each `/`-suffix. Directories are never filtered.");  #skip-lint
     help_exit(0, "at least one line matched");
     help_exit(1, "no line matched");
     help_exit(2, "an error occurred");
@@ -704,7 +704,7 @@ fn _gr_ctx_gap(first_line, term): i64 {
 #     therefore filtered differently depending on how it was found.
 #
 # ⚠ Also measured: directories are exempt entirely (never pruned, always
-# descended — that is `--exclude-dir`, not shipped, roadmap 1.4.x); stdin is
+# descended — that is `--exclude-dir`, not shipped, roadmap 1.6.14); stdin is
 # never filtered; and an excluded operand that cannot be OPENED still reports
 # its error and exits 2, because filtering happens after the open attempt.
 enum GrFilterKind {
