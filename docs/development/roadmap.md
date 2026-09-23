@@ -38,7 +38,7 @@ watchlist in [`lessons.md`](lessons.md). The rest are shipped or dissolved into 
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.6.x** | GNU-parity leftovers and cleanup | — | **1.6.16** — cleanup and leftovers |
+| **1.6.x** | GNU-parity leftovers and cleanup | — | **1.6.17** — `printf` and `stat` numbers |
 | **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | ARG_MAX argv chunking | **1.7.0** — batched exec |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.8.0** — floats |
 | **1.9.x** | Performance | niyama regex speed (upstream) | **1.9.0** — `wc -c` fast path |
@@ -55,49 +55,30 @@ test-first. **1.7.x onward is new capability**, a different kind of risk: it cha
 What the closed arcs and the release audits left open. One release per entry; every item was
 measured against GNU when it was filed and re-confirmed open at 1.6.11.
 
-- **1.6.16 — cleanup, and the leftovers nothing else claims.**
-  - ⛔ **`kriya_parse_nonneg_int` wraps past 2^64, and fifteen options read through it.** A count of
-    `18446744073709551617` comes back as **1**, at exit 0. Measured at 1.6.15 against GNU 9.11,
-    which refuses the number for `du -d`, `find -maxdepth` / `-mindepth` / `-uid`, and `nl -i` /
-    `-v` / `-w` (exit 1, *Numerical result out of range* or *Value too large*), where kriya runs
-    with depth 1, increment 1, width 1. GNU **saturates** it for `sort -k` and `uniq -f` / `-s` /
-    `-w`, where kriya's wrapped 1 agrees only by accident of the input (`uniq -w 1` on `xa`, `xb`
-    is one line; GNU prints two). `find -gid`, `-user` and `-group` given a number, and `nl -l`,
-    share the parser. ⚠ Each option wants its own answer, which is why 1.6.15 gave `head` and
-    `tail` their own saturating parser (`kriya_parse_count`) rather than changing this one: refuse
-    where GNU refuses, saturate where it saturates.
-  - **`xargs` treats an unrecognised numeric short as the COMMAND.** `echo hi | xargs -5 echo` is
-    *invalid option* / exit 1 under GNU and `-5: command not found` / **exit 127** here. ⚠ 127 is
-    "command not found", so a caller cannot tell a typo'd flag from a missing binary.
-  - **The octal-literal sweep.** Cyrius has lexed `0o755` since **6.0.62** — the proposal kriya
-    filed on 2026-05-17, archived upstream as done. Sweep the decimal POSIX-mode constants
-    (`511  # 0o777`) back to octal across `mkdir.cyr`, `touch.cyr`, `cp.cyr`, `tee.cyr`, `fs.cyr`
-    and `protected.cyr`, and correct the comments that still say Cyrius has no octal syntax
-    (`src/cmd/mkdir.cyr`). Zero behaviour change; the smoke suite is the check.
-  - **Retire `src/lib/env.cyr`, or decide to keep it.** It exists to route around the stdlib
-    `getenv`'s 8 KB window, which cyrius 6.5.36 removed (heap buffer, read to EOF, cached once), and
-    `find` and `xargs` cache PATH at startup to dodge a stack clobber in that same old buffer.
-    ⚠ Not a drop-in swap: the stdlib copies every hit to a fresh heap buffer where `kriya_getenv`
-    returns a pointer into its cached block. Pure cleanup either way.
-  - **`mv`'s diagnostics from a cross-filesystem move say `kriya cp:`**, because the move runs `cp`'s
-    copy and `cp`'s reporter hard-codes its name. GNU says `mv:`. Measured at 1.6.13 on a read-only
-    destination; the fix is the utility name as a parameter of the reporter, not a second reporter.
-  - **`cp -fi` never prompts**, and GNU's does: measured under a pty at 1.6.13, `cp -fi src dst`
-    asks *overwrite 'dst'?* and declining exits 1 with the destination unchanged, while kriya
-    overwrites and exits 0. kriya's `-f` skips the prompt in either order — CLAUDE.md's "`-f`
-    overrides" read broadly. ⚠ Decide before changing: GNU's `mv` makes `-f`/`-i`/`-n` last-wins
-    while its `cp` keeps `-i` whatever `-f` says, so "match GNU" is two different rules.
-  - **`grep -r` with no operand is refused** (`-r requires file operands`, exit 2); GNU searches `.`
-    and prints paths without a `./` prefix (`sub/b:hit`). ⚠ GNU also exempts that implied `.` from
-    `--exclude-dir` — `grep -r --exclude-dir=. hit` still searches — so the walk needs a display
-    prefix of its own, not the literal operand `.`. Measured at 1.6.14.
-  - **`stat %C`** — the SELinux context — prints `?` and exits 0, as an unknown specifier does.
-    GNU reads `security.selinux` and, where there is none, prints `?` too but exits **1** with
-    *failed to get security context*, so a script cannot tell "no context" from "not asked".
-    `k_getxattr` (1.6.12) is half of it; an unfollowed symlink needs the `l` variant.
-  - **Two doc blocks in `src/lib/args.cyr` sit 130-odd lines above the functions they document**
-    (`kriya_argv_collect`, `kriya_parse_octal_mode`). `kriya_parse_nonneg_int`'s moved at 1.6.15,
-    when the count parser landed beside it.
+- **1.6.17 — `printf` and `stat` numbers.** Measured at 1.6.16, which fixed the same defect —
+  a decimal parser that wraps — everywhere else, and left these two because their number handling
+  is a layer of its own:
+  - ⛔ **A width or precision wraps past 2^64**: `printf %18446744073709551617d 5` prints `5`, and
+    `stat -c %18446744073709551617n f` prints `f`. GNU fails both (glibc refuses a field past
+    `INT_MAX`; `printf`'s `*` form says *invalid field width*). ⚠ Below the wrap it is a hang, not
+    an answer: `printf %9223372036854775807d 5` never finishes, because `_pf_putc`, `_pf_pad` and
+    `stat`'s `_st_pad` write ONE BYTE PER SYSTEM CALL — a width of 100,000,000 takes 50 s against
+    GNU's 31 ms. `nl` had the same padding and 1.6.16 buffered it; these two want the same.
+  - ⛔ **`%d`'s argument wraps too**: `printf %d 99999999999999999999` prints 7766279631452241919
+    at exit 0, where GNU prints 9223372036854775807 with *Numerical result out of range* and exits
+    1. `%d 9223372036854775808` prints a bare `-`, and `%u` / `%x` / `%o` of anything from 2^63
+    up print NOTHING (`%u 18446744073709551615`), since `_pf_render_int_base` has no unsigned
+    path.
+  - **GNU's conversion diagnostics are missing**: `%d 5x` is *value not completely converted*,
+    and `%d abc` or `%d ''` is *expected a numeric value* — each printed, each exit 1. kriya
+    prints `5`, `0` and `0` at exit 0. `%d ' 5'` is 5 in GNU and 0 here.
+  - ⚠ **Decide: a negative argument needs `--`.** `printf '%d\n' -5` is *bad option*, exit 2,
+    by [ADR 0002](../adr/0002-option-parsing-humans-and-agents.md)'s rule for negative
+    positionals — which `seq` is exempt from, and which protects nothing here: `printf` has no
+    options but `--help` / `--version`, and POSIX and GNU both take every argument after FORMAT
+    as data. `smoke-printf.sh` writes `--` today.
+  - **`nl -i` and `-v` refuse a negative**, where GNU counts down and starts below zero
+    (`nl -v -1` numbers from -1). The counter is an i64 already; the number emitter is not signed.
 
 ---
 
@@ -110,6 +91,9 @@ measured against GNU when it was filed and re-confirmed open at 1.6.11.
   `--show-limits`. All four are the same argv-accounting problem seen from two directions.
 - **1.7.1 — `find` predicates.** `-prune`, `-depth` (DFS post-order), `-perm`, `-H` (operand-only
   follow — the one [ADR 0003](../adr/0003-symlink-follow-policy.md) mode still refused).
+  - **`-uid` / `-gid` take `+N` and `-N`** in GNU (more than, less than), as `-mtime` and `-size`
+    already do here through `_f_parse_signed_int`; kriya refuses them. And `-size Nw` (two-byte
+    words) is GNU's too. Both measured at 1.6.16, when `-size` learned GNU's rounding.
 - **1.7.2 — Destructive and parallel.** ⛔ `find -delete` **must inherit the
   [ADR-0004](../adr/0004-rm-refuses-root.md) `/` refusal and the
   [ADR-0010](../adr/0010-rm-refuses-a-trailing-slash-symlink-operand.md) trailing-slash-symlink
@@ -139,9 +123,10 @@ measured against GNU when it was filed and re-confirmed open at 1.6.11.
     `getdents64` 217→61 and `unlinkat` 263→35; 6.6.6 added `statfs` 137. `openat` and `mkdirat`
     were not checked. A `qemu-aarch64` run of the smoke suite says whether an aarch64 build is
     broken today or only hard to read.
-  - ⚠ **Two of them have no wrapper to convert to.** 1.6.12 added `statx` (332; **291** on aarch64)
-    for `stat %w`/`%W` and `getxattr` (191; **8** on aarch64) for `ls`'s `ca` colour, both as
-    `k_statx` / `k_getxattr` in `src/lib/sys.cyr`, and the 6.6.6 stdlib wraps neither. Check both
+  - ⚠ **Three of them have no wrapper to convert to.** 1.6.12 added `statx` (332; **291** on
+    aarch64) for `stat %w`/`%W` and `getxattr` (191; **8** on aarch64) for `ls`'s `ca` colour, and
+    1.6.16 `lgetxattr` (192; **9**) for `stat %C`, as `k_statx` / `k_getxattr` / `k_lgetxattr` in
+    `src/lib/sys.cyr`; the 6.6.6 stdlib wraps none of them. Check both
     against cyrius's aarch64 translation table in the same `qemu-aarch64` run; upstream wrappers are
     the fix if either is missing. Both already decline with `-38` on agnos.
   - ⚠ **agnos keeps its own arms.** The agnos syscall peer wraps only `sys_fchownat` of this set
@@ -192,6 +177,13 @@ measured against GNU when it was filed and re-confirmed open at 1.6.11.
     variable never silently drops a `+FORMAT` ([ADR 0020](../adr/0020-ls-long-format-dates-are-posix.md)).
     ⭐ `TIME_STYLE` passes [ADR 0017](../adr/0017-environment-variables-configure-features-the-caller-turned-on.md)'s
     test — it changes nothing without `-l` — so it lands with `+FORMAT`, not after it.
+- **1.8.5 — Symbolic file modes.** `mkdir -m` takes only an octal mode
+  (`kriya_parse_octal_mode`) and refuses every symbolic one, exit 2, where GNU takes all of them.
+  Measured at 1.6.16 with umask 022: `u=rwx,go=` is 700, `a+w` 777, `o-rx` 772, `g+s` 2777, `=` 0,
+  and `+t` **1755**. ⚠ That last one is the rule to get right: a clause with no `u`/`g`/`o`/`a`
+  is filtered through the umask, and one that names them is not. The parser's doc comment used to
+  promise this "in M3", a milestone that closed at v0.4.0 without it. ⚠ One parser, then its
+  callers: `mkdir -m` today, and `install -m` / `chmod` if either is ever added.
 
 ---
 
@@ -228,6 +220,12 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
   supports it. Speculative; check AGNOS kernel availability before committing.
 - **1.9.4 — `find` predicate JIT** — compile the predicate AST to a flat eval loop. ⚠ Not committed;
   revisit only if benchmark pressure rises after the consumer burn.
+- **1.9.5 — Buffered output for the line utilities.** `nl` writes each line in five system calls
+  (number, padding, separator, text, newline): **836 ms against GNU's 42 ms** on 500,000 lines,
+  measured at 1.6.16. That release buffered `nl`'s padding, which had been one call PER BYTE (a
+  20 MB `-w 1000000` run went 7,148 → 3 ms), but the per-line calls remain. `printf` and `stat`
+  share the shape (roadmap 1.6.17 has their per-byte padding). One shared stdout buffer, flushed
+  at exit and on a write error, serves all three.
 
 ---
 

@@ -169,6 +169,20 @@ if [ -d /dev/shm ] && [ "$TMP_DEV" != "$SHM_DEV" ]; then
     expect_eq "...replaces it"                     "ro-new" "$(cat ro_dst 2>/dev/null)"
     expect_eq "...and moves, not copies"           "gone" "$([ -e "$XFS_RO" ] && echo LEFT || echo gone)"
     rm -f "$XFS_RO" ro_dst
+    # ⛔ THE MOVE'S DIAGNOSTICS SAID `kriya cp:` (until 1.6.16): a cross-filesystem
+    # move runs cp's copy, and cp's reporter named cp. GNU says `mv:`. Into a
+    # directory the caller cannot write, so the copy fails and reports; ⚠ root
+    # can write there anyway, so the case needs a non-root run to mean anything.
+    if [ "$(id -u)" != 0 ]; then
+        XFS_NW=$(mktemp -p /dev/shm kriya-mv-nw.XXXXXX)
+        mkdir nowrite && chmod 0555 nowrite
+        err=$("$BIN" mv "$XFS_NW" nowrite/ 2>&1 >/dev/null || true)
+        case "$err" in
+            "kriya mv: "*) PASS=$((PASS + 1)) ;;
+            *) FAIL=$((FAIL + 1)); printf "FAIL cross-FS diagnostic names mv:\ngot: '%s'\n" "$err" >&2 ;;
+        esac
+        chmod 0755 nowrite; rm -rf nowrite "$XFS_NW"
+    fi
     expect_absent "src gone after xfs"  "$XFS_SRC"
     expect_present "dst arrived"        "$XFS_DST"
     content=$(cat "$XFS_DST")
@@ -305,6 +319,57 @@ expect_eq "\$VERSION_CONTROL reaches mv"    "dst dst.~1~ " "$(ubk_show)"
 ubk_mk; ( cd ubk && env -u SIMPLE_BACKUP_SUFFIX VERSION_CONTROL=numbered "$BIN" mv -f src dst 2>/dev/null ) || true
 expect_eq "...and makes no backup on its own" "dst " "$(ubk_show)"
 expect_exit "a bad control is a usage error"  2 "$BIN" mv --backup=bogus src dst
+
+# --- 1.6.16: -f, -i and -n are last-wins, as in GNU's mv (ADR 0024) ----------
+#
+# ⛔ A PRECEDENCE STOOD WHERE GNU HAS ORDER: `-f` beat `-i` wherever it stood, so
+# `mv -fi` never asked, and `-n` beat `-f`, so `mv -nf` kept what GNU replaces.
+# ⛔ And a declined prompt exited 0; GNU (since 9.2) says 1.
+
+# ⭐ UNDER A PTY, where `-i` actually asks: kriya and GNU must agree on the
+# destination, the source, the exit status and whether a prompt appeared.
+# ⚠ Skips loudly without `script(1)`; the non-tty cases below run everywhere.
+pty_case() {   # pty_case <label> <util> <flags> <answer>
+    if ! command -v script >/dev/null 2>&1; then
+        echo "SKIP $1: no script(1) for a pty" >&2
+        return 0
+    fi
+    for _which in gnu kri; do
+        rm -f pty_s pty_d; echo new > pty_s; echo old > pty_d
+        if [ "$_which" = gnu ]; then _cmd="$2 $3 pty_s pty_d"; else _cmd="'$BIN' $2 $3 pty_s pty_d"; fi
+        _out=$(printf '%s\n' "$4" | script -qec "$_cmd; echo RC=\$?" /dev/null 2>&1 | tr -d '\r' || true)
+        _res="dst=$(cat pty_d) src=$([ -e pty_s ] && echo kept || echo gone) $(echo "$_out" | grep -o 'RC=[0-9]*' | head -1) prompts=$(echo "$_out" | grep -c overwrite || true)"
+        if [ "$_which" = gnu ]; then _r_gnu=$_res; else _r_kri=$_res; fi
+    done
+    expect_eq "$1" "$_r_gnu" "$_r_kri"
+}
+nt_case() {   # nt_case <label> <util> <flags>: the same, stdin not a terminal, no prompt expected
+    for _which in gnu kri; do
+        rm -f pty_s pty_d; echo new > pty_s; echo old > pty_d
+        _rc=0
+        if [ "$_which" = gnu ]; then $2 $3 pty_s pty_d </dev/null >/dev/null 2>&1 || _rc=$?
+        else "$BIN" $2 $3 pty_s pty_d </dev/null >/dev/null 2>&1 || _rc=$?; fi
+        _res="dst=$(cat pty_d) src=$([ -e pty_s ] && echo kept || echo gone) rc=$_rc"
+        if [ "$_which" = gnu ]; then _r_gnu=$_res; else _r_kri=$_res; fi
+    done
+    expect_eq "$1" "$_r_gnu" "$_r_kri"
+}
+
+for _f in -fi -i -ni -nfi; do
+    for _a in y n; do pty_case "mv $_f, answering $_a" mv "$_f" "$_a"; done
+done
+for _f in -if -f -nf; do nt_case "mv $_f" mv "$_f"; done
+# ⚠ `mv -n` skipping: exit 0 under GNU 9.11, 1 under 9.4 (CI's). Asserted as
+# kriya's answer, the newer GNU's — for every order where `-n` comes last.
+for _f in -n -in -fn -fin -ifn; do
+    echo new > pty_s; echo old > pty_d
+    expect_exit "mv $_f skips, exit 0" 0 "$BIN" mv $_f pty_s pty_d
+    expect_eq "...and keeps the destination" "old" "$(cat pty_d)"
+done
+echo new > pty_s; echo old > pty_d
+expect_exit "mv -nb refused"  2 "$BIN" mv -n -b pty_s pty_d
+expect_exit "mv -bn refused"  2 "$BIN" mv -b -n pty_s pty_d
+expect_exit "mv -fi without a terminal refused" 2 sh -c "'$BIN' mv -fi pty_s pty_d </dev/null"
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

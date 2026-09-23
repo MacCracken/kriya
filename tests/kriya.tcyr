@@ -54,6 +54,13 @@ include "src/cmd/nl.cyr"
 # nothing below calls them.
 include "src/cmd/head.cyr"
 include "src/cmd/tail.cyr"
+# ⚠ M15e, PRE-EMPTIVELY (1.6.16). `sort.cyr`, `cut.cyr` and `seq.cyr` are here for
+# their pure number and LIST parsers; `cut`'s reports through `report_note`, so
+# `report.cyr` (quote.cyr and errmsg.cyr above) comes with it.
+include "src/lib/report.cyr"
+include "src/cmd/sort.cyr"
+include "src/cmd/cut.cyr"
+include "src/cmd/seq.cyr"
 
 # ⭐ The modes the real callers use, so a test reads as "FORMAT says this, `%b`
 # says that" rather than as a bitmask.
@@ -148,6 +155,23 @@ fn _t_tobs(tok, count, bytes, from, follow): i64 {
 fn _t_tobs_r(tok): i64 {
     var rec[32];
     return _tail_obs_parse(tok, &rec);
+}
+
+# `_so_cmp_numeric` on two keys written into one buffer: -1 / 0 / +1.
+fn _t_ncmp(a, b): i64 {
+    var al = strlen(a);
+    var bl = strlen(b);
+    var buf = alloc(al + bl + 1);
+    memcpy(buf, a, al);
+    memcpy(buf + al, b, bl);
+    return _so_cmp_numeric(buf, 0, al, al, bl);
+}
+
+# How many ranges `_cut_parse_list` makes of `s`, or -1 when it refuses it.
+fn _t_cut(s, fields): i64 {
+    var v = _cut_parse_list(s, fields);
+    if (v == 0) { return 0 - 1; }
+    return vec_len(v);
 }
 
 # 1 when `icase_bre_literal_stars` turns `pat` into exactly `want`.
@@ -349,6 +373,59 @@ fn main() {
     assert_eq(_t_tobs_r("-3cc"), 0, "one unit letter at most");
     assert_eq(_t_tobs_r("5"),    0, "a bare number is an operand");
     assert_eq(_t_tobs_r("--"),   0, "-- ends the options");
+
+    test_group("kriya_parse_nonneg_int / kriya_parse_bounded — never a wrap (1.6.16)");
+    assert_eq(kriya_parse_nonneg_int("9223372036854775807"), KRIYA_COUNT_MAX, "the ceiling");
+    assert_eq(kriya_parse_nonneg_int("9223372036854775808"), 0 - 1, "one past: refused, not negative");
+    # ⛔ The value that came back as 1.
+    assert_eq(kriya_parse_nonneg_int("18446744073709551617"), 0 - 1, "2^64 + 1: refused, not 1");
+    assert_eq(kriya_parse_bounded("5", 10), 5, "in range");
+    assert_eq(kriya_parse_bounded(" 5", 10), 5, "GNU's leading blank");
+    assert_eq(kriya_parse_bounded("+5", 10), 5, "GNU's plus");
+    assert_eq(kriya_parse_bounded("10", 10), 10, "the bound itself");
+    assert_eq(kriya_parse_bounded("11", 10), 0 - 2, "past the bound: -2");
+    assert_eq(kriya_parse_bounded("99999999999999999999", KRIYA_COUNT_MAX), 0 - 2, "past 2^63: -2");
+    assert_eq(kriya_parse_bounded("9223372036854775807", KRIYA_COUNT_MAX), KRIYA_COUNT_MAX, "2^63 - 1 fits");
+    assert_eq(kriya_parse_bounded("", 10), 0 - 1, "empty: -1");
+    assert_eq(kriya_parse_bounded("5x", 10), 0 - 1, "trailing junk: -1");
+    assert_eq(kriya_parse_bounded("-1", 10), 0 - 1, "a minus: -1");
+    assert_eq(kriya_parse_bounded("++5", 10), 0 - 1, "two pluses: -1");
+    assert_eq(kriya_parse_bounded("0", 10), 0, "zero");
+
+    test_group("_so_cmp_numeric — digit strings, never an i64 (1.6.16)");
+    assert_eq(_t_ncmp("-1.25", "-1.5"), 1, "-1.25 > -1.5 (tied as -1 before)");
+    assert_eq(_t_ncmp("18446744073709551617", "2"), 1, "past 2^64 still larger");
+    assert_eq(_t_ncmp("9223372036854775808", "-18446744073709551617"), 1, "past 2^63 is not negative");
+    assert_eq(_t_ncmp("99999999999999999999", "18446744073709551617"), 1, "two huge ones");
+    assert_eq(_t_ncmp("1.10", "1.1"), 0, "trailing fraction zeros");
+    assert_eq(_t_ncmp("-0", "0"), 0, "-0 is 0");
+    assert_eq(_t_ncmp("-.00", "abc"), 0, "zero, and not a number");
+    assert_eq(_t_ncmp(".5", "0.49"), 1, "a bare fraction");
+    assert_eq(_t_ncmp("007", "7"), 0, "leading zeros");
+    assert_eq(_t_ncmp("1e3", "2"), 0 - 1, "an exponent is not -n's");
+    assert_eq(_t_ncmp("+5", "4"), 0 - 1, "a plus is not -n's either");
+    assert_eq(_t_ncmp(" 5", "4"), 1, "leading blanks skipped");
+    assert_eq(_t_ncmp("-1", "-2"), 1, "negatives flip");
+    assert_eq(_t_ncmp("1.2.3", "1.2"), 0, "the number stops at the second dot");
+
+    test_group("_cut_parse_list — GNU's LIST (1.6.16)");
+    assert_eq(_t_cut("1-3,5", 1), 2, "two items");
+    assert_eq(_t_cut("1 3", 1), 2, "a blank separates, as in GNU");
+    assert_eq(_t_cut("3-", 1), 1, "open-ended");
+    assert_eq(_t_cut("-2", 1), 1, "open start");
+    assert_eq(_t_cut("0", 1), 0 - 1, "0: numbered from 1 (was field 1)");
+    assert_eq(_t_cut("2-1", 1), 0 - 1, "decreasing (was nothing)");
+    assert_eq(_t_cut("1-0", 1), 0 - 1, "1-0 (was everything)");
+    assert_eq(_t_cut("1,", 1), 0 - 1, "a trailing separator");
+    assert_eq(_t_cut("-", 1), 0 - 1, "no endpoint");
+    assert_eq(_t_cut("1-18446744073709551616", 0), 0 - 1, "past 2^64: too large (was everything)");
+
+    test_group("_seq_parse_signed — refuses what an i64 cannot hold (1.6.16)");
+    assert_eq(_seq_parse_signed("9223372036854775807"), KRIYA_COUNT_MAX, "the ceiling");
+    assert_eq(_seq_err, 0, "...parses");
+    _seq_parse_signed("18446744073709551617");
+    assert_eq(_seq_err, 2, "2^64 + 1: overflow (was 1)");
+    assert_eq(_seq_parse_signed("-9223372036854775807"), 0 - KRIYA_COUNT_MAX, "the floor + 1");
 
     test_group("kriya_parse_octal_mode");
     # Comparisons are decimal: 0o755=493, 0o700=448, 0o644=420,

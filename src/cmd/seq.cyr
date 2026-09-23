@@ -50,8 +50,14 @@ fn _seq_bytes_eq(a, b, n): i64 {
 
 # Parse a null-terminated cstring as a signed base-10 integer.
 # Sets `_seq_err = 1` on: null pointer, empty string, leading sign
-# with nothing after, non-digit body. Otherwise `_seq_err = 0` and
-# returns the value (which may legitimately be 0 or negative).
+# with nothing after, non-digit body — and 2 on a magnitude past 2^63 - 1.
+# Otherwise `_seq_err = 0` and returns the value (which may legitimately be
+# 0 or negative).
+#
+# ⛔ IT WRAPPED UNTIL 1.6.16: `seq 18446744073709551617 18446744073709551617`
+# printed `1`, and `seq 5 -18446744073709551617 3` counted down BY ONE. GNU
+# prints integers of any size; kriya holds an i64 and REFUSES what does not
+# fit, rather than printing a different number.
 fn _seq_parse_signed(s): i64 {
     _seq_err = 0;
     if (s == 0)        { _seq_err = 1; return 0; }
@@ -67,15 +73,31 @@ fn _seq_parse_signed(s): i64 {
     }
     if (load8(s + i) == 0) { _seq_err = 1; return 0; }
     var n: i64 = 0;
+    var over: i64 = 0;
     while (load8(s + i) != 0) {
         c = load8(s + i);
         if (c < 48) { _seq_err = 1; return 0; }
         if (c > 57) { _seq_err = 1; return 0; }
-        n = n * 10 + (c - 48);
+        var d = c - 48;
+        if (n > (KRIYA_COUNT_MAX - d) / 10) { over = 1; }
+        else { n = n * 10 + d; }
         i = i + 1;
     }
+    if (over == 1) { _seq_err = 2; return 0; }
     if (neg == 1) { return 0 - n; }
     return n;
+}
+
+# Report operand `s` (named `what`) after `_seq_parse_signed` refused it.
+fn _seq_bad_operand(s, what): i64 {
+    if (_seq_err == 2) {
+        report_note("seq", s, "a number past 2^63 - 1 is not supported");
+        return 0;
+    }
+    k_write( 2, "kriya seq: error: invalid ", 26);
+    k_write( 2, what, strlen(what));
+    k_write( 2, " operand\n", 9);
+    return 0;
 }
 
 # Digit count for |v| (excludes any sign byte).
@@ -355,36 +377,36 @@ fn cmd_seq(start: i64): i64 {
 
     if (npos == 1) {
         last = _seq_parse_signed(load64(&pos_buf));
-        if (_seq_err == 1) {
-            k_write( 2, "kriya seq: error: invalid LAST operand\n", 39);
+        if (_seq_err != 0) {
+            _seq_bad_operand(load64(&pos_buf), "LAST");
             return EXIT_USAGE;
         }
     } else {
         if (npos == 2) {
             first = _seq_parse_signed(load64(&pos_buf));
-            if (_seq_err == 1) {
-                k_write( 2, "kriya seq: error: invalid FIRST operand\n", 40);
+            if (_seq_err != 0) {
+                _seq_bad_operand(load64(&pos_buf), "FIRST");
                 return EXIT_USAGE;
             }
             last = _seq_parse_signed(load64(&pos_buf + 8));
-            if (_seq_err == 1) {
-                k_write( 2, "kriya seq: error: invalid LAST operand\n", 39);
+            if (_seq_err != 0) {
+                _seq_bad_operand(load64(&pos_buf + 8), "LAST");
                 return EXIT_USAGE;
             }
         } else {
             first = _seq_parse_signed(load64(&pos_buf));
-            if (_seq_err == 1) {
-                k_write( 2, "kriya seq: error: invalid FIRST operand\n", 40);
+            if (_seq_err != 0) {
+                _seq_bad_operand(load64(&pos_buf), "FIRST");
                 return EXIT_USAGE;
             }
             incr = _seq_parse_signed(load64(&pos_buf + 8));
-            if (_seq_err == 1) {
-                k_write( 2, "kriya seq: error: invalid INCREMENT operand\n", 44);
+            if (_seq_err != 0) {
+                _seq_bad_operand(load64(&pos_buf + 8), "INCREMENT");
                 return EXIT_USAGE;
             }
             last = _seq_parse_signed(load64(&pos_buf + 16));
-            if (_seq_err == 1) {
-                k_write( 2, "kriya seq: error: invalid LAST operand\n", 39);
+            if (_seq_err != 0) {
+                _seq_bad_operand(load64(&pos_buf + 16), "LAST");
                 return EXIT_USAGE;
             }
         }
@@ -435,7 +457,16 @@ fn cmd_seq(start: i64): i64 {
             } else {
                 blen = _seq_write_int(buf, blen, v);
             }
-            v = v + incr;
+            # ⛔ THE STEP OVERFLOWED AND THE LOOP NEVER ENDED: `seq
+            # 9223372036854775807 9223372036854775807` wrapped to the most
+            # negative value, which is below LAST too, and printed forever. A
+            # step that would leave the i64 range ends the sequence, since the
+            # next value would be past LAST anyway (1.6.16).
+            if (incr > 0) {
+                if (v > KRIYA_COUNT_MAX - incr) { go = 0; } else { v = v + incr; }
+            } else {
+                if (v < (0 - KRIYA_COUNT_MAX) - 1 - incr) { go = 0; } else { v = v + incr; }
+            }
         }
     }
 

@@ -129,6 +129,28 @@ check_parity "large ascending"      1 100
 check_parity "large with incr"      1 7 99
 check_parity "negative large"       -50 50
 
+# --- 1.6.16: past 2^63 - 1, a refusal, never a different number -------------
+#
+# ⛔ `seq 18446744073709551617 18446744073709551617` printed `1`, and
+# `seq 5 -18446744073709551617 3` counted down BY ONE. ⛔ And the step
+# overflowed: `seq 9223372036854775807 9223372036854775807` wrapped to the most
+# negative value and PRINTED FOREVER. GNU prints integers of any size; kriya
+# holds an i64 and refuses what does not fit.
+for _a in "9223372036854775806 9223372036854775807" "9223372036854775807 9223372036854775807" \
+          "9223372036854775800 5 9223372036854775807" "-9223372036854775800 -5 -9223372036854775807" \
+          "-9223372036854775807 -9223372036854775806" "-9223372036854775807 -9223372036854775807"; do
+    # shellcheck disable=SC2086
+    expect_eq "seq $_a" "$(seq $_a)" "$(timeout 5 "$BIN" seq $_a)"
+done
+for _a in "9223372036854775808 9223372036854775808" "18446744073709551617 18446744073709551617" \
+          "1 18446744073709551616 18446744073709551617" "-9223372036854775808 -9223372036854775808" \
+          "5 -18446744073709551617 3" "99999999999999999999"; do
+    # shellcheck disable=SC2086
+    expect_exit "seq $_a refused" 2 timeout 5 "$BIN" seq $_a
+done
+err=$("$BIN" seq 18446744073709551617 2>&1 >/dev/null || true)
+expect_eq "seq overflow diagnostic" "kriya seq: 18446744073709551617: a number past 2^63 - 1 is not supported" "$err"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

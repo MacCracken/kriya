@@ -97,7 +97,7 @@ fn backup_resolve(b_given, control_str, suffix_str): i64 {
         if (control_str != 0) {
             _backup_control = backup_control_from(control_str);
         } else {
-            var vc = kriya_getenv("VERSION_CONTROL");
+            var vc = getenv("VERSION_CONTROL");
             var have_vc: i64 = 0;
             if (vc != 0) {
                 # ⚠ AN EMPTY VALUE IS AN UNSET ONE. Measured: `VERSION_CONTROL=`
@@ -114,7 +114,7 @@ fn backup_resolve(b_given, control_str, suffix_str): i64 {
     # -S .bak` writes `dst.~1~` — measured — so resolving it here costs nothing
     # and misapplying it would be silent.
     _backup_suffix = "~";
-    var sbs = kriya_getenv("SIMPLE_BACKUP_SUFFIX");
+    var sbs = getenv("SIMPLE_BACKUP_SUFFIX");
     if (sbs != 0) {
         if (load8(sbs) != 0) { _backup_suffix = sbs; }
     }

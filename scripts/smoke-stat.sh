@@ -314,6 +314,29 @@ expect_eq "stat ln (default format, atime line aside)" \
 expect_eq "stat -t on a device and a directory" \
     "$(cd d612 && stat -t /dev/null dd)" "$(cd d612 && "$BIN" stat -t /dev/null dd)"
 
+# --- 1.6.16: %C is the SELinux context, or `?` and exit 1 ---------------------
+#
+# ⛔ `%C` PRINTED `?` AND EXITED 0, as an unknown directive does, so a script could
+# not tell "no context" from "not implemented". GNU reads `security.selinux` and,
+# where there is none, prints `?` too — and exits 1, *failed to get security
+# context*. ⚠ Its reason depends on the build: CI's libselinux GNU says *No data
+# available*, a GNU without libselinux says *Operation not supported*. Bytes and
+# exit status are compared; the reason is not.
+printf 'x\n' > c16f
+ln -sf c16f c16l
+for _a in "-c %C c16f" "-c %C c16l" "-L -c %C c16l" "--printf %C\n c16f" "-c [%-5C] c16f" "-c %n:%C c16f c16f"; do
+    _grc=0; stat $_a > c16_g.out 2>/dev/null || _grc=$?
+    _krc=0; "$BIN" stat $_a > c16_k.out 2>/dev/null || _krc=$?
+    expect_eq "stat $_a" "$_grc|$(cat c16_g.out)" "$_krc|$(cat c16_k.out)"
+done
+err=$("$BIN" stat -c %C c16f 2>&1 >/dev/null || true)
+case "$err" in
+    *"failed to get security context"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL stat %%C diagnostic:\ngot: '%s'\n" "$err" >&2 ;;
+esac
+# ⚠ An UNKNOWN directive is still `?` at exit 0, as GNU's is.
+expect_eq "stat %@ stays ? at exit 0" "0|?" "$(r=0; o=$("$BIN" stat -c %@ c16f) || r=$?; echo "$r|$o")"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

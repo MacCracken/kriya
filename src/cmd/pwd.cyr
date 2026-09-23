@@ -102,7 +102,7 @@ fn cmd_pwd(start: i64): i64 {
     if (flags_get_bool(_pwd_spec, _pwd_P_idx) == 1) { use_pwd_env = 0; }
 
     if (use_pwd_env == 1) {
-        var pwd_env = kriya_getenv("PWD");
+        var pwd_env = getenv("PWD");
         if (pwd_env != 0) {
             if (_pwd_env_usable(pwd_env) == 1) {
                 k_write( 1, pwd_env, strlen(pwd_env));

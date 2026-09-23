@@ -18,9 +18,8 @@
 # %A %f %F %u %U %g %G %i %h %d %D %r %R %t %T %b %B %o %m %x %X %y %Y %z %Z %w
 # %W %%`. ⭐ The last refusal, `%w`, went at 1.6.12: birth time comes from
 # statx(2), with `-` / `0` where the filesystem does not record one, as GNU
-# prints. ⚠ Except `%C`, the SELinux context, which prints `?` as an unknown
-# specifier does — GNU prints `?` too without SELinux, but exits 1 with "failed
-# to get security context" (roadmap 1.6.16).
+# prints. `%C`, the SELinux context, is the `security.selinux` attribute; where
+# there is none it prints `?` and the command exits 1, as GNU's does (1.6.16).
 #
 # A directive is GNU's printf shape, `%[flags][width][.precision][H|L]C` (1.6.12):
 #   - the flags a directive KEEPS depend on its kind — strings take `-`,
@@ -144,35 +143,35 @@ fn _st_render_hex(v, buf): i64 {
 
 # Return a static cstring describing the file-type word.
 fn _st_type_name(mode): i64 {
-    var typ = mode & 61440;  # S_IFMT
-    if (typ == 32768) { return "regular file"; }            # S_IFREG
-    if (typ == 16384) { return "directory"; }               # S_IFDIR
-    if (typ == 40960) { return "symbolic link"; }           # S_IFLNK
-    if (typ == 8192)  { return "character special file"; }  # S_IFCHR
-    if (typ == 24576) { return "block special file"; }      # S_IFBLK
-    if (typ == 4096)  { return "fifo"; }                    # S_IFIFO
-    if (typ == 49152) { return "socket"; }                  # S_IFSOCK
+    var typ = mode & FS_S_IFMT;
+    if (typ == FS_S_IFREG) { return "regular file"; }
+    if (typ == FS_S_IFDIR) { return "directory"; }
+    if (typ == FS_S_IFLNK) { return "symbolic link"; }
+    if (typ == FS_S_IFCHR) { return "character special file"; }
+    if (typ == FS_S_IFBLK) { return "block special file"; }
+    if (typ == FS_S_IFIFO) { return "fifo"; }
+    if (typ == FS_S_IFSOCK) { return "socket"; }
     return "unknown";
 }
 
 # Render symbolic permissions into `buf`. Writes exactly 10 bytes.
 fn _st_render_symperm(mode, buf): i64 {
-    var typ = mode & 61440;
+    var typ = mode & FS_S_IFMT;
     var c: i64 = 45;  # '-'
-    if (typ == 16384) { c = 100; }  # 'd'
-    if (typ == 40960) { c = 108; }  # 'l'
-    if (typ == 8192)  { c = 99;  }  # 'c'
-    if (typ == 24576) { c = 98;  }  # 'b'
-    if (typ == 4096)  { c = 112; }  # 'p'
-    if (typ == 49152) { c = 115; }  # 's'
+    if (typ == FS_S_IFDIR) { c = 100; }  # 'd'
+    if (typ == FS_S_IFLNK) { c = 108; }  # 'l'
+    if (typ == FS_S_IFCHR) { c = 99; }  # 'c'
+    if (typ == FS_S_IFBLK) { c = 98; }  # 'b'
+    if (typ == FS_S_IFIFO) { c = 112; }  # 'p'
+    if (typ == FS_S_IFSOCK) { c = 115; }  # 's'
     store8(buf, c);
 
     # User
     var dash: i64 = 45;
-    if ((mode & 256) != 0) { store8(buf + 1, 114); } else { store8(buf + 1, dash); }  # r/-
-    if ((mode & 128) != 0) { store8(buf + 2, 119); } else { store8(buf + 2, dash); }  # w/-
-    var ux: i64 = mode & 64;
-    var setuid: i64 = mode & 2048;  # S_ISUID
+    if ((mode & 0o400) != 0) { store8(buf + 1, 114); } else { store8(buf + 1, dash); }  # r/-
+    if ((mode & 0o200) != 0) { store8(buf + 2, 119); } else { store8(buf + 2, dash); }  # w/-
+    var ux: i64 = mode & 0o100;
+    var setuid: i64 = mode & 0o4000;  # S_ISUID
     if (setuid != 0) {
         if (ux != 0) { store8(buf + 3, 115); } else { store8(buf + 3, 83); }  # s / S
     } else {
@@ -180,10 +179,10 @@ fn _st_render_symperm(mode, buf): i64 {
     }
 
     # Group
-    if ((mode & 32) != 0) { store8(buf + 4, 114); } else { store8(buf + 4, dash); }
-    if ((mode & 16) != 0) { store8(buf + 5, 119); } else { store8(buf + 5, dash); }
-    var gx = mode & 8;
-    var setgid: i64 = mode & 1024;  # S_ISGID
+    if ((mode & 0o040) != 0) { store8(buf + 4, 114); } else { store8(buf + 4, dash); }
+    if ((mode & 0o020) != 0) { store8(buf + 5, 119); } else { store8(buf + 5, dash); }
+    var gx = mode & 0o010;
+    var setgid: i64 = mode & 0o2000;  # S_ISGID
     if (setgid != 0) {
         if (gx != 0) { store8(buf + 6, 115); } else { store8(buf + 6, 83); }
     } else {
@@ -191,10 +190,10 @@ fn _st_render_symperm(mode, buf): i64 {
     }
 
     # Other
-    if ((mode & 4) != 0) { store8(buf + 7, 114); } else { store8(buf + 7, dash); }
-    if ((mode & 2) != 0) { store8(buf + 8, 119); } else { store8(buf + 8, dash); }
-    var ox = mode & 1;
-    var sticky: i64 = mode & 512;  # S_ISVTX
+    if ((mode & 0o004) != 0) { store8(buf + 7, 114); } else { store8(buf + 7, dash); }
+    if ((mode & 0o002) != 0) { store8(buf + 8, 119); } else { store8(buf + 8, dash); }
+    var ox = mode & 0o001;
+    var sticky: i64 = mode & 0o1000;  # S_ISVTX
     if (sticky != 0) {
         if (ox != 0) { store8(buf + 9, 116); } else { store8(buf + 9, 84); }  # t / T
     } else {
@@ -332,6 +331,9 @@ var _st_btime_ns = 0;
 # written. kriya echoed them back as text at exit 0. A bare `%%`, and a bare
 # trailing `%`, stay a literal `%`.
 var _st_fatal = 0;
+# 1 once a `%C` could not be read: GNU prints `?` in its place, goes on, and
+# exits 1 (1.6.16).
+var _st_ctx_failed = 0;
 
 # ⛔ `%w` / `%W` — BIRTH TIME, the specifier kriya knew about and could not
 # render: `stat(2)` has no field for it, `statx(2)` does. ⚠ A filesystem that does
@@ -507,7 +509,7 @@ fn _st_render(c, dmod, st, name): i64 {
         if (dmod == 76) { rv = fs_dev_minor(rv); }
         return _st_set_num(ST_K_UINT, rv);
     }
-    if (c == 97)  { return _st_set_num(ST_K_OCT, load64(st + 24) & 4095); }            # a
+    if (c == 97)  { return _st_set_num(ST_K_OCT, load64(st + 24) & 0o7777); }          # a
     if (c == 102) { return _st_set_num(ST_K_HEX, load64(st + 24) & 4294967295); }      # f
     if (c == 68)  { return _st_set_num(ST_K_HEX, load64(st)); }                        # D
     if (c == 82)  { return _st_set_num(ST_K_HEX, load64(st + 40)); }                   # R
@@ -521,15 +523,52 @@ fn _st_render(c, dmod, st, name): i64 {
         _st_ens = _st_btime_ns;
         return _st_set_num(ST_K_EPOCH, _st_btime_s);
     }
+    if (c == 67) { return _st_context(name); }                           # C
     _st_kind = ST_K_RAW;
     if (c == 37) { _st_sbuf = "%"; }                                      # %%
     else {
-        # Not a GNU conversion — GNU writes `?` (verified with `%@`). ⚠ `%C`
-        # lands here too: there is no SELinux context to read.
+        # Not a GNU conversion — GNU writes `?` (verified with `%@`).
         _st_sbuf = "?";
     }
     _st_slen = 1;
     return 0;
+}
+
+# `%C`: the SELinux context — the `security.selinux` attribute, of the link
+# itself unless `-L` follows it — or `?` with a diagnostic, and exit 1.
+#
+# ⛔ IT PRINTED `?` AND EXITED 0, as an unknown directive does, so a script could
+# not tell "this file has no context" from "a directive nobody implemented"
+# (1.6.16). GNU reads the context and, where there is none, prints `?` too but
+# says *failed to get security context* and exits 1.
+# ⚠ The reason differs by GNU BUILD: with libselinux (Ubuntu's, CI's) a file
+# with no label says *No data available*, which is what reading the attribute
+# gives; a GNU without it (Arch's) says *Operation not supported* for every file.
+fn _st_context(name): i64 {
+    var cbuf = alloc(4096);
+    var r: i64 = 0;
+    if (_st_deref == 1) { r = k_getxattr(name, "security.selinux", cbuf, 4095); }
+    else { r = k_lgetxattr(name, "security.selinux", cbuf, 4095); }
+    if (r > 0) {
+        # The kernel's value ends in the NUL the setter stored; the context does not.
+        while (r > 0) {
+            if (load8(cbuf + r - 1) == 0) { r = r - 1; } else { store8(cbuf + r, 0); return _st_set_str(cbuf, r); }
+        }
+    }
+    var e: i64 = 61;                                   # ENODATA: an empty value is none
+    if (r < 0) { e = 0 - r; }
+    k_write( 2, "kriya stat: ", 12);
+    _report_operand(name);
+    k_write( 2, ": failed to get security context: ", 34);
+    if (errmsg_is_known(e) == 1) {
+        var m = errmsg_for(e);
+        k_write( 2, m, strlen(m));
+    } else {
+        k_write( 2, "errno", 5);
+    }
+    k_write( 2, "\n", 1);
+    _st_ctx_failed = 1;
+    return _st_set_str("?", 1);
 }
 
 fn _st_pad(n, ch): i64 {
@@ -843,10 +882,10 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
 # `%x`/`%y`/`%z` have rendered since v1.2.5. ⚠ A character or block device gets
 # `Links: %-5h Device type: %Hr,%Lr`, measured on /dev/null.
 fn _st_default_format(st): i64 {
-    var ty = load64(st + 24) & 61440;
+    var ty = load64(st + 24) & FS_S_IFMT;
     var devline = "Device: %Hd,%Ld\tInode: %-11i Links: %h\n";
-    if (ty == 8192) { devline = "Device: %Hd,%Ld\tInode: %-11i Links: %-5h Device type: %Hr,%Lr\n"; }
-    if (ty == 24576) { devline = "Device: %Hd,%Ld\tInode: %-11i Links: %-5h Device type: %Hr,%Lr\n"; }
+    if (ty == FS_S_IFCHR) { devline = "Device: %Hd,%Ld\tInode: %-11i Links: %-5h Device type: %Hr,%Lr\n"; }
+    if (ty == FS_S_IFBLK) { devline = "Device: %Hd,%Ld\tInode: %-11i Links: %-5h Device type: %Hr,%Lr\n"; }
     var head = "  File: %N\n  Size: %-10s\tBlocks: %-10b IO Block: %-6o %F\n";
     var tail = "Access: (%04a/%10.10A)  Uid: (%5u/%8U)   Gid: (%5g/%8G)\nAccess: %x\nModify: %y\nChange: %z\n Birth: %w\n";  #skip-lint
     var hl = strlen(head);
@@ -943,5 +982,6 @@ fn cmd_stat(start: i64): i64 {
     }
 
     if (any_failed == 1) { return EXIT_FAILURE; }
+    if (_st_ctx_failed == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
 }

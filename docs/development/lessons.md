@@ -143,6 +143,19 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 
 ### Testing the tests: mutation and adversarial review
 
+- ⛔ **A new block that passes against the OLD binary has proved nothing, and three kinds of block
+  do.** 1.6.16's run of every changed script against 1.6.15 found each of them in one pass:
+  - a helper that adds its own command word: `compare_sorted` prepends `find`, so passing it
+    `find d16s …` ran `find find d16s …`, which fails the same way on both sides and scores a pass;
+  - a regression that HANGS instead of failing: a wrapped `nl -w` padded for ever, so the suite
+    timed out where it should have reported. Wrap the call in `timeout`;
+  - a fixture that cannot tell the answers apart: files made a moment ago are under a minute old,
+    so a wrapped `-mmin -N` ("under a minute") and GNU's huge one match the same files. Backdate it.
+- ⭐ **A zero-behaviour sweep is proven by the binary, not by the suite.** The octal sweep and the
+  `FS_S_*` substitutions were built before the version bump and compared byte for byte with the
+  committed 1.6.15 binary, on both targets, after every file: identical. A suite can only sample
+  behaviour, while `cmp` covers every byte. It works only before the version string changes.
+
 - ⛔ *An adversarial review pass is worth more than the tests written beside the feature, again.*
   **Fifteen** real defects and none refuted — thirteen fixed in the release, two filed as follow-ups —
   of which the 76-case suite could see exactly none: attributes written before the
@@ -464,12 +477,20 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   leftmost-first. So a line where a LATER alternative qualified was rejected, silently
   (`-xE 'a|ab'` on `ab`). A constraint the engine must satisfy belongs IN the pattern (`^(…)$`),
   where every alternative is tried against it.
+- ⛔ **A defect found through one function is a CLASS, and the class is found by pattern, not by
+  callers.** The roadmap filed "fifteen options wrap past 2^64", counted through the callers of
+  `kriya_parse_nonneg_int`. Searching for the SHAPE instead (`n * 10 + d`, `v * base + d`) found
+  the same unbounded accumulator in eight more parsers: `cut`, `seq`, `find` twice, `sort -n`'s
+  comparator, `printf` and `stat`. Some of them gave worse answers than the ones filed, such as
+  `seq` printing forever and `cut -f 1-18446744073709551616` printing everything.
 - ⛔ **Measure an edge on BOTH GNU versions before comparing against "the local GNU".** GNU 9.4, in
   CI's container, refuses `head -n 99999999999999999999` (*Value too large*). GNU 9.11 on the host
   saturates it. A `ht_same`-style comparison would pass on one box and fail on the other, whichever
   answer kriya gave. Where the versions split, assert kriya's answer directly and name both
   versions in the comment. 1.6.12's `--dired` split was the first case and 1.6.15's oversized
-  counts the second.
+  counts the second. 1.6.16 found three more in one release: `mv -n`'s exit status on a skip,
+  `-n` with `-b`, and `nl -l 0`. Look for a split on any flag whose GNU behaviour changed in
+  9.2 through 9.5, the releases that reworked `-n`.
 - ⛔ **A utility that stops before EOF owes the next reader the rest.** `head` read 64 KiB, kept
   one line, and closed over the rest. So `{ head -n 1 >/dev/null; cat; } < file`, the idiom for
   consuming a header line, printed nothing more at exit 0. No test looked, because every test

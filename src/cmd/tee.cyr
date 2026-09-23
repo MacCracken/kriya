@@ -211,14 +211,13 @@ fn cmd_tee(start: i64): i64 {
     var i: i64 = 0;
     while (i < npos) {
         var p = flags_positional(_tee_spec, i);
-        # O_WRONLY=1, O_CREAT=64, O_TRUNC=512, O_APPEND=1024.
-        var flags: i64 = 65;       # WRONLY | CREAT
+        var flags: i64 = 0o101;        # O_WRONLY | O_CREAT
         if (append == 1) {
-            flags = flags | 1024;  # | O_APPEND
+            flags = flags | 0o2000;    # | O_APPEND
         } else {
-            flags = flags | 512;   # | O_TRUNC
+            flags = flags | 0o1000;    # | O_TRUNC
         }
-        var fd = k_open(p, flags, 438);  # 0o666 = 438
+        var fd = k_open(p, flags, 0o666);
         if (fd < 0) {
             _tee_report(p, 0 - fd);
             any_failed = 1;

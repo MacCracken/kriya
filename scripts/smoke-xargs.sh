@@ -233,6 +233,25 @@ case "$(printf 'a\n' | "$BIN" xargs ./e255.sh 2>&1 >/dev/null)" in
 esac
 cd ..
 
+# --- 1.6.16: an unknown option is refused, not run ---------------------------
+#
+# ⛔ AN UNKNOWN OPTION BECAME THE COMMAND: `echo hi | xargs -5 echo` ran a program
+# named `-5` and exited 127, "command not found", where GNU says *invalid option*.
+# 127 cannot tell a typo'd flag from a missing binary. Before the command, a word
+# that starts with `-` is an option, known or not — GNU's rule, and POSIX's.
+for _c in "-5 echo" "-Z echo" "-n1 -5 echo" "-5" "--bogus echo" "-x5 echo"; do
+    # shellcheck disable=SC2086
+    expect_exit "xargs $_c refused" 2 sh -c "echo hi | \"$BIN\" xargs $_c"
+    _grc=0
+    # shellcheck disable=SC2086
+    sh -c "echo hi | xargs $_c" >/dev/null 2>&1 || _grc=$?
+    expect_eq "...and by GNU (1, not 127)" "1" "$_grc"
+done
+# The command still starts at the first word without a `-`, or after `--`.
+expect_eq "xargs echo -5"      "$(echo hi | xargs echo -5)"      "$(echo hi | "$BIN" xargs echo -5)"
+expect_eq "xargs -- echo -r"   "$(echo hi | xargs -- echo -r)"   "$(echo hi | "$BIN" xargs -- echo -r)"
+expect_exit "xargs -- -5 runs '-5'" 127 sh -c "echo hi | \"$BIN\" xargs -- -5"
+
 # --- summary ---------------------------------------------------------
 
 TOTAL=$((PASS + FAIL))

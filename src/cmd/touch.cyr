@@ -77,8 +77,7 @@ fn _touch_create(path, no_create): i64 {
     # O_WRONLY | O_CREAT, mode 0666 (kernel applies umask). We just
     # need the file to exist; we close it immediately. O_NOCTTY would
     # only matter for terminals; skipping it is fine for the workload.
-    # 0o666 = 438; O_WRONLY | O_CREAT = 1 | 64 = 65.
-    var fd = k_open(path, 65, 438);
+    var fd = k_open(path, 0o101, 0o666);            # O_WRONLY | O_CREAT
     if (fd < 0) {
         # Existing file: open(O_WRONLY) without O_EXCL will succeed
         # if we have write permission. EACCES on a read-only file is

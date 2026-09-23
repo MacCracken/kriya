@@ -515,6 +515,18 @@ fn _uq_run(in_fd, out_fd, skip_f, skip_s, cw, ic, show_c, show_d, show_u, term_b
     return 0;
 }
 
+# A `-f` / `-s` / `-w` count: GNU's shape (blanks, a `+`, digits), SATURATED
+# past 2^63 - 1 as GNU saturates it. -1 after reporting it in GNU's words.
+fn _uq_count(arg, what): i64 {
+    var v = kriya_parse_bounded(arg, KRIYA_COUNT_MAX);
+    if (v == (0 - 2)) { return KRIYA_COUNT_MAX; }
+    if (v < 0) {
+        report_note("uniq", arg, what);
+        return 0 - 1;
+    }
+    return v;
+}
+
 fn cmd_uniq(start: i64): i64 {
     _uq_init_spec();
     # ⚠ TWO optional-value longs — the first utility to need more than one, which is
@@ -536,41 +548,29 @@ fn cmd_uniq(start: i64): i64 {
     var zero_term: i64 = 0;
     if (flags_get_bool(_uq_spec, _uq_z_idx) == 1) { zero_term = 1; }
 
+    # ⛔ THREE COUNTS, TWO DEFECTS EACH (1.6.16). They WRAPPED — `uniq -w
+    # 18446744073709551617` compared ONE byte, so `xa` and `xb` were one line
+    # where GNU prints two — and an EMPTY value was skipped as if absent, so
+    # `uniq -f ''` answered at exit 0 where GNU refuses. GNU SATURATES an
+    # oversized count ("more fields than any line has") and takes blanks and a
+    # `+` in front; `_uq_count` does both. See ADR 0002 on the empty value.
     var skip_f: i64 = 0;
     var f_arg = flags_get_str(_uq_spec, _uq_f_idx);
     if (f_arg != 0) {
-        if (load8(f_arg) != 0) {
-            var v = kriya_parse_nonneg_int(f_arg);
-            if (v < 0) {
-                k_write( 2, "kriya uniq: error: --skip-fields requires a non-negative integer\n", 65);
-                return EXIT_USAGE;
-            }
-            skip_f = v;
-        }
+        skip_f = _uq_count(f_arg, "invalid number of fields to skip");
+        if (skip_f < 0) { return EXIT_USAGE; }
     }
     var skip_s: i64 = 0;
     var s_arg = flags_get_str(_uq_spec, _uq_s_idx);
     if (s_arg != 0) {
-        if (load8(s_arg) != 0) {
-            var v = kriya_parse_nonneg_int(s_arg);
-            if (v < 0) {
-                k_write( 2, "kriya uniq: error: --skip-chars requires a non-negative integer\n", 64);
-                return EXIT_USAGE;
-            }
-            skip_s = v;
-        }
+        skip_s = _uq_count(s_arg, "invalid number of bytes to skip");
+        if (skip_s < 0) { return EXIT_USAGE; }
     }
     var cw: i64 = 0 - 1;  # -1 = no cap
     var w_arg = flags_get_str(_uq_spec, _uq_w_idx);
     if (w_arg != 0) {
-        if (load8(w_arg) != 0) {
-            var v = kriya_parse_nonneg_int(w_arg);
-            if (v < 0) {
-                k_write( 2, "kriya uniq: error: --check-chars requires a non-negative integer\n", 65);
-                return EXIT_USAGE;
-            }
-            cw = v;
-        }
+        cw = _uq_count(w_arg, "invalid number of bytes to compare");
+        if (cw < 0) { return EXIT_USAGE; }
     }
 
     var term_byte: i64 = 10;
@@ -605,8 +605,7 @@ fn cmd_uniq(start: i64): i64 {
     }
     if (npos == 2) {
         var p = flags_positional(_uq_spec, 1);
-        # O_WRONLY | O_CREAT | O_TRUNC = 577. Mode 0666 = 438.
-        out_fd = k_open(p, 577, 438);
+        out_fd = k_open(p, 0o1101, 0o666);         # O_WRONLY | O_CREAT | O_TRUNC
         if (out_fd < 0) {
             _uq_report(p, 0 - out_fd);
             if (in_opened == 1) { k_close( in_fd); }

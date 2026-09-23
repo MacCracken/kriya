@@ -206,6 +206,41 @@ mb_same "5-byte lead F8"          -c2 mbfive.txt
 mb_same "truncated 3-byte"        -c2 mbtrunc.txt
 mb_same "range over a bad seq"    -c1-3 mbsurr.txt
 
+# --- 1.6.16: the LIST is GNU's, and no number in it wraps --------------------
+#
+# ⛔ FIVE LISTS GNU REFUSES WERE READ AS SOMETHING ELSE, at exit 0: `0` and `00`
+# as field 1, `2-1` as nothing, `1-0` and `-0` as everything, a trailing `1,` as
+# `1` — and `-f 1-18446744073709551616` WRAPPED to everything. ⭐ GNU's blank
+# separator (`-f '1 3'`) is taken now, where kriya refused it.
+printf 'a\tb\tc\td\n' > d16_tabs
+printf 'abcdef\n' > d16_bytes
+d16_same() {   # d16_same <label> <cut args...>
+    _l=$1; shift
+    _grc=0; cut "$@" > d16_g.out 2>/dev/null || _grc=$?
+    _krc=0; "$BIN" cut "$@" > d16_k.out 2>/dev/null || _krc=$?
+    if [ "$_grc" = 0 ]; then
+        if cmp -s d16_g.out d16_k.out && [ "$_krc" = 0 ]; then PASS=$((PASS + 1))
+        else FAIL=$((FAIL + 1)); printf 'FAIL %s: GNU exit 0, kriya exit %s\n' "$_l" "$_krc" >&2; fi
+    else
+        # Both refuse: GNU with 1, kriya with 2 (ADR 0008).
+        if [ "$_krc" = 2 ]; then PASS=$((PASS + 1))
+        else FAIL=$((FAIL + 1)); printf 'FAIL %s: GNU refuses (%s), kriya exit %s\n' "$_l" "$_grc" "$_krc" >&2; fi
+    fi
+}
+for _l in 0 0-2 -0 2-1 1-0 3- - 1,,2 1-2-3 ,1 1, '1 3' '1	3' 2,1 1-3,2 -2,4- 00 01 1-1 4-2 2--3 \
+          +1 1x 9223372036854775807 9223372036854775806- 18446744073709551615 1-18446744073709551616 \
+          '1  3' '1, 3' ' 1' '1 ' 3,1-2 2-,1 1-3,-2 1- -1; do
+    d16_same "cut -f '$_l'" -f "$_l" d16_tabs
+    d16_same "cut -b '$_l'" -b "$_l" d16_bytes
+    d16_same "cut -c '$_l'" -c "$_l" d16_bytes
+done
+err=$("$BIN" cut -f 0 d16_tabs 2>&1 >/dev/null || true)
+expect_eq "cut -f 0 diagnostic" "kriya cut: 0: fields are numbered from 1" "$err"
+err=$("$BIN" cut -b 2-1 d16_bytes 2>&1 >/dev/null || true)
+expect_eq "cut -b 2-1 diagnostic" "kriya cut: 2-1: invalid decreasing range" "$err"
+# ⚠ GNU goes to 2^64 - 2; kriya holds 2^63 - 1 and refuses the band between.
+expect_exit "cut -f 9223372036854775808 refused (GNU takes it)" 2 "$BIN" cut -f 9223372036854775808 d16_tabs
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

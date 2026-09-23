@@ -47,7 +47,8 @@
 #   -s   suppress filesystem-error messages
 #   -h / -H   filename header control (auto when 2+ operands or -r)
 #   -o   emit only the matched substring(s) on each matching line
-#   -r / -R   recurse into directory operands; never follow symlinks
+#   -r / -R   recurse into directory operands — or `.` when there are none,
+#             named without the `./` — never following symlinks
 #   --include / --exclude / --exclude-dir   name filters (see `_gr_filter_init`)
 #   -z   NUL-separated input + output
 #
@@ -125,7 +126,7 @@ fn _gr_init_spec(): i64 {
     _gr_h_idx = flags_add_bool(s, 104, "no-filename",       0, "never prefix filename");
     _gr_H_idx = flags_add_bool(s, 72,  "with-filename",     0, "always prefix filename");
     _gr_o_idx = flags_add_bool(s, 111, "only-matching",     0, "emit only the matched substring");
-    _gr_r_idx = flags_add_bool(s, 114, "recursive",         0, "recurse into directory operands");
+    _gr_r_idx = flags_add_bool(s, 114, "recursive",         0, "recurse into directory operands (default .)");
     _gr_R_idx = flags_add_bool(s, 82,  "dereference-recursive", 0, "alias for -r (no symlink follow either)");
     _gr_z_idx = flags_add_bool(s, 122, "null-data",         0, "NUL-separated input + output");
     _gr_E_idx = flags_add_bool(s, 69,  "extended-regexp",   0, "ERE pattern (via niyama_re2)");
@@ -1404,10 +1405,15 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
 # `rm`, `cp` and `find` have descended from a parent fd since M2 (ADR 0003 hard
 # rule); `grep -r` was the one recursive walk still doing it by path, and the M8
 # audit's per-file O_NOFOLLOW mitigation hid how much was left open.
+#
+# ⚠ An EMPTY `dir_path` is the implied `.` of an operand-less `grep -r`: entries
+# are named bare (`sub/b`, not `./sub/b`), as GNU names them.
 fn _gr_walk_dir(parent_dirfd, dir_name, dir_path, handles, n_handles, opts, term_byte, suppress): i64 {
-    var dir_fd = fs_open_entry_dir(parent_dirfd, dir_path, dir_name);
+    var open_path = dir_path;
+    if (load8(dir_path) == 0) { open_path = "."; }
+    var dir_fd = fs_open_entry_dir(parent_dirfd, open_path, dir_name);
     if (dir_fd < 0) {
-        _gr_report(dir_path, 0 - dir_fd, suppress);
+        _gr_report(open_path, 0 - dir_fd, suppress);
         return 0;
     }
     var found_any: i64 = 0;
@@ -1442,6 +1448,8 @@ fn _gr_walk_dir(parent_dirfd, dir_name, dir_path, handles, n_handles, opts, term
                         var sep = 1;
                         if (dlen > 0) {
                             if (load8(dir_path + dlen - 1) == 47) { sep = 0; }
+                        } else {
+                            sep = 0;
                         }
                         var sub = alloc(dlen + sep + nlen + 1);
                         memcpy(sub, dir_path, dlen);
@@ -1885,14 +1893,23 @@ fn cmd_grep(start: i64): i64 {
     var any_failed: i64 = 0;
 
     if (n_files == 0) {
-        # Stdin mode.
         if (rec_mode == 1) {
-            k_write( 2, "kriya grep: error: -r requires file operands\n", 45);
-            return EXIT_USAGE;
+            # ⭐ `grep -r PAT` SEARCHES `.`, as GNU's has since 2.11, and names
+            # what it finds WITHOUT the `./` — `sub/b:hit` — because nobody typed
+            # it (1.6.16). It was refused, "-r requires file operands".
+            # ⚠ And the implied `.` is not an operand, so `--exclude-dir` never
+            # excludes it: `grep -r --exclude-dir=. hit` still searches, and
+            # `--exclude-dir='*'` still reads the top level's files, measured.
+            if (rec_auto == 1) { store64(opts + 48, 1); }
+            if (_gr_walk_dir(0 - 100, ".", "", handles, n_handles, opts, term_byte, suppress) == 1) {
+                any_match = 1;
+            }
+            store64(opts + 48, show_name);
+        } else {
+            var r = _gr_process_fd(0, "(standard input)", handles, n_handles, opts, term_byte);
+            if (r < 0) { _gr_report("(standard input)", 0 - r, suppress); any_failed = 1; }
+            elif (r == 1) { any_match = 1; }
         }
-        var r = _gr_process_fd(0, "(standard input)", handles, n_handles, opts, term_byte);
-        if (r < 0) { _gr_report("(standard input)", 0 - r, suppress); any_failed = 1; }
-        elif (r == 1) { any_match = 1; }
     } else {
         var fi: i64 = 0;
         while (fi < n_files) {

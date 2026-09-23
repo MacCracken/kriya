@@ -4,8 +4,8 @@
 #   -p / --parents       create parent components as needed; existing
 #                        directories are not an error.
 #   -m / --mode MODE     set the mode of the named directory (final
-#                        component only, per POSIX). Octal only at M2;
-#                        symbolic forms (`u+rwx`) land with chmod in M3.
+#                        component only, per POSIX). Octal only;
+#                        symbolic forms (`u+rwx`) are refused (roadmap 1.8.5).
 #   -v / --verbose       print a line for each created directory.
 #
 # Mode handling: sys_mkdir is always called with 0777 so the kernel's
@@ -70,8 +70,7 @@ fn _mkdir_is_dir(path): i64 {
     var sr = k_stat(path, &buf);
     if (sr != 0) { return 0; }
     var st_mode = load64(&buf + 24);
-    # S_IFMT = 0o170000 (61440); S_IFDIR = 0o040000 (16384).
-    if ((st_mode & 61440) == 16384) { return 1; }
+    if ((st_mode & FS_S_IFMT) == FS_S_IFDIR) { return 1; }
     return 0;
 }
 
@@ -90,7 +89,7 @@ fn _mkdir_single(path, set_mode, mode, verbose): i64 {
         _mkdir_report(path, 2);
         return 0 - 2;
     }
-    var r = k_mkdir(path, 511);
+    var r = k_mkdir(path, 0o777);
     if (r != 0) {
         _mkdir_report(path, 0 - r);
         return r;
@@ -153,8 +152,8 @@ fn _mkdir_with_parents(path, set_mode, mode, verbose): i64 {
             }
 
             if (skip == 0) {
-                # 0o777 = 511 (Cyrius has no octal literal syntax).
-                var r = k_mkdir(prefix, 511);
+                # 0o777, less the umask the kernel applies.
+                var r = k_mkdir(prefix, 0o777);
                 if (r == 0) {
                     any_made = 1;
                     last_made = i;

@@ -17,9 +17,11 @@
 # This file is filesystem-aware; pure path operations stay in
 # `src/lib/path.cyr` (no overlap).
 #
-# Bytes referenced as decimal-with-comment per the running practice
-# (no octal literal yet in Cyrius — see proposal
-# `2026-05-17-octal-literal-syntax`).
+# Mode bits and open flags are written in OCTAL, as the kernel headers write
+# them. Cyrius has lexed `0o755` since 6.0.62 — kriya's proposal
+# `2026-05-17-octal-literal-syntax`, archived upstream as done — and until
+# 1.6.16 this file still spelled them in decimal with the octal in a comment.
+# The AT_* flags stay hex, as <fcntl.h> has them.
 
 # --- AT_* and related flag constants -------------------------------
 
@@ -40,10 +42,10 @@ fn fs_at_fdcwd(): i64 {
 enum FsOpen {
     FS_O_RDONLY    = 0;
     FS_O_WRONLY    = 1;
-    FS_O_TRUNC     = 512;        # 0o1000
-    FS_O_DIRECTORY = 65536;      # 0o200000  (0x10000)
-    FS_O_NOFOLLOW  = 131072;     # 0o400000  (0x20000)
-    FS_O_CLOEXEC   = 524288;     # 0o2000000 (0x80000)
+    FS_O_TRUNC     = 0o1000;
+    FS_O_DIRECTORY = 0o200000;   # 0x10000
+    FS_O_NOFOLLOW  = 0o400000;   # 0x20000
+    FS_O_CLOEXEC   = 0o2000000;  # 0x80000
 }
 
 # linux_dirent64.d_type values. The kernel returns these in the
@@ -86,47 +88,47 @@ enum FsStat {
 
 # S_IFMT mask + type values (subset).
 enum FsMode {
-    FS_S_IFMT   = 61440;   # 0o170000
-    FS_S_IFREG  = 32768;   # 0o100000
-    FS_S_IFDIR  = 16384;   # 0o040000
-    FS_S_IFLNK  = 40960;   # 0o120000
-    FS_S_IFCHR  = 8192;    # 0o020000
-    FS_S_IFBLK  = 24576;   # 0o060000
-    FS_S_IFIFO  = 4096;    # 0o010000
-    FS_S_IFSOCK = 49152;   # 0o140000
+    FS_S_IFMT   = 0o170000;
+    FS_S_IFREG  = 0o100000;
+    FS_S_IFDIR  = 0o040000;
+    FS_S_IFLNK  = 0o120000;
+    FS_S_IFCHR  = 0o020000;
+    FS_S_IFBLK  = 0o060000;
+    FS_S_IFIFO  = 0o010000;
+    FS_S_IFSOCK = 0o140000;
 }
 
 # --- type predicates on a 144-byte stat buffer ---------------------
 
 fn fs_is_reg(stat_buf): i64 {
     var m = load64(stat_buf + 24);
-    if ((m & 61440) == 32768) { return 1; }
+    if ((m & FS_S_IFMT) == FS_S_IFREG) { return 1; }
     return 0;
 }
 
 fn fs_is_dir(stat_buf): i64 {
     var m = load64(stat_buf + 24);
-    if ((m & 61440) == 16384) { return 1; }
+    if ((m & FS_S_IFMT) == FS_S_IFDIR) { return 1; }
     return 0;
 }
 
 fn fs_is_lnk(stat_buf): i64 {
     var m = load64(stat_buf + 24);
-    if ((m & 61440) == 40960) { return 1; }
+    if ((m & FS_S_IFMT) == FS_S_IFLNK) { return 1; }
     return 0;
 }
 
 # A character or a block device: the two types whose `st_rdev` means something.
 fn fs_is_dev(stat_buf): i64 {
-    var t = load64(stat_buf + 24) & 61440;
-    if (t == 8192)  { return 1; }   # S_IFCHR
-    if (t == 24576) { return 1; }   # S_IFBLK
+    var t = load64(stat_buf + 24) & FS_S_IFMT;
+    if (t == FS_S_IFCHR) { return 1; }
+    if (t == FS_S_IFBLK) { return 1; }
     return 0;
 }
 
 # Extract the low-12 mode bits (permission + setuid/gid/sticky).
 fn fs_perms(stat_buf): i64 {
-    return load64(stat_buf + 24) & 4095;
+    return load64(stat_buf + 24) & 0o7777;
 }
 
 # --- syscall wrappers ----------------------------------------------
@@ -216,7 +218,7 @@ fn fs_stat_entry(dirfd, fullpath, name, buf, follow): i64 {
 # avoid: pass BOTH and each target uses the half it can.
 fn fs_open_entry_dir(dirfd, fullpath, name): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    return k_open(fullpath, 65536, 0);            # O_DIRECTORY
+    return k_open(fullpath, FS_O_DIRECTORY, 0);
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     return fs_opendir_nofollow(dirfd, name);
@@ -227,10 +229,10 @@ fn fs_open_entry_dir(dirfd, fullpath, name): i64 {
 # O_RDONLY | O_NOFOLLOW, dirfd-relative on Linux and path-based on agnos.
 fn fs_open_entry_file(dirfd, fullpath, name): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    return k_open(fullpath, 131072, 0);           # O_NOFOLLOW
+    return k_open(fullpath, FS_O_NOFOLLOW, 0);
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return fs_openat(dirfd, name, 131072, 0);     # O_RDONLY | O_NOFOLLOW
+    return fs_openat(dirfd, name, FS_O_NOFOLLOW, 0);   # O_RDONLY | O_NOFOLLOW
     #endif
 }
 
@@ -241,12 +243,12 @@ fn fs_opendir_nofollow(dirfd, name): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     # Pass O_DIRECTORY (k_open maps it to agnos AO_DIRECTORY) so the kernel
     # returns a getdents-capable dir fd; O_NOFOLLOW is moot (no symlinks).
-    if (dirfd == k_at_fdcwd()) { return k_open(name, 65536, 0); }
+    if (dirfd == k_at_fdcwd()) { return k_open(name, FS_O_DIRECTORY, 0); }
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    # 0 | 65536 | 131072 = 196608.
-    return syscall(257, dirfd, name, 196608, 0);
+    # O_RDONLY | O_DIRECTORY | O_NOFOLLOW, folded: 0o200000 | 0o400000.
+    return syscall(257, dirfd, name, 0o600000, 0);
     #endif
 }
 

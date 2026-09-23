@@ -204,6 +204,33 @@ for pfx in "--group=sep" "--group=b" "--all-repeated=n"; do
     expect_eq "group edge: $pfx refused (no prefix matching, ADR 0002)" "2" "$rc"
 done
 
+# --- 1.6.16: the counts saturate, and an empty one is refused ---------------
+#
+# ⛔ `-f`, `-s` and `-w` WRAPPED past 2^64 — `uniq -w 18446744073709551617`
+# compared one byte, so `xa` and `xb` were one line — and an EMPTY value was
+# skipped as if absent. GNU saturates a large count and refuses an empty one.
+d16_same() {   # d16_same <label> <uniq args...>: GNU and kriya agree on bytes and exit
+    _l=$1; shift
+    _grc=0; uniq "$@" > d16_g.out 2>/dev/null || _grc=$?
+    _krc=0; "$BIN" uniq "$@" > d16_k.out 2>/dev/null || _krc=$?
+    if cmp -s d16_g.out d16_k.out && [ "$_grc" = "$_krc" ]; then PASS=$((PASS + 1))
+    else FAIL=$((FAIL + 1)); printf 'FAIL %s: GNU exit %s, kriya exit %s\n' "$_l" "$_grc" "$_krc" >&2; fi
+}
+printf 'xa\nxb\nxb\nya\n' > d16_u
+for _o in -f -s -w; do
+    for _v in 9223372036854775807 9223372036854775808 18446744073709551616 18446744073709551617 \
+              99999999999999999999 ' 1' '+1' 0; do
+        d16_same "uniq $_o '$_v'" $_o "$_v" d16_u
+    done
+    for _v in '' -1 1x; do
+        expect_exit "uniq $_o '$_v' refused" 2 "$BIN" uniq $_o "$_v" d16_u
+        _grc=0; uniq $_o "$_v" d16_u >/dev/null 2>&1 || _grc=$?
+        expect_eq "...and by GNU" "yes" "$([ "$_grc" != 0 ] && echo yes || echo no)"
+    done
+done
+err=$("$BIN" uniq -f 1x d16_u 2>&1 >/dev/null || true)
+expect_eq "uniq -f 1x diagnostic" "kriya uniq: 1x: invalid number of fields to skip" "$err"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

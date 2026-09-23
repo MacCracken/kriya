@@ -546,39 +546,39 @@ fn _ls_emit_q_padded(width): i64 {
 }
 
 fn _ls_render_symperm(mode, buf): i64 {
-    var typ = mode & 61440;
+    var typ = mode & FS_S_IFMT;
     var c: i64 = 45;  # '-'
-    if (typ == 16384) { c = 100; }
-    if (typ == 40960) { c = 108; }
-    if (typ == 8192)  { c = 99;  }
-    if (typ == 24576) { c = 98;  }
-    if (typ == 4096)  { c = 112; }
-    if (typ == 49152) { c = 115; }
+    if (typ == FS_S_IFDIR) { c = 100; }
+    if (typ == FS_S_IFLNK) { c = 108; }
+    if (typ == FS_S_IFCHR) { c = 99; }
+    if (typ == FS_S_IFBLK) { c = 98; }
+    if (typ == FS_S_IFIFO) { c = 112; }
+    if (typ == FS_S_IFSOCK) { c = 115; }
     store8(buf, c);
 
     var dash: i64 = 45;
-    if ((mode & 256) != 0) { store8(buf + 1, 114); } else { store8(buf + 1, dash); }
-    if ((mode & 128) != 0) { store8(buf + 2, 119); } else { store8(buf + 2, dash); }
-    var ux = mode & 64;
-    var setuid = mode & 2048;
+    if ((mode & 0o400) != 0) { store8(buf + 1, 114); } else { store8(buf + 1, dash); }
+    if ((mode & 0o200) != 0) { store8(buf + 2, 119); } else { store8(buf + 2, dash); }
+    var ux = mode & 0o100;
+    var setuid = mode & 0o4000;
     if (setuid != 0) {
         if (ux != 0) { store8(buf + 3, 115); } else { store8(buf + 3, 83); }
     } else {
         if (ux != 0) { store8(buf + 3, 120); } else { store8(buf + 3, dash); }
     }
-    if ((mode & 32) != 0) { store8(buf + 4, 114); } else { store8(buf + 4, dash); }
-    if ((mode & 16) != 0) { store8(buf + 5, 119); } else { store8(buf + 5, dash); }
-    var gx = mode & 8;
-    var setgid = mode & 1024;
+    if ((mode & 0o040) != 0) { store8(buf + 4, 114); } else { store8(buf + 4, dash); }
+    if ((mode & 0o020) != 0) { store8(buf + 5, 119); } else { store8(buf + 5, dash); }
+    var gx = mode & 0o010;
+    var setgid = mode & 0o2000;
     if (setgid != 0) {
         if (gx != 0) { store8(buf + 6, 115); } else { store8(buf + 6, 83); }
     } else {
         if (gx != 0) { store8(buf + 6, 120); } else { store8(buf + 6, dash); }
     }
-    if ((mode & 4) != 0) { store8(buf + 7, 114); } else { store8(buf + 7, dash); }
-    if ((mode & 2) != 0) { store8(buf + 8, 119); } else { store8(buf + 8, dash); }
-    var ox = mode & 1;
-    var sticky = mode & 512;
+    if ((mode & 0o004) != 0) { store8(buf + 7, 114); } else { store8(buf + 7, dash); }
+    if ((mode & 0o002) != 0) { store8(buf + 8, 119); } else { store8(buf + 8, dash); }
+    var ox = mode & 0o001;
+    var sticky = mode & 0o1000;
     if (sticky != 0) {
         if (ox != 0) { store8(buf + 9, 116); } else { store8(buf + 9, 84); }
     } else {
@@ -867,13 +867,13 @@ fn _ls_emit_mtime(sec, nsec): i64 {
 # or 0 if none).
 fn _ls_type_suffix(st): i64 {
     var m = load64(st + 24);
-    if ((m & 61440) == 16384) { return 47; }   # / dir
-    if ((m & 61440) == 40960) { return 64; }   # @ symlink
-    if ((m & 61440) == 4096)  { return 124; }  # | fifo
-    if ((m & 61440) == 49152) { return 61; }   # = socket
-    if ((m & 61440) == 32768) {
+    if ((m & FS_S_IFMT) == FS_S_IFDIR) { return 47; }   # / dir
+    if ((m & FS_S_IFMT) == FS_S_IFLNK) { return 64; }   # @ symlink
+    if ((m & FS_S_IFMT) == FS_S_IFIFO) { return 124; }  # | fifo
+    if ((m & FS_S_IFMT) == FS_S_IFSOCK) { return 61; }   # = socket
+    if ((m & FS_S_IFMT) == FS_S_IFREG) {
         # Regular file: '*' if any execute bit is set.
-        if ((m & 73) != 0) { return 42; }  # 73 = 64|8|1 (ux|gx|ox)
+        if ((m & 0o111) != 0) { return 42; }  # anyone's execute bit
     }
     return 0;
 }
@@ -958,10 +958,11 @@ fn _ls_load_link_target(parent_dirfd, rec): i64 {
 # and `33`. The values below were measured out of `ls` itself, on stock
 # coreutils 9.4 in a container as well as 9.11 here.
 #
-# ⚠ Reading it needs `kriya_getenv`, not the stdlib's: a `dircolors -b` value is
-# ~1.9 KB and the stdlib scans only the first 8 KB of the environment, so
-# whether the variable was found would depend on where the shell placed it.
-# See `src/lib/env.cyr`.
+# ⚠ A `dircolors -b` value is ~1.9 KB. The stdlib `getenv` scanned only the first
+# 8 KB of the environment until cyrius 6.5.36, so whether the variable was found
+# depended on where the shell placed it; kriya carried its own lookup
+# (`src/lib/env.cyr`) until 1.6.16 retired it for the stdlib's, which reads the
+# whole environment into a heap buffer once.
 
 enum LsColorWhen {
     LS_CW_NEVER  = 0;
@@ -1050,9 +1051,9 @@ fn _ls_pat_more(p): i64 {
 }
 
 fn _ls_term_known(): i64 {
-    var ct = kriya_getenv("COLORTERM");
+    var ct = getenv("COLORTERM");
     if (ct != 0) { if (load8(ct) != 0) { return 1; } }
-    var t = kriya_getenv("TERM");
+    var t = getenv("TERM");
     if (t == 0) { return 0; }
     var tl = strlen(t);
     if (tl == 0) { return 0; }
@@ -1266,7 +1267,7 @@ fn _ls_color_load(): i64 {
     store64(_ls_ckey + LSK_OW * 8, "34;42");
     store64(_ls_ckey + LSK_TW * 8, "30;42");
     store64(_ls_ckey + LSK_CL * 8, _ls_esc_str("[K"));
-    var env = kriya_getenv("LS_COLORS");
+    var env = getenv("LS_COLORS");
     var have: i64 = 0;
     if (env != 0) { if (load8(env) != 0) { have = 1; } }
     if (have == 0) {
@@ -1393,9 +1394,9 @@ fn _ls_color_for_stat(st, name, bad, broken, rec): i64 {
     }
     if (fs_is_dir(st) == 1) {
         var other_w: i64 = 0;
-        if ((mode & 2) != 0) { other_w = 1; }
+        if ((mode & 0o002) != 0) { other_w = 1; }
         var sticky: i64 = 0;
-        if ((mode & 512) != 0) { sticky = 1; }
+        if ((mode & 0o1000) != 0) { sticky = 1; }
         if (other_w == 1) {
             if (sticky == 1) {
                 if (_ls_is_colored(LSK_TW) == 1) { return _ls_code(LSK_TW); }
@@ -1423,10 +1424,10 @@ fn _ls_color_for_stat(st, name, bad, broken, rec): i64 {
     if (ty == FS_S_IFSOCK) { return _ls_code(LSK_SO); }
     if (ty == FS_S_IFBLK) { return _ls_code(LSK_BD); }
     if (ty == FS_S_IFCHR) { return _ls_code(LSK_CD); }
-    if ((mode & 2048) != 0) {
+    if ((mode & 0o4000) != 0) {
         if (_ls_is_colored(LSK_SU) == 1) { return _ls_code(LSK_SU); }
     }
-    if ((mode & 1024) != 0) {
+    if ((mode & 0o2000) != 0) {
         if (_ls_is_colored(LSK_SG) == 1) { return _ls_code(LSK_SG); }
     }
     if (_ls_is_colored(LSK_CA) == 1) {
@@ -1434,7 +1435,7 @@ fn _ls_color_for_stat(st, name, bad, broken, rec): i64 {
             if (_ls_rec_has_cap(rec) == 1) { return _ls_code(LSK_CA); }
         }
     }
-    if ((mode & 73) != 0) {
+    if ((mode & 0o111) != 0) {
         if (_ls_is_colored(LSK_EX) == 1) { return _ls_code(LSK_EX); }
     }
     if (load64(st + 16) > 1) {
@@ -1997,7 +1998,7 @@ fn _ls_resolve_width(columnar, color_req): i64 {
         }
         #endif
         if (lw < 0) {
-            var ce = kriya_getenv("COLUMNS");
+            var ce = getenv("COLUMNS");
             if (ce != 0) {
                 if (load8(ce) != 0) {
                     var v = _ls_parse_env_num(ce);
@@ -2028,7 +2029,7 @@ fn _ls_resolve_tabsize(): i64 {
         _ls_tabsize = flags_get_int(_ls_spec, _ls_T_idx);
         return 0;
     }
-    var te = kriya_getenv("TABSIZE");
+    var te = getenv("TABSIZE");
     if (te != 0) {
         var v = _ls_parse_env_num(te);
         if (v >= 0) { _ls_tabsize = v; }

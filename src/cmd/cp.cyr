@@ -10,9 +10,11 @@
 #   -f / --force        overwrite an existing destination without prompt —
 #                       and, as GNU's `--force`, remove one that cannot be
 #                       opened for writing and create it afresh (ADR 0021).
-#   -i / --interactive  prompt before overwrite. Per ADR 0002, on
-#                       non-tty stdin this is a usage error (exit 2),
-#                       not a hang.
+#   -i / --interactive  prompt before overwrite, even under -f. Per ADR
+#                       0002, on non-tty stdin this is a usage error
+#                       (exit 2), not a hang.
+#   -n / --no-clobber   skip an existing destination, silently. -i and -n
+#                       are last-wins; -f cancels neither (ADR 0024).
 #   -p / --preserve     mode, ownership and timestamps; --preserve=LIST
 #                       names them: mode, ownership, timestamps, links,
 #                       xattr, all. `context` is refused by name.
@@ -73,6 +75,12 @@ var _cp_bk_idx = 0;
 var _cp_S_idx = 0;
 var _cp_f_idx = 0;
 var _cp_i_idx = 0;
+var _cp_n_idx = 0;
+# 1 under an effective `-n`: an existing destination is skipped, silently, before
+# any prompt or `-f` is consulted (ADR 0024). `mv`'s copy never sets it.
+var _cp_noclobber = 0;
+# The resolved `-i`, for the symlink arm, which takes no `interactive` argument.
+var _cp_interactive = 0;
 var _cp_p_idx = 0;
 var _cp_v_idx = 0;
 var _cp_R_idx = 0;
@@ -212,6 +220,7 @@ fn _cp_init_spec(): i64 {
     var s = flags_new();
     _cp_f_idx     = flags_add_bool(s, 102, "force",       0, "overwrite existing destination");
     _cp_i_idx     = flags_add_bool(s, 105, "interactive", 0, "prompt before overwrite");
+    _cp_n_idx     = flags_add_bool(s, 110, "no-clobber",  0, "skip an existing destination");
     _cp_p_idx     = flags_add_bool(s, 112, "preserve",    0,
       "preserve mode, ownership, timestamps; =LIST: mode,ownership,timestamps,links,xattr,all");
     _cp_v_idx     = flags_add_bool(s, 118, "verbose",     0, "print each copy");
@@ -266,7 +275,22 @@ fn _cp_buf_get(): i64 {
 # utility apart from the name; `errmsg_report` in `src/lib/report.cyr` is the
 # single implementation of architecture 001's framing, and it shell-quotes the
 # operand so a name containing a newline cannot split the diagnostic in two.
-fn _cp_report(operand, errno): i64 { return errmsg_report("cp", operand, errno); }
+fn _cp_report(operand, errno): i64 { return errmsg_report(_cp_util, operand, errno); }
+
+# ⭐ THE UTILITY NAME EVERY cp DIAGNOSTIC CARRIES — "cp", or "mv" when `mv` is
+# moving across filesystems through this file's copy (1.6.16). Until then every
+# one of them said `kriya cp:` under `mv`, where GNU says `mv:`, so the caller
+# was told about a command it never ran. One name, set once by the utility that
+# is running; never a second reporter.
+var _cp_util = "cp";
+
+# `kriya <util>: ` on stderr, for the diagnostics written piecewise.
+fn _cp_prefix(): i64 {
+    k_write( 2, "kriya ", 6);
+    k_write( 2, _cp_util, strlen(_cp_util));
+    k_write( 2, ": ", 2);
+    return 0;
+}
 
 # `errno NNN` for a value outside `errmsg.cyr`'s 1..40 table — the fallback that
 # module's own header promises and that this file's diagnostics did not use.
@@ -296,7 +320,7 @@ fn _cp_isatty(fd): i64 {
 }
 
 fn _cp_prompt(dst): i64 {
-    k_write( 2, "kriya cp: overwrite '", 21);
+    _cp_prefix(); k_write( 2, "overwrite '", 11);
     k_write( 2, dst, strlen(dst));
     k_write( 2, "'? ", 3);
     var c[8];
@@ -337,7 +361,7 @@ fn _cp_verbose_removed(dst_display): i64 {
 # GNU's wording for a destination `-f` could not remove — the directory's
 # permissions, not the file's, decide that.
 fn _cp_report_cannot_remove(dst_display, errno): i64 {
-    k_write( 2, "kriya cp: cannot remove '", 25);
+    _cp_prefix(); k_write( 2, "cannot remove '", 15);
     k_write( 2, dst_display, strlen(dst_display));
     k_write( 2, "': ", 3);
     if (errmsg_is_known(errno) == 1) {
@@ -409,7 +433,7 @@ fn _cp_link_master(master, dst_path, remove_first): i64 {
     if (remove_first == 1) { fs_unlinkat(fs_at_fdcwd(), dst_path, 0); }
     var r = fs_linkat(fs_at_fdcwd(), master, fs_at_fdcwd(), dst_path, 0);
     if (r != 0) {
-        k_write( 2, "kriya cp: cannot create hard link '", 35);
+        _cp_prefix(); k_write( 2, "cannot create hard link '", 25);
         k_write( 2, dst_path, strlen(dst_path));
         k_write( 2, "' to '", 6);
         k_write( 2, master, strlen(master));
@@ -429,7 +453,7 @@ fn _cp_link_master(master, dst_path, remove_first): i64 {
 fn _cp_links_record(st, dst_path): i64 {
     if (_cp_links == 0) { return 0; }
     if (fs_inoset_add(_cp_links, fs_dev(st), fs_ino(st), dst_path) < 0) {
-        k_write( 2, "kriya cp: --preserve=links: cannot track '", 42);
+        _cp_prefix(); k_write( 2, "--preserve=links: cannot track '", 32);
         k_write( 2, dst_path, strlen(dst_path));
         k_write( 2, "': out of memory\n", 17);
         _cp_link_track_failed = 1;
@@ -513,7 +537,7 @@ fn _cp_copy_loop(src_fd, dst_fd, src_display, dst_display): i64 {
 # `kriya cp: preserving WHAT for 'DST': REASON` — GNU's wording for a mode or a
 # timestamp it could not carry across.
 fn _cp_report_preserving(what, dst_display, errno): i64 {
-    k_write( 2, "kriya cp: preserving ", 21);
+    _cp_prefix(); k_write( 2, "preserving ", 11);
     k_write( 2, what, strlen(what));
     k_write( 2, " for '", 6);
     k_write( 2, dst_display, strlen(dst_display));
@@ -580,7 +604,7 @@ fn _cp_restore_fd(dst_fd, src_fd, src_st, preserve, dst_display, src_display): i
                     # backup that silently changed a file's owner is the opposite
                     # — it reported complete success on a copy it had altered.
                     if (k_geteuid() == 0) {
-                        k_write( 2, "kriya cp: failed to preserve ownership for '", 44);
+                        _cp_prefix(); k_write( 2, "failed to preserve ownership for '", 34);
                         k_write( 2, dst_display, strlen(dst_display));
                         k_write( 2, "': ", 3);
                         var oe = 0 - cr;
@@ -627,7 +651,7 @@ fn _cp_restore_fd(dst_fd, src_fd, src_st, preserve, dst_display, src_display): i
                 if (xreport == 1) {
                     # ⚠ Printed HERE, before anything else can touch the shared
                     # list buffer the name points into — see `FsXattr` in fs.cyr.
-                    k_write( 2, "kriya cp: setting attribute '", 29);
+                    _cp_prefix(); k_write( 2, "setting attribute '", 19);
                     var nm = load64(&xr + FS_XR_NAME);
                     if (nm != 0) { k_write( 2, nm, strlen(nm)); }
                     k_write( 2, "' for '", 7);
@@ -656,19 +680,19 @@ fn _cp_restore_fd(dst_fd, src_fd, src_st, preserve, dst_display, src_display): i
 
     if ((preserve & CP_PRES_MODE) != 0) {
         var mode = fs_perms(src_st);
-        # ⛔ 511 = 0o777. THE STICKY BIT GOES TOO, and that is measured rather
+        # ⛔ 0o777: THE STICKY BIT GOES TOO, and that is measured rather
         # than assumed: `cp -pR /var/spool/mail out` — a root-owned 1777
         # directory — yields **777** under GNU, while `cp --preserve=mode -R` of
         # the same source yields 1777. GNU clears S_ISUID, S_ISGID *and* S_ISVTX
         # when ownership was requested and could not be set; POSIX names only the
         # first two.
         #
-        # ⚠ The first version of this masked with 1023 (0o1777) and kept sticky,
+        # ⚠ The first version of this masked with 0o1777 and kept sticky,
         # and the test written beside it could not see the difference: it used a
         # sticky file the CALLER OWNED, where the chown succeeds and nothing is
         # dropped at all. The fixture has to be foreign-owned for this line to
         # mean anything.
-        if (owner_kept == 0) { mode = mode & 511; }
+        if (owner_kept == 0) { mode = mode & 0o777; }
         # ⛔ A MODE THAT DID NOT STICK IS REPORTED (1.6.13). The result was never
         # read, so a filesystem refusing the chmod left the destination at its
         # creation mode and `cp -p` said nothing. GNU reports it, and fails the
@@ -738,8 +762,8 @@ fn _cp_create_mode(src_st, preserve): i64 {
     # restored by `_cp_restore_fd`, directories start narrower and are restored
     # at the end of the descend.
     # `--no-preserve=mode`: GNU's default for a new file, 0666 under the umask.
-    if ((preserve & CP_PRES_NOMODE) != 0) { return 438; }
-    return fs_perms(src_st) & 511;
+    if ((preserve & CP_PRES_NOMODE) != 0) { return 0o666; }
+    return fs_perms(src_st) & 0o777;
 }
 
 # 1 when `dst_st` names a file this same invocation created, in which case the
@@ -747,7 +771,7 @@ fn _cp_create_mode(src_st, preserve): i64 {
 fn _cp_guard_created(dst_st, dst_display, src_display): i64 {
     if (_cp_created == 0) { return 0; }
     if (fs_inoset_find(_cp_created, fs_dev(dst_st), fs_ino(dst_st)) == 0) { return 0; }
-    k_write( 2, "kriya cp: will not overwrite just-created '", 43);
+    _cp_prefix(); k_write( 2, "will not overwrite just-created '", 33);
     k_write( 2, dst_display, strlen(dst_display));
     k_write( 2, "' with '", 8);
     k_write( 2, src_display, strlen(src_display));
@@ -800,7 +824,7 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
         if (fs_lstat_at(0 - 100, dst, &dl_stat) == 0) {
             if (fs_is_lnk(&dl_stat) == 1) {
                 if (backup_control() == BACKUP_NONE) {
-                    k_write( 2, "kriya cp: not writing through dangling symlink ", 47);
+                    _cp_prefix(); k_write( 2, "not writing through dangling symlink ", 37);
                     k_write( 2, dst, strlen(dst));
                     k_write( 2, "\n", 1);
                     return 0 - 17;
@@ -816,7 +840,7 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
     if (dr == 0) {
         if (load64(&src_stat + 0) == load64(&dst_stat + 0)) {
             if (load64(&src_stat + 8) == load64(&dst_stat + 8)) {
-                k_write( 2, "kriya cp: '", 11);
+                _cp_prefix(); k_write( 2, "'", 1);
                 k_write( 2, src, strlen(src));
                 k_write( 2, "' and '", 7);
                 k_write( 2, dst, strlen(dst));
@@ -827,14 +851,17 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
         # ⚠ BEFORE the -f / -i decision, exactly as GNU orders it: a just-created
         # destination is refused outright and never prompted for.
         if (_cp_guard_created(&dst_stat, dst, src) == 1) { return 0 - 17; }
-        if (force == 0) {
-            if (interactive == 1) {
-                if (_cp_isatty(0) == 0) {
-                    k_write( 2, "kriya cp: error: -i requires stdin to be a terminal\n", 52);
-                    return 0 - 9999;
-                }
-                if (_cp_prompt(dst) == 0) { _cp_declined = 1; return 0; }
-            } else {
+        # `-n` skips silently; `-i` asks, `-f` or no `-f`; only then does `-f`
+        # (or a backup) decide (ADR 0024).
+        if (_cp_noclobber == 1) { return 0; }
+        if (interactive == 1) {
+            if (_cp_isatty(0) == 0) {
+                _cp_prefix(); k_write( 2, "error: -i requires stdin to be a terminal\n", 42);
+                return 0 - 9999;
+            }
+            if (_cp_prompt(dst) == 0) { _cp_declined = 1; return 0; }
+        } else {
+            if (force == 0) {
                 # ⭐ `-b` IS ITSELF AN ANSWER TO "may I replace this?". kriya
                 # refuses a silent overwrite without `-f`, and a backup is not a
                 # silent overwrite — the old contents survive under a new name.
@@ -866,7 +893,7 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
     } else {
         if (interactive == 1) {
             if (_cp_isatty(0) == 0) {
-                k_write( 2, "kriya cp: error: -i requires stdin to be a terminal\n", 52);
+                _cp_prefix(); k_write( 2, "error: -i requires stdin to be a terminal\n", 42);
                 return 0 - 9999;
             }
         }
@@ -928,8 +955,8 @@ fn _cp_one(src, dst, force, interactive, preserve, verbose): i64 {
     if ((preserve & CP_PRES_OWNER) != 0) {
         var fmade[144];
         if (fs_fstatat(dst_fd, "", &fmade, 4096) == 0) {              # AT_EMPTY_PATH
-            var fmode = fs_perms(&fmade) & 4095;
-            var fwork = fmode & 448;                                  # 0o700
+            var fmode = fs_perms(&fmade) & 0o7777;
+            var fwork = fmode & 0o700;
             if (fwork != fmode) {
                 if (k_fchmod(dst_fd, fwork) == 0) {
                     if ((preserve & CP_PRES_MODE) == 0) { file_restore_mode = fmode; }
@@ -1045,6 +1072,24 @@ fn _cp_symlink_meta(dst_dirfd, dst_name, src_st, preserve): i64 {
 # (dev, ino) for the same map the regular-file path uses.
 fn _cp_symlink_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, verbose, src_st,
   preserve): i64 {
+    # ⛔ `-n` AND `-i` NEVER REACHED A SYMLINK (1.6.16): this arm only unlinked
+    # under `-f` and otherwise let `symlinkat` fail with EEXIST, so `cp -Rn` and
+    # `cp -Ri` reported an error on an existing destination link where GNU skips
+    # it or asks. The same order as the file paths: `-n`, then `-i`, then `-f`.
+    var sdst_probe[144];
+    var sdst_exists: i64 = 0;
+    if (fs_fstatat(dst_dirfd, dst_name, &sdst_probe, 256) == 0) {
+        sdst_exists = 1;
+        if (_cp_guard_created(&sdst_probe, dst_display, src_display) == 1) { return 0 - 17; }
+        if (_cp_noclobber == 1) { return 0; }
+        if (_cp_interactive == 1) {
+            if (_cp_prompt(dst_display) == 0) {
+                _cp_declined = 1;
+                return 0;
+            }
+            force = 1;                 # an accepted overwrite replaces the link
+        }
+    }
     if (_cp_links != 0) {
         var lslot = fs_inoset_find(_cp_links, fs_dev(src_st), fs_ino(src_st));
         if (lslot != 0) {
@@ -1062,13 +1107,9 @@ fn _cp_symlink_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_dis
     }
     store8(link_buf + n, 0);
 
-    # ⚠ This arm never probed the destination — it unlinked under `-f` and let
-    # `symlinkat` fail otherwise — so the just-created check needs its own stat.
-    var sdst_probe[144];
-    if (fs_fstatat(dst_dirfd, dst_name, &sdst_probe, 256) == 0) {
-        if (_cp_guard_created(&sdst_probe, dst_display, src_display) == 1) { return 0 - 17; }
+    if (sdst_exists == 1) {
+        if (force == 1) { fs_unlinkat(dst_dirfd, dst_name, 0); }
     }
-    if (force == 1) { fs_unlinkat(dst_dirfd, dst_name, 0); }
 
     var r = fs_symlinkat(link_buf, dst_dirfd, dst_name);
     if (r != 0) {
@@ -1120,14 +1161,19 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
             fs_close(src_fd);
             return 0 - 17;
         }
-        if (force == 0) {
-            if (interactive == 1) {
-                if (_cp_prompt(dst_display) == 0) {
-                    fs_close(src_fd);
-                    _cp_declined = 1;
-                    return 0;                    # declined: not an error, but exit 1
-                }
-            } else {
+        # The same order as `_cp_one`: `-n`, then `-i`, then `-f` (ADR 0024).
+        if (_cp_noclobber == 1) {
+            fs_close(src_fd);
+            return 0;
+        }
+        if (interactive == 1) {
+            if (_cp_prompt(dst_display) == 0) {
+                fs_close(src_fd);
+                _cp_declined = 1;
+                return 0;                    # declined: not an error, but exit 1
+            }
+        } else {
+            if (force == 0) {
                 # ⭐ Same rule in the `-R` walk: a backup makes room, so it does
                 # not need `-f` to do it.
                 if (backup_control() == BACKUP_NONE) {
@@ -1235,8 +1281,8 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
     if ((preserve & CP_PRES_OWNER) != 0) {
         var fmade[144];
         if (fs_fstatat(dst_fd, "", &fmade, 4096) == 0) {              # AT_EMPTY_PATH
-            var fmode = fs_perms(&fmade) & 4095;
-            var fwork = fmode & 448;                                  # 0o700
+            var fmode = fs_perms(&fmade) & 0o7777;
+            var fwork = fmode & 0o700;
             if (fwork != fmode) {
                 if (k_fchmod(dst_fd, fwork) == 0) {
                     if ((preserve & CP_PRES_MODE) == 0) { file_restore_mode = fmode; }
@@ -1308,7 +1354,7 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
     # Ensure destination exists as a directory.
     var perms = fs_perms(src_st);
     # `--no-preserve=mode`: GNU's default for a new directory, 0777 under the umask.
-    if ((preserve & CP_PRES_NOMODE) != 0) { perms = 511; }
+    if ((preserve & CP_PRES_NOMODE) != 0) { perms = 0o777; }
     var mr = fs_mkdirat(dst_dirfd, dst_name, perms);
     # ⭐ 1 only when THIS call created it. A destination directory that already
     # existed is NOT ours to widen or to restore — measured, GNU leaves an
@@ -1396,9 +1442,9 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
     if (we_made_it == 1) {
         var dmade[144];
         if (fs_fstatat(dst_fd, "", &dmade, 4096) == 0) {              # AT_EMPTY_PATH
-            var made_mode = fs_perms(&dmade) & 4095;
-            # 0o700 = 448 forced on, 0o022 = 18 withheld.
-            var working = (made_mode + 0 - (made_mode & 18)) | 448;
+            var made_mode = fs_perms(&dmade) & 0o7777;
+            # 0o700 forced on, 0o022 withheld.
+            var working = (made_mode + 0 - (made_mode & 0o022)) | 0o700;
             if (working != made_mode) {
                 if (fs_fd_chmod(dst_fd, working) == 0) {
                     dir_widened = 1;
@@ -1427,7 +1473,7 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
         if (dir_restore_mode != 0) {
             fs_fd_chmod(dst_fd, dir_restore_mode);
         } else {
-            if (dir_widened == 1) { fs_fd_chmod(dst_fd, fs_perms(src_st) & 4095); }
+            if (dir_widened == 1) { fs_fd_chmod(dst_fd, fs_perms(src_st) & 0o7777); }
         }
         fs_close(dst_fd);
         return src_fd;
@@ -1452,7 +1498,7 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
     var pushed: i64 = 0;
     if (policy == CP_POLICY_L) {
         if (fs_dirstack_push(_cp_path, fs_dev(src_st), fs_ino(src_st)) != 0) {
-            k_write( 2, "kriya cp: cannot track directory depth: out of memory\n", 54);
+            _cp_prefix(); k_write( 2, "cannot track directory depth: out of memory\n", 44);
             fs_close(src_fd);
             fs_close(dst_fd);
             return 0 - 12;                 # ENOMEM
@@ -1523,13 +1569,13 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
                                         }
                                     }
                                     if (is_dest == 1) {
-                                        k_write( 2, "kriya cp: not descending into the destination '", 47);
+                                        _cp_prefix(); k_write( 2, "not descending into the destination '", 37);
                                         k_write( 2, child_src_disp, strlen(child_src_disp));
                                         k_write( 2, "'\n", 2);
                                         rr = 0 - 22;              # EINVAL
                                     } else {
                                         if (cyclic == 1) {
-                                            k_write( 2, "kriya cp: cannot copy cyclic symbolic link '", 44);
+                                            _cp_prefix(); k_write( 2, "cannot copy cyclic symbolic link '", 34);
                                             k_write( 2, child_src_disp, strlen(child_src_disp));
                                             k_write( 2, "'\n", 2);
                                             rr = 0 - 40;              # ELOOP
@@ -1549,7 +1595,7 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
                                           dst_fd, name, child_dst_disp,
                                           force, interactive, preserve, verbose, &child_st, follow);
                                     } else {
-                                        k_write( 2, "kriya cp: ", 10);
+                                        _cp_prefix();
                                         k_write( 2, child_src_disp, strlen(child_src_disp));
                                         k_write( 2, ": unsupported file type (FIFO/socket/device)\n", 45);
                                         rr = 0 - 22;
@@ -1696,7 +1742,7 @@ fn _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose): i
         var abs_src = fs_path_absolute(src);
         var abs_dst = fs_path_absolute(dst);
         if (path_is_under(abs_src, abs_dst) == 1) {
-            k_write( 2, "kriya cp: cannot copy a directory, '", 36);
+            _cp_prefix(); k_write( 2, "cannot copy a directory, '", 26);
             k_write( 2, src, strlen(src));
             k_write( 2, "', into itself, '", 17);
             k_write( 2, dst, strlen(dst));
@@ -1709,7 +1755,7 @@ fn _cp_recursive_one(src, dst, policy, force, interactive, preserve, verbose): i
     if (fs_is_reg(&st) == 1) {
         return _cp_one(src, dst, force, interactive, preserve, verbose);
     }
-    k_write( 2, "kriya cp: ", 10);
+    _cp_prefix();
     k_write( 2, src, strlen(src));
     k_write( 2, ": unsupported file type (FIFO/socket/device)\n", 45);
     return 0 - 22;
@@ -1801,7 +1847,7 @@ fn _cp_attr_list(attrs, on, optname): i64 {
                     if (on == 0) { ok = 1; }
                     if (on == 1) {
                         if (bad == 0) {
-                            k_write( 2, "kriya cp: --preserve: 'context' is not preserved by kriya ", 58);
+                            _cp_prefix(); k_write( 2, "--preserve: 'context' is not preserved by kriya ", 48);
                             k_write( 2, "(it has no SELinux support)\n", 28);
                             bad = 1;
                         }
@@ -1811,7 +1857,7 @@ fn _cp_attr_list(attrs, on, optname): i64 {
             }
             if (ok == 0) {
                 if (bad == 0) {
-                    k_write( 2, "kriya cp: ", 10);
+                    _cp_prefix();
                     k_write( 2, optname, strlen(optname));
                     k_write( 2, ": '", 3);
                     k_write( 2, seg, slen);
@@ -2034,7 +2080,7 @@ fn cmd_cp(start: i64): i64 {
     # `--preserve=links` used to do: accepted, discarded, exit 0, hard links
     # quietly turned into independent copies.
     if (kriya_args_parse_optval(_cp_spec, start, 0, "preserve") != 0) {
-        k_write( 2, "kriya cp: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
+        _cp_prefix(); k_write( 2, "error: bad option (see ADR 0002 for accepted syntax)\n", 53);
         return EXIT_USAGE;
     }
     # ⛔ RESOLVED ONCE, BEFORE ANY OPERAND IS TOUCHED. An invalid control name is
@@ -2045,7 +2091,7 @@ fn cmd_cp(start: i64): i64 {
       flags_get_str(_cp_spec, _cp_bk_idx),
       flags_get_str(_cp_spec, _cp_S_idx));
     if (_bk == BACKUP_INVALID) {
-        k_write( 2, "kriya cp: error: invalid backup control ", 40);
+        _cp_prefix(); k_write( 2, "error: invalid backup control ", 30);
         k_write( 2, "(want none, off, numbered, t, existing, nil, simple or never)\n", 62);
         return EXIT_USAGE;
     }
@@ -2062,7 +2108,8 @@ fn cmd_cp(start: i64): i64 {
     # so kriya refuses instead; `--no-preserve=context` is the explicit way on.
     if (_cp_o_ctx == 1) {
         if (_cp_selinux_enabled() == 1) {
-            k_write( 2, "kriya cp: -a / --preserve=all would preserve SELinux contexts here, and kriya cannot ", 85);
+            _cp_prefix();
+            k_write( 2, "-a / --preserve=all would preserve SELinux contexts here, and kriya cannot ", 75);
             k_write( 2, "(add --no-preserve=context to copy without them)\n", 49);
             return EXIT_USAGE;
         }
@@ -2070,14 +2117,33 @@ fn cmd_cp(start: i64): i64 {
 
     var npos = flags_positional_count(_cp_spec);
     if (npos < 2) {
-        k_write( 2, "kriya cp: error: missing operand (need SRC and DST)\n", 52);
+        _cp_prefix(); k_write( 2, "error: missing operand (need SRC and DST)\n", 42);
         return EXIT_USAGE;
     }
 
+    # ⛔ `-f`, `-i` AND `-n` AS GNU's `cp` RESOLVES THEM (ADR 0024, 1.6.16).
+    # `-f` used to cancel `-i` in either order, so `cp -fi src dst` overwrote
+    # without asking — a prompt the caller asked for, skipped. GNU's `cp` keeps
+    # `-i` whatever `-f` says, and lets `-i` and `-n` override each other by
+    # position. ⚠ `mv` differs: there all three are last-wins.
     var force: i64 = 0;
     if (flags_get_bool(_cp_spec, _cp_f_idx) == 1) { force = 1; }
     var interactive: i64 = 0;
-    if (flags_get_bool(_cp_spec, _cp_i_idx) == 1) { interactive = 1; }
+    var i_at = kriya_opt_seq(_cp_spec, 105, "interactive");
+    var n_at = kriya_opt_seq(_cp_spec, 110, "no-clobber");
+    _cp_noclobber = 0;
+    if (i_at > n_at) { interactive = 1; }
+    if (n_at > i_at) { _cp_noclobber = 1; }
+    _cp_interactive = interactive;
+    # ⚠ An effective `-n` with a backup is refused, as GNU 9.11 refuses it: a
+    # backup of a file `-n` will never replace. (9.4 took the pair, backed nothing
+    # up, and warned that `-n` was non-portable.)
+    if (_cp_noclobber == 1) {
+        if (backup_control() != BACKUP_NONE) {
+            _cp_prefix(); k_write( 2, "error: --backup is mutually exclusive with -n\n", 46);
+            return EXIT_USAGE;
+        }
+    }
     # `-p`, `--preserve[=LIST]`, `--no-preserve=LIST`, `-a` and `-d`, resolved in
     # order by `_cp_scan_order` above. ⚠ GNU's forms are CUMULATIVE — `-p
     # --preserve=links` preserves all four — and the walk ORs each onto the last.
@@ -2093,7 +2159,7 @@ fn cmd_cp(start: i64): i64 {
     if ((preserve & CP_PRES_LINKS) != 0) {
         _cp_links = fs_inoset_new();
         if (_cp_links == 0) {
-            k_write( 2, "kriya cp: --preserve=links: out of memory\n", 42);
+            _cp_prefix(); k_write( 2, "--preserve=links: out of memory\n", 32);
             return EXIT_FAILURE;
         }
     }
@@ -2108,7 +2174,7 @@ fn cmd_cp(start: i64): i64 {
     # invocation-wide, even before any operand classification.
     if (interactive == 1) {
         if (_cp_isatty(0) == 0) {
-            k_write( 2, "kriya cp: error: -i requires stdin to be a terminal\n", 52);
+            _cp_prefix(); k_write( 2, "error: -i requires stdin to be a terminal\n", 42);
             return EXIT_USAGE;
         }
     }
@@ -2123,7 +2189,7 @@ fn cmd_cp(start: i64): i64 {
     var any_failed: i64 = 0;
     if (dst_is_dir == 0) {
         if (npos != 2) {
-            k_write( 2, "kriya cp: error: with multiple sources, the last operand must be a directory\n", 77);
+            _cp_prefix(); k_write( 2, "error: with multiple sources, the last operand must be a directory\n", 67);
             return EXIT_USAGE;
         }
         var src = flags_positional(_cp_spec, 0);

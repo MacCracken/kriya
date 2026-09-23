@@ -237,6 +237,11 @@ fn _f_tok_eq(s): i64 {
 
 # Parse +/-/exact number prefix. On entry s points to "+N", "-N", or "N".
 # Stores sign in *sign_ptr, returns the integer value (or -1 on bad).
+#
+# ⛔ N WRAPPED PAST 2^64 until 1.6.16: `-mmin -18446744073709551617` asked for
+# "less than 1 minute" and matched nothing, where GNU matches everything. N
+# SATURATES now, as GNU's does — a time that far back is "longer ago than any
+# file" — and the callers only compare it, never multiply it.
 fn _f_parse_signed_int(s, sign_ptr): i64 {
     if (s == 0) { return 0 - 1; }
     var i: i64 = 0;
@@ -244,50 +249,49 @@ fn _f_parse_signed_int(s, sign_ptr): i64 {
     if (load8(s) == 43) { sign = F_SIGN_PLUS;  i = 1; }
     elif (load8(s) == 45) { sign = F_SIGN_MINUS; i = 1; }
     if (load8(s + i) == 0) { return 0 - 1; }
-    var n: i64 = 0;
-    while (load8(s + i) != 0) {
-        var c = load8(s + i);
-        if (c < 48 || c > 57) { return 0 - 1; }
-        n = n * 10 + (c - 48);
-        i = i + 1;
-    }
+    var len: i64 = 0;
+    var n = kriya_count_digits(s + i, &len);
+    if (load8(s + i + len) != 0) { return 0 - 1; }
     store64(sign_ptr, sign);
     return n;
 }
 
-# Parse a -size argument like "+10c", "-1M", "100". Returns byte
-# count (or -1 on bad). Stores sign in *sign_ptr.
-fn _f_parse_size(s, sign_ptr): i64 {
+# Parse a -size argument like "+10c", "-1M", "100": returns the COUNT, in the
+# unit its suffix names, and stores the sign in `*sign_ptr` and the unit's size
+# in bytes in `*unit_ptr`. -1 when it is not one.
+#
+# ⛔ IT RETURNED BYTES — the count times the unit — and compared those with the
+# file's size, so `find -size -1M` matched every file under a megabyte. GNU
+# rounds the file's size UP to the unit and compares counts: `-size -1M` is
+# only the empty files, and `-size 1k` includes a one-byte file. POSIX defines
+# only blocks and `c`; `k`, `M` and `G` are GNU's, and so is that rule (1.6.16).
+# The multiplication also WRAPPED past 2^63; there is none now, and a count past
+# 2^63 - 1 is refused.
+fn _f_parse_size(s, sign_ptr, unit_ptr): i64 {
     if (s == 0) { return 0 - 1; }
     var i: i64 = 0;
     var sign: i64 = F_SIGN_EXACT;
     if (load8(s) == 43) { sign = F_SIGN_PLUS;  i = 1; }
     elif (load8(s) == 45) { sign = F_SIGN_MINUS; i = 1; }
-    var digits_start = i;
-    while (load8(s + i) >= 48 && load8(s + i) <= 57) {
-        i = i + 1;
-    }
-    if (i == digits_start) { return 0 - 1; }
-    var n: i64 = 0;
-    var j = digits_start;
-    while (j < i) {
-        n = n * 10 + (load8(s + j) - 48);
-        j = j + 1;
-    }
-    var suf = load8(s + i);
-    var scale: i64 = 512;  # default unit = 512-byte block
-    if      (suf == 0)   { scale = 512; }
-    elif    (suf == 98)  { scale = 512; }
-    elif    (suf == 99)  { scale = 1; }
-    elif    (suf == 107) { scale = 1024; }
-    elif    (suf == 77)  { scale = 1048576; }
-    elif    (suf == 71)  { scale = 1073741824; }
+    var len: i64 = 0;
+    var n = kriya_count_digits(s + i, &len);
+    if (len == 0) { return 0 - 1; }
+    if (n == KRIYA_COUNT_MAX) { return 0 - 1; }
+    var suf = load8(s + i + len);
+    var unit: i64 = 512;  # default unit = 512-byte block
+    if      (suf == 0)   { unit = 512; }
+    elif    (suf == 98)  { unit = 512; }
+    elif    (suf == 99)  { unit = 1; }
+    elif    (suf == 107) { unit = 1024; }
+    elif    (suf == 77)  { unit = 1048576; }
+    elif    (suf == 71)  { unit = 1073741824; }
     else { return 0 - 1; }
     if (suf != 0) {
-        if (load8(s + i + 1) != 0) { return 0 - 1; }
+        if (load8(s + i + len + 1) != 0) { return 0 - 1; }
     }
     store64(sign_ptr, sign);
-    return n * scale;
+    store64(unit_ptr, unit);
+    return n;
 }
 
 # --- AST node allocator -----------------------------------------------
@@ -405,9 +409,10 @@ fn _f_parse_primary(): i64 {
         var sa = _f_consume();
         if (sa == 0) { _f_set_err("-size needs an argument"); return 0; }
         var sign: i64 = 0;
-        var b = _f_parse_size(sa, &sign);
+        var unit: i64 = 0;
+        var b = _f_parse_size(sa, &sign, &unit);
         if (b < 0) { _f_set_err("bad -size argument"); return 0; }
-        return _f_node_new(F_N_SIZE, sign, b, _f_size_unit_block(sa));
+        return _f_node_new(F_N_SIZE, sign, b, unit);
     }
     if (streq(t, "-mtime") == 1) {
         _f_consume();
@@ -452,7 +457,9 @@ fn _f_parse_primary(): i64 {
         var ua = _f_consume();
         if (ua == 0) { _f_set_err("-user needs an argument"); return 0; }
         var uid = userdb_user_id(ua);
-        if (uid < 0) { uid = kriya_parse_nonneg_int(ua); }
+        # ⚠ A number that is not a name must fit a `uid_t`, as in GNU: past
+        # 4294967295 it is refused, where it used to WRAP past 2^64 (1.6.16).
+        if (uid < 0) { uid = kriya_parse_bounded(ua, 4294967295); }
         if (uid < 0) { _f_set_err("-user: not the name of a known user"); return 0; }
         return _f_node_new(F_N_UID, uid, 0, 0);
     }
@@ -461,7 +468,7 @@ fn _f_parse_primary(): i64 {
         var ga = _f_consume();
         if (ga == 0) { _f_set_err("-group needs an argument"); return 0; }
         var gid = userdb_group_id(ga);
-        if (gid < 0) { gid = kriya_parse_nonneg_int(ga); }
+        if (gid < 0) { gid = kriya_parse_bounded(ga, 4294967295); }
         if (gid < 0) { _f_set_err("-group: not the name of a known group"); return 0; }
         return _f_node_new(F_N_GID, gid, 0, 0);
     }
@@ -497,7 +504,10 @@ fn _f_parse_primary(): i64 {
         _f_consume();
         var dx = _f_consume();
         if (dx == 0) { _f_set_err("-maxdepth needs an argument"); return 0; }
+        # ⚠ GNU's depth is an `int`: past 2147483647 it is out of range. It used
+        # to be taken — and past 2^64 to WRAP to a small depth (1.6.16).
         var dv = kriya_parse_nonneg_int(dx);
+        if (dv > 2147483647) { dv = 0 - 1; }
         if (dv < 0) { _f_set_err("bad -maxdepth value"); return 0; }
         return _f_node_new(F_N_MAXDEPTH, dv, 0, 0);
     }
@@ -506,6 +516,7 @@ fn _f_parse_primary(): i64 {
         var dy = _f_consume();
         if (dy == 0) { _f_set_err("-mindepth needs an argument"); return 0; }
         var dv2 = kriya_parse_nonneg_int(dy);
+        if (dv2 > 2147483647) { dv2 = 0 - 1; }
         if (dv2 < 0) { _f_set_err("bad -mindepth value"); return 0; }
         return _f_node_new(F_N_MINDEPTH, dv2, 0, 0);
     }
@@ -547,16 +558,6 @@ fn _f_parse_primary(): i64 {
 # Pull the unit-suffix indicator out of an unparsed -size arg so the
 # evaluator can choose between byte-exact (`c`) and block-rounded
 # (default / `b`). Returns 0 for blocks (default), 1 for bytes.
-fn _f_size_unit_block(s): i64 {
-    var i: i64 = 0;
-    if (load8(s) == 43 || load8(s) == 45) { i = 1; }
-    while (load8(s + i) >= 48 && load8(s + i) <= 57) { i = i + 1; }
-    var suf = load8(s + i);
-    if (suf == 0)   { return 0; }   # default = blocks
-    if (suf == 98)  { return 0; }   # b = blocks
-    return 1;  # c/k/M/G all measured in raw bytes
-}
-
 fn _f_parse_unary(): i64 {
     var t = _f_tok();
     if (t == 0) { _f_set_err("missing operand"); return 0; }
@@ -633,18 +634,14 @@ fn _f_has_action(n): i64 {
 
 # --- Predicate evaluators ---------------------------------------------
 
-fn _f_eval_size_predicate(sign, want_bytes, unit_block, actual_size): i64 {
-    var actual = actual_size;
-    var target = want_bytes;
-    if (unit_block == 0) {
-        # GNU rounds size UP to the next 512-block when comparing in
-        # block units (size 1..512 → 1 block, 513..1024 → 2 blocks).
-        actual = (actual_size + 511) / 512;
-        target = want_bytes / 512;
-    }
-    if (sign == F_SIGN_PLUS)  { if (actual > target) { return 1; } return 0; }
-    if (sign == F_SIGN_MINUS) { if (actual < target) { return 1; } return 0; }
-    return (actual == target);
+fn _f_eval_size_predicate(sign, want, unit, actual_size): i64 {
+    # GNU: the size in UNITS, rounded up — 1..512 bytes is one block, 1..1024
+    # one `k` — so an empty file is the only thing smaller than one of anything.
+    var actual = actual_size / unit;
+    if (actual * unit < actual_size) { actual = actual + 1; }
+    if (sign == F_SIGN_PLUS)  { if (actual > want) { return 1; } return 0; }
+    if (sign == F_SIGN_MINUS) { if (actual < want) { return 1; } return 0; }
+    return (actual == want);
 }
 
 fn _f_eval_mtime_predicate(sign, want_days, mtime): i64 {
@@ -669,14 +666,14 @@ fn _f_eval_mmin_predicate(sign, want_min, mtime): i64 {
 
 fn _f_eval_type_predicate(letter, stat_buf): i64 {
     var m = load64(stat_buf + 24);
-    var ifmt = m & 61440;
-    if (letter == 102) { if (ifmt == 32768) { return 1; } return 0; }   # f
-    if (letter == 100) { if (ifmt == 16384) { return 1; } return 0; }   # d
-    if (letter == 108) { if (ifmt == 40960) { return 1; } return 0; }   # l
-    if (letter == 115) { if (ifmt == 49152) { return 1; } return 0; }   # s
-    if (letter == 112) { if (ifmt == 4096)  { return 1; } return 0; }   # p
-    if (letter == 98)  { if (ifmt == 24576) { return 1; } return 0; }   # b
-    if (letter == 99)  { if (ifmt == 8192)  { return 1; } return 0; }   # c
+    var ifmt = m & FS_S_IFMT;
+    if (letter == 102) { if (ifmt == FS_S_IFREG) { return 1; } return 0; }   # f
+    if (letter == 100) { if (ifmt == FS_S_IFDIR) { return 1; } return 0; }   # d
+    if (letter == 108) { if (ifmt == FS_S_IFLNK) { return 1; } return 0; }   # l
+    if (letter == 115) { if (ifmt == FS_S_IFSOCK) { return 1; } return 0; }   # s
+    if (letter == 112) { if (ifmt == FS_S_IFIFO) { return 1; } return 0; }   # p
+    if (letter == 98) { if (ifmt == FS_S_IFBLK) { return 1; } return 0; }   # b
+    if (letter == 99) { if (ifmt == FS_S_IFCHR) { return 1; } return 0; }   # c
     return 0;
 }
 
@@ -684,19 +681,19 @@ fn _f_eval_type_predicate(letter, stat_buf): i64 {
 # Other types yield 0.
 fn _f_eval_empty_predicate(path, stat_buf): i64 {
     var m = load64(stat_buf + 24);
-    var ifmt = m & 61440;
-    if (ifmt == 32768) {
+    var ifmt = m & FS_S_IFMT;
+    if (ifmt == FS_S_IFREG) {
         if (load64(stat_buf + 48) == 0) { return 1; }
         return 0;
     }
-    if (ifmt == 16384) {
+    if (ifmt == FS_S_IFDIR) {
         # M8 mitigation: respect _f_follow_mode for NOFOLLOW. Without
         # this, a swapped-in symlink between classifying lstat and this
         # open would be silently followed even under default `-P`.
         # Mirrors the conditional NOFOLLOW pattern used at the main
         # descent site (_f_descend / line ~918).
-        var open_flags: i64 = 65536;  # O_RDONLY | O_DIRECTORY
-        if (_f_follow_mode == 0) { open_flags = open_flags | 131072; }  # O_NOFOLLOW
+        var open_flags: i64 = FS_O_DIRECTORY;  # | O_RDONLY
+        if (_f_follow_mode == 0) { open_flags = open_flags | FS_O_NOFOLLOW; }
         var dfd = fs_openat(0 - 100, path, open_flags, 0);
         if (dfd < 0) { return 0; }
         var dbuf = alloc(4096);
@@ -1064,9 +1061,9 @@ fn _f_walk(path, depth, max_depth): i64 {
 
     _f_eval(_f_ast, &ctx);
 
-    var ifmt = load64(st_buf + 24) & 61440;
+    var ifmt = load64(st_buf + 24) & FS_S_IFMT;
     var is_dir: i64 = 0;
-    if (ifmt == 16384) { is_dir = 1; }
+    if (ifmt == FS_S_IFDIR) { is_dir = 1; }
     if (is_dir == 0) { return 0; }
 
     if (max_depth >= 0) {
@@ -1142,12 +1139,12 @@ fn cmd_find(start: i64): i64 {
     _f_err_msg = 0;
     _f_env_vec = 0;
     _f_follow_mode = 0;
-    # Snapshot PATH up-front: io.cyr's getenv uses a stack buffer that
-    # appears to come back stale after a fork+exec+waitpid cycle (the
-    # first call returns the right value, subsequent calls see /proc/
-    # self/environ as empty). Caching the heap copy once at startup
-    # sidesteps it.
-    _f_path_env = kriya_getenv("PATH");
+    # Snapshot PATH up-front, once, for every `-exec`. ⚠ It began as a
+    # workaround: the stdlib `getenv` read /proc/self/environ into a stack
+    # buffer on every call, which came back empty after a fork+exec+waitpid
+    # cycle. Since cyrius 6.5.36 it reads once into a heap cache, so the
+    # snapshot is only the cheaper way to ask.
+    _f_path_env = getenv("PATH");
 
     var total = kriya_argv_count();
     # Build a private flat argv view of argv[start..].

@@ -155,10 +155,64 @@ expect_exit "-b p refuses \\w"  2 "$BIN" nl -b 'p\wx'  sect
 expect_exit "-b p bad regex"    2 "$BIN" nl -b 'p\('    sect
 expect_exit "bad -h"            2 "$BIN" nl -h zzz sect
 expect_exit "bad -f"            2 "$BIN" nl -f zzz sect
-expect_exit "-l 0 refused"      2 "$BIN" nl -l 0 sect
+# ⚠ `-l 0` is GNU 9.11's too, and means what `-l 1` means; refused until 1.6.16.
+# Compared with GNU's `-l 1`, because GNU 9.4 (CI's) still refuses `-l 0`.
+expect_eq "-l 0 is -l 1" "$(nl -l 1 -b a mix)" "$($BIN nl -l 0 -b a mix)"
 # ⚠ Supported constructs must NOT trip the guard — a false refusal is a bug too.
 expect_exit "-b p allows \\<"   0 "$BIN" nl -b 'p\<B' sect
 expect_exit "-b p allows [\\+]" 0 "$BIN" nl -b 'p[\+]' sect
+
+# --- 1.6.16: the counts, and the counter ------------------------------------
+#
+# ⛔ `-i`, `-v`, `-w` and `-l` WRAPPED past 2^64 — `-v 99999999999999999999`
+# started at 7766279631452241919 — and an EMPTY value was skipped as if absent.
+# ⛔ And the counter itself wrapped: `nl -v 9223372036854775807` printed that
+# number and then BLANK number fields, at exit 0. GNU says *line number overflow*
+# and exits 1 when the overflowed number is needed. Compared with GNU on bytes and
+# exit status; where GNU says 1 for a usage error, kriya says 2 (ADR 0008).
+nl_same() {   # nl_same <label> <file> <nl args...>
+    _l=$1; _f=$2; shift 2
+    _grc=0; nl "$@" "$_f" > nl_g.out 2>/dev/null || _grc=$?
+    _krc=0; timeout 10 "$BIN" nl "$@" "$_f" > nl_k.out 2>/dev/null || _krc=$?
+    if cmp -s nl_g.out nl_k.out && [ "$_grc" = "$_krc" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        printf 'FAIL %s: GNU exit %s, kriya exit %s, output %s\n' "$_l" "$_grc" "$_krc" \
+            "$(cmp -s nl_g.out nl_k.out && echo same || echo differs)" >&2
+    fi
+}
+printf 'a\nb\nc\n' > three
+printf 'a\n\\:\\:\nb\n' > reset
+nl_same "-v MAX, one line"          short -v 9223372036854775807 -b n
+nl_same "-v MAX overflows"          three -v 9223372036854775807
+nl_same "-v MAX-1 prints two"       three -v 9223372036854775806
+nl_same "-i MAX overflows"          three -i 9223372036854775807
+nl_same "a new section resets it"   reset -v 9223372036854775807
+nl_same "-v ' 5' (GNU's blanks)"    three -v ' 5'
+nl_same "-i +2 (GNU's plus)"        three -i +2
+# ⚠ GNU 9.11 saturates an oversized `-l`; 9.4 refuses it. Compared with a finite
+# `-l` no blank run in the fixture reaches, which both versions take.
+expect_eq "-l huge saturates"   "$(nl -l 1000000 -b a mix)" "$($BIN nl -l 99999999999999999999 -b a mix)"
+expect_eq "-l 2^64+1 saturates" "$(nl -l 1000000 -b a mix)" "$($BIN nl -l 18446744073709551617 -b a mix)"
+for _o in -i -v -w -l; do
+    for _v in 9223372036854775808 18446744073709551617 99999999999999999999 '' 1x; do
+        [ "$_o" = "-l" ] && case "$_v" in 9*|18*) continue ;; esac
+        # ⚠ `timeout`: a wrapped width is a hang, and a regression must FAIL here.
+        expect_exit "nl $_o '$_v' refused" 2 timeout 10 "$BIN" nl $_o "$_v" three
+        _grc=0; nl $_o "$_v" three >/dev/null 2>&1 || _grc=$?
+        expect_eq "...and by GNU" "yes" "$([ "$_grc" != 0 ] && echo yes || echo no)"
+    done
+done
+expect_exit "nl -w 0 refused"          2 timeout 10 "$BIN" nl -w 0 three
+expect_exit "nl -w 2147483648 refused" 2 timeout 10 "$BIN" nl -w 2147483648 three
+# ⚠ Deliberate: GNU takes a NEGATIVE -i and -v, kriya refuses both.
+expect_exit "nl -v -1 refused (GNU: numbers from -1)" 2 timeout 10 "$BIN" nl -v -1 three
+expect_exit "nl -i -1 refused (GNU: counts down)"     2 timeout 10 "$BIN" nl -i -1 three
+# ⛔ THE PADDING WAS ONE WRITE PER BYTE: `-w 2147483647`, which GNU prints, never
+# finished. A wide field is a buffer at a time now.
+nl_same "-w 100000 pads in chunks"  three -w 100000
+nl_same "-w 100000, unnumbered"     three -w 100000 -b n
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

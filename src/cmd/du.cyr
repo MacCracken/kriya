@@ -472,6 +472,23 @@ fn _du_init_spec(): i64 {
     return 0;
 }
 
+# The `-d` / `--max-depth` value, or -1 after reporting it in GNU's words.
+#
+# ⛔ IT WRAPPED UNTIL 1.6.16: `du -d 18446744073709551617` ran at depth ONE, exit
+# 0, where GNU refuses the number. Anything past 2^63 - 1 is refused now, as in
+# GNU; blanks and a `+` in front are GNU's too (`du -d ' 1'`).
+# ⚠ Two GNU readings stay refused, both exit 2: a NEGATIVE depth, which GNU
+# clamps to 0, and hex or octal (`0x2`, and `010` as eight), since GNU reads the
+# value in base 0. kriya reads decimal, as `ls -w` does (ADR 0019).
+fn _du_depth_value(arg): i64 {
+    var v = kriya_parse_bounded(arg, KRIYA_COUNT_MAX);
+    if (v < 0) {
+        report_note("du", arg, "invalid maximum depth");
+        return 0 - 1;
+    }
+    return v;
+}
+
 fn cmd_du(start: i64): i64 {
     _du_init_spec();
     du_help_declare();
@@ -540,21 +557,19 @@ fn cmd_du(start: i64): i64 {
                         if (nlen == 9) {
                             if (_seq_bytes_eq(tok + 2, "summarize", 9) == 1) { _du_summarize = 1; handled = 1; }
                             if (_seq_bytes_eq(tok + 2, "max-depth", 9) == 1) {
-                                var dval: i64 = 0;
+                                var darg: i64 = 0;
                                 if (eq_off > 0) {
-                                    dval = kriya_parse_nonneg_int(tok + eq_off + 1);
+                                    darg = tok + eq_off + 1;
                                 } else {
                                     i = i + 1;
                                     if (i >= n_argv) {
                                         k_write( 2, "kriya du: error: --max-depth requires an argument\n", 50);
                                         return EXIT_USAGE;
                                     }
-                                    dval = kriya_parse_nonneg_int(argv(i));
+                                    darg = argv(i);
                                 }
-                                if (dval < 0) {
-                                    k_write( 2, "kriya du: error: invalid --max-depth value\n", 43);
-                                    return EXIT_USAGE;
-                                }
+                                var dval = _du_depth_value(darg);
+                                if (dval < 0) { return EXIT_USAGE; }
                                 _du_max_depth = dval;
                                 _du_have_depth = 1;
                                 handled = 1;
@@ -623,23 +638,19 @@ fn cmd_du(start: i64): i64 {
                                                             } else { if (c == 108) {       # -l
                                                                     _du_count_links = 1; p = p + 1;
                                                                 } else { if (c == 100) {       # -d N
-                                                                        var dval: i64 = 0;
+                                                                        var sarg: i64 = 0;
                                                                         if (p + 1 < tlen) {
-                                                                            dval = kriya_parse_nonneg_int(tok + p + 1);
+                                                                            sarg = tok + p + 1;
                                                                         } else {
                                                                             if (i + 1 >= n_argv) {
                                                                                 k_write( 2, "kriya du: error: -d requires an argument\n", 41);  #skip-lint
                                                                                 return EXIT_USAGE;
                                                                             }
-                                                                            dval = kriya_parse_nonneg_int(argv(i + 1));
+                                                                            sarg = argv(i + 1);
                                                                             consumed_next = 1;
                                                                         }
-                                                                        if (dval < 0) {
-                                                                            k_write( 2,
-                                                                              "kriya du: error: invalid -d value\n",
-                                                                              34);
-                                                                            return EXIT_USAGE;
-                                                                        }
+                                                                        var dval = _du_depth_value(sarg);
+                                                                        if (dval < 0) { return EXIT_USAGE; }
                                                                         _du_max_depth = dval;
                                                                         _du_have_depth = 1;
                                                                         loop = 0;

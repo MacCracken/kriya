@@ -163,6 +163,17 @@ expect_eq "empty PATH entry == cwd"  "./cwd_prog" "$out"
 # --- no operands ---
 expect_exit "no operands"         2 "$BIN" which
 
+# --- 1.6.16: a variable past the first 8 KB of the environment ----------------
+#
+# ⚠ kriya carried its own lookup (`src/lib/env.cyr`) because the stdlib `getenv`
+# scanned only the first 8 KB until cyrius 6.5.36: PATH placed after a large
+# variable was simply not found. 1.6.16 retired it for the stdlib's; this pins
+# that the stdlib still reads past 8 KB, so a pin bump cannot bring the cliff back.
+BIG8=$(head -c 9000 /dev/zero | tr '\0' x)
+mkdir -p big8bin && printf '#!/bin/sh\n' > big8bin/big8prog && chmod +x big8bin/big8prog
+expect_eq "PATH after 9 KB is found" "$PWD/big8bin/big8prog" \
+    "$(env -i BIG8="$BIG8" PATH="$PWD/big8bin" "$BIN" which big8prog 2>&1)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

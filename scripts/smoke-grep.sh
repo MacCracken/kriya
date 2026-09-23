@@ -185,7 +185,8 @@ expect_exit 'match exit 0'         0 "$BIN" grep foo basic
 expect_exit '-P rejected'          2 "$BIN" grep -P foo basic
 expect_exit '-E and -F clash'      2 "$BIN" grep -E -F foo basic
 expect_exit 'no pattern'           2 "$BIN" grep
-expect_exit '-r no operand'        2 "$BIN" grep -r foo
+# `-r` with no operand searches `.` since 1.6.16, as GNU's does — the `g16`
+# block below compares it; it used to be refused here.
 expect_exit 'missing file'         2 "$BIN" grep foo no_such_file
 expect_exit 'directory no -r'      2 "$BIN" grep foo tree
 expect_exit '-q match exit 0'      0 "$BIN" grep -q foo basic
@@ -684,6 +685,42 @@ case "$("$BIN" grep -E 'a**' g14/o 2>&1)" in
 esac
 # ...and a literal is one backslash away, as the message says.
 g14 "ERE '\\*a' is the literal"           -E '\*a' st
+
+# --- 1.6.16: `grep -r` with no operand searches `.` --------------------------
+#
+# ⛔ IT WAS REFUSED, "-r requires file operands". GNU (since 2.11) searches the
+# working directory and names what it finds WITHOUT a `./` — `sub/b:hit` — and
+# exempts that implied `.` from `--exclude-dir`: `--exclude-dir=.` still
+# searches, and `--exclude-dir='*'` still reads the top level's files.
+# ⚠ Exit statuses are compared too, which the `g14` helper above cannot do: its
+# `$(… | sort)` reports sort's status, not grep's.
+g16() {   # g16 <label> <args...>: in g14/t, no operand; GNU and kriya agree
+    _l=$1; shift
+    _grc=0; (cd g14/t && LC_ALL=C grep "$@" < /dev/null > ../../g16_g.raw 2>/dev/null) || _grc=$?
+    _krc=0; (cd g14/t && LC_ALL=C "$BIN" grep "$@" < /dev/null > ../../g16_k.raw 2>/dev/null) || _krc=$?
+    expect_eq "1.6.16: $_l" "$_grc|$(tr '\0' '\n' < g16_g.raw | sort)" "$_krc|$(tr '\0' '\n' < g16_k.raw | sort)"
+}
+printf 'miss\n' > g14/t/m
+g16 "-r PAT"                     -r hit
+g16 "-rl"                        -rl hit
+g16 "-rL"                        -rL hit
+g16 "-rc"                        -rc hit
+g16 "-rh"                        -rh hit
+g16 "-rH"                        -rH hit
+g16 "-rn"                        -rn hit
+g16 "-rZl"                       -rZl hit
+g16 "-rv"                        -rv hit
+g16 "-rq"                        -rq hit
+g16 "-r, no match"               -r nomatch
+g16 "--exclude-dir=. keeps ."    -r --exclude-dir=. hit
+g16 "--exclude-dir='*'"          -r "--exclude-dir=*" hit
+g16 "--exclude-dir=sub"          -r --exclude-dir=sub hit
+g16 "--exclude-dir=.git"         -r --exclude-dir=.git hit
+g16 "--include"                  -r "--include=a" hit
+g16 "-r -e"                      -r -e hit
+g16 "-r PAT . keeps ./"          -r hit .
+# `-` is still standard input, operand or not.
+expect_eq "1.6.16: -r PAT - reads stdin" "$(echo hit | grep -r hit -)" "$(echo hit | "$BIN" grep -r hit -)"
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

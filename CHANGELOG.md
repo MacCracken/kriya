@@ -6,6 +6,227 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.16] - 2026-09-23 — cleanup, and the numbers that wrapped
+
+The 1.6.16 slot: nine cleanup items, each measured against GNU coreutils 9.11 (this box) and 9.4
+(CI's) before anything was written. The first of them, "fifteen options wrap past 2^64", turned out
+to be the same defect in **eight more number parsers**, across nine utilities in all. Measuring
+them turned up the wrong answers sitting in the same code:
+- `sort` dropped part of a key spec, broke ties differently from GNU, and split fields differently;
+- `find -size` compared the wrong units;
+- `cut` read refused LISTs as other LISTs;
+- `nl` printed blank numbers after an overflow;
+- `seq` printed forever at the i64 edge.
+
+### ⛔ Breaking
+
+- **`cp` and `mv` resolve `-f`, `-i` and `-n` as GNU does**
+  ([ADR 0024](docs/adr/0024-cp-and-mv-resolve-force-interactive-and-no-clobber-as-gnu-does.md)).
+  GNU's two utilities use two rules. In `cp`, `-f` cancels neither `-i` nor `-n`. In `mv`, all
+  three are last-wins.
+  - `cp -fi` now ASKS; without a terminal it is a usage error (it used to replace without asking).
+  - `mv -fi` asks, `mv -nf` replaces, and a declined `mv -i` exits 1.
+  - `-n` with a backup is refused in both.
+  - **Migration:** a script that means "replace" writes `-f` alone, or last.
+- **`sort -k2n` is refused**, exit 2. So is any key's own ordering letter, or a character offset
+  (`-k2.3`). They used to be dropped: `-k2n` sorted field 2 as TEXT at exit 0. Both come in
+  roadmap 1.8.1. **Migration:** for one key, `-n -k2,2` is exactly `-k2,2n`.
+- **A blank-separated field includes the blanks in front of it**, as in GNU and POSIX, so
+  `sort -k1` puts ` b` before `a`. Indented or column-aligned input can sort differently.
+  **Migration:** `-b` ignores those blanks, as before.
+- **`sort -u` with `-n`, `-f`, `-b` or `-k` treats equal KEYS as duplicates**, as GNU does.
+  `sort -nu` of `1`, `01`, `1.0` prints one line (it used to print three). **`sort -s` now keeps
+  tied lines in input order**; it did nothing before.
+- **`find -size` rounds a file's size up to the unit**, as GNU does. `-size -1M` now matches only
+  empty files; it used to match everything under a megabyte. **Migration:** `-size -1048576c` for
+  "under a megabyte".
+- **`cut` refuses the LISTs GNU refuses**: `0`, `2-1`, `1-0`, `-0` and a trailing `,`. They used
+  to print field 1, nothing, everything, everything, and field 1.
+- **`xargs` refuses an unknown option**, exit 2. It used to run a program by that name and exit
+  127.
+
+### Fixed — ⛔ numbers that wrapped past 2^64
+
+`kriya_parse_nonneg_int` multiplied without a bound, so `18446744073709551617` came back as 1, at
+exit 0. Eight hand-rolled parsers did the same, found by searching for the shape
+(`n * 10 + d`) rather than for callers. Each option now gives GNU's answer to a
+large value, never a wrap:
+
+| option | before | now |
+|---|---|---|
+| `du -d` | depth 1 | refused, GNU's words |
+| `find -maxdepth`, `-mindepth` | depth 1, or any depth to 2^63 | refused past 2^31 − 1, GNU's `int` |
+| `find -uid`, `-gid` | uid 1 | refused from 2^63 |
+| `find -user`, `-group` given a number | uid 1 | refused past 2^32 − 1, as in GNU |
+| `find -mmin`, `-mtime` | "under a minute" | saturated, as in GNU |
+| `find -size` | wrapped through a multiply | a count in the unit, no multiply |
+| `nl -i`, `-v`, `-w` | increment, start or width 1 | refused, as in GNU; `-w` also past 2^31 − 1 |
+| `nl -l` | 1 | saturated, as in GNU |
+| `sort -k` | field 1 | saturated, as in GNU |
+| `sort -n`, on the data | `9223372036854775808` sorted first, as a negative | compared as digit strings |
+| `uniq -f`, `-s`, `-w` | 1 | saturated, as in GNU |
+| `cut -f`, `-b`, `-c` | field 1 | refused: *field number is too large* |
+| `seq` | `1` | refused past 2^63 − 1 |
+
+`kriya_parse_nonneg_int` refuses an overflow now. The new `kriya_parse_bounded` gives each option a
+choice: -1 for a malformed value, -2 for one that is too large, which the caller refuses or
+saturates. It takes GNU's `xstrto*` shape: leading blanks, one `+`, digits. ⚠ GNU accepts some of
+these between 2^63 and 2^64 (`cut` up to 2^64 − 2, `find -uid`, `-gid` and `-size` up to
+2^64 − 1). kriya refuses that band, and the suites assert it. `printf` and `stat` widths wrap the
+same way and are roadmap 1.6.17.
+
+### Fixed — ⛔ an empty value was ignored
+
+`uniq -f ''`, `-s ''` and `-w ''`, `nl -i ''`, `-v ''`, `-w ''` and `-l ''`, and `sort -k ''` all
+treated the empty value as absent and exited 0. GNU refuses each; kriya does too now. This is the
+defect 1.6.9 fixed in `head` and `tail`
+([ADR 0002](docs/adr/0002-option-parsing-humans-and-agents.md)).
+
+### Fixed — ⛔ `sort`: the key, `-n`, and the tie-break
+
+A differential fuzz of every flag `sort` supports found each of these; 7,000 cases now match GNU.
+
+- **The key spec kept only its digits.** `-k2n` and `-k2r` were sorted as plain `-k2`; `-k2,2.1`
+  lost its `.1`; `-k 2,-1` and `-k 2,2x` lost their tails. Malformed specs are refused now, in
+  GNU's words, and the forms kriya cannot honour yet are refused by name. `-k 2,1` is an empty
+  key, as in GNU; it used to be refused.
+- **`-n` parsed each key into an i64.** Past 2^63 a number wrapped, and the parse stopped at the
+  `.`, so `-1.25` and `-1.5` tied and came out in the wrong order. Keys are now compared as digit
+  strings (sign, integer length, integer digits, fraction), as GNU compares them.
+- **The last-resort comparison.** When keys tie, GNU compares the whole lines as bytes, unless
+  `-u` or `-s` is given. kriya skipped that step for `-n -k`, `-f` and `-b` (`sort -f` of `a`,
+  `A` gave `a A`, where GNU gives `A a`). It applied the step under `-u`, and it ignored `-s`.
+  `-c -u` now checks strict order.
+- **Fields without `-t`** include their leading blanks now, as in GNU's `begfield` and `limfield`;
+  both are rewritten as GNU has them.
+
+### Fixed — ⛔ `nl`
+
+- **The counter overflowed silently.** `nl -v 9223372036854775807` printed that number and then
+  BLANK number fields, at exit 0. It now says *line number overflow* and exits 1, as GNU does.
+  Like GNU, it waits until the overflowed number is needed, and a new section clears it.
+- **Padding was one `write(2)` per byte.** `nl -w 1000000` over 20 lines took **7,148 ms** and
+  takes **3 ms** now (GNU 4 ms). `nl -w 2147483647`, which GNU prints, used to never finish.
+- **`-l 0` is accepted**, as it is in GNU, and means what `-l 1` means.
+
+### Fixed — ⛔ `find -size` counted bytes for `k`, `M` and `G`
+
+GNU rounds a file's size up to the unit before comparing. `-size 1k` includes a one-byte file,
+and `-size -1M` means empty. kriya multiplied the count out to bytes instead. Now 18 of 18 unit
+cases match GNU.
+
+### Fixed — ⛔ `cut`'s LIST is GNU's
+
+The parser is rewritten to GNU's `set_fields` rules and wording:
+- `N`, `N-`, `-M` and `N-M`, one separator apiece; a blank separates, as a comma does
+  (`-f '1 3'`);
+- field 0 and an empty item are refused (*numbered from 1*), and so are a decreasing range, a
+  bare `-`, and a stray character;
+- a number too large is refused.
+
+All 38 LIST shapes, across `-f`, `-b` and `-c`, give GNU's verdict.
+
+### Fixed — ⛔ `seq` at the edge of the i64
+
+`seq 9223372036854775807 9223372036854775807` wrapped to the most negative value, which is also
+below LAST, and printed forever. A step that would leave the range now ends the sequence.
+Operands past 2^63 − 1 are refused rather than wrapped: `seq 18446744073709551617 …` used to
+print `1`.
+
+### Fixed — `mv`'s diagnostics say `mv`
+
+A cross-filesystem move runs `cp`'s copy, and every diagnostic from it said `kriya cp:`. The
+utility name is now a parameter of `cp`'s reporter (`_cp_util`), set by `mv`, as the roadmap asked.
+
+### Added
+
+- **`cp -n` / `--no-clobber`**: an existing destination is skipped silently, exit 0. It applies
+  in all three copy paths, including symlinks in a `-R` walk; those never saw `-i` either and now
+  do.
+- **`grep -r` with no operand searches `.`**, as GNU's has since 2.11. It names what it finds
+  without `./` (`sub/b:hit`). The implied `.` is exempt from `--exclude-dir`, so
+  `--exclude-dir=.` still searches. 21 of 21 forms match GNU.
+- **`stat %C` reads the SELinux context** (`security.selinux`, of the link itself unless `-L`).
+  Where there is none it prints `?`, says *failed to get security context*, and exits 1, as GNU
+  does. It used to print `?` at exit 0, like an unknown directive. ⚠ GNU's reason differs by
+  build: CI's libselinux GNU says *No data available*, which is what kriya reads; Arch's GNU,
+  built without libselinux, says *Operation not supported*. The path where a context exists
+  cannot be exercised on a box without SELinux.
+
+### Changed
+
+- **The octal sweep**, with no behaviour change. Mode constants are octal now (`0o777`, `0o4000`),
+  and file-type tests use `fs.cyr`'s `FS_S_*` names instead of `61440` and `16384`. This covers
+  `fs.cyr`, `mkdir`, `touch`, `tee`, `cp`, `find`, `ln`, `ls`, `stat`, `sort` and `uniq`.
+  ⭐ **Proven by bytes**: after the sweep, both targets' binaries were identical to 1.6.15's.
+  `protected.cyr`, which the roadmap listed, has no mode constants. The comments that said Cyrius
+  has no octal literals are gone.
+- **`src/lib/env.cyr` is retired** for the stdlib `getenv`. Since cyrius 6.5.36 the stdlib reads
+  the whole environment into a heap cache, and since 6.6.6 it does not cache a partial read after
+  an error, which kriya's own did. Eleven lookups moved. A new test in `smoke-which.sh` and
+  `smoke-ls.sh` pins the 8 KB case the module existed for, so a later toolchain pin bump cannot
+  bring the cliff back.
+- **The two stray doc blocks in `args.cyr`** now sit on `kriya_argv_collect` and
+  `kriya_parse_octal_mode`. The octal-mode block promised symbolic modes "in M3"; that is now
+  roadmap 1.8.5, with measurements.
+
+### Documentation
+
+- **[ADR 0024](docs/adr/0024-cp-and-mv-resolve-force-interactive-and-no-clobber-as-gnu-does.md)**:
+  `cp` and `mv` resolve `-f`, `-i` and `-n` as GNU does, one rule each.
+- **Roadmap**: 1.6.16 retired, next up 1.6.17.
+  - **1.6.17, new**: `printf` and `stat` numbers. Their widths wrap, their padding is one write
+    per byte, `%d` arguments wrap and `%u` of values from 2^63 up prints nothing, GNU's conversion
+    warnings are missing, and there is a decision to make on negative `printf` arguments, which
+    need `--` under ADR 0002. It also holds `nl`'s negative `-i` / `-v`.
+  - 1.7.1 gains `find -uid` / `-gid` `±N`; 1.7.4 gains the new `lgetxattr` wrapper.
+  - **1.8.5, new**: symbolic `mkdir -m`.
+  - **1.9.5, new**: buffered output for the line utilities (`nl` is 836 ms against GNU's 42 ms on
+    500,000 lines).
+- **Lessons**:
+  - a defect found through one function is a class, found by searching for its shape;
+  - a zero-behaviour sweep is proven by comparing binaries;
+  - three ways a new block can pass against the old binary;
+  - three more GNU 9.4 / 9.11 splits.
+
+### Tests
+
+- Smoke **6,420 → 6,895** across 41 scripts:
+  - `smoke-sort.sh` 35 → **129**, `smoke-cut.sh` 60 → **171**, `smoke-grep.sh` 328 → **346**;
+  - `smoke-uniq.sh` 87 → **130**, `smoke-nl.sh` 48 → **97**, `smoke-cp.sh` 140 → **161**;
+  - `smoke-mv.sh` 69 → **94**, `smoke-find.sh` 90 → **137**, `smoke-seq.sh` 44 → **57**;
+  - `smoke-du.sh` 37 → **62**, `smoke-stat.sh` 113 → **121**, `smoke-xargs.sh` 54 → **69**;
+  - `smoke-ls.sh` 347 → **348** and `smoke-which.sh` 23 → **24**, for the 8 KB environment case.
+
+  Every block compares kriya with GNU on bytes and exit status, and prompts go through a pty.
+- `kriya.tcyr` **618 → 661**: `kriya_parse_bounded`, the overflow in `kriya_parse_nonneg_int`,
+  `sort`'s digit-string comparison, `cut`'s LIST, and `seq`'s parse.
+- ⭐ **Run against the 1.6.15 binary, 201 of the new assertions fail**, across twelve scripts:
+  `sort` 56, `find` 21, `nl` 18, `uniq` 18, `grep` 17, `mv` 15, `cut` 13, `cp` 12, `seq` 10,
+  `du` 8, `stat` 7 and `xargs` 6. The new `ls` and `which` cases pin the environment behaviour
+  that `env.cyr` already had, and they pass on both binaries, as they should.
+- ⭐ A run against 1.6.15 also caught three more harness faults of the kind 1.6.15 found:
+  `find`'s new cases passed vacuously (`compare_sorted` prepends `find`, so they ran
+  `find find …`), `nl`'s refusal cases HUNG on a wrapped width instead of failing, and the
+  `-mmin` cases could not tell a huge interval from "under a minute" on fresh files. All three
+  are fixed.
+
+### Release totals
+
+**6,895 smoke cases across 41 scripts** (from 6,420), **661 unit**, 18 POSIX. The rest of the
+gate is clean:
+- fuzz green under poison (1,127 / 201 / 201);
+- `cyrius lint`, `lint-deferrals.sh`, `lint-help-schema.sh` and `check-oracles.sh`;
+- `watchlist-scan.py`: 194 declarations, M15a 0, M15c the 3 known, M15d 0, M15i 0;
+- `vet` reports **55** deps (one fewer: `env.cyr`), and both targets build warning-free.
+
+⭐ Verified in the `ubuntu:24.04` container (coreutils **9.4**, grep **3.11**) as a non-root user,
+`script(1)` present for the pty cases: 39 of 41 scripts green, **4,401** cases. The two exceptions
+need `python3`, which the image lacks.
+
+Binary 1,220,728 → **1,224,904** bytes on host (+4,176), 1,212,352 → **1,220,624** on agnos
+(+8,272).
+
 ## [1.6.15] - 2026-09-22 — `head` / `tail` count forms, and where `head` leaves its input
 
 The 1.6.15 slot's three items, each measured against GNU coreutils 9.11 (this box) and 9.4 (CI's)

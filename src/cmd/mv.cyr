@@ -8,7 +8,7 @@
 #   -f / --force        overwrite without prompt (default — POSIX mv
 #                       silently overwrites; this flag is here so
 #                       scripts can be explicit and to override an
-#                       earlier `-i`).
+#                       earlier `-i` or `-n`).
 #   -i / --interactive  prompt before overwrite. Per ADR 0002, on
 #                       non-tty stdin this is a usage error (exit 2),
 #                       not a hang.
@@ -16,11 +16,12 @@
 #                       (silently — not an error).
 #   -v / --verbose      print "renamed 'src' -> 'dst'" per move.
 #
-# Last-one-wins precedence for -f/-i/-n is GNU's behaviour but
-# requires order info the parser doesn't surface. Instead we apply:
-# -n beats -i; -f beats -i; -f beats -n. Practical effect: scripts
-# that want strict no-clobber pass -n alone; scripts that want
-# strict overwrite pass -f alone.
+# ⛔ -f, -i AND -n ARE LAST-WINS, as in GNU's `mv` (ADR 0024, 1.6.16). This
+# said the parser could not surface their order and applied a precedence
+# instead, and even described it wrongly: it claimed `-f` beat `-n`, while the
+# code let `-n` win, so `mv -nf` kept the destination GNU replaces. The order has
+# been available since `kriya_opt_seq` (1.6.9). ⚠ `cp` differs: there `-f`
+# cancels neither `-i` nor `-n`.
 #
 # Symlink policy (ADR 0003):
 #   - mv operates on the named entry. A source that IS a symlink is
@@ -286,6 +287,10 @@ fn _mv_cross_fs(src, dst, src_st, verbose): i64 {
 
 # Move one SRC to DST. Returns 0 or negative errno; 0 - 9999 is the
 # invocation-wide -i-on-non-tty sentinel (matches cp.cyr's pattern).
+# 1 once a `-i` prompt was answered no: that operand is left alone, and the
+# exit status is 1.
+var _mv_declined = 0;
+
 fn _mv_one(src, dst, force, interactive, no_clobber, verbose): i64 {
     # Stat source. We need to know its type and inode for the
     # self-move and cross-FS checks. Use lstat so a source-symlink
@@ -333,13 +338,18 @@ fn _mv_one(src, dst, force, interactive, no_clobber, verbose): i64 {
                     k_write( 2, "kriya mv: error: -i requires stdin to be a terminal\n", 52);
                     return 0 - 9999;
                 }
-                if (_mv_prompt(dst) == 0) { return 0; }
+                # ⛔ A DECLINED PROMPT EXITED 0: GNU says 1 (since 9.2), as kriya's
+                # own `cp` already did — "nothing was moved" is not success.
+                if (_mv_prompt(dst) == 0) {
+                    _mv_declined = 1;
+                    return 0;
+                }
             }
         }
-        # ⭐ AFTER `-n` AND THE PROMPT, NOT BEFORE. `mv -n` is a silent skip, and
-        # a backup taken before that check would move the destination aside for a
-        # move that then does not happen — losing the file `-n` exists to
-        # protect. Measured against GNU: `mv -bn src dst` makes no backup.
+        # ⭐ AFTER `-n` AND THE PROMPT, NOT BEFORE. A backup taken before a
+        # declined prompt would move the destination aside for a move that then
+        # does not happen. (`-n` with a backup never gets here since 1.6.16:
+        # `cmd_mv` refuses the pair, as GNU does.)
         #
         # ⚠ It also has to precede BOTH move paths — the `rename(2)` below and
         # the cross-filesystem copy — which it does by sitting above the branch.
@@ -380,6 +390,8 @@ fn _mv_one(src, dst, force, interactive, no_clobber, verbose): i64 {
 
 fn cmd_mv(start: i64): i64 {
     _mv_init_spec();
+    # A cross-filesystem move runs `cp`'s copy, and its diagnostics name `mv`.
+    _cp_util = "mv";
     if (kriya_args_parse(_mv_spec, start) != 0) {
         k_write( 2, "kriya mv: error: bad option (see ADR 0002 for accepted syntax)\n", 63);
         return EXIT_USAGE;
@@ -403,12 +415,32 @@ fn cmd_mv(start: i64): i64 {
         return EXIT_USAGE;
     }
 
+    # The last of -f, -i and -n decides; with none of them, POSIX's silent
+    # overwrite (ADR 0024).
     var force: i64 = 0;
-    if (flags_get_bool(_mv_spec, _mv_f_idx) == 1) { force = 1; }
     var interactive: i64 = 0;
-    if (flags_get_bool(_mv_spec, _mv_i_idx) == 1) { interactive = 1; }
     var no_clobber: i64 = 0;
-    if (flags_get_bool(_mv_spec, _mv_n_idx) == 1) { no_clobber = 1; }
+    var f_at = kriya_opt_seq(_mv_spec, 102, "force");
+    var i_at = kriya_opt_seq(_mv_spec, 105, "interactive");
+    var n_at = kriya_opt_seq(_mv_spec, 110, "no-clobber");
+    if (f_at > i_at) {
+        if (f_at > n_at) { force = 1; }
+    }
+    if (i_at > f_at) {
+        if (i_at > n_at) { interactive = 1; }
+    }
+    if (n_at > f_at) {
+        if (n_at > i_at) { no_clobber = 1; }
+    }
+    # ⚠ An effective `-n` with a backup is refused, as GNU 9.11 (and 9.4)
+    # refuse it: nothing `-n` protects would ever be backed up. It used to be
+    # taken, with no backup made.
+    if (no_clobber == 1) {
+        if (backup_control() != BACKUP_NONE) {
+            k_write( 2, "kriya mv: error: --backup is mutually exclusive with -n\n", 56);
+            return EXIT_USAGE;
+        }
+    }
     var verbose: i64 = 0;
     if (flags_get_bool(_mv_spec, _mv_v_idx) == 1) { verbose = 1; }
 
@@ -464,5 +496,6 @@ fn cmd_mv(start: i64): i64 {
     }
 
     if (any_failed == 1) { return EXIT_FAILURE; }
+    if (_mv_declined == 1) { return EXIT_FAILURE; }
     return EXIT_SUCCESS;
 }

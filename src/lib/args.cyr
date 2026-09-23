@@ -653,9 +653,16 @@ fn kriya_long_type(spec, name, len): i64 {
     return 0 - 1;
 }
 
-# Index of the first argv token at or after `start` that is NOT one of `spec`'s
-# own options (nor the value of one). A `--` terminator is consumed and the
-# index after it is returned.
+# Index of the first OPERAND at or after `start`: a token that does not start
+# with `-` (a lone `-` included), or the one after a `--`, which is consumed.
+# Everything before it is `spec`'s options and their values — or options it does
+# not have, which the parser then refuses.
+#
+# ⛔ AN UNKNOWN OPTION USED TO END THE WINDOW, so it became the COMMAND: `echo hi
+# | xargs -5 echo` ran a program called `-5` and exited 127, "command not
+# found", where GNU says *invalid option -- '5'* — and a caller cannot tell a
+# typo'd flag from a missing binary by 127. GNU's rule is the one here: before
+# the command, a word that starts with `-` is an option, known or not (1.6.16).
 #
 # ⛔ THIS EXISTS BECAUSE `xargs` WAS PARSING THE CHILD'S COMMAND LINE AS ITS OWN.
 # `echo t.txt | xargs sort -r` silently sorted ASCENDING — `-r` was eaten as
@@ -718,16 +725,13 @@ fn kriya_argv_option_end(spec, start: i64): i64 {
                             if (eq > 0) { i = i + 1; }        # value attached
                             else {
                                 var lt = kriya_long_type(spec, tok + 2, tlen - 2);
-                                if (lt < 0) { done = 1; }     # not ours → operand boundary
-                                else {
-                                    i = i + 1;
-                                    if (lt > 0) { i = i + 1; }  # separate value token
-                                }
+                                i = i + 1;                    # unknown: the parser refuses it
+                                if (lt > 0) { i = i + 1; }    # separate value token
                             }
                         }
                     } else {
                         var t0 = kriya_short_type(spec, load8(tok + 1));
-                        if (t0 < 0) { done = 1; }             # not ours → operand boundary
+                        if (t0 < 0) { i = i + 1; }            # unknown: the parser refuses it
                         else {
                             # Walk the cluster to find whether its LAST effective
                             # option takes a value with nothing attached.
@@ -930,18 +934,6 @@ fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
     return flags_parse(spec, m, out);
 }
 
-# Push every value given for the repeatable option `short_ch` / `--long_name`
-# into `out` (a vec), in argv order. Returns how many were found.
-#
-# ⛔ THE STDLIB SPEC KEEPS ONLY THE LAST VALUE, and for a repeatable option that
-# is a silent wrong answer rather than a missing feature: `grep -e alpha -e
-# gamma` matched only `gamma`, with no diagnostic and exit 0, where GNU matched
-# both. `flags_add_str` has one value slot, so the earlier occurrences were
-# overwritten during parsing and there was nothing left to recover afterwards.
-#
-# ⭐ Walks the EXPANDED argv, not the raw one, so every spelling has already been
-# normalised to `-e VALUE` — `-ealpha`, `-ie alpha` and `--regexp=alpha` all
-# arrive here in the same shape. Call after `kriya_args_parse*`.
 # The expanded argv the last `kriya_args_parse*` handed to `flags_parse`, and
 # its length: clusters already split (`-Ps` → `-P -s`), attached values already
 # separated (`-n5` → `-n 5`), long forms normalised, `--` honoured, permutation
@@ -1068,6 +1060,18 @@ fn kriya_short_seq(spec, short_ch): i64 {
     return kriya_opt_seq(spec, short_ch, 0);
 }
 
+# Push every value given for the repeatable option `short_ch` / `--long_name`
+# into `out` (a vec), in argv order. Returns how many were found.
+#
+# ⛔ THE STDLIB SPEC KEEPS ONLY THE LAST VALUE, and for a repeatable option that
+# is a silent wrong answer rather than a missing feature: `grep -e alpha -e
+# gamma` matched only `gamma`, with no diagnostic and exit 0, where GNU matched
+# both. `flags_add_str` has one value slot, so the earlier occurrences were
+# overwritten during parsing and there was nothing left to recover afterwards.
+#
+# ⭐ Walks the EXPANDED argv, not the raw one, so every spelling has already been
+# normalised to `-e VALUE` — `-ealpha`, `-ie alpha` and `--regexp=alpha` all
+# arrive here in the same shape. Call after `kriya_args_parse*`.
 fn kriya_argv_collect(short_ch, long_name, out): i64 {
     var av = _kriya_expanded;
     var n  = _kriya_expanded_n;
@@ -1124,14 +1128,23 @@ fn kriya_argv_collect(short_ch, long_name, out): i64 {
     return found;
 }
 
-# Parse a null-terminated cstring as a non-negative base-10 integer.
-# Returns the value, or -1 on any of: null pointer, empty string,
-# non-digit character, leading sign.
-# ⚠ IT WRAPS: past 2^63 the value turns negative, and past 2^64 it comes back
-# small and positive — `18446744073709551617` is 1. `head` and
-# `tail` moved to `kriya_parse_count` below for exactly that reason (1.6.15);
-# the remaining callers (roadmap 1.6.16) each want their own answer to an
-# oversized value, so the fix is theirs, not a blanket one here.
+# The largest count `kriya_parse_count`, `kriya_parse_bounded` and
+# `kriya_parse_nonneg_int` return: i64's maximum,
+# standing for "more than any input has".
+enum KriyaCount {
+    KRIYA_COUNT_MAX = 9223372036854775807;
+}
+
+# Parse a null-terminated cstring as a non-negative base-10 integer: digits
+# only. Returns the value, or -1 on any of: null pointer, empty string,
+# non-digit character, leading sign, or a value past 2^63 - 1.
+#
+# ⛔ IT WRAPPED UNTIL 1.6.16: past 2^63 the value turned negative, and past 2^64
+# it came back small and positive — `18446744073709551617` was 1, so
+# `du -d 18446744073709551617` ran at depth 1 and `uniq -w` compared one byte,
+# at exit 0. Fifteen options read through it. It refuses an overflow now, and
+# the callers where GNU does something else with a large value parse with
+# `kriya_parse_bounded` (below) and choose: refuse, or saturate.
 fn kriya_parse_nonneg_int(s): i64 {
     if (s == 0) { return 0 - 1; }
     if (load8(s) == 0) { return 0 - 1; }
@@ -1141,16 +1154,58 @@ fn kriya_parse_nonneg_int(s): i64 {
         var c = load8(s + i);
         if (c < 48) { return 0 - 1; }
         if (c > 57) { return 0 - 1; }
-        n = n * 10 + (c - 48);
+        var d = c - 48;
+        if (n > (KRIYA_COUNT_MAX - d) / 10) { return 0 - 1; }
+        n = n * 10 + d;
         i = i + 1;
     }
     return n;
 }
 
-# The largest count `kriya_parse_count` returns: i64's maximum, standing for
-# "more than any input has".
-enum KriyaCount {
-    KRIYA_COUNT_MAX = 9223372036854775807;
+# A decimal number in GNU's `xstrto*` shape — optional leading blanks, one
+# optional `+`, digits, nothing after — as its value; -1 when it is malformed;
+# -2 when it is well formed but larger than `max`, overflow past 2^63 included
+# (1.6.16). It never wraps.
+#
+# ⚠ -2 IS A SEPARATE ANSWER ON PURPOSE: the caller decides what "too large"
+# means, and GNU decides differently per option. `du -d`, `nl -i` and `cut -f`
+# refuse it; `sort -k`, `uniq -f` and `nl -l` saturate it to "more than any
+# input has". One parser, both policies, and neither is a wrap.
+fn kriya_parse_bounded(s, max): i64 {
+    if (s == 0) { return 0 - 1; }
+    var i: i64 = 0;
+    var ws: i64 = 1;
+    while (ws == 1) {
+        var c = load8(s + i);
+        var sp: i64 = 0;
+        if (c == 32) { sp = 1; }
+        if (c >= 9) {
+            if (c <= 13) { sp = 1; }
+        }
+        if (sp == 1) { i = i + 1; } else { ws = 0; }
+    }
+    if (load8(s + i) == 43) { i = i + 1; }
+    var n: i64 = 0;
+    var nd: i64 = 0;
+    var over: i64 = 0;
+    var more: i64 = 1;
+    while (more == 1) {
+        var c = load8(s + i);
+        if (c < 48) { more = 0; }
+        elif (c > 57) { more = 0; }
+        else {
+            var d = c - 48;
+            if (n > (KRIYA_COUNT_MAX - d) / 10) { over = 1; }
+            else { n = n * 10 + d; }
+            nd = nd + 1;
+            i = i + 1;
+        }
+    }
+    if (nd == 0) { return 0 - 1; }
+    if (load8(s + i) != 0) { return 0 - 1; }
+    if (over == 1) { return 0 - 2; }
+    if (n > max) { return 0 - 2; }
+    return n;
 }
 
 # The value of the decimal digits at the start of `s`, SATURATING at
@@ -1221,15 +1276,6 @@ fn kriya_parse_count(s): i64 {
     return n;
 }
 
-# Parse a null-terminated cstring as an octal file mode (POSIX
-# `-m` argument shape for mkdir/install/chmod). Accepts 1-4 digit
-# strings of 0..7, with or without a leading `0`. Returns the
-# integer mode in the low 12 bits (setuid/setgid/sticky + rwx
-# triplet), or -1 on any of: null pointer, empty string, non-octal
-# digit, value >= 010000 (4096).
-#
-# Symbolic forms (`u+rwx`, `g-w`, …) are NOT accepted. They land
-# when the symbolic-mode parser ships in M3 (`chmod`-driven).
 # Parse a GNU-style duration into MILLISECONDS: an optional fractional decimal
 # with an optional unit suffix — `1`, `1.5`, `0.25`, `1s`, `2m`, `1h`, `1d`.
 # Returns -1 on any of: null, empty, a sign, a bad digit, a bad suffix, more
@@ -1348,6 +1394,15 @@ fn kriya_parse_duration_ms(s): i64 {
     return us / 1000;
 }
 
+# Parse a null-terminated cstring as an octal file mode (POSIX
+# `-m` argument shape for mkdir/install/chmod). Accepts 1-4 digit
+# strings of 0..7, with or without a leading `0`. Returns the
+# integer mode in the low 12 bits (setuid/setgid/sticky + rwx
+# triplet), or -1 on any of: null pointer, empty string, non-octal
+# digit, value >= 010000 (4096).
+#
+# Symbolic forms (`u+rwx`, `g-w`, …) are refused, exit 2, where GNU's `mkdir
+# -m` takes them (roadmap 1.8.5).
 fn kriya_parse_octal_mode(s): i64 {
     if (s == 0) { return 0 - 1; }
     if (load8(s) == 0) { return 0 - 1; }

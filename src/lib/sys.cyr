@@ -660,6 +660,18 @@ fn k_getxattr(path, name, value, size): i64 {
     #endif
 }
 
+# lgetxattr(2): the attribute of a symlink ITSELF, never its target — what
+# `stat %C` reads for a link it was not told to follow (`-L`) (1.6.16).
+# ⚠ 192 on x86-64 and 9 on aarch64; see roadmap 1.7.4 on raw numbers.
+fn k_lgetxattr(path, name, value, size): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return syscall(192, path, name, value, size);          # linux lgetxattr #192
+    #endif
+}
+
 fn k_fsetxattr(fd, name, value, size, flags): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 38;

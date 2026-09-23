@@ -91,7 +91,8 @@ enum NlState {
     NL_S_BLANKRUN  = 128;
     NL_S_DELIM     = 136;
     NL_S_DELIM_LEN = 144;   # 0 = section matching disabled (-d '')
-    NL_STATE_SIZE  = 152;
+    NL_S_OVERFLOW  = 152;   # 1 once the NEXT number would pass 2^63 - 1
+    NL_STATE_SIZE  = 160;
 }
 
 var _nl_spec   = 0;
@@ -191,35 +192,47 @@ fn _nl_emit_number(num, fmt, width): i64 {
         return 0;
     }
     var pad = width - n;
-    var pad_buf[1];
     if (fmt == 1) {
         # Left-justified: digits then spaces.
         k_write( 1, &buf, n);
-        store8(&pad_buf, 32);
-        var i: i64 = 0;
-        while (i < pad) { k_write( 1, &pad_buf, 1); i = i + 1; }
+        _nl_emit_pad(32, pad);
     } else {
         # Right-justified. fmt 0 (rn) pads with space; fmt 2 (rz) with '0'.
         var pad_char: i64 = 32;
         if (fmt == 2) { pad_char = 48; }
-        store8(&pad_buf, pad_char);
-        var i: i64 = 0;
-        while (i < pad) { k_write( 1, &pad_buf, 1); i = i + 1; }
+        _nl_emit_pad(pad_char, pad);
         k_write( 1, &buf, n);
+    }
+    return 0;
+}
+
+# `count` copies of the byte `ch`, a buffer at a time.
+#
+# ⛔ IT WAS ONE `write(2)` PER BYTE until 1.6.16, so the padding cost a system
+# call per column: `nl -w 2147483647`, which GNU prints, never finished here.
+var _nl_pad_buf = 0;
+var _nl_pad_ch  = 0 - 1;
+
+fn _nl_emit_pad(ch, count): i64 {
+    if (_nl_pad_buf == 0) { _nl_pad_buf = alloc(4096); }
+    if (_nl_pad_ch != ch) {
+        var k: i64 = 0;
+        while (k < 4096) { store8(_nl_pad_buf + k, ch); k = k + 1; }
+        _nl_pad_ch = ch;
+    }
+    var left = count;
+    while (left > 0) {
+        var chunk = left;
+        if (chunk > 4096) { chunk = 4096; }
+        k_write( 1, _nl_pad_buf, chunk);
+        left = left - chunk;
     }
     return 0;
 }
 
 # Emit `width` spaces (used for unnumbered lines).
 fn _nl_emit_blank_column(width): i64 {
-    var sp[2];
-    store8(&sp, 32);
-    var i: i64 = 0;
-    while (i < width) {
-        k_write( 1, &sp, 1);
-        i = i + 1;
-    }
-    return 0;
+    return _nl_emit_pad(32, width);
 }
 
 # Process one line. `body_type`: 0=all, 1=non-empty, 2=none.
@@ -271,6 +284,7 @@ fn _nl_begin_section(st, sec): i64 {
     store64(st + NL_S_SECTION, sec);
     if (load64(st + NL_S_RENUMBER) == 1) {
         store64(st + NL_S_COUNTER, load64(st + NL_S_START));
+        store64(st + NL_S_OVERFLOW, 0);
     }
     k_write( 1, "\n", 1);
     return 0;
@@ -325,9 +339,23 @@ fn _nl_emit_line(st, line, len): i64 {
     var sep = load64(st + NL_S_SEP);
     var sep_len = load64(st + NL_S_SEP_LEN);
     if (_nl_should_number(st, line, len) == 1) {
+        # ⛔ THE COUNTER WRAPPED, and the lines after it came out UNNUMBERED at
+        # exit 0: `nl -v 9223372036854775807` printed that number and then blank
+        # number fields. GNU says *line number overflow* and exits 1 when the
+        # overflowed number is NEEDED — not when it is computed, so the last
+        # representable number still prints — and a section reset clears it.
+        if (load64(st + NL_S_OVERFLOW) == 1) {
+            _nl_overflowed = 1;
+            return 0 - 1;
+        }
         var c = load64(st + NL_S_COUNTER);
         _nl_emit_number(c, load64(st + NL_S_FMT), width);
-        store64(st + NL_S_COUNTER, c + load64(st + NL_S_INCREMENT));
+        var inc = load64(st + NL_S_INCREMENT);
+        if (c > KRIYA_COUNT_MAX - inc) {
+            store64(st + NL_S_OVERFLOW, 1);
+        } else {
+            store64(st + NL_S_COUNTER, c + inc);
+        }
         k_write( 1, sep, sep_len);
     } else {
         # Unnumbered: GNU emits `width + sep_len` spaces of padding so the
@@ -344,6 +372,14 @@ fn _nl_feed(st, line, len): i64 {
     var sec = _nl_classify(st, line, len);
     if (sec >= 0) { return _nl_begin_section(st, sec); }
     return _nl_emit_line(st, line, len);
+}
+
+# 1 once a line needed a number past 2^63 - 1; `cmd_nl` reports it and stops.
+var _nl_overflowed = 0;
+
+fn _nl_overflow_exit(): i64 {
+    k_write( 2, "kriya nl: line number overflow\n", 31);
+    return EXIT_FAILURE;
 }
 
 fn _nl_run(fd, st): i64 {
@@ -371,6 +407,10 @@ fn _nl_run(fd, st): i64 {
                     if (b == 10) {
                         _nl_feed(st, line_buf, line_len);
                         line_len = 0;
+                        if (_nl_overflowed == 1) {
+                            i = n;
+                            loop = 0;
+                        }
                     } else {
                         if (line_len < _NL_LINE_SZ - 1) {
                             store8(line_buf + line_len, b);
@@ -555,30 +595,36 @@ fn cmd_nl(start: i64): i64 {
         }
     }
 
+    # ⛔ FOUR COUNTS, TWO DEFECTS EACH (1.6.16). They WRAPPED past 2^64 —
+    # `nl -v 99999999999999999999` started at 7766279631452241919 and `-w
+    # 18446744073709551617` was a width of 1 — and an EMPTY value was skipped as
+    # if absent, so `nl -i '' f` numbered at exit 0 where GNU refuses. Each now
+    # takes GNU's shape (blanks, a `+`, digits), GNU's words, and GNU's answer to
+    # a large value: `-i`, `-v` and `-w` refuse it, `-l` saturates it.
+    # ⚠ GNU also takes a NEGATIVE `-i` and `-v`; kriya refuses both, exit 2.
     var i_arg = flags_get_str(_nl_spec, _nl_i_idx);
     if (i_arg != 0) {
-        if (load8(i_arg) != 0) {
-            var v = kriya_parse_nonneg_int(i_arg);
-            if (v < 0) {
-                k_write( 2, "kriya nl: error: --line-increment requires a non-negative integer\n", 66);
-                return EXIT_USAGE;
-            }
-            store64(st + NL_S_INCREMENT, v);
+        var iv = kriya_parse_bounded(i_arg, KRIYA_COUNT_MAX);
+        if (iv < 0) {
+            report_note("nl", i_arg, "invalid line number increment");
+            return EXIT_USAGE;
         }
+        store64(st + NL_S_INCREMENT, iv);
     }
 
-    # -l N. ⚠ Zero is refused: it would make the blank run never reach the
-    # threshold, silently suppressing every blank line's number.
+    # -l N. ⚠ ZERO IS GNU's TOO, and means what 1 means: a blank line is numbered
+    # when its run reaches the threshold, and every run reaches zero. This used
+    # to refuse it, on the belief that zero would suppress every blank line's
+    # number — true of an `==` test, not of the `>=` below.
     var l_arg = flags_get_str(_nl_spec, _nl_l_idx);
     if (l_arg != 0) {
-        if (load8(l_arg) != 0) {
-            var lv = kriya_parse_nonneg_int(l_arg);
-            if (lv < 1) {
-                k_write( 2, "kriya nl: error: --join-blank-lines requires a positive integer\n", 64);
-                return EXIT_USAGE;
-            }
-            store64(st + NL_S_JOIN, lv);
+        var lv = kriya_parse_bounded(l_arg, KRIYA_COUNT_MAX);
+        if (lv == (0 - 2)) { lv = KRIYA_COUNT_MAX; }
+        if (lv < 0) {
+            report_note("nl", l_arg, "invalid line number of blank lines");
+            return EXIT_USAGE;
         }
+        store64(st + NL_S_JOIN, lv);
     }
 
     # Format. ln=1, rn=0, rz=2.
@@ -615,29 +661,27 @@ fn cmd_nl(start: i64): i64 {
 
     var v_arg = flags_get_str(_nl_spec, _nl_v_idx);
     if (v_arg != 0) {
-        if (load8(v_arg) != 0) {
-            var v = kriya_parse_nonneg_int(v_arg);
-            if (v < 0) {
-                k_write( 2, "kriya nl: error: --starting-line-number requires a non-negative integer\n", 72);
-                return EXIT_USAGE;
-            }
-            store64(st + NL_S_START, v);
+        var vv = kriya_parse_bounded(v_arg, KRIYA_COUNT_MAX);
+        if (vv < 0) {
+            report_note("nl", v_arg, "invalid starting line number");
+            return EXIT_USAGE;
         }
+        store64(st + NL_S_START, vv);
     }
 
+    # ⚠ GNU's width is an `int`: 1 to 2147483647.
     var w_arg = flags_get_str(_nl_spec, _nl_w_idx);
     if (w_arg != 0) {
-        if (load8(w_arg) != 0) {
-            var v = kriya_parse_nonneg_int(w_arg);
-            if (v < 1) {
-                k_write( 2, "kriya nl: error: --number-width requires a positive integer\n", 60);
-                return EXIT_USAGE;
-            }
-            store64(st + NL_S_WIDTH, v);
+        var wv = kriya_parse_bounded(w_arg, 2147483647);
+        if (wv < 1) {
+            report_note("nl", w_arg, "invalid line number field width");
+            return EXIT_USAGE;
         }
+        store64(st + NL_S_WIDTH, wv);
     }
 
     store64(st + NL_S_COUNTER, load64(st + NL_S_START));
+    store64(st + NL_S_OVERFLOW, 0);
 
     var npos = flags_positional_count(_nl_spec);
     var any_failed: i64 = 0;
@@ -645,6 +689,7 @@ fn cmd_nl(start: i64): i64 {
     if (npos < 1) {
         var r = _nl_run(0, st);
         if (r != 0) { _nl_report("(stdin)", 0 - r); any_failed = 1; }
+        if (_nl_overflowed == 1) { return _nl_overflow_exit(); }
         if (any_failed == 1) { return EXIT_FAILURE; }
         return EXIT_SUCCESS;
     }
@@ -677,6 +722,8 @@ fn cmd_nl(start: i64): i64 {
             any_failed = 1;
         }
         if (is_stdin == 0) { k_close( fd); }
+        # GNU stops at the overflow, operands still to come included.
+        if (_nl_overflowed == 1) { return _nl_overflow_exit(); }
         i = i + 1;
     }
 

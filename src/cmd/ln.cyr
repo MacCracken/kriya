@@ -106,7 +106,7 @@ fn _ln_is_real_dir(path): i64 {
     var r = k_lstat(path, &buf);
     if (r != 0) { return 0; }
     var st_mode = load64(&buf + 24);
-    if ((st_mode & 61440) == 16384) { return 1; }  # S_IFMT/S_IFDIR
+    if ((st_mode & FS_S_IFMT) == FS_S_IFDIR) { return 1; }
     return 0;
 }
 
@@ -118,7 +118,7 @@ fn _ln_resolved_dir(path): i64 {
     var r = k_stat(path, &buf);
     if (r != 0) { return 0; }
     var st_mode = load64(&buf + 24);
-    if ((st_mode & 61440) == 16384) { return 1; }
+    if ((st_mode & FS_S_IFMT) == FS_S_IFDIR) { return 1; }
     return 0;
 }
 

@@ -348,6 +348,46 @@ done
 rc=0; (cd ownerdir && "$BIN" find . -user) >/dev/null 2>&1 || rc=$?
 expect_eq "owner: -user with no argument is a usage error" "2" "$rc"
 
+# --- 1.6.16: no number wraps, and -size counts in its unit -------------------
+#
+# ⛔ `-maxdepth`, `-mindepth`, `-uid`, `-gid`, `-mmin`, `-mtime` and `-size` all
+# WRAPPED past 2^64 — `-mmin -18446744073709551617` asked for "under a minute".
+# ⛔ And `-size` compared BYTES for `k`, `M` and `G`, so `-size -1M` matched every
+# file under a megabyte. GNU rounds the file's size up to the unit: `-size -1M` is
+# only the empty files, and `-size 1k` includes a one-byte file.
+mkdir -p d16s d16d/a/b
+# ⚠ OLD mtimes, or the time cases cannot tell a huge `-mmin -N` from the
+# wrapped "under one minute": a file made a moment ago is under a minute old.
+touch -t 202001010000 d16d d16d/a d16d/a/b
+: > d16s/s0
+head -c 1 /dev/zero > d16s/s1
+head -c 1024 /dev/zero > d16s/s1024
+head -c 1025 /dev/zero > d16s/s1025
+head -c 2048 /dev/zero > d16s/s2048
+head -c 1048577 /dev/zero > d16s/s1m1
+for _a in "-size -1M" "-size 1M" "-size +1M" "-size -1k" "-size 1k" "-size 2k" "-size -2k" \
+          "-size 1" "-size 2" "-size -3" "-size 1025c" "-size +1024c" "-size -1G" "-size 1G" \
+          "-size 0" "-size +0" "-size 0c" "-size -1"; do
+    # shellcheck disable=SC2086
+    compare_sorted "find $_a" "d16s -type f $_a"
+done
+for _a in "-mmin -18446744073709551617" "-mmin +18446744073709551617" "-mtime -99999999999999999999" \
+          "-mtime +9223372036854775808" "-maxdepth 2147483647" "-mindepth 2147483647" "-maxdepth 1"; do
+    # shellcheck disable=SC2086
+    compare_sorted "find $_a" "d16d $_a"
+done
+for _a in "-maxdepth 2147483648" "-mindepth 2147483648" "-maxdepth 18446744073709551617" \
+          "-mindepth 18446744073709551617" "-uid 18446744073709551617" "-gid 18446744073709551617" \
+          "-user 4294967296" "-group 4294967296" "-user 18446744073709551617" \
+          "-size -18446744073709551617c" "-size 99999999999999999999k"; do
+    # shellcheck disable=SC2086
+    expect_exit "find $_a refused" 2 "$BIN" find d16d $_a
+    _grc=0
+    # shellcheck disable=SC2086
+    find d16d $_a >/dev/null 2>&1 || _grc=$?
+    expect_eq "...and by GNU" "yes" "$([ "$_grc" != 0 ] && echo yes || echo no)"
+done
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

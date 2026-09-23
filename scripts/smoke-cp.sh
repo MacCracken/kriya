@@ -422,6 +422,61 @@ expect_exit "--no-dereference is accepted"     0 "$BIN" cp --no-dereference pl_l
 expect_exit "--no-preserve=bogus is refused"   2 "$BIN" cp --no-preserve=bogus pl_target pl_np
 expect_exit "--no-preserve with no list"       2 "$BIN" cp pl_target pl_np2 --no-preserve
 
+# --- 1.6.16: -f, -i and -n as GNU's cp resolves them (ADR 0024) --------------
+#
+# ⛔ `-f` CANCELLED `-i` IN EITHER ORDER: `cp -fi src dst` overwrote without the
+# prompt the caller asked for. GNU's `cp` keeps `-i` whatever `-f` says, and lets
+# `-i` and `-n` override each other by position. ⭐ `-n` itself is new: kriya's
+# `cp` had no `--no-clobber` at all ("bad option").
+
+# ⭐ UNDER A PTY, where `-i` actually asks: kriya and GNU must agree on the
+# destination, the source, the exit status and whether a prompt appeared.
+# ⚠ Skips loudly without `script(1)`; the non-tty cases below run everywhere.
+pty_case() {   # pty_case <label> <util> <flags> <answer>
+    if ! command -v script >/dev/null 2>&1; then
+        echo "SKIP $1: no script(1) for a pty" >&2
+        return 0
+    fi
+    for _which in gnu kri; do
+        rm -f pty_s pty_d; echo new > pty_s; echo old > pty_d
+        if [ "$_which" = gnu ]; then _cmd="$2 $3 pty_s pty_d"; else _cmd="'$BIN' $2 $3 pty_s pty_d"; fi
+        _out=$(printf '%s\n' "$4" | script -qec "$_cmd; echo RC=\$?" /dev/null 2>&1 | tr -d '\r' || true)
+        _res="dst=$(cat pty_d) src=$([ -e pty_s ] && echo kept || echo gone) $(echo "$_out" | grep -o 'RC=[0-9]*' | head -1) prompts=$(echo "$_out" | grep -c overwrite || true)"
+        if [ "$_which" = gnu ]; then _r_gnu=$_res; else _r_kri=$_res; fi
+    done
+    expect_eq "$1" "$_r_gnu" "$_r_kri"
+}
+nt_case() {   # nt_case <label> <util> <flags>: the same, stdin not a terminal, no prompt expected
+    for _which in gnu kri; do
+        rm -f pty_s pty_d; echo new > pty_s; echo old > pty_d
+        _rc=0
+        if [ "$_which" = gnu ]; then $2 $3 pty_s pty_d </dev/null >/dev/null 2>&1 || _rc=$?
+        else "$BIN" $2 $3 pty_s pty_d </dev/null >/dev/null 2>&1 || _rc=$?; fi
+        _res="dst=$(cat pty_d) src=$([ -e pty_s ] && echo kept || echo gone) rc=$_rc"
+        if [ "$_which" = gnu ]; then _r_gnu=$_res; else _r_kri=$_res; fi
+    done
+    expect_eq "$1" "$_r_gnu" "$_r_kri"
+}
+
+for _f in -fi -if -i -ni; do
+    for _a in y n; do pty_case "cp $_f, answering $_a" cp "$_f" "$_a"; done
+done
+for _f in -n -in -nf -fn -f; do nt_case "cp $_f" cp "$_f"; done
+nt_case "cp --no-clobber" cp --no-clobber
+# ⚠ kriya's own answers, where GNU has none to compare: `-i` without a terminal
+# is a usage error (ADR 0002), and now so is `-fi`, which used to overwrite.
+expect_exit "cp -fi without a terminal refused" 2 sh -c "'$BIN' cp -fi pty_s pty_d </dev/null"
+# An effective `-n` with a backup is refused, as GNU 9.11 refuses it.
+echo new > pty_s; echo old > pty_d
+expect_exit "cp -nb refused"  2 "$BIN" cp -n -b pty_s pty_d
+expect_exit "cp -bn refused"  2 "$BIN" cp -b -n pty_s pty_d
+expect_eq   "...and nothing is backed up" "no" "$([ -e pty_d~ ] && echo yes || echo no)"
+# `-n` reaches every copy path: a symlink in a `-R` walk, and a directory tree.
+mkdir -p ncs ncd/ncs; ln -s target ncs/lnk; ln -s other ncd/ncs/lnk; echo a > ncs/f; echo b > ncd/ncs/f
+expect_exit "cp -Rn over existing entries" 0 "$BIN" cp -Rn ncs ncd
+expect_eq "...keeps the file"    "b"     "$(cat ncd/ncs/f)"
+expect_eq "...keeps the link"    "other" "$(readlink ncd/ncs/lnk)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

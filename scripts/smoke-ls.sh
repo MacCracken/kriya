@@ -1101,6 +1101,16 @@ else
     echo "note: no util-linux script(1) — the tty's ? masking is unverified here"
 fi
 
+# --- 1.6.16: COLUMNS past the first 8 KB of the environment -------------------
+#
+# ⚠ The same cliff `src/lib/env.cyr` existed for, retired at 1.6.16 for the
+# stdlib `getenv`, which reads the whole environment since cyrius 6.5.36.
+mkdir -p big8 && (cd big8 && touch a1 b2 c3 d4 e5 f6 g7 h8 i9 j0)
+BIG8=$(head -c 9000 /dev/zero | tr '\0' x)
+expect_eq "COLUMNS after 9 KB is honoured" \
+    "$(cd big8 && env -i BIG8="$BIG8" COLUMNS=20 LC_ALL=C TERM=dumb ls -C)" \
+    "$(cd big8 && env -i BIG8="$BIG8" COLUMNS=20 LC_ALL=C TERM=dumb "$BIN" ls -C)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"
