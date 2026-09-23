@@ -48,6 +48,12 @@ include "src/cmd/false.cyr"
 # file descriptor, and they are the parts most likely to be quietly wrong.
 include "src/cmd/echo.cyr"
 include "src/cmd/nl.cyr"
+# ⚠ M15e, PRE-EMPTIVELY. `head.cyr` and `tail.cyr` are here for their obsolescent-
+# argument grammars (1.6.15), which are pure. Their `cmd_*` bodies reach
+# `src/lib/report.cyr`, which this subset does not include — safe only while
+# nothing below calls them.
+include "src/cmd/head.cyr"
+include "src/cmd/tail.cyr"
 
 # ⭐ The modes the real callers use, so a test reads as "FORMAT says this, `%b`
 # says that" rather than as a bitmask.
@@ -108,6 +114,40 @@ fn _t_q(src, style, want): i64 {
     var k = quote_shell(src, n, style, out);
     store8(out + k, 0);
     return streq(out, want);
+}
+
+# 1 when `_head_obs_parse` takes `tok` with exactly these fields.
+fn _t_hobs(tok, count, bytes, hdr): i64 {
+    var rec[32];
+    if (_head_obs_parse(tok, &rec) != 1) { return 0; }
+    if (load64(&rec + HEAD_OBS_COUNT) != count) { return 0; }
+    if (load64(&rec + HEAD_OBS_BYTES) != bytes) { return 0; }
+    if (load64(&rec + HEAD_OBS_HDR) != hdr) { return 0; }
+    return 1;
+}
+
+# `_head_obs_parse`'s answer for `tok`: 1, 0, or MINUS the letter it refused.
+fn _t_hobs_r(tok): i64 {
+    var rec[32];
+    var r = _head_obs_parse(tok, &rec);
+    if (r < 0) { return 0 - load64(&rec + HEAD_OBS_BAD); }
+    return r;
+}
+
+# 1 when `_tail_obs_parse` takes `tok` with exactly these fields.
+fn _t_tobs(tok, count, bytes, from, follow): i64 {
+    var rec[32];
+    if (_tail_obs_parse(tok, &rec) != 1) { return 0; }
+    if (load64(&rec + TAIL_OBS_COUNT) != count) { return 0; }
+    if (load64(&rec + TAIL_OBS_BYTES) != bytes) { return 0; }
+    if (load64(&rec + TAIL_OBS_START) != from) { return 0; }
+    if (load64(&rec + TAIL_OBS_FOLLOW) != follow) { return 0; }
+    return 1;
+}
+
+fn _t_tobs_r(tok): i64 {
+    var rec[32];
+    return _tail_obs_parse(tok, &rec);
 }
 
 # 1 when `icase_bre_literal_stars` turns `pat` into exactly `want`.
@@ -223,6 +263,92 @@ fn main() {
     assert_eq(kriya_parse_nonneg_int("12a"),  0 - 1,    "trailing non-digit -> -1");
     assert_eq(kriya_parse_nonneg_int("-1"),   0 - 1,    "leading sign -> -1");
     assert_eq(kriya_parse_nonneg_int(0),      0 - 1,    "null pointer -> -1");
+
+    test_group("kriya_parse_count — GNU's xstrtoumax shape, saturating");
+    assert_eq(kriya_parse_count("0"),     0,     "\"0\" -> 0");
+    assert_eq(kriya_parse_count("3"),     3,     "\"3\" -> 3");
+    assert_eq(kriya_parse_count("007"),   7,     "leading zeros");
+    assert_eq(kriya_parse_count(" 3"),    3,     "leading blank, as GNU");
+    assert_eq(kriya_parse_count("\t3"),   3,     "leading tab, as GNU");
+    assert_eq(kriya_parse_count("+3"),    3,     "one plus");
+    assert_eq(kriya_parse_count(" +3"),   3,     "blank, then the plus");
+    assert_eq(kriya_parse_count("++3"),   0 - 1, "two pluses");
+    assert_eq(kriya_parse_count("+ 3"),   0 - 1, "a blank after the plus");
+    assert_eq(kriya_parse_count("+"),     0 - 1, "a plus and no digits");
+    assert_eq(kriya_parse_count("-3"),    0 - 1, "a minus is the CALLER's to take");
+    assert_eq(kriya_parse_count("3 "),    0 - 1, "a trailing blank");
+    assert_eq(kriya_parse_count("3k"),    0 - 1, "a suffix (roadmap 1.8.2)");
+    assert_eq(kriya_parse_count(""),      0 - 1, "empty");
+    assert_eq(kriya_parse_count(" "),     0 - 1, "a blank alone");
+    assert_eq(kriya_parse_count(0),       0 - 1, "null");
+    assert_eq(kriya_parse_count("9223372036854775806"), 9223372036854775806, "one below the ceiling");
+    assert_eq(kriya_parse_count("9223372036854775807"), KRIYA_COUNT_MAX, "the ceiling");
+    assert_eq(kriya_parse_count("9223372036854775808"), KRIYA_COUNT_MAX, "one past it saturates");
+    # ⛔ The value that WRAPPED to one line through kriya_parse_nonneg_int.
+    assert_eq(kriya_parse_count("18446744073709551617"), KRIYA_COUNT_MAX, "2^64 + 1 saturates, never wraps");
+    assert_eq(kriya_parse_count("99999999999999999999"), KRIYA_COUNT_MAX, "twenty nines");
+    var cdl: i64 = 0;
+    assert_eq(kriya_count_digits("12ab", &cdl), 12, "digits stop at a letter");
+    assert_eq(cdl, 2, "...and say how many they were");
+    assert_eq(kriya_count_digits("x", &cdl), 0, "no digits");
+    assert_eq(cdl, 0, "...is a length of zero");
+    assert_eq(kriya_count_mul(3, 512), 1536, "3 blocks");
+    assert_eq(kriya_count_mul(0, 512), 0, "zero times anything");
+    assert_eq(kriya_count_mul(18014398509481983, 512), 9223372036854775296, "the largest product that fits");
+    assert_eq(kriya_count_mul(18014398509481984, 512), KRIYA_COUNT_MAX, "2^63 saturates");
+
+    test_group("_head_obs_parse — head's obsolescent first argument");
+    assert_eq(_t_hobs("-5", 5, 0, 0),        1, "-5: five lines");
+    assert_eq(_t_hobs("-5c", 5, 1, 0),       1, "-5c: five bytes");
+    assert_eq(_t_hobs("-5l", 5, 0, 0),       1, "-5l: five lines");
+    assert_eq(_t_hobs("-03c", 3, 1, 0),      1, "leading zeros");
+    assert_eq(_t_hobs("-3b", 1536, 1, 0),    1, "b: 512-byte blocks");
+    assert_eq(_t_hobs("-3k", 3072, 1, 0),    1, "k: KiB");
+    assert_eq(_t_hobs("-3m", 3145728, 1, 0), 1, "m: MiB");
+    # ⚠ GNU's order rules, measured: `c` clears a multiplier, `l` does not.
+    assert_eq(_t_hobs("-3kc", 3, 1, 0),      1, "-3kc: c resets the multiplier");
+    assert_eq(_t_hobs("-3kl", 3072, 0, 0),   1, "-3kl: 3072 LINES — l keeps it");
+    assert_eq(_t_hobs("-3lk", 3072, 1, 0),   1, "-3lk: the last unit letter wins");
+    assert_eq(_t_hobs("-3cl", 3, 0, 0),      1, "-3cl: lines");
+    assert_eq(_t_hobs("-3qv", 3, 0, 118),    1, "-3qv: the last header letter wins");
+    assert_eq(_t_hobs("-3vq", 3, 0, 113),    1, "-3vq: ...either way round");
+    assert_eq(_t_hobs("-2kv", 2048, 1, 118), 1, "units and a header together");
+    assert_eq(_t_hobs("-99999999999999999999", KRIYA_COUNT_MAX, 0, 0), 1, "saturates");
+    assert_eq(_t_hobs("-99999999999999999999k", KRIYA_COUNT_MAX, 1, 0), 1, "...and so does its multiple");
+    assert_eq(_t_hobs_r("-3x"),  0 - 120, "an unknown letter is refused, and named");
+    assert_eq(_t_hobs_r("-3z"),  0 - 122, "z too: kriya's head has no -z");
+    assert_eq(_t_hobs_r("-3cx"), 0 - 120, "...wherever it stands");
+    assert_eq(_t_hobs_r("-c"),   0, "-c is the option, not this form");
+    assert_eq(_t_hobs_r("-"),    0, "- is standard input");
+    assert_eq(_t_hobs_r("--5"),  0, "--5 is not this form");
+    assert_eq(_t_hobs_r("5"),    0, "a bare number is an operand");
+    assert_eq(_t_hobs_r("+5"),   0, "head has no + form");
+
+    test_group("_tail_obs_parse — tail's obsolescent first argument");
+    assert_eq(_t_tobs("-5", 5, 0, 0, 0),       1, "-5: the last five lines");
+    assert_eq(_t_tobs("+5", 5, 0, 1, 0),       1, "+5: from line five");
+    assert_eq(_t_tobs("-5c", 5, 1, 0, 0),      1, "-5c: the last five bytes");
+    assert_eq(_t_tobs("+5c", 5, 1, 1, 0),      1, "+5c: from byte five");
+    assert_eq(_t_tobs("-5l", 5, 0, 0, 0),      1, "-5l: lines");
+    assert_eq(_t_tobs("-3b", 1536, 1, 0, 0),   1, "-3b: three 512-byte blocks");
+    assert_eq(_t_tobs("-5f", 5, 0, 0, 1),      1, "-5f: follow");
+    assert_eq(_t_tobs("-3cf", 3, 1, 0, 1),     1, "-3cf: bytes, and follow");
+    assert_eq(_t_tobs("+", 10, 0, 1, 0),       1, "+ alone: from line TEN, GNU's default");
+    assert_eq(_t_tobs("+c", 10, 1, 1, 0),      1, "+c: from byte ten");
+    assert_eq(_t_tobs("-l", 10, 0, 0, 0),      1, "-l: ten lines");
+    assert_eq(_t_tobs("-b", 5120, 1, 0, 0),    1, "-b: ten blocks");
+    assert_eq(_t_tobs("-cf", 10, 1, 0, 1),     1, "-cf: ten bytes, follow — GNU's reading, not -c f");
+    assert_eq(_t_tobs("+0", 0, 0, 1, 0),       1, "+0: from the start");
+    assert_eq(_t_tobs("-99999999999999999999b", KRIYA_COUNT_MAX, 1, 0, 0), 1, "saturates through the multiple");
+    assert_eq(_t_tobs_r("-"),    0, "- is standard input");
+    assert_eq(_t_tobs_r("-c"),   0, "-c is the option; its value follows");
+    assert_eq(_t_tobs_r("-f"),   0, "a bare -f is left to the option parser");
+    assert_eq(_t_tobs_r("-3fl"), 0, "f must come last");
+    assert_eq(_t_tobs_r("-3x"),  0, "an unknown letter: not this form");
+    assert_eq(_t_tobs_r("+3x"),  0, "+3x: a file name");
+    assert_eq(_t_tobs_r("-3cc"), 0, "one unit letter at most");
+    assert_eq(_t_tobs_r("5"),    0, "a bare number is an operand");
+    assert_eq(_t_tobs_r("--"),   0, "-- ends the options");
 
     test_group("kriya_parse_octal_mode");
     # Comparisons are decimal: 0o755=493, 0o700=448, 0o644=420,

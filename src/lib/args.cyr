@@ -53,6 +53,19 @@ fn kriya_set_digit_option(letter): i64 {
     return 0;
 }
 
+# ⭐ 1 when the utility has already parsed the first argument as its obsolescent
+# count (`head -3c`, `tail +5f`), so the expander drops it (1.6.15). Set with
+# `kriya_obs_consume_first` right before the parse; the parse clears it.
+# ⚠ The utility parses that argument, not the expander: the grammar after the
+# digits is head's own (`c b k m l q v`) or tail's own (`[+-]` `b c l` `f`, and
+# a `+` form that is a file NAME unless GNU's operand rule says otherwise).
+var _kriya_obs_drop = 0;
+
+fn kriya_obs_consume_first(): i64 {
+    _kriya_obs_drop = 1;
+    return 0;
+}
+
 # 1 when `tok` is `-` followed by a digit: `-5`, `-12`, `-3i`.
 # ⭐ Lifted from `seq` (1.6.14), which reads the shape as a NEGATIVE NUMBER — an
 # operand — while grep reads it as `-NUM`, an option. One recogniser, and each
@@ -340,6 +353,11 @@ fn _kriya_expand_digits(spec, tok, tlen, out, oi): i64 {
 # registered numeric short (`ls -1`) is unaffected: that is matched as an
 # option first. ⚠ And only in the FIRST argument position — see
 # `_kriya_obsnum_trailing`.
+#
+# ⚠ Since 1.6.15 `head` and `tail` parse that first argument THEMSELVES — their
+# forms go well past bare digits (`-3c`, `+5f`) — and have the expander drop it
+# (`kriya_obs_consume_first`). For them the rewrite below never fires, and what
+# `obs_num` still does is refuse a bare-digit option anywhere else.
 fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
     var oi: i64 = 0;
     if (n > 0) {
@@ -370,8 +388,13 @@ fn kriya_expand_shorts(spec, n, av, out, obs_num): i64 {
         var tlen = strlen(tok);
         var handled: i64 = 0;
         var want_value: i64 = 0;
+        # The first argument, when the utility already parsed it as its
+        # obsolescent count: dropped, never interpreted a second time.
+        if (i == 1) {
+            if (_kriya_obs_drop == 1) { handled = 1; }
+        }
 
-        if (passthrough + pass_one == 0) {
+        if (passthrough + pass_one + handled == 0) {
             # `--` terminator: copy it and stop interpreting.
             if (tlen == 2) {
                 if (load8(tok) == 45) {
@@ -891,6 +914,7 @@ fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
         zi = zi + 1;
     }
     var m = kriya_expand_shorts(spec, slice_argc, slice_argv, out, obs_num);
+    _kriya_obs_drop   = 0;
     _kriya_expanded   = out;
     _kriya_expanded_n = m;
     # The expander already printed the precise diagnostic ("option '--x' doesn't
@@ -906,9 +930,6 @@ fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
     return flags_parse(spec, m, out);
 }
 
-# Parse a null-terminated cstring as a non-negative base-10 integer.
-# Returns the value, or -1 on any of: null pointer, empty string,
-# non-digit character, leading sign. Used by sleep/seq/sort/head/tail.
 # Push every value given for the repeatable option `short_ch` / `--long_name`
 # into `out` (a vec), in argv order. Returns how many were found.
 #
@@ -1103,6 +1124,14 @@ fn kriya_argv_collect(short_ch, long_name, out): i64 {
     return found;
 }
 
+# Parse a null-terminated cstring as a non-negative base-10 integer.
+# Returns the value, or -1 on any of: null pointer, empty string,
+# non-digit character, leading sign.
+# ⚠ IT WRAPS: past 2^63 the value turns negative, and past 2^64 it comes back
+# small and positive — `18446744073709551617` is 1. `head` and
+# `tail` moved to `kriya_parse_count` below for exactly that reason (1.6.15);
+# the remaining callers (roadmap 1.6.16) each want their own answer to an
+# oversized value, so the fix is theirs, not a blanket one here.
 fn kriya_parse_nonneg_int(s): i64 {
     if (s == 0) { return 0 - 1; }
     if (load8(s) == 0) { return 0 - 1; }
@@ -1115,6 +1144,80 @@ fn kriya_parse_nonneg_int(s): i64 {
         n = n * 10 + (c - 48);
         i = i + 1;
     }
+    return n;
+}
+
+# The largest count `kriya_parse_count` returns: i64's maximum, standing for
+# "more than any input has".
+enum KriyaCount {
+    KRIYA_COUNT_MAX = 9223372036854775807;
+}
+
+# The value of the decimal digits at the start of `s`, SATURATING at
+# KRIYA_COUNT_MAX; how many digits were read goes to `*len_p` (0 when `s` does
+# not start with one).
+fn kriya_count_digits(s, len_p): i64 {
+    var n: i64 = 0;
+    var i: i64 = 0;
+    var more: i64 = 1;
+    while (more == 1) {
+        var c = load8(s + i);
+        if (c < 48) { more = 0; }
+        elif (c > 57) { more = 0; }
+        else {
+            var d = c - 48;
+            if (n > (KRIYA_COUNT_MAX - d) / 10) { n = KRIYA_COUNT_MAX; }
+            else { n = n * 10 + d; }
+            i = i + 1;
+        }
+    }
+    store64(len_p, i);
+    return n;
+}
+
+# `a * b` for two non-negative counts, saturating at KRIYA_COUNT_MAX.
+fn kriya_count_mul(a, b): i64 {
+    if (a == 0) { return 0; }
+    if (b == 0) { return 0; }
+    if (a > KRIYA_COUNT_MAX / b) { return KRIYA_COUNT_MAX; }
+    return a * b;
+}
+
+# A `head` / `tail` count, once the utility has taken the leading sign that
+# means something to it (`head -n -5`, `tail -n +5`): optional leading
+# whitespace, one optional `+`, then decimal digits and nothing after — what
+# GNU's `xstrtoumax` accepts, measured on coreutils 9.11. Returns -1 when
+# invalid.
+#
+# ⛔ IT SATURATES; `kriya_parse_nonneg_int` WRAPS. `head -n 18446744073709551617`
+# printed ONE line at exit 0 until 1.6.15. GNU 9.11 clamps an oversized count to
+# its maximum, which reads as "more than the input has", and this clamps to
+# KRIYA_COUNT_MAX. ⚠ GNU 9.4 refused the same number (*Value too large for
+# defined data type*); the newer answer is the one kept, because the number is
+# well formed and only large.
+#
+# ⚠ The whitespace is GNU's, not an accident of this parser, and it has a trap
+# the callers depend on: `tail -n ' +3'` is the LAST three lines, because only
+# the FIRST byte is looked at for tail's `+`. The `+` accepted here is the one
+# `xstrtoumax` swallows after the whitespace, and it means nothing.
+fn kriya_parse_count(s): i64 {
+    if (s == 0) { return 0 - 1; }
+    var i: i64 = 0;
+    var ws: i64 = 1;
+    while (ws == 1) {
+        var c = load8(s + i);
+        var sp: i64 = 0;
+        if (c == 32) { sp = 1; }
+        if (c >= 9) {
+            if (c <= 13) { sp = 1; }
+        }
+        if (sp == 1) { i = i + 1; } else { ws = 0; }
+    }
+    if (load8(s + i) == 43) { i = i + 1; }
+    var len: i64 = 0;
+    var n = kriya_count_digits(s + i, &len);
+    if (len == 0) { return 0 - 1; }
+    if (load8(s + i + len) != 0) { return 0 - 1; }
     return n;
 }
 

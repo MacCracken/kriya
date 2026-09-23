@@ -291,6 +291,229 @@ for _u in head tail; do
     expect_exit "$_u -n 5 --lines= still refuses"   2 "$BIN" "$_u" -n 5 --lines= qv1
 done
 
+# --- 1.6.15: the count forms --------------------------------------------------
+#
+# ⭐ `head -n -N` / `-c -N` (all but the last N), `tail -n +N` / `-c +N` (from N
+# on), a sign on either count, and the obsolescent first argument past bare
+# digits (`head -5c`, `tail +5`, `tail -5cf`). Every one was a refusal, exit 2,
+# until 1.6.15 — and `tail +5 FILE` read a FILE named `+5`. Each case below is
+# compared with GNU byte for byte, exit status included.
+printf 'a\nb\nc' > ht_nonl                  # an unended last line
+printf '\n\n\n' > ht_blank
+: > ht_empty
+seq 1 10 > ht_ten
+# ⚠ PAST ONE 64 KiB READ, so the held-back bytes have to slide and grow, and the
+# regular-file `-c -N` path (which only trusts a size bigger than one read) runs.
+seq 1 200000 > ht_big
+awk 'BEGIN { for (i = 0; i < 300000; i++) printf "%c", 65 + i % 26 }' > ht_nolf
+awk 'BEGIN { for (i = 0; i < 70000; i++) printf "x"; printf "\nend" }' > ht_long
+
+ht_same() {   # ht_same <util> <args...>: GNU and kriya agree on stdout and exit status
+    _u=$1; shift
+    _grc=0; timeout 1 "$_u" "$@" </dev/null >ht_g.out 2>/dev/null || _grc=$?
+    _krc=0; timeout 1 "$BIN" "$_u" "$@" </dev/null >ht_k.out 2>/dev/null || _krc=$?
+    if cmp -s ht_g.out ht_k.out && [ "$_grc" = "$_krc" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        printf 'FAIL %s %s: GNU exit %s, kriya exit %s, output %s\n' "$_u" "$*" "$_grc" "$_krc" \
+            "$(cmp -s ht_g.out ht_k.out && echo same || echo differs)" >&2
+    fi
+}
+ht_pipe() {   # ht_pipe <file> <util> <args...>: the same, reading the file through a pipe
+    _f=$1; _u=$2; shift 2
+    _grc=0; cat "$_f" | "$_u" "$@" >ht_g.out 2>/dev/null || _grc=$?
+    _krc=0; cat "$_f" | "$BIN" "$_u" "$@" >ht_k.out 2>/dev/null || _krc=$?
+    if cmp -s ht_g.out ht_k.out && [ "$_grc" = "$_krc" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL pipe %s %s %s\n' "$_u" "$*" "$_f" >&2
+    fi
+}
+
+# head: all but the last N.
+for _a in "-n -3" "-n -0" "-n -1" "-n -9" "-n -10" "-n -99" "-n -02" "-c -3" "-c -0" \
+          "-c -99" "--lines=-3" "--bytes=-3" "-n -+3"; do
+    for _f in ht_ten ht_nonl ht_blank ht_empty; do
+        # shellcheck disable=SC2086
+        ht_same head $_a "$_f"
+    done
+done
+for _a in "-n -3" "-n -150000" "-n -199999" "-n -200000" "-n -70000" "-c -3" "-c -200000"; do
+    # shellcheck disable=SC2086
+    ht_same head $_a ht_big
+    # shellcheck disable=SC2086
+    ht_pipe ht_big head $_a
+done
+for _a in "-c -1" "-c -65535" "-c -65536" "-c -65537" "-c -299999" "-c -300000" "-c -300001" "-n -1"; do
+    # shellcheck disable=SC2086
+    ht_same head $_a ht_nolf
+    # shellcheck disable=SC2086
+    ht_pipe ht_nolf head $_a
+done
+ht_same head -n -1 ht_long
+ht_same head -c -2 ht_long
+ht_same head -n -2 ht_ten ht_nonl
+ht_same head -c -2 ht_nonl ht_ten
+ht_same head -v -n -2 ht_ten
+# A `+` on head's count is only a sign.
+ht_same head -n +3 ht_ten
+ht_same head -c +3 ht_ten
+ht_same head -n ' 3' ht_ten
+
+# tail: from N on.
+for _a in "-n +3" "-n +1" "-n +0" "-n +10" "-n +11" "-n +100" "-c +3" "-c +0" "-c +21" \
+          "-c +22" "--lines=+3" "--bytes=+3"; do
+    for _f in ht_ten ht_nonl ht_blank ht_empty; do
+        # shellcheck disable=SC2086
+        ht_same tail $_a "$_f"
+    done
+done
+for _a in "-n +199990" "-n +2" "-c +1288000" "-c +70000"; do
+    # shellcheck disable=SC2086
+    ht_same tail $_a ht_big
+    # shellcheck disable=SC2086
+    ht_pipe ht_big tail $_a
+done
+ht_same tail -n +2 ht_long
+ht_same tail -c +70001 ht_long
+ht_same tail -n +3 ht_ten ht_nonl
+# A `-` on tail's count is only a sign — and ONLY THE FIRST BYTE decides, so a
+# blank in front turns the `+` into a sign as well: the LAST three lines.
+ht_same tail -n -3 ht_ten
+ht_same tail -n -+3 ht_ten
+ht_same tail -n ' +3' ht_ten
+
+# The obsolescent first argument.
+for _a in -3c -3cv -3l -3cl -3kc -3kl -3lk -3k -3b -3m -03c -0 -3v -3q; do
+    ht_same head "$_a" ht_ten
+done
+ht_same head -3qv ht_ten ht_nonl
+ht_same head -3vq ht_ten ht_nonl
+ht_same head -3v -q ht_ten ht_nonl
+ht_same head -3c -v ht_ten
+ht_same head -3c -n 2 ht_ten
+ht_same head -3 -c 2 ht_ten
+ht_same head -3c ht_ten ht_nonl
+for _a in +3 +3l +3c +3b +0 + +c -3c -3l -1b -l -b -0; do
+    ht_same tail "$_a" ht_ten
+done
+ht_same tail +3 -- ht_ten
+ht_same tail -3 -- ht_ten
+ht_same tail +3 -n 2 ht_ten
+# ⚠ A `+` FIRST ARGUMENT IS A LEGAL FILE NAME, and GNU's rule for when it is
+# one is kept exactly: a count only when at most one operand follows (or `--`
+# and one). So both of these read a FILE named `+3`, fail on it, and go on.
+ht_same tail +3 ht_ten ht_nonl
+ht_same tail +3 -v ht_ten
+ht_same tail +3x ht_ten
+# Follow forms, cut off by the helper's one-second timeout at the same point.
+ht_same tail -3f ht_ten
+ht_same tail -cf ht_ten
+ht_same tail +8f ht_ten
+# ⚠ The `-` forms do NOT follow GNU's operand rule — see the deviation note at
+# the obsolescent block above: a token starting with `-` cannot be a file name,
+# so kriya takes it whatever follows, where GNU refuses.
+expect_eq "tail -3c two files (kriya takes it)" "$(tail -c 3 ht_ten ht_nonl)" "$($BIN tail -3c ht_ten ht_nonl)"
+expect_nonzero "gnu tail -3c two files refused" tail -3c ht_ten ht_nonl
+
+# ⭐ OVERSIZED COUNTS SATURATE. `head -n 18446744073709551617` printed ONE line at
+# exit 0 until 1.6.15: the parser wrapped past 2^64. GNU 9.11 clamps these to
+# "more than the input has", and so does kriya. ⚠ Asserted against the answer,
+# not against the local GNU: 9.4 (CI's container) refuses them outright.
+expect_eq "head -n 2^64+1 is everything"  "$(cat ht_ten)" "$($BIN head -n 18446744073709551617 ht_ten)"
+expect_eq "head -n huge is everything"    "$(cat ht_ten)" "$($BIN head -n 99999999999999999999 ht_ten)"
+expect_eq "head -huge is everything"      "$(cat ht_ten)" "$($BIN head -99999999999999999999 ht_ten)"
+expect_eq "head -c huge is everything"    "$(cat ht_ten)" "$($BIN head -c 99999999999999999999 ht_ten)"
+expect_eq "head -n -huge is nothing"      "" "$($BIN head -n -99999999999999999999 ht_ten)"
+expect_eq "head -c -huge is nothing"      "" "$($BIN head -c -99999999999999999999 ht_ten)"
+expect_eq "tail -n huge is everything"    "$(cat ht_ten)" "$($BIN tail -n 99999999999999999999 ht_ten)"
+expect_eq "tail -n +huge is nothing"      "" "$($BIN tail -n +99999999999999999999 ht_ten)"
+expect_eq "tail +huge is nothing"         "" "$($BIN tail +99999999999999999999 ht_ten)"
+# ⛔ A SEEK THAT CLOSE TO 2^63 SUCCEEDS AND THE READ AFTER IT FAILS (EINVAL), so
+# this exited 1 in development; the seek now stops at the end of the file.
+expect_exit "tail -c +huge exits 0"       0 "$BIN" tail -c +99999999999999999999 ht_ten
+expect_eq "tail -c +huge is nothing"      "" "$($BIN tail -c +99999999999999999999 ht_ten)"
+
+# ⚠ THREE GNU `tail` BEHAVIOURS KRIYA DOES NOT REPRODUCE, found by the grammar
+# fuzz at 1.6.15 (`difffuzz-head-tail.py`) and asserted here as kriya's own answer:
+# - With `-n 0` or `-c 0` and no `-f`, GNU 9.11 exits at once: no headers, and
+#   no file is even opened, so `tail -n 0 missing` exits 0. kriya prints the
+#   headers, as GNU's own `head -n 0 a b` does, and reports the missing file.
+# - A `+N` of 2^63-1 or more makes GNU exit the same way; kriya prints the
+#   headers over empty output, as it does for any `+N` past the end.
+# - GNU's `tail` takes a negative zero (`-n --0` is 0) where its `head` refuses
+#   one. kriya refuses it in both.
+printf '==> ht_ten <==\n\n==> ht_nonl <==\n' > ht_hdrs
+# ⚠ `|| true`: under `set -e` a regression here must FAIL an assertion, not end the suite.
+"$BIN" tail -n 0 ht_ten ht_nonl > ht_k.out || true
+expect_eq "tail -n 0 two files prints the headers" "$(cksum < ht_hdrs)" "$(cksum < ht_k.out)"
+expect_exit "tail -n 0 missing reports it"       1 "$BIN" tail -n 0 ghost
+expect_exit "tail -n --0 refused"                2 "$BIN" tail -n --0 ht_ten
+"$BIN" tail -n +99999999999999999999 ht_ten ht_nonl > ht_k.out || true
+expect_eq "tail +huge two files prints the headers" "$(cksum < ht_hdrs)" "$(cksum < ht_k.out)"
+
+# Refusals: both refuse (kriya with 2, per ADR 0008).
+for _c in "head -3x ht_ten" "head -n - ht_ten" "head -n + ht_ten" \
+          "head -n --3 ht_ten" "head -c ++3 ht_ten" "tail -n ++3 ht_ten" "tail -n +-3 ht_ten" \
+          "tail -n - ht_ten" "tail -3x ht_ten" "tail -3fl ht_ten"; do
+    # shellcheck disable=SC2086
+    expect_exit "kriya $_c refused" 2 "$BIN" $_c
+    # shellcheck disable=SC2086
+    expect_nonzero "gnu $_c refused" $_c
+done
+# ⚠ GNU takes `z` (NUL-terminated lines) in the obsolescent argument. kriya's
+# `head` has no `-z` at all, so `-3z` is refused exactly as `-z` is.
+expect_exit "head -3z refused (no -z in kriya)" 2 "$BIN" head -3z ht_ten
+expect_exit "head -z refused the same way"      2 "$BIN" head -z ht_ten
+expect_exit "head -n ' -3' refused" 2 "$BIN" head -n ' -3' ht_ten
+expect_nonzero "gnu head -n ' -3' refused" head -n ' -3' ht_ten
+expect_exit "tail -n '+ 3' refused" 2 "$BIN" tail -n '+ 3' ht_ten
+expect_nonzero "gnu tail -n '+ 3' refused" tail -n '+ 3' ht_ten
+err=$("$BIN" head -3x ht_ten 2>&1 >/dev/null | head -1)
+case "$err" in
+    *"invalid trailing option -- x"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); printf "FAIL head -3x diagnostic:\ngot: '%s'\n" "$err" >&2 ;;
+esac
+err=$("$BIN" head -n abc ht_ten 2>&1 >/dev/null | head -1)
+expect_eq "head -n abc diagnostic" "kriya head: abc: invalid number of lines" "$err"
+
+# --- 1.6.15: a shared descriptor is left where `head` stopped ------------------
+#
+# ⛔ `{ head -n 1 >/dev/null; cat; } < file` PRINTED NOTHING AFTER THE FIRST LINE,
+# at exit 0: the 64 KiB read that found line 1 took the rest of the file with it.
+# POSIX asks a utility that stops before EOF to leave a seekable input just past
+# the last byte it processed (XCU 1.4, INPUT FILES), and GNU does. ⚠ A pipe
+# cannot be put back, so only the forms that never over-read are compared there.
+ht_offset() {   # ht_offset <file> <util> <args...>
+    _f=$1; _u=$2; shift 2
+    # ⚠ `|| true` inside the group: `set -e` reaches into it, and a refusal
+    # must fail the comparison below rather than end the suite.
+    { "$_u" "$@" >/dev/null 2>&1 || true; echo ---; cat; } < "$_f" > ht_g.out
+    { "$BIN" "$_u" "$@" >/dev/null 2>&1 || true; echo ---; cat; } < "$_f" > ht_k.out
+    if cmp -s ht_g.out ht_k.out; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL offset after %s %s < %s\n' "$_u" "$*" "$_f" >&2
+    fi
+}
+for _a in "-n 2" "-n 0" "-c 4" "-c 0" "-2" "-3c" "-n -3" "-c -3" "-n -0"; do
+    # shellcheck disable=SC2086
+    ht_offset ht_ten head $_a
+done
+for _a in "-n 5" "-n 70000" "-c 70000" "-n -3" "-c -3" "-c -100000"; do
+    # shellcheck disable=SC2086
+    ht_offset ht_big head $_a
+done
+ht_offset ht_nolf head -c -100000
+ht_offset ht_ten tail -n +3
+for _a in "-c 4" "-c 0" "-3c"; do
+    # shellcheck disable=SC2086
+    expect_eq "pipe keeps the rest after head $_a" \
+        "$(cat ht_big | { head $_a >/dev/null || true; cat; } | cksum)" \
+        "$(cat ht_big | { "$BIN" head $_a >/dev/null || true; cat; } | cksum)"
+done
+
 # --- partial failure ---
 rc=0
 out=$($BIN head -n 2 short ghost nums 2>/dev/null) || rc=$?

@@ -4,20 +4,24 @@
 #   tail [opts] [file...]
 #
 # Flags:
-#   -n / --lines=N    emit the last N lines (default 10).
-#   -c / --bytes=N    emit the last N bytes.
-#   -q / --quiet      never emit the `==> FILE <==` header.
-#   -v / --verbose    always emit the header.
+#   -n / --lines=[+]N  emit the last N lines (default 10) — or, written `+N`,
+#                      everything from line N on.
+#   -c / --bytes=[+]N  emit the last N bytes — or everything from byte N on.
+#   -q / --quiet       never emit the `==> FILE <==` header.
+#   -v / --verbose     always emit the header.
+#   [+-]NUM[bcl][f]    the obsolescent form, FIRST ARGUMENT ONLY
+#                      (`_tail_obs_parse` has the grammar).
 #
 # Default: 10 lines. When neither `-q` nor `-v` is set, the header is
 # emitted iff there is more than one file operand.
 #
-# Implementation: buffer the input (up to a 16 MiB cap) into memory,
-# then scan backwards from EOF to find the Nth-from-last newline (for
-# `-n`) or the byte at offset `size - N` (for `-c`). This is the
-# straightforward path that works for both seekable files and pipes.
+# Implementation: for the last N, buffer the input (up to a 16 MiB cap)
+# into memory, then scan backwards from EOF to find the Nth-from-last
+# newline (for `-n`) or the byte at offset `size - N` (for `-c`). This is
+# the straightforward path that works for both seekable files and pipes.
 # A seek-back-from-end fast path for huge files is a clearly-named
-# follow-up — see deferrals below. (roadmap 1.9.1)
+# follow-up — see deferrals below. (roadmap 1.9.1) The `+N` forms need no
+# buffer at all: they skip, then stream (`_tail_from`).
 #
 # Cap: if input exceeds 16 MiB, the buffer is truncated to the LAST
 # 16 MiB (head bytes discarded). For `-n N` this means the result is
@@ -32,7 +36,6 @@
 #   -f on MULTIPLE files     the single-file restriction is real and enforced;
 #                            `tail -f a b` errors (see _tail_report_usage below).
 #   -F                       --follow=name --retry compound.
-#   -n +N / -c +N            start-from-line/byte semantics (roadmap 1.6.15).
 #   --pid=PID                terminate when PID exits (with -f).
 #   k/M/G suffixes           on N — shared with head; one parser when extracted.
 #   Seek-from-end fast path  for large seekable files (avoids the 16MB cap),
@@ -49,11 +52,21 @@ var _TAIL_CAP_BYTES: i64 = 16777216;  # 16 MiB
 var _TAIL_READ_BUFSZ: i64 = 65536;
 var _TAIL_FOLLOW_POLL_MS: i64 = 200;   # poll interval for -f (200ms)
 
+var _tail_rbuf = 0;                    # `_tail_from`'s read window, reused
+
+# The obsolescent first argument, parsed: offsets into a 32-byte record.
+enum TailObs {
+    TAIL_OBS_COUNT  = 0;   # the count, saturated
+    TAIL_OBS_BYTES  = 8;   # 1 when it counts bytes, 0 for lines
+    TAIL_OBS_START  = 16;  # 1 for the `+` form: counted from the start
+    TAIL_OBS_FOLLOW = 24;  # 1 when it ends in `f`
+}
+
 fn _tail_init_spec(): i64 {
     if (_tail_spec != 0) { return 0; }
     var s = flags_new();
-    _tail_n_idx = flags_add_str(s,  110, "lines",   0, "emit last N lines (default 10)");
-    _tail_c_idx = flags_add_str(s,  99,  "bytes",   0, "emit last N bytes");
+    _tail_n_idx = flags_add_str(s,  110, "lines",   0, "emit last N lines (default 10); +N: from line N on");
+    _tail_c_idx = flags_add_str(s,  99,  "bytes",   0, "emit last N bytes; +N: from byte N on");
     _tail_q_idx = flags_add_bool(s, 113, "quiet",   0, "suppress filename headers");
     _tail_v_idx = flags_add_bool(s, 118, "verbose", 0, "always emit filename headers");
     _tail_f_idx = flags_add_bool(s, 102, "follow",  0, "output new lines as the file grows");
@@ -69,11 +82,12 @@ fn tail_help_declare(): i64 {
     help_begin("tail", "Print the last part of files.",
       "tail [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("Defaults to 10 lines. ⚠ -f follows a single file by polling its path; multi-file follow is not supported.");  #skip-lint
+    help_operands("Defaults to 10 lines. A count written +N starts at line (or byte) N instead. The obsolescent `tail -5` form (also `+5`, `-5c`, `-5f`) is accepted, first argument only. ⚠ -f follows a single file by polling its path; multi-file follow is not supported.");  #skip-lint
     help_exit(1, "a file could not be read");
     help_example("tail -n 50 app.log");
     help_example("tail -f app.log");
     help_example("tail -c 200 blob.bin");
+    help_example("tail -n +2 data.csv");
     return 0;
 }
 
@@ -197,6 +211,182 @@ fn _tail_line_start(buf, size, n): i64 {
     return 0;
 }
 
+# `tail`'s obsolescent first argument (1.6.15): `+` or `-`, optional digits,
+# then optionally `b` (512-byte blocks), `c` (bytes) or `l` (lines), then
+# optionally `f` (follow) — GNU's grammar, measured on coreutils 9.11. Without
+# digits the count is the default ten (so `-b` is ten blocks, and `+` alone is
+# from line 10). Returns 1 and fills `rec` when `tok` is that form, 0 when not.
+#
+# ⚠ Three spellings that fit are NOT taken: `-` (standard input) and `-c` (the
+# option, whose value is the next argument), exactly as in GNU, and a bare `-f`,
+# which means the same either way and is left to the option parser.
+# ⚠ A `+` form is also a legal FILE NAME; `_tail_plus_is_count` decides.
+fn _tail_obs_parse(tok, rec): i64 {
+    var c0 = load8(tok);
+    var from: i64 = 0;
+    if (c0 == 43) {
+        from = 1;
+    } elif (c0 == 45) {
+        var c1 = load8(tok + 1);
+        if (c1 == 0) { return 0; }                                  # `-`
+        if (load8(tok + 2) == 0) {
+            if (c1 == 99) { return 0; }                             # `-c`
+            if (c1 == 102) { return 0; }                            # `-f`
+        }
+    } else {
+        return 0;
+    }
+    var len: i64 = 0;
+    var n = kriya_count_digits(tok + 1, &len);
+    if (len == 0) { n = 10; }
+    var p = 1 + len;
+    var bytes: i64 = 0;
+    var c = load8(tok + p);
+    if (c == 98) {                                                  # b
+        bytes = 1;
+        n = kriya_count_mul(n, 512);
+        p = p + 1;
+    } elif (c == 99) {                                              # c
+        bytes = 1;
+        p = p + 1;
+    } elif (c == 108) {                                             # l
+        p = p + 1;
+    }
+    var follow: i64 = 0;
+    if (load8(tok + p) == 102) {                                    # f
+        follow = 1;
+        p = p + 1;
+    }
+    if (load8(tok + p) != 0) { return 0; }
+    store64(rec + TAIL_OBS_COUNT, n);
+    store64(rec + TAIL_OBS_BYTES, bytes);
+    store64(rec + TAIL_OBS_START, from);
+    store64(rec + TAIL_OBS_FOLLOW, follow);
+    return 1;
+}
+
+# Is a first argument of the `+` form a count here, or a file name? GNU's rule,
+# measured: a count when nothing follows it, or one operand that is not an
+# option, or `--` and at most one operand after that. Otherwise it is a file —
+# `tail +3 a b` reads a file named `+3`, then `a` and `b`.
+#
+# ⚠ THE `-` FORMS DO NOT ASK. GNU applies this rule to them as well and refuses
+# `tail -5 a b` outright ("option used in invalid context"); kriya has taken the
+# first-argument `-5` whatever follows since the obsolescent form first shipped
+# (`smoke-head-tail.sh` carries that deviation). A token that begins with `-`
+# can never be a file name, so accepting it is never a misreading — the rule
+# exists to tell a count from a NAME, and only `+` forms can be one.
+fn _tail_plus_is_count(start): i64 {
+    var rest = kriya_argv_count() - start - 1;
+    if (rest == 0) { return 1; }
+    var a1 = load64(kriya_argv_flat() + (start + 1) * 8);
+    var dd = streq(a1, "--");
+    if (rest == 1) {
+        if (dd == 1) { return 1; }
+        if (load8(a1) != 45) { return 1; }
+        if (load8(a1 + 1) == 0) { return 1; }                        # `-`, stdin
+        return 0;
+    }
+    if (rest == 2) { return dd; }
+    return 0;
+}
+
+# Everything from line or byte `n` on (`tail -n +N`, `-c +N`), counting from 1;
+# `+0` means `+1`, as in GNU. Returns 0 or a negative errno.
+#
+# ⭐ STREAMED: it skips, then copies, holding nothing but the read window — so
+# unlike the last-N path there is no 16 MiB cap here, and `tail -n +2` of an
+# endless pipe starts printing at once. A regular file skips its bytes with a
+# seek rather than a read.
+#
+# ⚠ WITH `-f`, THE SKIP COVERS WHAT THE FILE HELD AT THE START, in both modes:
+# once EOF is reached, everything appended is printed. That is GNU's behaviour
+# for lines (measured: `tail -n +5 -f` of three lines prints lines 4 on as they
+# arrive). For bytes past the end GNU seeks beyond EOF, then reports its own
+# seek as "file truncated" and prints the whole file; kriya does not copy that.
+fn _tail_from(fd, n, bytes): i64 {
+    var skip = n - 1;
+    if (n == 0) { skip = 0; }
+    if (bytes == 1) {
+        if (skip > 0) {
+            if (K_HAVE_LSEEK == 1) {
+                var st[144];
+                if (fs_fstatat(fd, "", &st, 4096) == 0) {           # AT_EMPTY_PATH: fstat
+                    if ((load64(&st + FS_STAT_MODE) & FS_S_IFMT) == FS_S_IFREG) {
+                        var pos = k_lseek(fd, 0, 1);                # SEEK_CUR
+                        if (pos >= 0) {
+                            # ⛔ NEVER PAST THE END. A seek to `+99999999999999999999`
+                            # (saturated) succeeds, and the read after it fails with
+                            # EINVAL — an offset that close to 2^63 cannot be read
+                            # from — so the command exited 1 where GNU prints
+                            # nothing. Past the end there is nothing to print anyway.
+                            var left = load64(&st + FS_STAT_SIZE) - pos;
+                            if (skip >= left) {
+                                if (k_lseek(fd, 0, 2) >= 0) { skip = 0; }       # SEEK_END
+                            } else {
+                                if (k_lseek(fd, skip, 1) >= 0) { skip = 0; }    # SEEK_CUR
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (_tail_rbuf == 0) { _tail_rbuf = alloc(_TAIL_READ_BUFSZ); }
+    var buf = _tail_rbuf;
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var got = k_read( fd, buf, _TAIL_READ_BUFSZ);
+        if (got < 0) {
+            if ((0 - got) != 4) { return got; }                    # EINTR retries
+        } elif (got == 0) {
+            loop = 0;
+        } else {
+            var off: i64 = 0;
+            if (skip > 0) {
+                if (bytes == 1) {
+                    off = skip;
+                    if (off > got) { off = got; }
+                    skip = skip - off;
+                } else {
+                    var scanning: i64 = 1;
+                    while (scanning == 1) {
+                        if (off >= got) { scanning = 0; }
+                        elif (skip == 0) { scanning = 0; }
+                        else {
+                            if (load8(buf + off) == 10) { skip = skip - 1; }
+                            off = off + 1;
+                        }
+                    }
+                }
+            }
+            if (off < got) {
+                var wr = _tail_write_all(buf + off, got - off);
+                if (wr != 0) { return wr; }
+            }
+        }
+    }
+    return 0;
+}
+
+# A `-n` / `-c` value: `N` or `-N` for the last N, `+N` for from N on. Returns
+# the count (saturated) or -1; `*from_p` is set to 1 for the `+N` form.
+#
+# ⚠ ONLY THE FIRST BYTE DECIDES, as in GNU — so `tail -n ' +3'` is the LAST three
+# lines: the blank is first, and the `+` that `kriya_parse_count` then accepts
+# after it is a sign, not the start-from marker.
+fn _tail_count(arg, from_p): i64 {
+    store64(from_p, 0);
+    var a = arg;
+    var c0 = load8(a);
+    if (c0 == 43) {
+        store64(from_p, 1);          # the `+` stays: kriya_parse_count takes it
+    } elif (c0 == 45) {
+        a = a + 1;
+    }
+    return kriya_parse_count(a);
+}
+
 # --- follow mode (-f) ------------------------------------------------
 #
 # After the initial "last N" output, this loop polls the file every
@@ -294,7 +484,8 @@ fn _tail_follow(fd, name): i64 {
     return 0;
 }
 
-fn _tail_emit_one(fd, name, mode_bytes, limit): i64 {
+fn _tail_emit_one(fd, name, mode_bytes, limit, from_start): i64 {
+    if (from_start == 1) { return _tail_from(fd, limit, mode_bytes); }
     var slurp[24];
     var r = _tail_slurp(fd, name, &slurp);
     if (r != 0) { return r; }
@@ -324,22 +515,34 @@ fn _tail_emit_one(fd, name, mode_bytes, limit): i64 {
 
 fn cmd_tail(start: i64): i64 {
     _tail_init_spec();
-    # 110 = 'n': the obsolescent bare-digit form. POSIX marks `head -5` / `tail -5`
-    # obsolescent but every shell script in existence still uses it, and it is only
-    # unambiguous here because neither utility registers a digit as a short option.
-    # ⚠ FIRST ARGUMENT ONLY — `head -c 3 -5` is a usage error, as it is in GNU.
+    # ⭐ THE OBSOLESCENT FIRST ARGUMENT IS PARSED HERE, BEFORE THE OPTION PARSER
+    # SEES IT, and dropped from what the parser gets (`kriya_obs_consume_first`).
+    # POSIX marks `tail -5` obsolescent but every shell script in existence still
+    # uses it, and GNU's form goes further than bare digits: `+5` starts at line
+    # five, `-5c` is five bytes, `-5f` follows. Until 1.6.15 only the bare digits
+    # were taken, `-5c` exited 2, and `tail +5 f` read a FILE named `+5`.
+    # ⚠ FIRST ARGUMENT ONLY — `tail -c 3 -5` is a usage error, as it is in GNU.
     # The expander enforces that and names the offender (`_kriya_obsnum_trailing`).
+    var obs[32];
+    var have_obs: i64 = 0;
+    if (start < kriya_argv_count()) {
+        var tok0 = load64(kriya_argv_flat() + start * 8);
+        if (_tail_obs_parse(tok0, &obs) == 1) {
+            have_obs = 1;
+            if (load8(tok0) == 43) { have_obs = _tail_plus_is_count(start); }
+        }
+        if (have_obs == 1) { kriya_obs_consume_first(); }
+    }
     if (kriya_args_parse_optval(_tail_spec, start, 110, "follow") != 0) {
         k_write( 2, "kriya tail: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
         return EXIT_USAGE;
     }
 
-    var quiet: i64 = 0;
-    if (flags_get_bool(_tail_spec, _tail_q_idx) == 1) { quiet = 1; }
-    var verbose: i64 = 0;
-    if (flags_get_bool(_tail_spec, _tail_v_idx) == 1) { verbose = 1; }
     var follow: i64 = 0;
     if (flags_get_bool(_tail_spec, _tail_f_idx) == 1) { follow = 1; }
+    if (have_obs == 1) {
+        if (load64(&obs + TAIL_OBS_FOLLOW) == 1) { follow = 1; }
+    }
     # GNU's `--follow[=name|descriptor]`. The value used to be swallowed.
     # ⚠ kriya's follow is a stat-cadence poll on the PATH, so `=name` is exact
     # and `=descriptor` is an approximation — a file replaced under the same
@@ -371,35 +574,45 @@ fn cmd_tail(start: i64): i64 {
     # ⚠ `-n 1 -c 3` agrees under both rules, and that is the order the suite
     # covered. See the longer note in `src/cmd/head.cyr` — the two utilities are
     # a pair and a fix to one that skips the other is half a fix.
+    # ⭐ The obsolescent first argument is not in the expanded argv at all: it
+    # comes first, so any `-n` or `-c` after it wins.
     var mode_bytes: i64 = 0;
     var limit: i64 = 10;
+    var from_start: i64 = 0;
+    if (have_obs == 1) {
+        limit = load64(&obs + TAIL_OBS_COUNT);
+        mode_bytes = load64(&obs + TAIL_OBS_BYTES);
+        from_start = load64(&obs + TAIL_OBS_START);
+    }
 
     var n_arg = flags_get_str(_tail_spec, _tail_n_idx);
     var c_arg = flags_get_str(_tail_spec, _tail_c_idx);
 
     # ⚠ BOTH ARE VALIDATED EVEN THOUGH ONLY ONE IS USED: a bad count is a usage
     # error whichever flag ends up losing.
-    var n_val: i64 = 0 - 1;
-    var c_val: i64 = 0 - 1;
-    if (n_arg != 0) {
-        n_val = kriya_parse_nonneg_int(n_arg);
-        if (n_val < 0) {
-            k_write( 2, "kriya tail: error: --lines requires a non-negative integer\n", 59);
-            return EXIT_USAGE;
-        }
-    }
-    if (c_arg != 0) {
-        c_val = kriya_parse_nonneg_int(c_arg);
-        if (c_val < 0) {
-            k_write( 2, "kriya tail: error: --bytes requires a non-negative integer\n", 59);
-            return EXIT_USAGE;
-        }
-    }
-
+    #
     # ⛔ AN EMPTY VALUE IS AN ERROR, NOT AN ABSENT OPTION. `--lines=` used to be
     # skipped over — the option was thrown away and the DEFAULT ten lines
     # printed, at exit 0. See the same note in `head.cyr`; both had it, because
     # both were written from the same shape.
+    var n_val: i64 = 0 - 1;
+    var c_val: i64 = 0 - 1;
+    var n_from: i64 = 0;
+    var c_from: i64 = 0;
+    if (n_arg != 0) {
+        n_val = _tail_count(n_arg, &n_from);
+        if (n_val < 0) {
+            report_note("tail", n_arg, "invalid number of lines");
+            return EXIT_USAGE;
+        }
+    }
+    if (c_arg != 0) {
+        c_val = _tail_count(c_arg, &c_from);
+        if (c_val < 0) {
+            report_note("tail", c_arg, "invalid number of bytes");
+            return EXIT_USAGE;
+        }
+    }
     var n_at: i64 = 0;
     var c_at: i64 = 0;
     if (n_val >= 0) { n_at = kriya_opt_seq(_tail_spec, 110, "lines"); }
@@ -407,10 +620,12 @@ fn cmd_tail(start: i64): i64 {
     if (n_at > c_at) {
         limit = n_val;
         mode_bytes = 0;
+        from_start = n_from;
     }
     if (c_at > n_at) {
         limit = c_val;
         mode_bytes = 1;
+        from_start = c_from;
     }
 
     var npos = flags_positional_count(_tail_spec);
@@ -432,7 +647,7 @@ fn cmd_tail(start: i64): i64 {
         var sq_at = kriya_opt_seq(_tail_spec, 113, "quiet");
         var sv_at = kriya_opt_seq(_tail_spec, 118, "verbose");
         if (sv_at > sq_at) { _tail_emit_header("standard input", 1); }
-        var r = _tail_emit_one(0, "standard input", mode_bytes, limit);
+        var r = _tail_emit_one(0, "standard input", mode_bytes, limit, from_start);
         if (r != 0) {
             _tail_report("(stdin)", 0 - r);
             any_failed = 1;
@@ -486,7 +701,7 @@ fn cmd_tail(start: i64): i64 {
             }
         }
         if (show_headers == 1) { _tail_emit_header(name, first); }
-        var r = _tail_emit_one(fd, name, mode_bytes, limit);
+        var r = _tail_emit_one(fd, name, mode_bytes, limit, from_start);
         if (r != 0) {
             _tail_report(name, 0 - r);
             any_failed = 1;

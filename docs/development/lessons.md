@@ -464,6 +464,25 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   leftmost-first. So a line where a LATER alternative qualified was rejected, silently
   (`-xE 'a|ab'` on `ab`). A constraint the engine must satisfy belongs IN the pattern (`^(…)$`),
   where every alternative is tried against it.
+- ⛔ **Measure an edge on BOTH GNU versions before comparing against "the local GNU".** GNU 9.4, in
+  CI's container, refuses `head -n 99999999999999999999` (*Value too large*). GNU 9.11 on the host
+  saturates it. A `ht_same`-style comparison would pass on one box and fail on the other, whichever
+  answer kriya gave. Where the versions split, assert kriya's answer directly and name both
+  versions in the comment. 1.6.12's `--dired` split was the first case and 1.6.15's oversized
+  counts the second.
+- ⛔ **A utility that stops before EOF owes the next reader the rest.** `head` read 64 KiB, kept
+  one line, and closed over the rest. So `{ head -n 1 >/dev/null; cat; } < file`, the idiom for
+  consuming a header line, printed nothing more at exit 0. No test looked, because every test
+  compared what `head` PRINTED. POSIX XCU 1.4 (INPUT FILES) asks that a seekable input be left just
+  past the last byte processed. Test the shared descriptor with a second reader, as
+  `smoke-head-tail.sh`'s `ht_offset` does. Any future early-stopping reader (a `grep -m`) owes the
+  same.
+- ⭐ **A grammar fuzz finds the behaviours nobody thought to write down.** 1.6.15's hand-written
+  cases covered every form the roadmap named and matched GNU. 8,500 generated command lines then
+  found three GNU `tail` behaviours outside any form: the `-n 0` early exit that never opens its
+  files, the same exit for a `+N` past 2^63, and a negative zero. They were not kriya defects, but
+  each needed a decision, and a hand-written case would never have asked. The fuzzer sorts each
+  difference into a named class and fails only on the rest (`scripts/difffuzz-head-tail.py`).
 - **A per-byte table cannot see a whole-name rule.** `{` and `}` are bare anywhere in a word and
   quoted when they ARE the word; a table measured byte by byte at two positions records them as bare.
   One-byte names are a fuzz stratum of their own.

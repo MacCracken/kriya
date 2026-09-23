@@ -38,7 +38,7 @@ watchlist in [`lessons.md`](lessons.md). The rest are shipped or dissolved into 
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.6.x** | GNU-parity leftovers and cleanup | — | **1.6.15** — `head` / `tail` count forms |
+| **1.6.x** | GNU-parity leftovers and cleanup | — | **1.6.16** — cleanup and leftovers |
 | **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | ARG_MAX argv chunking | **1.7.0** — batched exec |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.8.0** — floats |
 | **1.9.x** | Performance | niyama regex speed (upstream) | **1.9.0** — `wc -c` fast path |
@@ -55,14 +55,17 @@ test-first. **1.7.x onward is new capability**, a different kind of risk: it cha
 What the closed arcs and the release audits left open. One release per entry; every item was
 measured against GNU when it was filed and re-confirmed open at 1.6.11.
 
-- **1.6.15 — `head` / `tail` count forms.** All three are refusals today, never wrong answers:
-  - **Negative counts**: `head -n -5` (all but the last five lines) and `head -c -3` are
-    GNU-supported, and kriya requires a non-negative integer. The diagnostic already names the
-    count; what is left is the feature — a single buffer plus a tail-like backward scan.
-  - **`tail -n +N` / `-c +N`** (start FROM line or byte N) is unimplemented, same message.
-  - **The obsolescent unit suffix `-5c` / `-5l`** is refused where GNU accepts it.
-
 - **1.6.16 — cleanup, and the leftovers nothing else claims.**
+  - ⛔ **`kriya_parse_nonneg_int` wraps past 2^64, and fifteen options read through it.** A count of
+    `18446744073709551617` comes back as **1**, at exit 0. Measured at 1.6.15 against GNU 9.11,
+    which refuses the number for `du -d`, `find -maxdepth` / `-mindepth` / `-uid`, and `nl -i` /
+    `-v` / `-w` (exit 1, *Numerical result out of range* or *Value too large*), where kriya runs
+    with depth 1, increment 1, width 1. GNU **saturates** it for `sort -k` and `uniq -f` / `-s` /
+    `-w`, where kriya's wrapped 1 agrees only by accident of the input (`uniq -w 1` on `xa`, `xb`
+    is one line; GNU prints two). `find -gid`, `-user` and `-group` given a number, and `nl -l`,
+    share the parser. ⚠ Each option wants its own answer, which is why 1.6.15 gave `head` and
+    `tail` their own saturating parser (`kriya_parse_count`) rather than changing this one: refuse
+    where GNU refuses, saturate where it saturates.
   - **`xargs` treats an unrecognised numeric short as the COMMAND.** `echo hi | xargs -5 echo` is
     *invalid option* / exit 1 under GNU and `-5: command not found` / **exit 127** here. ⚠ 127 is
     "command not found", so a caller cannot tell a typo'd flag from a missing binary.
@@ -92,8 +95,9 @@ measured against GNU when it was filed and re-confirmed open at 1.6.11.
     GNU reads `security.selinux` and, where there is none, prints `?` too but exits **1** with
     *failed to get security context*, so a script cannot tell "no context" from "not asked".
     `k_getxattr` (1.6.12) is half of it; an unfollowed symlink needs the `l` variant.
-  - **Four doc blocks in `src/lib/args.cyr` sit 100–190 lines above the functions they document**
-    (`kriya_parse_nonneg_int`, `kriya_argv_collect`, `kriya_parse_octal_mode`).
+  - **Two doc blocks in `src/lib/args.cyr` sit 130-odd lines above the functions they document**
+    (`kriya_argv_collect`, `kriya_parse_octal_mode`). `kriya_parse_nonneg_int`'s moved at 1.6.15,
+    when the count parser landed beside it.
 
 ---
 
@@ -205,6 +209,14 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
   fixes, and both are needed: seek from the end for seekable input (which also lifts the 16 MiB cap
   for regular files), and a ring buffer for pipes, which cannot seek. (`src/cmd/tail.cyr` points
   here.)
+  - **`head -n -N` wants the same backward scan.** Since 1.6.15 it holds the last N lines in memory
+    for every input, which is right for a pipe and unnecessary for a regular file, whose last N
+    lines can be found from the end the way GNU's `elide_tail_lines_seekable` does. `head -c -N`
+    already uses the file size and holds nothing. (`src/cmd/head.cyr` points here.)
+  - **And the pipe's ring buffer should serve `head` too.** `_head_elide`'s hold grows by doubling
+    and the bump allocator never frees the buffer it outgrew, so a pipe under
+    `head -c -30000000` peaks at **64 MB against GNU's 33 MB** (measured at 1.6.15) — about twice
+    the held bytes. A ring sized to what is held is the fix, and it is the structure `tail` needs.
 - **1.9.2 — niyama regex speed** — ⚠ upstream Cyrius. ⭐ **The crash is gone**: at pin 6.6.6,
   `grep 'line.*005'` over the 13.6 MB fixture that used to segfault under `ulimit -v 1048576`
   completes in constant memory (~8 MB peak) with GNU's count. What remains is speed — **5.2 s

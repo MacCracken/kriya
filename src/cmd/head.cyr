@@ -4,23 +4,35 @@
 #   head [opts] [file...]
 #
 # Flags:
-#   -n / --lines=N    emit the first N lines (default 10).
-#   -c / --bytes=N    emit the first N bytes.
-#   -q / --quiet      never emit the `==> FILE <==` header.
-#   -v / --verbose    always emit the header.
+#   -n / --lines=[-]N  emit the first N lines (default 10) — or, written
+#                      `-N`, every line but the last N.
+#   -c / --bytes=[-]N  emit the first N bytes — or all but the last N.
+#   -q / --quiet       never emit the `==> FILE <==` header.
+#   -v / --verbose     always emit the header.
+#   -NUM[cbkmlqv]      the obsolescent form, FIRST ARGUMENT ONLY
+#                      (`_head_obs_parse` has the letters).
 #
 # When neither `-q` nor `-v` is set, the header is emitted iff there
 # is more than one file operand (POSIX/GNU default).
 #
-# Streaming: 64 KiB reads; stops as soon as the limit is hit. No
-# buffering of the file beyond the read window.
+# Streaming: 64 KiB reads; stops as soon as the limit is hit. Nothing is
+# held beyond the read window, except by the "all but the last N" forms,
+# which cannot know which lines or bytes are the last N until EOF and so
+# hold those back (`_head_elide`).
 #
-# Deferred (GNU extensions, each a named follow-up): (roadmap 1.6.15, 1.8.2)
-#   -n -N / -c -N            "all but the last N" forms (roadmap 1.6.15). Need a
-#                            single-buffer + tail-like backward scan.
+# ⭐ A seekable input is left positioned just past the last byte `head`
+# used, as POSIX asks of a utility that stops before EOF (XCU 1.4, INPUT
+# FILES): `{ head -n 1 >/dev/null; cat; } < file` prints the rest of the
+# file, as it does under GNU. Until 1.6.15 the 64 KiB read took the rest
+# with it and `cat` printed nothing, at exit 0.
+#
+# Deferred (GNU extensions, each a named follow-up): (roadmap 1.8.2, 1.9.1)
 #   k/M/G/T/P/E suffixes     on N (e.g. `-c 5K`), roadmap 1.8.2. Wait on a shared
 #                            byte-suffix parser; once head + tail +
 #                            dd want it, extract into args.cyr.
+#   `-n -N` by seeking       a seekable file could be scanned backward from
+#                            its end instead of holding its last N lines —
+#                            the same scan `tail` needs (roadmap 1.9.1).
 #
 # Symlink policy: file operands are opened by path; default open
 # follows symlinks (POSIX head/tail semantics). ADR 0003's matrix is
@@ -35,11 +47,24 @@ var _head_v_idx = 0;
 var _head_buf   = 0;
 var _HEAD_BUFSZ = 65536;
 
+# The held-back bytes of `_head_elide`: one buffer, reused across operands and
+# grown as needed.
+var _head_hold     = 0;
+var _head_hold_cap = 0;
+
+# The obsolescent first argument, parsed: offsets into a 32-byte record.
+enum HeadObs {
+    HEAD_OBS_COUNT = 0;    # the count, saturated
+    HEAD_OBS_BYTES = 8;    # 1 when it counts bytes, 0 for lines
+    HEAD_OBS_HDR   = 16;   # 113 (`q`) or 118 (`v`), whichever came last, or 0
+    HEAD_OBS_BAD   = 24;   # the letter refused, when the parse returns -1
+}
+
 fn _head_init_spec(): i64 {
     if (_head_spec != 0) { return 0; }
     var s = flags_new();
-    _head_n_idx = flags_add_str(s,  110, "lines",   0, "emit first N lines (default 10)");
-    _head_c_idx = flags_add_str(s,  99,  "bytes",   0, "emit first N bytes");
+    _head_n_idx = flags_add_str(s,  110, "lines",   0, "emit first N lines (default 10); -N: all but the last N");
+    _head_c_idx = flags_add_str(s,  99,  "bytes",   0, "emit first N bytes; -N: all but the last N");
     _head_q_idx = flags_add_bool(s, 113, "quiet",   0, "suppress filename headers");
     _head_v_idx = flags_add_bool(s, 118, "verbose", 0, "always emit filename headers");
     _head_spec = s;
@@ -54,10 +79,11 @@ fn head_help_declare(): i64 {
     help_begin("head", "Print the first part of files.",
       "head [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("Defaults to 10 lines. The obsolescent `head -5` form is accepted as `-n 5`, first argument only.");
+    help_operands("Defaults to 10 lines. A count written -N means all but the last N. The obsolescent `head -5` form (also `-5c`, `-5l`) is accepted, first argument only.");  #skip-lint
     help_exit(1, "a file could not be read");
     help_example("head -n 20 file.txt");
     help_example("head -c 512 blob.bin");
+    help_example("head -n -1 file.txt");
     help_example("head -5 log");
     return 0;
 }
@@ -98,81 +124,356 @@ fn _head_write_all(buf, n): i64 {
     return 0;
 }
 
-# Stream `fd` to stdout, emitting at most `limit` bytes if `count_lines`
-# is 0, or at most `limit` newlines (with the data up through the Nth
-# newline) if `count_lines` is 1. Returns 0 on success, negative errno
-# on read/write failure.
-fn _head_emit(fd, limit, count_lines): i64 {
-    if (limit == 0) { return 0; }
+# `head`'s obsolescent first argument (1.6.15): `-` and digits, then any of `c`
+# (bytes), `b` `k` `m` (bytes, times 512, 1024 or 1048576), `l` (lines), `q` and
+# `v` (headers). Returns 1 and fills `rec` when `tok` is that form, 0 when it is
+# not, and -1 — the letter in HEAD_OBS_BAD — when a letter after the digits is
+# not one of them.
+#
+# ⚠ THE LETTERS APPLY IN ORDER, AS GNU APPLIES THEM, and two of GNU's results
+# look like accidents but are measured (coreutils 9.11): `c` clears a multiplier
+# and `l` does not, so `-3kc` is 3 bytes but `-3kl` is 3072 LINES; and `-3lk` is
+# 3072 bytes, because the last unit letter wins. Header letters are last-wins
+# among themselves (`-3qv` prints headers).
+#
+# ⚠ GNU also takes `z`, for NUL-terminated lines. kriya's `head` has no `-z`,
+# so here it is refused like any other letter, exactly as `head -z` is.
+fn _head_obs_parse(tok, rec): i64 {
+    if (kriya_token_is_dashdigit(tok) == 0) { return 0; }
+    var len: i64 = 0;
+    var n = kriya_count_digits(tok + 1, &len);
+    var bytes: i64 = 0;
+    var mult: i64 = 1;
+    var hdr: i64 = 0;
+    var p = 1 + len;
+    var c = load8(tok + p);
+    while (c != 0) {
+        if (c == 99) { bytes = 1; mult = 1; }              # c
+        elif (c == 98) { bytes = 1; mult = 512; }          # b
+        elif (c == 107) { bytes = 1; mult = 1024; }        # k
+        elif (c == 109) { bytes = 1; mult = 1048576; }     # m
+        elif (c == 108) { bytes = 0; }                     # l
+        elif (c == 113) { hdr = 113; }                     # q
+        elif (c == 118) { hdr = 118; }                     # v
+        else {
+            store64(rec + HEAD_OBS_BAD, c);
+            return 0 - 1;
+        }
+        p = p + 1;
+        c = load8(tok + p);
+    }
+    store64(rec + HEAD_OBS_COUNT, kriya_count_mul(n, mult));
+    store64(rec + HEAD_OBS_BYTES, bytes);
+    store64(rec + HEAD_OBS_HDR, hdr);
+    store64(rec + HEAD_OBS_BAD, 0);
+    return 1;
+}
+
+# Copy up to `limit` bytes of `fd` to stdout, never READING past them — so a
+# pipe keeps the rest for its next reader and a seekable input is left where
+# `head` stopped. Returns the bytes copied, or a negative errno.
+fn _head_copy(fd, limit): i64 {
     var buf = _head_buf_get();
-    var bufsz = _HEAD_BUFSZ;
-    var emitted_bytes: i64 = 0;
-    var emitted_lines: i64 = 0;
+    var done: i64 = 0;
     var loop: i64 = 1;
     while (loop == 1) {
-        var n = k_read( fd, buf, bufsz);
+        if (done >= limit) { loop = 0; }
+        else {
+            var want = _HEAD_BUFSZ;
+            if (limit - done < want) { want = limit - done; }
+            var n = k_read( fd, buf, want);
+            if (n < 0) {
+                if ((0 - n) != 4) { return n; }          # EINTR retries
+            } elif (n == 0) {
+                loop = 0;
+            } else {
+                var wr = _head_write_all(buf, n);
+                if (wr != 0) { return wr; }
+                done = done + n;
+            }
+        }
+    }
+    return done;
+}
+
+# Copy the first `limit` lines of `fd`. Returns 0 or a negative errno.
+#
+# ⛔ THE READ GOES PAST THE LAST LINE, and nothing used to put it back. The
+# 64 KiB window that held line N also held whatever followed it, so
+# `{ head -n 1; cat; } < file` printed one line and then NOTHING, at exit 0 —
+# the idiom for consuming a header line, answered wrongly. A seekable input is
+# now moved back to just past line N's newline, as GNU does. ⚠ A pipe cannot be
+# moved back; there, as in GNU, the rest of the window is gone.
+fn _head_lines(fd, limit): i64 {
+    if (limit == 0) { return 0; }
+    var buf = _head_buf_get();
+    var seen: i64 = 0;
+    var loop: i64 = 1;
+    while (loop == 1) {
+        var n = k_read( fd, buf, _HEAD_BUFSZ);
         if (n < 0) {
-            if ((0 - n) == 4) {
-                # EINTR — retry.
-            } else { return n; }
+            if ((0 - n) != 4) { return n; }              # EINTR retries
+        } elif (n == 0) {
+            loop = 0;
         } else {
-            if (n == 0) { loop = 0; }
-            else {
-                var write_n = n;
-                if (count_lines == 0) {
-                    # Byte-limited.
-                    var remaining = limit - emitted_bytes;
-                    if (write_n > remaining) { write_n = remaining; }
-                } else {
-                    # Line-limited: find the Nth newline (if any) within
-                    # this read window and truncate.
-                    var i: i64 = 0;
-                    var capped: i64 = 0;
-                    while (i < n) {
-                        if (load8(buf + i) == 10) {
-                            emitted_lines = emitted_lines + 1;
-                            if (emitted_lines >= limit) {
-                                write_n = i + 1;
-                                capped = 1;
-                                i = n;
-                            }
-                        }
-                        i = i + 1;
+            var write_n = n;
+            var i: i64 = 0;
+            while (i < n) {
+                if (load8(buf + i) == 10) {
+                    seen = seen + 1;
+                    if (seen >= limit) {
+                        write_n = i + 1;
+                        i = n;
+                        loop = 0;
                     }
-                    if (capped == 0) { write_n = n; }
                 }
-                if (write_n > 0) {
-                    var wr = _head_write_all(buf, write_n);
-                    if (wr != 0) { return wr; }
-                    emitted_bytes = emitted_bytes + write_n;
-                }
-                if (count_lines == 0) {
-                    if (emitted_bytes >= limit) { loop = 0; }
-                } else {
-                    if (emitted_lines >= limit) { loop = 0; }
-                }
+                i = i + 1;
+            }
+            var wr = _head_write_all(buf, write_n);
+            if (wr != 0) { return wr; }
+            if (write_n < n) {
+                # Failure means a pipe, which cannot give the bytes back.
+                if (K_HAVE_LSEEK == 1) { k_lseek(fd, 0 - (n - write_n), 1); }   # SEEK_CUR
             }
         }
     }
     return 0;
 }
 
+# Bytes of `p[0..len)` up to and including its `k`-th newline; the caller
+# guarantees there are at least `k`.
+fn _head_through_nl(p, len, k): i64 {
+    var seen: i64 = 0;
+    var i: i64 = 0;
+    while (i < len) {
+        if (load8(p + i) == 10) {
+            seen = seen + 1;
+            if (seen == k) { return i + 1; }
+        }
+        i = i + 1;
+    }
+    return len;
+}
+
+# Every byte of `fd` but the last `n` bytes (`bytes` = 1) or the last `n` lines
+# (`bytes` = 0): `head -c -N` on anything that cannot be sized, and `head -n -N`
+# on everything. Returns 0 or a negative errno.
+#
+# ⭐ ONLY WHAT MIGHT STILL BE AMONG THE LAST `n` IS HELD — at most `n` bytes, or
+# `n` whole lines plus the line still arriving. Everything before that is
+# written as soon as it is known not to be, so `head -n -1` of an endless pipe
+# streams rather than waiting for an EOF that never comes.
+#
+# ⚠ A LINE IS WHAT GNU COUNTS: every newline ends one, and bytes after the last
+# newline are one more. So `head -n -1` of `a\nb\nc` is `a\nb\n` — the unended
+# last line is dropped, never printed, whenever `n` is at least 1.
+#
+# ⚠ Nothing held is ever given back: a count larger than the input prints
+# nothing, having read all of it (GNU 9.11 the same). The hold is limited by
+# what `alloc` will hand out; past that this reports ENOMEM rather than guess.
+# ⚠ It grows by doubling and the bump allocator never frees the buffer it
+# outgrew, so memory peaks at about twice what is held — a ring sized to the
+# hold is the fix, shared with `tail` (roadmap 1.9.1).
+fn _head_elide(fd, n, bytes): i64 {
+    if (n == 0) {
+        var r0 = _head_copy(fd, KRIYA_COUNT_MAX);
+        if (r0 < 0) { return r0; }
+        return 0;
+    }
+    # Where a seekable input started, so it can be left just past the last byte
+    # written — the same courtesy `_head_lines` extends.
+    var pos0: i64 = 0 - 1;
+    if (K_HAVE_LSEEK == 1) { pos0 = k_lseek(fd, 0, 1); }   # SEEK_CUR
+    if (_head_hold == 0) {
+        _head_hold_cap = 4 * _HEAD_BUFSZ;
+        _head_hold = alloc(_head_hold_cap);
+        if (_head_hold == 0) { return 0 - 12; }             # ENOMEM
+    }
+    var start: i64 = 0;      # the held bytes are [start, start + have)
+    var have: i64 = 0;
+    var nl: i64 = 0;         # newlines among them, counted in line mode
+    var written: i64 = 0;
+    var loop: i64 = 1;
+    while (loop == 1) {
+        # Room for one more read. ⚠ Grow while the held bytes fill more than half
+        # the buffer, and otherwise slide them to the front: a slide then moves
+        # fewer bytes than were written since the last one, so it costs O(1) per
+        # byte however large `n` is.
+        if (start + have + _HEAD_BUFSZ > _head_hold_cap) {
+            if (2 * (have + _HEAD_BUFSZ) > _head_hold_cap) {
+                var ncap = _head_hold_cap * 2;
+                while (ncap < 2 * (have + _HEAD_BUFSZ)) { ncap = ncap * 2; }
+                var nb = alloc(ncap);
+                if (nb == 0) { return 0 - 12; }             # ENOMEM
+                memcpy(nb, _head_hold + start, have);
+                _head_hold = nb;
+                _head_hold_cap = ncap;
+            } else {
+                # An overlapping move to the LEFT: a forward copy is safe.
+                var m: i64 = 0;
+                while (m < have) {
+                    store8(_head_hold + m, load8(_head_hold + start + m));
+                    m = m + 1;
+                }
+            }
+            start = 0;
+        }
+        var at = _head_hold + start + have;
+        var got = k_read( fd, at, _HEAD_BUFSZ);
+        if (got < 0) {
+            if ((0 - got) != 4) { return got; }            # EINTR retries
+        } elif (got == 0) {
+            loop = 0;
+        } else {
+            if (bytes == 0) {
+                var q: i64 = 0;
+                while (q < got) {
+                    if (load8(at + q) == 10) { nl = nl + 1; }
+                    q = q + 1;
+                }
+            }
+            have = have + got;
+            var out: i64 = 0;
+            if (bytes == 1) {
+                if (have > n) { out = have - n; }
+            } else {
+                # More than `n` whole lines held: the ones before the last `n`
+                # are safe, whatever follows.
+                if (nl > n) {
+                    out = _head_through_nl(_head_hold + start, have, nl - n);
+                    nl = n;
+                }
+            }
+            if (out > 0) {
+                var wr = _head_write_all(_head_hold + start, out);
+                if (wr != 0) { return wr; }
+                start = start + out;
+                have = have - out;
+                written = written + out;
+            }
+        }
+    }
+    # EOF. The unended last line, if there is one, is one more line.
+    if (bytes == 0) {
+        var total = nl;
+        if (have > 0) {
+            if (load8(_head_hold + start + have - 1) != 10) { total = total + 1; }
+        }
+        if (total > n) {
+            var out2 = _head_through_nl(_head_hold + start, have, total - n);
+            var wr2 = _head_write_all(_head_hold + start, out2);
+            if (wr2 != 0) { return wr2; }
+            written = written + out2;
+        }
+    }
+    if (pos0 >= 0) { k_lseek(fd, pos0 + written, 0); }     # SEEK_SET
+    return 0;
+}
+
+# All but the last `n` bytes of `fd` (`head -c -N`). Returns 0, a negative
+# errno, or 1 when the failure has already been reported.
+#
+# ⭐ A REGULAR FILE IS NOT BUFFERED AT ALL: its size says where to stop, and the
+# bytes are copied straight through — so `head -c -1G` of a large file costs a
+# read, not a gigabyte of memory. Anything else goes through `_head_elide`.
+#
+# ⚠ ONLY A FILE THAT REPORTS MORE THAN ONE READ WINDOW. `/proc` files report
+# size 0 and `/sys` files a page, whatever they hold; trusting either would
+# print the wrong bytes. GNU draws the same line at one block. A real file that
+# small costs one read through the other path.
+fn _head_elide_bytes(fd, name, n): i64 {
+    if (n > 0) {
+        if (K_HAVE_LSEEK == 1) {
+            var st[144];
+            if (fs_fstatat(fd, "", &st, 4096) == 0) {       # AT_EMPTY_PATH: fstat
+                if ((load64(&st + FS_STAT_MODE) & FS_S_IFMT) == FS_S_IFREG) {
+                    var size = load64(&st + FS_STAT_SIZE);
+                    var pos = k_lseek(fd, 0, 1);            # SEEK_CUR
+                    if (size > _HEAD_BUFSZ) {
+                        if (pos >= 0) {
+                            var left = size - pos;
+                            if (left <= n) { return 0; }
+                            var r = _head_copy(fd, left - n);
+                            if (r < 0) { return r; }
+                            # ⚠ Short means the file shrank after the size was
+                            # read, and what was copied may include bytes that
+                            # are now among the last `n`. GNU says so too.
+                            if (r < left - n) {
+                                report_note("head", name, "file shrank while it was being read");
+                                return 1;
+                            }
+                            return 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return _head_elide(fd, n, 1);
+}
+
+# One operand under the count: the first `limit` lines or bytes, or — `elide` —
+# all but the last `limit`. Returns 0, a negative errno, or 1 when the failure
+# has already been reported.
+fn _head_emit(fd, name, limit, count_lines, elide): i64 {
+    if (elide == 1) {
+        if (count_lines == 1) { return _head_elide(fd, limit, 0); }
+        return _head_elide_bytes(fd, name, limit);
+    }
+    if (count_lines == 1) { return _head_lines(fd, limit); }
+    var r = _head_copy(fd, limit);
+    if (r < 0) { return r; }
+    return 0;
+}
+
+# A `-n` / `-c` value: `N`, or `-N` for all but the last N. Returns the count
+# (saturated) or -1; `*elide_p` is set to 1 for the `-N` form.
+#
+# ⚠ Only the FIRST byte is looked at for the `-`, as in GNU; `kriya_parse_count`
+# then takes GNU's `xstrtoumax` shape, so `+3` is 3, `-+3` is all but 3, and
+# ` -3` is refused.
+fn _head_count(arg, elide_p): i64 {
+    store64(elide_p, 0);
+    var a = arg;
+    if (load8(a) == 45) {
+        store64(elide_p, 1);
+        a = a + 1;
+    }
+    return kriya_parse_count(a);
+}
+
 fn cmd_head(start: i64): i64 {
     _head_init_spec();
-    # 110 = 'n': the obsolescent bare-digit form. POSIX marks `head -5` / `tail -5`
-    # obsolescent but every shell script in existence still uses it, and it is only
-    # unambiguous here because neither utility registers a digit as a short option.
+    # ⭐ THE OBSOLESCENT FIRST ARGUMENT IS PARSED HERE, BEFORE THE OPTION PARSER
+    # SEES IT, and dropped from what the parser gets (`kriya_obs_consume_first`).
+    # POSIX marks `head -5` obsolescent but every shell script in existence still
+    # uses it, and GNU's form goes further than bare digits: `-5c` is five bytes,
+    # `-2kv` two KiB with a header. Until 1.6.15 only the bare digits were taken
+    # and `head -5c` exited 2.
     # ⚠ FIRST ARGUMENT ONLY — `head -c 3 -5` is a usage error, as it is in GNU.
     # The expander enforces that and names the offender (`_kriya_obsnum_trailing`).
+    var obs[32];
+    var have_obs: i64 = 0;
+    if (start < kriya_argv_count()) {
+        var o = _head_obs_parse(load64(kriya_argv_flat() + start * 8), &obs);
+        if (o < 0) {
+            var bad[2];
+            store8(&bad, load64(&obs + HEAD_OBS_BAD));
+            store8(&bad + 1, 0);
+            k_write( 2, "kriya head: error: invalid trailing option -- ", 46);
+            k_write( 2, &bad, 1);
+            k_write( 2, " (after -NUM only c, b, k, m, l, q or v may follow)\n", 52);
+            return EXIT_USAGE;
+        }
+        if (o == 1) {
+            have_obs = 1;
+            kriya_obs_consume_first();
+        }
+    }
     if (kriya_args_parse_obsnum(_head_spec, start, 110) != 0) {
         k_write( 2, "kriya head: error: bad option (see ADR 0002 for accepted syntax)\n", 65);
         return EXIT_USAGE;
     }
-
-    var quiet: i64 = 0;
-    if (flags_get_bool(_head_spec, _head_q_idx) == 1) { quiet = 1; }
-    var verbose: i64 = 0;
-    if (flags_get_bool(_head_spec, _head_v_idx) == 1) { verbose = 1; }
 
     # ⛔ -n AND -c ARE LAST-WINS, AND "-c WINS" IS NOT THE SAME RULE. The comment
     # here said "Mode: -c wins over -n (last-wins; GNU same)" and the code did
@@ -187,10 +488,16 @@ fn cmd_head(start: i64): i64 {
     # wrapper appends `-n` to a base command that already carried `-c`.
     #
     # ⭐ The order comes from the parser's expanded argv, so the clustered
-    # `-c3 -n1`, the attached `--bytes=3`, and the obsolescent `head -5` (which
-    # expands to `-n 5`) all count as occurrences at their own position.
+    # `-c3 -n1` and the attached `--bytes=3` count as occurrences at their own
+    # position. The obsolescent first argument is not in that argv at all: it
+    # comes first, so any `-n` or `-c` after it wins.
     var count_lines: i64 = 1;
     var limit: i64 = 10;
+    var elide: i64 = 0;
+    if (have_obs == 1) {
+        limit = load64(&obs + HEAD_OBS_COUNT);
+        count_lines = 1 - load64(&obs + HEAD_OBS_BYTES);
+    }
 
     var n_arg = flags_get_str(_head_spec, _head_n_idx);
     var c_arg = flags_get_str(_head_spec, _head_c_idx);
@@ -198,23 +505,7 @@ fn cmd_head(start: i64): i64 {
     # ⚠ BOTH ARE VALIDATED EVEN THOUGH ONLY ONE IS USED. GNU refuses
     # `head -c abc -n 1` rather than quietly taking the `-n`, and a bad count is
     # a usage error whichever flag ends up losing.
-    var n_val: i64 = 0 - 1;
-    var c_val: i64 = 0 - 1;
-    if (n_arg != 0) {
-        n_val = kriya_parse_nonneg_int(n_arg);
-        if (n_val < 0) {
-            k_write( 2, "kriya head: error: --lines requires a non-negative integer\n", 59);
-            return EXIT_USAGE;
-        }
-    }
-    if (c_arg != 0) {
-        c_val = kriya_parse_nonneg_int(c_arg);
-        if (c_val < 0) {
-            k_write( 2, "kriya head: error: --bytes requires a non-negative integer\n", 59);
-            return EXIT_USAGE;
-        }
-    }
-
+    #
     # ⛔ AN EMPTY VALUE IS AN ERROR, NOT AN ABSENT OPTION. `--lines=` used to be
     # skipped over — the option was thrown away and the DEFAULT ten lines
     # printed, at exit 0 — so `head --lines= f` answered a question nobody asked
@@ -222,9 +513,24 @@ fn cmd_head(start: i64): i64 {
     # and [ADR 0002](../../docs/adr/0002-argument-parsing-is-agent-safe.md) names
     # this case: an option given a value it cannot use is a usage error, because
     # the alternative is a silently different answer.
-    #
-    # ⚠ `kriya_parse_nonneg_int` already rejects the empty string; the bug was
-    # the `if (load8(arg) != 0)` guard that kept it from ever being asked.
+    var n_val: i64 = 0 - 1;
+    var c_val: i64 = 0 - 1;
+    var n_elide: i64 = 0;
+    var c_elide: i64 = 0;
+    if (n_arg != 0) {
+        n_val = _head_count(n_arg, &n_elide);
+        if (n_val < 0) {
+            report_note("head", n_arg, "invalid number of lines");
+            return EXIT_USAGE;
+        }
+    }
+    if (c_arg != 0) {
+        c_val = _head_count(c_arg, &c_elide);
+        if (c_val < 0) {
+            report_note("head", c_arg, "invalid number of bytes");
+            return EXIT_USAGE;
+        }
+    }
     var n_at: i64 = 0;
     var c_at: i64 = 0;
     if (n_val >= 0) { n_at = kriya_opt_seq(_head_spec, 110, "lines"); }
@@ -232,11 +538,18 @@ fn cmd_head(start: i64): i64 {
     if (n_at > c_at) {
         limit = n_val;
         count_lines = 1;
+        elide = n_elide;
     }
     if (c_at > n_at) {
         limit = c_val;
         count_lines = 0;
+        elide = c_elide;
     }
+
+    # A header letter in the obsolescent argument (`-3v`) stands until a `-q` or
+    # `-v` after it says otherwise.
+    var obs_hdr: i64 = 0;
+    if (have_obs == 1) { obs_hdr = load64(&obs + HEAD_OBS_HDR); }
 
     var npos = flags_positional_count(_head_spec);
     var any_failed: i64 = 0;
@@ -248,12 +561,15 @@ fn cmd_head(start: i64): i64 {
         # none. One rule, both paths.
         var sq_at = kriya_opt_seq(_head_spec, 113, "quiet");
         var sv_at = kriya_opt_seq(_head_spec, 118, "verbose");
-        if (sv_at > sq_at) { _head_emit_header("standard input", 1); }
-        var r = _head_emit(0, limit, count_lines);
-        if (r != 0) {
-            _head_report("(stdin)", 0 - r);
-            any_failed = 1;
+        var s_hdr: i64 = 0;
+        if (sv_at > sq_at) { s_hdr = 1; }
+        if (sq_at + sv_at == 0) {
+            if (obs_hdr == 118) { s_hdr = 1; }
         }
+        if (s_hdr == 1) { _head_emit_header("standard input", 1); }
+        var r = _head_emit(0, "standard input", limit, count_lines, elide);
+        if (r < 0) { _head_report("(stdin)", 0 - r); }
+        if (r != 0) { any_failed = 1; }
         if (any_failed == 1) { return EXIT_FAILURE; }
         return EXIT_SUCCESS;
     }
@@ -275,6 +591,10 @@ fn cmd_head(start: i64): i64 {
     var v_at = kriya_opt_seq(_head_spec, 118, "verbose");
     if (v_at > q_at) { show_headers = 1; }
     if (q_at > v_at) { show_headers = 0; }
+    if (q_at + v_at == 0) {
+        if (obs_hdr == 118) { show_headers = 1; }
+        if (obs_hdr == 113) { show_headers = 0; }
+    }
 
     var i: i64 = 0;
     var first: i64 = 1;
@@ -301,11 +621,9 @@ fn cmd_head(start: i64): i64 {
             }
         }
         if (show_headers == 1) { _head_emit_header(name, first); }
-        var r = _head_emit(fd, limit, count_lines);
-        if (r != 0) {
-            _head_report(name, 0 - r);
-            any_failed = 1;
-        }
+        var r = _head_emit(fd, name, limit, count_lines, elide);
+        if (r < 0) { _head_report(name, 0 - r); }
+        if (r != 0) { any_failed = 1; }
         if (is_stdin == 0) { k_close( fd); }
         first = 0;
         i = i + 1;

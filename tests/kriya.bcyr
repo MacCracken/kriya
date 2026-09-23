@@ -8,6 +8,8 @@
 #   - path_normalize on a path that exercises `.`, `..` and dupes
 #   - fs_inoset insert/lookup, the per-entry cost `du`'s dedup and
 #     `cp --preserve=links` both pay on every file they touch
+#   - kriya_parse_count, the `head` / `tail` count parser, plain and
+#     saturating (1.6.15)
 #
 # These are the per-step costs that compose the dispatcher hot path.
 # True process-spawn cold-start needs `time ./build/kriya true`-style
@@ -130,6 +132,18 @@ fn bench_parse_duration() {
     return 0;
 }
 
+# `head` / `tail` parse one count per `-n` / `-c` (1.6.15). The saturating
+# case is the one with extra work per digit, so it is the one measured too.
+fn bench_parse_count() {
+    var r = kriya_parse_count("+1000");
+    return 0;
+}
+
+fn bench_parse_count_saturating() {
+    var r = kriya_parse_count("99999999999999999999");
+    return 0;
+}
+
 fn bench_niyama_bre_search() {
     var r = niyama_bre_search_at(_grep_bench_bre, _grep_bench_line, _grep_bench_llen, 0);
     return 0;
@@ -214,6 +228,14 @@ fn main() {
     var b16 = bench_new("args/parse_duration_us");
     bench_run_batch(b16, &bench_parse_duration, 10000, 100);
     bench_report(b16);
+
+    var b17 = bench_new("args/parse_count");
+    bench_run_batch(b17, &bench_parse_count, 10000, 100);
+    bench_report(b17);
+
+    var b18 = bench_new("args/parse_count_saturating");
+    bench_run_batch(b18, &bench_parse_count_saturating, 10000, 100);
+    bench_report(b18);
 
     return 0;
 }

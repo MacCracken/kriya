@@ -6,6 +6,175 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.15] - 2026-09-22 — `head` / `tail` count forms, and where `head` leaves its input
+
+The 1.6.15 slot's three items, each measured against GNU coreutils 9.11 (this box) and 9.4 (CI's)
+before anything was written: `head`'s negative counts, `tail`'s `+N`, and the obsolescent forms past
+bare digits. All three were refusals. Measuring them turned up things the slot did not name: **a
+wrong answer**, where oversized counts wrapped past 2^64; **a POSIX violation** in `head`, which
+lost the rest of a shared input; and three GNU `tail` behaviours that kriya does not copy.
+
+### ⛔ Breaking — a `+N` first argument to `tail` is a count
+
+`tail +5 f` used to read a file named `+5`, fail on it, and then print `f`'s last ten lines. It now
+prints `f` from line 5, as GNU does. GNU's operand rule decides when a `+` first argument is a count:
+nothing follows it, or one operand that is not an option, or `--` and one operand. So
+`tail +5 a b` still reads a file named `+5`. **Migration:** a script that means the file writes
+`./+5`, or puts it after `--` (`tail -- +5 f`).
+
+### Added — `head -n -N` and `head -c -N`
+
+These print every line or byte except the last N, and `--lines=-N` / `--bytes=-N` work too. A line
+is what GNU counts: every newline ends one, and bytes after the last newline are one more. So
+`head -n -1` of `a\nb\nc` is `a\nb\n`. `-0` prints everything, and a count larger than the input
+prints nothing. A `+` is only a sign (`head -n +3` is 3), as in GNU.
+
+- A regular file under `-c -N` is not buffered at all: its size says where to stop.
+- Everything else holds back only what may still be among the last N, and writes the rest as soon
+  as it knows. That covers pipes, `/proc` files (which report size 0) and every `-n -N`. So
+  `head -n -1` of an endless pipe streams.
+
+### Added — `tail -n +N` and `tail -c +N`
+
+These print everything from line or byte N on, counting from 1; `+0` means `+1`. The output is
+streamed, so the last-N path's 16 MiB cap does not apply, and a regular file skips its bytes with a
+seek. A `-` is a sign too (`tail -n -3` is `-n 3`). ⚠ Only the first byte decides, as in GNU, so
+`tail -n ' +3'` is the LAST three lines.
+
+### Added — the obsolescent forms past bare digits
+
+[ADR 0023](docs/adr/0023-head-and-tail-take-the-obsolescent-count-first.md). First argument only, as
+before.
+
+- **`head -NUM`** followed by any of `c` (bytes), `b` / `k` / `m` (bytes × 512, 1024 or 1048576),
+  `l` (lines) and `q` / `v` (headers). The letters apply in order, which gives GNU's measured
+  answers: `-3kc` is 3 bytes and `-3kl` is 3072 lines. `head -3x` is refused and names the `x`.
+  `head -3z` is refused as `head -z` is, since kriya's `head` has no `-z`.
+- **`tail [+-]NUM[bcl][f]`**: `+5` is from line 5, `-5c` the last five bytes, `-3b` three
+  512-byte blocks, and `-5f` follows. With no digits the count is ten (`tail -l`, `tail +c`).
+- `tail -5 a b` and `tail -5 -f f` keep working, and so do the new `-` spellings when several
+  operands follow. GNU refuses all of these. A token that starts with `-` cannot be a file name, so
+  there is nothing for kriya to misread.
+
+Every form in the one-operand case matches GNU byte for byte, exit status included.
+
+### Fixed — ⛔ an oversized count wrapped past 2^64
+
+`head -n 18446744073709551617` printed **one** line at exit 0. Counts now saturate
+(`kriya_parse_count`): `head -n 99999999999999999999` prints everything, and
+`head -n -99999999999999999999` and `tail +99999999999999999999` print nothing. These are GNU 9.11's
+answers; 9.4 refuses the same numbers. The same wrap in fifteen other options, across `du`, `find`,
+`nl`, `sort` and `uniq`, is filed at roadmap 1.6.16, measured option by option.
+
+- ⛔ Found while fixing it: `tail -c +99999999999999999999` exited 1. A seek that close to 2^63
+  succeeds, and the read after it fails with EINVAL. The seek now stops at the end of the file.
+
+### Fixed — ⛔ `head` took the rest of a shared input with it
+
+`{ head -n 1 >/dev/null; cat; } < file` is the idiom for consuming a header line. It printed nothing
+after the first line, at exit 0, because the 64 KiB read that found line 1 kept everything after it.
+POSIX asks a utility that stops before EOF to leave a seekable input just past the last byte it
+processed (XCU 1.4, INPUT FILES), and GNU does.
+
+- `head -n N` now seeks back to just past line N's newline.
+- `head -c N` never reads past byte N, so a pipe keeps the rest too.
+- The `-N` forms leave the input just past the last byte they wrote.
+
+### Changed — an invalid count is named in GNU's words
+
+`kriya head: abc: invalid number of lines`, in architecture 001's frame (`report_note`). It replaces
+`--lines requires a non-negative integer`, which would now contradict `-n -5`. The exit status is
+still 2.
+
+### Not reproduced — three GNU `tail` behaviours
+
+The grammar fuzz below found these. `smoke-head-tail.sh` asserts kriya's own answers.
+
+- **`tail -n 0` or `-c 0` without `-f`.** GNU 9.11 exits at once: no headers, and no file is
+  opened, so `tail -n 0 missing` exits 0. kriya prints the headers, as GNU's own `head -n 0 a b`
+  does, and reports the missing file.
+- **A `+N` of 2^63−1 or more.** GNU exits the same way. kriya prints the headers over empty
+  output, as it does for any `+N` past the end.
+- **A negative zero.** GNU's `tail` takes one (`-n --0` is 0) where its `head` refuses one. kriya
+  refuses both.
+- ⚠ **A byte count past the end, under `-f`.** GNU seeks beyond EOF, reports its own seek as
+  `file truncated`, and prints the whole file. kriya prints what is appended.
+
+### Performance
+
+Median of seven runs over 38.9 MB (5,000,000 lines), output to `/dev/null`:
+
+| command | GNU 9.11 | kriya |
+|---|---|---|
+| `head -n -3 FILE` | 12 ms | 121 ms |
+| `cat FILE \| head -n -3` | 37 ms | 121 ms |
+| `head -c -3 FILE` | 12 ms | 6 ms |
+| `cat FILE \| head -c -3` | 13 ms | 6 ms |
+| `cat FILE \| head -c -30000000` | 24 ms | 46 ms |
+| `tail -n +3 FILE` | 12 ms | 6 ms |
+| `tail -c +3 FILE` | 13 ms | 6 ms |
+| `cat FILE \| tail -n +3` | 13 ms | 6 ms |
+
+- `-n -N` counts newlines one byte at a time, which is where the 10× goes.
+- Every path above peaks at kriya's baseline 13 MB of memory, except a pipe under
+  `head -c -30000000`. That one holds 30 MB and peaks at **64 MB against GNU's 33 MB**, because the
+  hold doubles and the bump allocator keeps the buffer it outgrew. The fix is filed at roadmap
+  1.9.1, with the ring buffer `tail` needs.
+- For scale, the last-N path this release leaves alone: `tail -n 5000000` of the same file takes
+  12.9 s, which is the 1.9.1 item. `tail -n +1` of it takes 6 ms.
+- `cyrius bench`: `args/parse_count` 26 ns, `args/parse_count_saturating` 76 ns.
+
+### Documentation
+
+- **[ADR 0023](docs/adr/0023-head-and-tail-take-the-obsolescent-count-first.md)**: `head` and `tail`
+  take GNU's obsolescent grammars in the first argument. GNU's operand rule applies to a `+` form,
+  which could be a file name, and not to a `-` form, which cannot. `head -3z` is refused, and
+  oversized counts saturate as in 9.11.
+- **Roadmap**: 1.6.15 retired, next up 1.6.16.
+  - 1.6.16 gains the wrap in fifteen other options, with GNU's answer for each: refuse for `du`,
+    `find` and `nl`, saturate for `sort` and `uniq`.
+  - 1.9.1 gains `head -n -N`'s backward scan and the pipe hold's memory.
+  - `kriya_parse_nonneg_int`'s doc block sits on its function again, so the stray-doc item names
+    two.
+- **Lessons**: measure an edge on both GNU versions; a utility that stops before EOF owes the next
+  reader the rest; a grammar fuzz finds the behaviours nobody wrote down.
+- `state.md`'s `head` / `tail` rows no longer list shipped forms as deferred, and the
+  `smoke-head-tail.sh` line had said 42 cases since 1.6.9.
+
+### Tests
+
+- `smoke-head-tail.sh` **133 → 393**, covering every form above against GNU:
+  - four small fixtures plus 200,000 lines, 300,000 bytes with no newline, and a 70,000-byte line,
+    through files and pipes;
+  - GNU's `+` operand rule;
+  - where a shared descriptor is left;
+  - the oversized counts, asserted as their answers, since 9.4 refuses them.
+
+  ⭐ **Run against the 1.6.14 binary, 211 of the 260 new assertions fail.** That run also caught
+  four places where a wrong binary ended the suite under `set -e` instead of failing an assertion.
+  They are guarded now.
+- `kriya.tcyr` **541 → 618**:
+  - `kriya_parse_count`, including 2^64 + 1;
+  - `kriya_count_digits` and `kriya_count_mul`;
+  - both obsolescent grammars, field by field.
+- `kriya.bcyr` gains the two `parse_count` benches.
+- ⭐ **`scripts/difffuzz-head-tail.py`** is committed, beside the `ls` / `stat` / quoting fuzzers. It
+  draws command lines from both grammars and compares them with the host's GNU. It fails only on a
+  difference outside the documented classes. **3,000 command lines through it, and 5,500 more
+  through its development versions, 0 unexplained.**
+
+### Release totals
+
+**6,420 smoke cases across 41 scripts** (from 6,160), **618 unit**, 18 POSIX. Fuzz is green under
+poison (1,127 / 201 / 201). `cyrius lint`, `lint-deferrals.sh`, `lint-help-schema.sh` and
+`check-oracles.sh` are clean. `watchlist-scan.py` is clean: 194 declarations, M15a 0, M15c the 3
+known, M15d 0, M15i 0. `vet` reports 56 deps, and both targets build warning-free.
+
+⭐ Verified in the `ubuntu:24.04` container (coreutils **9.4**, grep **3.11**) as a non-root user:
+39 of 41 scripts green, **3,930** cases. The two exceptions need `python3`, which the image lacks.
+
+Binary 1,208,064 → **1,220,728** bytes on host (+12,664), 1,203,784 → **1,212,352** on agnos (+8,568).
+
 ## [1.6.14] - 2026-09-22 — `grep`: `-NUM`, `--exclude-dir`, and the wrong answers under them
 
 The 1.6.14 slot's four `grep` items, each measured against GNU 3.12 (this box) and 3.11 (CI's)
