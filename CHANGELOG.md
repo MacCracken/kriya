@@ -6,6 +6,152 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.6.11] - 2026-09-22 — toolchain pin 6.6.6, every operand processed, and a fuzz gate that could not fail
+
+### Changed — toolchain pin 6.6.2 → **6.6.6**
+
+`cyrius.cyml`'s `[package].cyrius` is the source of truth; `lib/` re-synced with `cyrius lib sync
+--full` (111 files) and now matches the 6.6.6 snapshot byte for byte. ⚠ **Before the sync, `./lib/`
+was eleven bundled libs behind even the OLD pin** (`bayan`, `ganita`, `sakshi`, `sigil`, `sandhi`,
+`yukti`, `patra`, `vani`, `mabda`, `sankoch`, `yantra`): `cyrius build` re-copies the modules
+`[deps].stdlib` declares and never touches the rest, and the 1.6.10 bump skipped checklist step 2.
+None is in kriya's closure and CI re-vendors from scratch, so no shipped binary was affected.
+`cyrius deps` resolves clean and writes no `cyrius.lock` (kriya declares stdlib deps only).
+
+### Fixed — ⛔ kriya's `env.cyr` broke the stdlib `getenv`, and the build said so for four releases
+
+cyrius **6.5.36** fixed the stdlib `getenv`'s 8 KB window — the very defect `src/lib/env.cyr` exists
+to route around — by giving `lib/io.cyr` a heap-cached block behind two new privates, **`_env_load`
+and `_env_len`**. Those were the names `env.cyr` already used. Cyrius merges a duplicate definition
+with only a warning (*"last definition wins"*), and every kriya build since the 6.5.36 pin (1.6.7)
+printed it:
+
+    warning:src/lib/env.cyr:38:16: duplicate symbol '_env_len' redefined with conflicting value
+    warning:src/lib/env.cyr:43:1: duplicate fn '_env_load' (last definition wins; first defined in lib/io.cyr)
+
+The 1.6.9 audit read it and filed it under roadmap 1.6.13 as *"nothing is observably broken, but
+'last definition wins' is not a design."* ⛔ **Measured, it is not cosmetic.** A probe that
+includes `env.cyr` exactly as `src/main.cyr` does, run with `PROBE_VAR=hello`:
+
+| call order | stdlib `getenv("PROBE_VAR")` |
+|---|---|
+| stdlib `getenv` first | `unset` — its `-1` "not loaded" sentinel had become `env.cyr`'s `0` |
+| after `kriya_getenv` | **SIGSEGV** (rc 139) — a length from `env.cyr`, a NULL block from `io.cyr` |
+
+⚠ **Latent, not live**: nothing in kriya's closure calls the stdlib `getenv` on Linux, and on agnos
+it returns through `_agnos_getenv` before touching either symbol. The first stdlib module to read the
+environment on Linux would have inherited both failures.
+
+Every private in `env.cyr` is `_kriya_env_*` now; both targets build with **zero warnings**, and the
+same probe answers `hello` in both orders. The header's claim that
+the stdlib `getenv` scans an 8 KB stack buffer — false since 6.5.36 — is corrected, and it names the
+difference that still separates the two (the stdlib copies each hit to the heap; this returns a
+pointer into the cached block). ⭐ **The detection is a script now** — see *Added*, M15i.
+
+### Changed — ⛔ BREAKING (exit status): more than 128 operands is processed, not refused
+
+cyrius 6.6.5 rewrote `lib/flags.cyr`'s positional table to **grow**. It used to keep 128 and silently
+drop the rest while returning success — how `kriya rm *` on 200 files deleted 128 and exited 0 until
+1.6.3 turned it into a refusal. The upstream entry names kriya's workaround by line
+(`src/lib/args.cyr:781`).
+
+With the table unbounded, `_kriya_count_operands` / `_kriya_operand_overflow` could never fire, so
+they are retired (**−93 lines**) and `kriya_args_parse_range` returns `flags_parse`'s result
+directly. `rm` on 200 files deletes all 200 and exits 0, as GNU does — the destination roadmap 1.6.12
+planned to reach by re-plumbing every utility, delivered instead by the toolchain.
+
+**Migration:** none expected. The refusal (`too many operands (128 maximum)`, exit 2) only ever stood
+in for the truncation it prevented; a caller passing 129 or more operands now has them processed.
+
+⚠ **The assertions were rewritten, not deleted** — the roadmap said to keep them "whichever way it
+is satisfied". `smoke-rm.sh` asserts that 200 **and 1,500** operands are all deleted (1,500 crosses
+four doublings of the table, not one) with exit 0 and a clean stderr; `smoke-realpath.sh` asserts
+that 140 operands print **140 lines**, because a truncation that exits 0 is exactly what is guarded.
+⭐ Proven by mutation: with the pre-6.6.5 drop put back into `flags.cyr`, `rm` leaves **72 of 200** and
+**1,372 of 1,500** behind and `realpath` prints **128 of 140** — the original 1.6.3 signature.
+
+⛔ **And the first mutant was byte-identical to the real build.** `cyrius build` re-copies every
+declared `[deps].stdlib` module from the pinned snapshot before compiling — **`--no-deps` too** — so a
+mutation written into `lib/flags.cyr` was gone before `cycc` read it, and every test stayed green.
+The mutant that counted was built from a scratch copy with `flags` taken out of `[deps].stdlib` and
+included explicitly. Recorded in [`lessons.md`](docs/development/lessons.md).
+
+### Fixed — ⛔ `scripts/fuzz.sh` could not fail, so CI's fuzz step could not go red
+
+The loop piped `cyrius fuzz --poison` into `grep | sed`, and a pipeline's status is its **last**
+command's. With a stub `cyrius` whose every harness fails, and with one whose harness does not
+compile, the script exited **0** both times — and the compile error printed nothing at all, since the
+filter kept no `error:` line. The header's promise that an old toolchain "fails loudly" was not true
+either. The status is taken before the output is filtered now, a failure prints everything, and the
+script exits 1 naming the failed harnesses: both stubs red, the real run green.
+
+Found by doing what the roadmap's 6.6.6 note asked — auditing `scripts/` for a step whose failure
+cannot propagate. No script builds anything (each only checks that `build/kriya` exists), so 6.6.6's
+new exit code for a failed output rename changes nothing here.
+
+### Fixed — five deferral notes that 6.6.5's case-folding cyrlint could suddenly see
+
+6.6.5's cyrlint folds case (`Deferred`, `NOT YET`), and `scripts/lint-deferrals.sh` went red on the
+five notes the roadmap had listed. Each was checked before anything was marked:
+
+- **Three were prose** about the words themselves — `sys.cyr`'s `-2 IS "NOT YET"` (a return code)
+  and `uniq.cyr`'s two lines explaining why its old deferral heading was removed. Marked `#skip-lint`.
+- ⛔ **`cut.cyr`'s was false.** "Deferred: `-c` distinct from `-b` for multi-byte input" sat twenty
+  lines below the same file's own note that `-c` has been distinct since **1.4.2**, and
+  `kriya cut -c 2` on `héllo` returns the whole `é`. Rewritten as a statement of fact.
+- **`which.cyr`'s was a scope decision**, not a deferral: `--read-alias`, `--show-tilde` and the rest
+  are shell-state features that CHANGELOG [0.4.0] assigned to agnoshi when `which` shipped. It points
+  there now rather than reading as pending work.
+
+### Added — ⭐ watchlist **M15i**: a name kriya and its stdlib closure both define
+
+`scripts/watchlist-scan.py` resolves `cyrius.cyml`'s `[deps].stdlib` through every `include "lib/…"`
+(39 files at 6.6.6), collects top-level `fn` / `var` / enum-member names on both sides and exits
+non-zero on any overlap. It reports **0** on this tree and exactly **`_env_len`, `_env_load`** against
+the 1.6.10 `env.cyr` — the two the compiler named — with no false positive from the deliberately
+over-approximated closure.
+
+### Fixed — the 1.6.10 entry was filed below 0.1.0
+
+The 1.6.10 bump appended its entry, plus an empty `## [Unreleased]` heading this file does not use,
+after the 0.1.0 entry at the very bottom, so the newest release read as the oldest. Moved up verbatim
+to sit above 1.6.9; the stray heading is gone.
+
+### Checked — what else 6.6.3–6.6.6 could have touched
+
+- **PE `O_APPEND` / `O_TRUNC`** (6.6.6's headline, which names kriya's `tee`): kriya has no PE
+  target. On the Linux build `tee -a` appends and plain `tee` truncates a longer file; the agnos
+  build compiles, but there is no agnos runner on the release box, so that half is build-only.
+- **aarch64 `statfs` routing** is the one row 6.6.6 adds to the compiler's per-target syscall
+  renumbering. ⚠ Checking it showed the aarch64-Linux arm **already** maps `write`, `exit`, `fcntl`,
+  `getdents64` and `unlinkat` — five of the seven numbers roadmap 1.7.4 names as broken — so that
+  entry now says to measure an aarch64 build before scheduling it. `df`'s private `struct statfs` table
+  could become a shim over the stdlib accessors; left for its own release.
+- **6.6.6's nine new refusals** are compile-time, and both targets plus every `.tcyr` / `.bcyr` /
+  `.fcyr` subset compile. `assert.cyr`'s new `vec.cyr` include collides with nothing (M15i: 0 — kriya
+  defines no `vec_*`), `lib/` holds no symlink for `cyrius deps` to fail on, and there is no
+  `cyrius.lock` for it to fail to write.
+
+### Release totals
+
+**5,762 smoke cases across 41 scripts** (from 5,759) — `smoke-rm.sh` 92 → **94**, `smoke-realpath.sh`
+415 → **416**. **453 unit**, 18 POSIX; fuzz green under poison (1,127 / 201 / 201) and now able to go
+red; `cyrius lint`, `lint-deferrals.sh`, `lint-help-schema.sh` and `check-oracles.sh` clean;
+`watchlist-scan.py` clean (179 declarations; M15a 0, M15c the 3 known, M15d 0, **M15i 0**); M15a's
+premise re-measured unchanged at **8 / 32 / 144**; `vet` 56 deps; both targets build warning-free.
+⭐ Verified in the `ubuntu:24.04` container (coreutils **9.4**) as a non-root user — 39 of 41 scripts
+green, **3,318** cases; the two exceptions need `python3`, which the image lacks.
+
+Binary 1,134,432 → **1,147,512** bytes on host, 1,134,384 → **1,139,136** on agnos. The pin alone
+accounts for 1,147,544 / 1,143,264; this release's source changes net −32 / −4,128.
+
+## [1.6.10] - 2026-09-11
+
+### Changed
+
+- **Toolchain `6.5.36` → `6.6.2`.** No source change; the value form needed none.
+  Build, tests, and any bench/fuzz/distlib target the repo ships re-verified at the new pin.
+
 ## [1.6.9] - 2026-08-28 — `cp` stops losing read-only trees, and four utilities stop pretending to be last-wins
 
 Three branches merged (`claude/brave-moore-fbef5b`, `claude/kind-shannon-27e1ea`,
@@ -5537,12 +5683,3 @@ Closes M1 — dispatcher + six simplest utilities + four shared lib modules + tw
 ### Identity
 
 `kriya` (Sanskrit: क्रिया — *action, operation, verb*) — coreutils-equivalent for AGNOS. One repo, many small static utilities (`cp`, `mv`, `rm`, `mkdir`, `echo`, `wc`, `find`, `grep` …) sharing infrastructure. BusyBox-style dispatcher + symlinks per utility. Each kriya is one verb the user invokes.
-
-## [Unreleased]
-
-## [1.6.10] - 2026-09-11
-
-### Changed
-
-- **Toolchain `6.5.36` → `6.6.2`.** No source change; the value form needed none.
-  Build, tests, and any bench/fuzz/distlib target the repo ships re-verified at the new pin.

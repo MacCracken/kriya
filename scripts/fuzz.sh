@@ -43,10 +43,30 @@ fi
 echo "=== kriya fuzz suite (poisoned allocator) ==="
 echo ""
 
+failed=""
 for f in kriya-grep kriya-find kriya-printf; do
     echo "--- $f ---"
-    cyrius fuzz --poison "tests/$f.fcyr" 2>&1 | grep -E "passed|FAIL|fuzz:|poison" | sed 's/^/  /'
+    # ⛔ THE EXIT STATUS IS TAKEN BEFORE THE OUTPUT IS FILTERED. This loop used to
+    # pipe `cyrius fuzz` straight into `grep | sed`, and a pipeline's status is its
+    # LAST command's — so the script exited 0 with every harness failing, and 0
+    # for a harness that did not compile (its `error:` lines were filtered out
+    # too). CI's fuzz step could not go red, and the header's promise that an old
+    # toolchain "fails loudly" was not true. Found at 1.6.11, auditing `scripts/`
+    # for exactly this shape at the 6.6.6 pin bump.
+    rc=0
+    out=$(cyrius fuzz --poison "tests/$f.fcyr" 2>&1) || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        printf '%s\n' "$out" | grep -E "passed|FAIL|fuzz:|poison" | sed 's/^/  /'
+    else
+        # A failure prints EVERYTHING: a compile error has no line the filter keeps.
+        printf '%s\n' "$out" | sed 's/^/  /'
+        failed="$failed $f"
+    fi
     echo ""
 done
 
+if [ -n "$failed" ]; then
+    echo "=== fuzz suite FAILED:$failed ===" >&2
+    exit 1
+fi
 echo "=== fuzz suite complete ==="

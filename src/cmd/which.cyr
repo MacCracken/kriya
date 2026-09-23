@@ -29,7 +29,8 @@
 # Symlink + root-protection policy (informative): which is purely
 # informational; ADR 0003 and ADR 0004 don't apply.
 #
-# Deferred (GNU `which` features not in scope at M3):
+# Not provided — GNU `which`'s shell-state flags belong to agnoshi, not kriya
+# (CLAUDE.md scope boundaries; decided with `which` itself, CHANGELOG [0.4.0]):
 #   --read-alias / --read-functions  — shell-state introspection.
 #   --show-dot / --show-tilde / --skip-tilde — interactive-shell display.
 #   --skip-dot / --skip-functions    — shell-state introspection.

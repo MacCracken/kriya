@@ -691,99 +691,6 @@ fn _kriya_wants_help(start: i64, end: i64): i64 {
     return 0;
 }
 
-# ⛔ THE STDLIB PARSER DROPS OPERANDS PAST ITS 128-SLOT CAP AND REPORTS SUCCESS.
-# `lib/flags.cyr`'s `_flags_push_positional` is `if (pc >= cap) { return 0; }` —
-# no error, no flag, nothing to notice afterwards. Measured before this check:
-#
-#     $ ls | wc -l              200
-#     $ kriya rm *              (exit 0, silent)
-#     $ ls | wc -l              72
-#
-# ⛔ **A `rm` THAT DELETES 128 OF 200 FILES AND EXITS 0 IS THE WORST FAILURE THIS
-# PROJECT CAN HAVE.** The caller is told it succeeded. `cp` was worse in a
-# different way: with 200 sources the DESTINATION was among the discarded
-# tokens, so it reported "with multiple sources, the last operand must be a
-# directory" — a diagnostic about an operand the user did supply.
-#
-# ⚠ The cap is upstream and stays upstream. What kriya owes is a REFUSAL rather
-# than a silent truncation: this counts what the parser was given, compares it
-# with what the table kept, and exits 2 when they differ.
-#
-# ⭐ Counted over the EXPANDED argv — the parser's own view, with clusters split,
-# long forms normalised, `--` honoured and permutation resolved — so the
-# classification below is `flags_parse`'s, not a second opinion about it.
-fn _kriya_count_operands(spec): i64 {
-    var av = _kriya_expanded;
-    var n  = _kriya_expanded_n;
-    if (av == 0) { return 0; }
-    var count: i64 = 0;
-    var i: i64 = 1;
-    var in_pos: i64 = 0;
-    while (i < n) {
-        var tok = load64(av + i * 8);
-        var step: i64 = 1;
-        if (tok != 0) {
-            if (in_pos == 1) { count = count + 1; }
-            else {
-                if (load8(tok) != 45) { count = count + 1; }
-                else {
-                    if (load8(tok + 1) == 0) { count = count + 1; }      # "-" is stdin
-                    else {
-                        var is_term: i64 = 0;
-                        if (load8(tok + 1) == 45) {
-                            if (load8(tok + 2) == 0) { is_term = 1; }
-                        }
-                        if (is_term == 1) { in_pos = 1; }
-                        else {
-                            var ep: i64 = 0;
-                            if (load8(tok + 1) == 45) {
-                                var ns = tok + 2;
-                                var j: i64 = 0;
-                                var eq: i64 = 0 - 1;
-                                while (load8(ns + j) != 0) {
-                                    if (eq < 0) {
-                                        if (load8(ns + j) == 61) { eq = j; }
-                                    }
-                                    j = j + 1;
-                                }
-                                var nlen = j;
-                                if (eq >= 0) { nlen = eq; }
-                                ep = _flags_find_long(spec, ns, nlen);
-                                if (ep != 0) {
-                                    if (eq < 0) {
-                                        # ⚠ A value-taking long in the SEPARATED
-                                        # form eats the next token, which is
-                                        # therefore not an operand.
-                                        if (load64(ep + 16) != FLAG_BOOL) { step = 2; }
-                                    }
-                                }
-                            } else {
-                                if (load8(tok + 2) == 0) {
-                                    ep = _flags_find_short(spec, load8(tok + 1));
-                                    if (ep != 0) {
-                                        if (load64(ep + 16) != FLAG_BOOL) { step = 2; }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        i = i + step;
-    }
-    return count;
-}
-
-fn _kriya_operand_overflow(): i64 {
-    k_write( 2, "kriya ", 6);
-    if (_help_name != 0) { k_write( 2, _help_name, strlen(_help_name)); }
-    k_write( 2, ": error: too many operands (128 maximum)\n", 41);
-    if (k_write_failed() == 1) { syscall(SYS_EXIT, 1); }
-    syscall(SYS_EXIT, EXIT_USAGE);
-    return 0;
-}
-
 fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
     _kriya_expand_bad = 0;
 
@@ -837,17 +744,12 @@ fn kriya_args_parse_range(spec, start: i64, end: i64, obs_num): i64 {
     # failure and let the caller's usage exit stand — it names the offender, and
     # the caller's line supplies the exit code every call site already agrees on.
     if (_kriya_expand_bad == 1) { return 0 - 1; }
-    var pr = flags_parse(spec, m, out);
-    if (pr != 0) { return pr; }
-    # ⛔ EXITS RATHER THAN RETURNING, for the reason `--help` above does: every
-    # one of the call sites answers a non-zero return with "bad option (see ADR
-    # 0002)", which is not what happened. A third outcome threaded through all
-    # of them is 28 chances to get it wrong, for a condition where continuing is
-    # never the right answer — the operands are already gone.
-    if (_kriya_count_operands(spec) > flags_positional_count(spec)) {
-        _kriya_operand_overflow();
-    }
-    return 0;
+    # ⭐ Every operand survives: the stdlib table grows its positionals since cyrius
+    # v6.6.5. Before that it kept 128 and DISCARDED the rest while returning success
+    # (`kriya rm *` on 200 files deleted 128 and exited 0), so 1.6.3–1.6.10 counted
+    # operands here and exited 2 on a shortfall. `smoke-rm.sh` and `smoke-realpath.sh`
+    # now assert that every operand is PROCESSED, which holds however it is satisfied.
+    return flags_parse(spec, m, out);
 }
 
 # Parse a null-terminated cstring as a non-negative base-10 integer.

@@ -30,9 +30,9 @@
 # it is the input file (stdin reads if no operand or operand `-`). With
 # two operands the second is the output file (truncated, mode 0666).
 #
-# ⚠ NOTHING IS DEFERRED HERE ANY MORE. This header used to introduce a list
+# ⚠ NOTHING IS DEFERRED HERE ANY MORE. This header used to introduce a list  #skip-lint
 # of pending items; both entries below are now a SHIPPED feature and a settled
-# NON-GOAL. A stale "Deferred" heading over closed items reads as an
+# NON-GOAL. A stale "Deferred" heading over closed items reads as an  #skip-lint
 # admission of gaps that do not exist.
 #   ⚠ --all-repeated[=METHOD] / -D and --group[=METHOD] SHIPPED at 1.4.3 —
 #   see the notes on `_uq_group_line`. They emit EVERY line of a group, not the

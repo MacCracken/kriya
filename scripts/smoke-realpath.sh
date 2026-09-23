@@ -598,14 +598,18 @@ expect_eq "...in the other argv order too" "1" \
           "$("$BIN" realpath -e --relative-to=/no/such/t --relative-base=/no/such/b base/d 2>&1 >/dev/null \
              | grep -c '/no/such/t')"
 
-# ⛔ OPERANDS PAST THE PARSER'S 128-SLOT CAP ARE REFUSED, NOT DISCARDED. The
-# stdlib drops them and returns success; `kriya rm *` on 200 files deleted 128
-# and exited 0.
+# ⛔ OPERANDS PAST THE OLD 128-SLOT CAP ARE ALL RESOLVED, NOT DISCARDED. The
+# stdlib parser used to drop them and return success (`kriya rm *` on 200 files
+# deleted 128 and exited 0); 1.6.3 refused instead, and since cyrius v6.6.5 the
+# table grows. ⚠ Count the OUTPUT, not just the exit code: a truncation that
+# still exits 0 is exactly the failure this block exists for.
 MANY=""
 i=0
 while [ "$i" -lt 140 ]; do MANY="$MANY base/d"; i=$((i + 1)); done
 # shellcheck disable=SC2086
-expect_exit "141 operands is a usage error, not a silent truncation" 2 "$BIN" realpath $MANY
+expect_exit "140 operands resolve"                0 "$BIN" realpath $MANY
+# shellcheck disable=SC2086
+expect_eq   "...every one of them, not 128"     140 "$("$BIN" realpath $MANY | wc -l)"
 FEW=""
 i=0
 while [ "$i" -lt 128 ]; do FEW="$FEW base/d"; i=$((i + 1)); done

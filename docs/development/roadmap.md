@@ -56,42 +56,6 @@ Two rules hold across the arcs, both learned the hard way:
   upstream-gated and turned out two-thirds actionable — the assumed blockers either did not exist or
   were weaker than the local code already was. Verify the gate before you plan around it.
 
-## Moving the cyrius pin to 6.6.5
-
-⛔ **Before bumping the pin to 6.6.5:** cross-reference the five deferral notes that turn
-`scripts/lint-deferrals.sh` red (CI runs it at `.github/workflows/ci.yml:99`). 6.6.5's cyrlint folds
-case (`Deferred`, `NOT YET`, `DEFERRED` now match), so it sees prose the 6.6.2 cyrlint never matched.
-
-cyrius 6.6.5 is not tagged yet. Nothing below can land against the pin until it is, except items
-marked **(can land now)**. The pin is 6.6.2 today, and this section lists only what 6.6.5 itself
-changes.
-
-- [ ] ⛔ Put a tracking pointer (CHANGELOG / issue / roadmap / `docs/` path) on a line the phrase
-      itself touches, or mark prose that is not a deferral `#skip-lint`. **(can land now)** — a
-      same-line pointer or `#skip-lint` does not depend on the toolchain.
-  - `src/lib/sys.cyr:68` — `-2 IS "NOT YET"`. Prose about a return code.
-  - `src/cmd/cut.cyr:33` — "Deferred: `-c` distinct from `-b`". A real deferral; check it still holds
-    first (§ Enabler map marks the UTF-8 decoder that unblocks `cut -c` ✅ 1.4.x, and
-    `_cut_decode_char` at `:289` already decodes per character).
-  - `src/cmd/uniq.cyr:33` — "NOTHING IS DEFERRED HERE ANY MORE". Prose.
-  - `src/cmd/uniq.cyr:35` — "A stale "Deferred" heading". Prose.
-  - `src/cmd/which.cyr:32` — "Deferred (GNU `which` features not in scope at M3)". A real deferral
-    list.
-
-  See the cyrius CHANGELOG [6.6.5] entry "cyrlint read every rule ONE PHYSICAL LINE at a time".
-- [ ] `_kriya_operand_overflow` (`src/lib/args.cyr:778-785`), its call at `:847-849` and
-      `_kriya_count_operands` (`:715`, used only there) can be retired once `lib/flags.cyr` is
-      re-vendored (step 2 of § The toolchain pin-bump checklist).
-      Positionals are unbounded now, so the 128-operand silent stop it guards against is gone. See
-      the CHANGELOG [6.6.5] entry "The whole CLI took flags as file names, dropped flags written after
-      the operand, and dropped extra operands", which names `src/lib/args.cyr:781`.
-- [ ] At the bump, re-run `cyrius deps` — the aarch64 syscall peer moved SYS_UNLINKAT 35 → 263, so
-      an un-re-vendored peer's sys_unlink would run nanosleep.
-      Step 2 of § The toolchain pin-bump checklist (`cyrius lib sync --full`) covers this too.
-      `syscalls` and `flags` are declared `[deps].stdlib` leaves, so `cyrius deps` re-copies them,
-      and the `syscalls_*` peers they include, from the pinned snapshot. `--full` also refreshes the
-      undeclared rest of `lib/`.
-
 ## Arc sequence
 
 | Arc | Theme | Enabler | Next up |
@@ -158,9 +122,6 @@ arrive. Every open item now names a release it can land in.
   - **`xargs` treats an unrecognised numeric short as the COMMAND.** `echo hi | xargs -5 echo` is
     *invalid option* / exit 1 under GNU and `-5: command not found` / **exit 127** here. ⚠ 127 is
     "command not found", so a caller cannot tell a typo'd flag from a missing binary.
-  - ⚠ **`src/lib/env.cyr` redefines `_env_len` and `_env_load`**, which `lib/io.cyr` already
-    defines — the compiler warns *duplicate symbol … last definition wins* on every build. Nothing
-    is observably broken, but "last definition wins" is not a design.
   - **Four doc blocks in `src/lib/args.cyr` sit 100–190 lines above the functions they document**
     (`kriya_parse_nonneg_int`, `kriya_argv_collect`, `kriya_parse_octal_mode`). Pre-existing, not
     merge damage — confirmed against the merge base.
@@ -240,18 +201,6 @@ arrive. Every open item now names a release it can land in.
       under `-i`, and there kriya is the CORRECT one — GNU's `-o` contradicts GNU's own line matcher
       (1.4.5). Do not "fix" that second case toward GNU.
 
-- **1.6.12 — 128 operands is a REFUSAL now, and it should be a non-issue.** ⛔ 1.6.3 turned the
-  stdlib flag table's silent truncation into an honest error, because `kriya rm *` on 200 files was
-  deleting 128 and exiting 0. ⚠ **A refusal is the safe stopgap, not the destination**: `rm *` on a
-  directory with 200 files is an ordinary thing to do, GNU has no such limit, and kriya now says no.
-  - The cap is `FLAGS_POS_MAX = 128` in `lib/flags.cyr`, which is UPSTREAM and stays upstream.
-  - The kriya-side fix is to stop routing operands through the flag table at all — parse options
-    from the expanded argv (which `kriya_args_parse` already builds) and let each utility iterate
-    operands directly from argv, unbounded. ⚠ That touches every utility, which is why it is its own
-    release and not a patch inside 1.6.3.
-  - ⭐ Keep the overflow guard until then, and keep its `smoke-rm.sh` assertion afterwards: the test
-    that says "200 operands must not silently become 128" stays true whichever way it is satisfied.
-
 ## 1.7.x — Traversal, exec & filesystem reporting
 
 **Enabler:** the spawn helper (`src/lib/spawn.cyr`, shipped 1.2.2) plus ARG_MAX argv chunking.
@@ -288,6 +237,16 @@ arrive. Every open item now names a release it can land in.
   what cyrlint suggests: `xgetdents` returns the RAW agnos record on agnos, while `k_getdents`
   translates it into `linux_dirent64` so every caller sees one format. The swap would silently
   mis-parse every directory entry on agnos. The reason is written at the call site.
+  - ⚠ **Re-verify the premise before scheduling this** (found at 1.6.11, not yet measured). cyrius
+    renumbers raw x86-64 syscalls per target (`ESYSXLAT`, `src/backend/aarch64/emit.cyr` in the
+    cyrius repo), and its aarch64-Linux arm already maps at least `write` 1→64, `exit` 60→93,
+    `fcntl` 72→25, `getdents64` 217→61 and `unlinkat` 263→35; 6.6.6 added `statfs` 137. `openat`
+    and `mkdirat` were not checked. Measure an aarch64 build (`qemu-aarch64` over the smoke suite)
+    before sweeping — the list above may be mostly routed already.
+  - **`df`'s private `DfStatfs` offset table** (`src/cmd/df.cyr`, commented *"Linux x86_64, 64-bit
+    struct statfs64"*) can become a shim over 6.6.6's per-OS `Statfs` enums and the `statfs_bsize`
+    accessor. ⚠ An accessor, not a convenience: the underlying field differs by OS, which is why a
+    private table is the wrong long-term answer. The agnos `-38` decline stays as it is.
 
 ---
 
@@ -443,6 +402,13 @@ entry on agnos. The reason is now written at the call site.
 `find` and `xargs` cache PATH at startup to work around a stack-vs-syscall clobber in `getenv`'s 8 KB
 stack buffer. When upstream fixes it, the workaround comes out. Pure cleanup, zero behaviour change.
 
+⭐ **The gate cleared at cyrius 6.5.36** (checked in the 6.6.6 source at 1.6.11): `lib/io.cyr`'s `getenv`
+reads `/proc/self/environ` to EOF into a heap buffer, once, so there is no stack buffer left to
+clobber. ⚠ Both callers already read PATH through `kriya_getenv` (`src/lib/env.cyr`, heap-backed since
+1.5.2), so what remains is a decision rather than a fix: retire `env.cyr` in favour of the stdlib, or
+keep it. ⚠ Not a drop-in swap — the stdlib copies every hit to a fresh heap buffer where
+`kriya_getenv` returns a pointer into its cached block. Ready to schedule into an arc.
+
 ### Upstream chrono — local time
 
 `date` local-time and `ls -l` locale-aware mtime need tzfile parsing (`chrono_tz.cyr`). ⚠ This is the
@@ -483,10 +449,14 @@ four sat in `find.cyr`, because the status had been established by reading.
 
 1. `cyrius.cyml` `[package].cyrius` — the source of truth, never the CI YAML.
 2. **`cyrius lib sync --full`**, not `cyrius deps`. ⚠ `deps` resolves without re-vendoring, and the
-   build then warns that bundled libs are behind the pin.
-3. `python3 scripts/watchlist-scan.py` — M15a / M15c / M15d, exits non-zero on a hit.
+   build then warns that bundled libs are behind the pin. ⚠ `cyrius build` re-copies the modules
+   `[deps].stdlib` DECLARES on every build and never the rest, so the undeclared bundled libs drift
+   silently without `--full` — eleven had, by the 1.6.11 bump.
+3. `python3 scripts/watchlist-scan.py` — M15a / M15c / M15d / M15i, exits non-zero on a hit.
 4. Re-measure M15a's premise: a two-local probe must still give `|&b - &a|` = 8 / 32 / 144.
-5. Build **both** targets, plus every `tests/*.tcyr` and `tests/*.fcyr` subset (M15e).
+5. Build **both** targets, plus every `tests/*.tcyr` and `tests/*.fcyr` subset (M15e). ⛔ **Read the
+   build output**: a `duplicate symbol` / `duplicate fn` warning is a collision with the stdlib (M15i),
+   not noise — 1.6.7 to 1.6.10 shipped one that broke the stdlib `getenv`, unreached only by luck.
 6. Full smoke suite, both lints, `vet`, fuzz under poison.
 
 ### The compiler watchlist
@@ -540,7 +510,9 @@ the table below does not move.
   system.
 - **Per-utility binaries** — explicit choice via ADR 0001; revisit only if dispatcher overhead
   exceeds budget.
-- **Windows / non-Linux** — AGNOS-targeted.
+- **Windows / non-Linux** — AGNOS-targeted. ⚠ If that ever changes, the pin floor is **6.6.6**:
+  before it, a PE `O_APPEND` overwrote from offset 0 and `O_TRUNC` left the old tail behind, which
+  is `tee -a` and `tee` (`src/cmd/tee.cyr`) failing at the only two things they do.
 
 ## Splitting policy
 
@@ -550,109 +522,3 @@ it into its own repo. ⚠ Five already exceed it — `find` (1087), `grep` (1022
 automatic trigger: the multi-tool is the right home while they share `src/lib/`, and the question is
 whether a given utility has stopped sharing. Revisit at each arc boundary.
 
----
-
-## Moving the cyrius pin to 6.6.6
-
-**Current pin: `cyrius = "6.6.2"`** — four releases behind. Nothing must change first; this
-is a pin bump and a rebuild, run through **§ The toolchain pin-bump checklist** above (all
-six steps, including `cyrius lib sync --full` rather than bare `cyrius deps`).
-
-### 6.6.6 takes one row off M-1.7.4, and only one
-
-6.6.6 adds an **ESYSXLAT row for `statfs`: source `137` → aarch64 native `43`**, plus
-`SYS_STATFS = 137` / `SYS_FSTATFS = 138` named in **both** Linux syscall peers, per-OS
-`Statfs` offset enums, `sys_statfs` / `sys_fstatfs`, a `statfs_bsize` accessor, and a
-documented `-38` decline on the targets with no statfs.
-
-That lands directly on `k_statfs` (`src/lib/sys.cyr:459`):
-
-```cyrius
-#ifdef CYRIUS_TARGET_AGNOS
-return 0 - 38;                     # no statfs on agnos
-#endif
-#ifndef CYRIUS_TARGET_AGNOS
-return syscall(137, path, buf);    # linux statfs #137
-#endif
-```
-
-- **The raw `137` is now correctly routed on aarch64** instead of hitting whatever aarch64
-  syscall 137 happens to be. That is one entry off M-1.7.4's list, fixed by the toolchain
-  rather than by the sweep. ⚠ It does **not** shrink the rest of the sweep: `openat` 257,
-  `mkdirat` 258, `unlinkat` 263, `write` 1, `exit` 60, `fcntl` 72, `getdents64` 217 are
-  untouched by 6.6.6 and still need the one reviewable pass M-1.7.4 describes. Do not let
-  this bump be recorded as progress on that milestone beyond the single `statfs` row.
-- **`src/cmd/df.cyr` can now drop its private offset table.** `DfStatfs` (df.cyr:45–60) is
-  commented *"Linux x86_64, 64-bit struct statfs64"* and hard-codes `BSIZE = 8`,
-  `BLOCKS = 16`, … `BUFSZ = 120`. The stdlib now ships the per-OS equivalent plus
-  `statfs_bsize`, so `_df_statfs` and `DfStatfs` become a thin shim over portable names.
-  ⚠ `statfs_bsize` is an **accessor, not a convenience** — the underlying field differs by
-  OS — which is exactly why the private table is the wrong long-term answer. This is an
-  opportunity, not a requirement of the bump; land it as its own bite.
-- df's `#ifdef CYRIUS_TARGET_AGNOS → -38` and its *"not supported on AGNOS (no statfs)"*
-  message (df.cyr:581–585) are the same shape the stdlib now takes. No change needed.
-
-### O_APPEND / O_TRUNC — several, all Linux/AGNOS-only
-
-kriya is a coreutils repo, so it opens with these flags more than anything else in this
-slice:
-
-- `src/cmd/tee.cyr:217/219` — `tee -a` selects `| 1024` (`O_APPEND`) and plain `tee`
-  selects `| 512` (`O_TRUNC`). **This is the canonical instance of the 6.6.6 defect.** On a
-  pre-6.6.6 PE build `tee -a` would not have appended — it would have overwritten from
-  offset 0 — and plain `tee` would have left the old tail of a longer file behind. A `tee`
-  that silently does neither of the two things it exists to do is the worst case in the
-  whole release.
-- `src/cmd/sort.cyr:794`, `src/cmd/uniq.cyr:609`, `src/cmd/cp.cyr:782` — `577`
-  (`O_WRONLY|O_CREAT|O_TRUNC`); `src/cmd/cp.cyr:1045` — `131649`
-  (`…|O_TRUNC|O_NOFOLLOW`).
-- `src/cmd/touch.cyr:81` — `65` (`O_WRONLY|O_CREAT`), unaffected.
-
-**Not exposed** — checked, not assumed: CI is `ubuntu-latest` only, there is no
-`CYRIUS_TARGET_WIN` / `_TARGET_PE` branch anywhere in `src/`, no PE entry in `cyrius.cyml`,
-and kriya reaches the kernel through 83 raw `syscall(N, …)` sites with Linux numbers. The
-only conditional target is `CYRIUS_TARGET_AGNOS`. kriya is AGNOS + x86_64 Linux.
-
-Worth recording anyway: if a Windows kriya is ever proposed, `tee.cyr:217` is the first
-line to re-read, and the pin floor for it is 6.6.6.
-
-### What else was checked
-
-- **No shape the new refusals catch.** Zero `struct` declarations in `src/`, so no
-  struct/vector copy, no by-value struct parameter, no struct-valued return, no top-level
-  struct call. No `async fn`, no `operator` fn, no SIMD-returning fn, no fn mixing pair and
-  scalar returns, no `var` inside a top-level block (zero top-level `{` / `if (` / `while (`
-  at column 0), no `lib/regression.cyr` consumer.
-- **The new `assert.cyr` → `vec.cyr` transitive include does not collide.** 6.6.6 makes
-  `lib/assert.cyr` pull in `lib/vec.cyr`, which newly collides with a consumer defining its
-  own `vec_*` at the same arity. kriya uses `vec_new` / `vec_push` from the stdlib (e.g.
-  `src/cmd/tee.cyr:205–207`) and defines **no** `vec_*` of its own — checked across all 58
-  `src/` files. Nothing to rename.
-- No symlink in `lib/` (6.6.6 makes `cyrius deps` **fail** rather than skip when a
-  `lib/*.cyr` cannot be hashed; nothing to clear). Longest string literal is 4,350 B in
-  `src/lib/quote.cyr`, so 6.6.4's ≥64 KB literal fix was never reachable.
-
-### Other 6.6.6 toolchain changes that touch kriya's build
-
-- **`cyrius build` now exits 1 instead of 0 when its output rename fails.** kriya builds
-  many small binaries from one repo; any script that treated a build step as successful
-  without checking for the artifact starts failing correctly. Check `scripts/` for that
-  shape while bumping.
-- `cyrius deps` / `publish` now **fail** rather than warn when `cyrius.lock` cannot be
-  written. kriya has no `cyrius.lock` today, so this is only relevant if one is introduced.
-
-### What it gains
-
-The `statfs` routing above; 6.6.3's `#inline`-disarms-`#derive` fix; 6.6.5's
-aggregate-layout fix, silently wrong since **5.8.17**, and three corrected ENTRY stack
-bases; and 6.6.6's nine new refusals, which for a 58-module utility repo are a free
-whole-surface audit of exactly the kind § The compiler watchlist asks for.
-
-### Verify after bumping
-
-Steps 1–6 of § The toolchain pin-bump checklist, plus **re-run every detection in
-[`lessons.md`](lessons.md) § The compiler watchlist** — a pin move is exactly when a latent
-instance stops being latent, which that section already says. Then one targeted behavioural
-check this bump earns: `tee -a` onto an existing file, and plain `tee` of a short payload
-over a long file, on **both** the Linux and agnos builds. Those two commands are the
-whole `O_APPEND`/`O_TRUNC` surface in one line each.

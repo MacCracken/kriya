@@ -65,7 +65,7 @@ fn k_at_fdcwd(): i64 { return 0 - 100; }
 
 fn k_read(fd, buf, n): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    # ⛔ -2 IS "NOT YET", NOT EOF — AND EVERY kriya APPLET DEPENDS ON THIS ONE FUNCTION GETTING IT
+    # ⛔ -2 IS "NOT YET", NOT EOF — AND EVERY kriya APPLET DEPENDS ON THIS ONE FUNCTION GETTING IT  #skip-lint
     # RIGHT. agnos 1.56.40 makes `read()` answer -2 (WOULD_BLOCK) for an empty pipe whose write end
     # is still open, reserving 0 for a genuine EOF. Callers here branch on `n <= 0`, so without this
     # retry a `wc`/`grep`/`tee` reading from a CONCURRENT producer would stop at the first moment it

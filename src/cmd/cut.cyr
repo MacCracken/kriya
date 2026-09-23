@@ -30,9 +30,8 @@
 # Stdin reads when no file operand or operand is `-`. Multiple files
 # concatenate (no header) — matches GNU.
 #
-# Deferred: `-c` distinct from `-b` for multi-byte input; LIST shorthand
-# like `1,2,3,5-8` is fully supported, but locale-dependent collation
-# is not.
+# LIST shorthand like `1,2,3,5-8` is fully supported. There is no locale:
+# `-c` decodes UTF-8 unconditionally (see its note above).
 
 var _cut_spec = 0;
 var _cut_b_idx = 0;

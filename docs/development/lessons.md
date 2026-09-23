@@ -173,7 +173,23 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   aimed at `realpath` found that the stdlib flag table keeps 128 positionals and DISCARDS the rest
   while returning success — so `kriya rm *` on 200 files deleted 128, left 72, and exited 0. It had
   been true since the flag table arrived. ⚠ **A cap that silently truncates is worse than one that
-  refuses**, and the place to notice it is a review of something else entirely.
+  refuses**, and the place to notice it is a review of something else entirely. ⭐ Fixed upstream at
+  cyrius 6.6.5 (the table grows); 1.6.11 retired kriya's refusal and kept the assertion — every
+  operand must be PROCESSED, which stays true however it is satisfied.
+
+- ⛔ *A MUTANT THAT NEVER REACHES THE BINARY LOOKS EXACTLY LIKE A TEST THAT CANNOT SEE THE BUG.*
+  `cyrius build` re-copies every module `[deps].stdlib` declares from the pinned snapshot before
+  it compiles — `--no-deps` too — so the pre-6.6.5 positional drop written into `lib/flags.cyr` was
+  gone before `cycc` read it. The "mutant" was byte-identical to the real build and every
+  assertion stayed green, which reads as a verdict on the TESTS. ⭐ **`cmp` the mutant against the
+  real build before believing either answer.** Mutate stdlib code in a scratch copy with the module
+  taken out of `[deps].stdlib` and included explicitly; that one turned three assertions red.
+
+- ⛔ *A GATE WHOSE COMMAND IS PIPED INTO A FILTER REPORTS THE FILTER'S STATUS.* `scripts/fuzz.sh`
+  piped `cyrius fuzz` into `grep | sed` from the day it was written, so it exited 0 with every
+  harness failing and with a harness that did not compile — CI's fuzz step could not go red. Found
+  at 1.6.11. ⭐ **Prove a gate can fail**: a stub on `PATH` that fails is a one-minute mutant for any
+  script that shells out, and it is the only way to see a status that is thrown away.
 
 - ⛔ *AN OPTION THE ORACLE LACKS LOOKS EXACTLY LIKE A FAILING PATH, and this is the THIRD release
   cycle lost to a dev-box-versus-runner version difference.* GNU rejects an unknown option with
@@ -430,7 +446,8 @@ pin move is exactly when a latent instance stops being latent.
 
 **M15a — A function-local `var X[N]` is N BYTES. At module scope it is N×8.**
 The single most expensive rule in this list. Re-measured at pin 6.5.35 with a two-local probe:
-`|&b - &a|` = **8 / 32 / 144** for `var x[4]` / `var x[32]` / `var x[144]`.
+`|&b - &a|` = **8 / 32 / 144** for `var x[4]` / `var x[32]` / `var x[144]` — and again at **6.6.6**
+(1.6.11), unchanged.
 - *Detection*: for every `var X[N]` in `src/`, take the maximum byte offset actually accessed
   (`store8`/`store16`/`store64`/`load*`/`memcpy`/a syscall buffer arg) and require it `< N`. Sizes are
   a strong smell on their own: a buffer holding k 64-bit fields must be `[k*8]`, and every `struct stat`
@@ -519,4 +536,21 @@ NEGATIVE `h` whose masked index addresses off the FRONT of the array rather than
 - *Status at v1.6.0*: `_fs_inoset_hash` is sized so the widest input (a 32-bit half of `st_ino`) cannot
   push the sum past 2^56, and `tests/kriya.tcyr` pins it non-negative at four extremes including
   `st_ino = 2^63 - 1`. No other `>>` in `src/` takes an unbounded left operand.
+
+**M15i — A name kriya defines that the stdlib ALSO defines is merged, not shadowed.**
+Opened at 1.6.11. Cyrius resolves a duplicate top-level definition across two non-private files as
+ONE symbol — *"last definition wins"* — and says so only in a warning, so the stdlib's own functions
+can end up running kriya's code, or reading kriya's initializer for a variable the stdlib owns.
+- *Detection*: `scripts/watchlist-scan.py` M15i resolves `[deps].stdlib` through every
+  `include "lib/…"` and intersects its top-level `fn` / `var` / enum-member names with `src/`. The
+  build's own `duplicate symbol` / `duplicate fn` warning names the same thing — read it.
+- *Why at a pin bump*: kriya's names do not move when the pin does; the stdlib's do. A name that was
+  kriya's alone becomes a collision the day upstream adds it.
+- *Bit us from 1.6.7 to 1.6.10*: cyrius 6.5.36 gave `lib/io.cyr` `_env_load` / `_env_len`, the names
+  `src/lib/env.cyr` used. The stdlib `getenv` then answered "unset" for every name when it ran first
+  and segfaulted when it ran after `kriya_getenv`. Latent only because nothing in kriya calls the
+  stdlib `getenv` on Linux — and ⚠ **the 1.6.9 audit read the warning and filed it as cosmetic**;
+  a twenty-line probe said otherwise. Renamed to `_kriya_env_*`.
+- *Status at 1.6.11*: 0 names over a 39-file closure; the scan reports exactly the two above when
+  run against the 1.6.10 `env.cyr`.
 
