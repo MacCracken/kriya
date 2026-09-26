@@ -1,6 +1,6 @@
 # 0016 — `tee` changes signal dispositions, and only when asked
 
-**Status**: Accepted
+**Status**: Accepted — amended at 1.7.1 (§ agnos)
 **Date**: 2026-08-27
 
 ## Context
@@ -83,6 +83,13 @@ looked at, and a first-recorded ENOSPC still stands.
 `signal_ignore` is a no-op on agnos — ring 3 has no signal delivery yet. `-i` and `-p` are accepted
 there and there is nothing to ignore. ⚠ That is the honest behaviour, not a stub: the signals do not
 arrive, so the flags describe a condition that cannot occur.
+
+⚠ **Amended at 1.7.1 — `-p`'s OTHER half does occur on agnos.** With no SIGPIPE, a write to a pipe
+nobody reads answers -1 there (agnos 1.57.9), and `k_write` records that as EPIPE on a descriptor
+kriya inherited — so the `-nopipe` modes drop a dead stdout exactly as they do on Linux with SIGPIPE
+ignored. A file `tee` opened itself can never be a pipe on agnos (its `open` returns no FIFOs), and its
+-1 is EIO, which no mode discounts ([architecture 002](../architecture/002-signal-handling-model.md),
+*agnos has no SIGPIPE*).
 
 ## Consequences
 

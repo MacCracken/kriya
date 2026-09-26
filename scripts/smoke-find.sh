@@ -136,7 +136,7 @@ expect_exit 'unknown predicate'        2 "$BIN" find tree -frobnicate
 expect_exit 'bad -size'                2 "$BIN" find tree -size abc
 expect_exit 'missing -exec ;'          2 sh -c "$BIN find tree -exec echo"
 expect_exit 'missing start path'       1 "$BIN" find /no/such/path
-expect_exit '-H deferred'              2 "$BIN" find -H tree
+expect_exit '-H accepted (1.7.1)'      0 "$BIN" find -H tree
 
 # --- -exec {} expansion is sized exactly (v1.1.11) ----------------------
 # ⛔ The rebuild buffer was `tlen + plen * 4`, silently assuming at most four
@@ -455,6 +455,294 @@ expect_eq "two -exec + batches interleave" \
 # Every path arrives, once.
 expect_eq "25,000 paths, each once" "25000" \
     "$("$BIN" find x17b -type f -exec sh -c 'for f; do echo "$f"; done' sh {} + | sort -u | wc -l)"
+
+# --- 1.7.1: -prune, -depth, -perm, -H, `,`, -uid/-gid ±N, -size Nw -------------
+#
+# Every case runs the SAME argv through GNU and kriya. `f17_same` compares stdout
+# BYTES UNSORTED and the exit status — ⛔ order is the point of -depth, and both
+# walks visit entries in readdir order, so an unsorted comparison is sound here.
+# `f17_err` adds the number of stderr lines: the wording differs (architecture
+# 001), the count must not. `f17_refused`: GNU exits 1 on a bad argument, kriya 2
+# (ADR 0008), and neither prints anything.
+f17_same() {
+    _n=$1; shift
+    _g=0; find "$@" > f17_g.out 2>/dev/null </dev/null || _g=$?
+    _k=0; timeout 30 "$BIN" find "$@" > f17_k.out 2>/dev/null </dev/null || _k=$?
+    if cmp -s f17_g.out f17_k.out && [ "$_g" = "$_k" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        printf 'FAIL %s: GNU exit %s, kriya exit %s, stdout %s\n' "$_n" "$_g" "$_k" \
+            "$(cmp -s f17_g.out f17_k.out && echo same || echo differs)" >&2
+    fi
+}
+f17_err() {
+    _n=$1; shift
+    f17_same "$_n" "$@"
+    _ge=$(find "$@" 2>&1 >/dev/null </dev/null | wc -l || true)
+    _ke=$(timeout 30 "$BIN" find "$@" 2>&1 >/dev/null </dev/null | wc -l || true)
+    expect_eq "$_n (stderr lines)" "$_ge" "$_ke"
+}
+f17_refused() {
+    _n=$1; shift
+    _k=0; _ko=$(timeout 30 "$BIN" find "$@" 2>/dev/null </dev/null) || _k=$?
+    _g=0; _go=$(find "$@" 2>/dev/null </dev/null) || _g=$?
+    expect_eq "$_n: kriya refuses, exit 2, prints nothing" "2|" "$_k|$_ko"
+    expect_eq "$_n: ...and GNU refuses" "yes|" "$([ "$_g" != 0 ] && echo yes || echo no)|$_go"
+}
+
+mkdir -p p17/a/b p17/c p17/skip/deep
+for _m in 644 755 600 4755 2755 1777 000 666 640 711 6750 700; do
+    : > "p17/f$_m"; chmod "$_m" "p17/f$_m"
+done
+: > p17/a/x; : > p17/a/b/y; : > p17/skip/deep/z; : > p17/c/w
+chmod 755 p17/a; chmod 700 p17/c; chmod 1777 p17/skip
+printf 'abc' > p17/s3; printf 'abcd' > p17/s4; printf 'abcde' > p17/s5; printf 'a' > p17/s1
+ln -s a p17/la; ln -s nowhere p17/ldang; ln -s f644 p17/lf
+ln -s p17 p17l; ln -s p17/a p17la
+
+# ⭐ -prune: true, and a directory it matches is not entered. The implicit
+# -print still applies (GNU: "no actions other than -prune or -print").
+f17_same "-prune: the classic exclusion"      p17 -name a -prune -o -print
+f17_same "-prune: implicit -print"            p17 -name a -prune
+f17_same "-prune on a file is only true"      p17 -name f644 -prune
+f17_same "-prune on the starting point"       p17 -prune -o -print
+f17_same "-prune -print"                      p17 -maxdepth 2 -name skip -prune -print
+f17_same "-prune in a group"                  p17 '(' -name a -o -name c ')' -prune -o -type f -print
+f17_same "-prune under -L, on a followed link" -L p17 -name la -prune -o -print
+# ⛔ The prune flag outlived its entry: cleared only on the way into the
+# expression, it was still set when the NEXT starting point, above -mindepth,
+# came to be entered — so `b` was never walked, at exit 0.
+mkdir -p p17m/a/x p17m/b/y
+f17_same "-prune does not reach the next starting point" p17m/a p17m/b -mindepth 1 -name x -prune -o -print
+f17_same "...nor a sibling directory above -mindepth"   p17m -mindepth 2 -name x -prune -o -print
+# ⛔ POSIX: "If the -depth primary is specified, the -prune primary shall have no
+# effect." Everything under p17/a is listed; p17/a itself is what -o skips.
+f17_same "-prune is inert under -depth"       p17 -depth -name a -prune -o -print
+
+# ⭐ -depth / -d: a directory after its entries, in the walk's own order.
+f17_same "-depth post-order"                  p17 -depth
+f17_same "-d is -depth"                       p17 -d
+f17_same "-depth with -maxdepth 1"            p17 -maxdepth 1 -depth
+f17_same "-depth with -mindepth"              p17 -mindepth 2 -depth
+f17_same "-depth after a test (global)"       p17 -name a -depth
+f17_same "-depth is true where it stands"     p17 -depth -o -print
+f17_same "-depth -type d"                     p17 -depth -type d
+
+# ⛔ -mindepth and -maxdepth are GLOBAL. -mindepth was a test evaluated where it
+# stood, so `-print -mindepth 2` printed every entry and `-mindepth 2 -o -print`
+# the shallow ones, both at exit 0; -maxdepth was first-wins, GNU's is last.
+f17_same "-mindepth is global"                p17 -print -mindepth 2
+f17_same "-mindepth -o -print"                p17 -mindepth 2 -o -print
+f17_same "-mindepth hides a -prune above it"  p17 -mindepth 2 -name a -prune -o -print
+f17_same "-maxdepth: the last wins"           p17 -maxdepth 2 -maxdepth 1
+f17_same "-maxdepth: the last wins, reversed" p17 -maxdepth 1 -maxdepth 2
+f17_same "-mindepth: the last wins"           p17 -mindepth 1 -mindepth 3
+
+# ⭐ -perm: exact, -all-of, /any-of, octal and symbolic (`src/lib/mode.cyr`, a
+# port of gnulib's modechange.c). `scripts/difffuzz-find-perm.py` covers every
+# mode; these pin the forms people write.
+for _p in 644 0644 00644 -644 /111 -4000 /6000 -2000 /u+s,g+s -u=rw u=rw,go=r /o+w -o+w \
+          +w a+x -g+s -+t /+t /u=X -a=X -u=x,g=u =644 -ug+w -o= -u+w-x 0 000 -000 /000 /u= \
+          -+222 /+222 u=rwx,g=rx,o=rx u=rwxs,g=rxs -a+st -o+s 7777 6750; do
+    f17_same "-perm $_p" p17 -maxdepth 1 -perm "$_p"
+done
+f17_same "-perm on directories: X"            p17 -type d -perm -u=X
+f17_same "-perm on symlinks (-P: 0777)"       p17 -maxdepth 1 -type l -perm 777
+f17_same "-perm on followed links (-L)"       -L p17 -maxdepth 1 -name 'l*' -perm 644
+# ⛔ `+` before an octal digit was GNU's old "any of", removed in 2005 because
+# `chmod` reads it as "add": refused rather than guessed.
+for _p in +222 +0 10000 8 u+z '' - / u ,u+w u+w, u+w,,g+w u=644 644,u+s =644+w; do
+    f17_refused "-perm '$_p'" p17 -perm "$_p"
+done
+f17_refused "-perm with no argument" p17 -perm
+
+# ⭐ -H: a starting point that is a symlink is followed, nothing below it is.
+f17_same "-H follows the starting point"      -H p17l
+f17_same "-H: the start is a directory"       -H p17l -maxdepth 0 -type d
+f17_same "-H: the start is not a link"        -H p17l -maxdepth 0 -type l
+f17_same "-H: links below are not followed"   -H p17 -name 'l*' -type l
+f17_same "-H: a link below is not entered"    -H p17l -name la -type d
+f17_same "-H: a dangling start is the link"   -H p17/ldang -type l
+f17_same "-H: a start link to a file"         -H p17/lf -type f
+f17_same "-H -empty follows the start"        -H p17la -empty
+f17_same "-H -prune on the start"             -H p17l -prune
+f17_same "-H then -P: the last wins"          -H -P p17l
+f17_same "-P then -H: the last wins"          -P -H p17l
+f17_same "-L then -H: the last wins"          -L -H p17l -name la -type d
+f17_same "-H then -L: the last wins"          -H -L p17l -name la -type d
+f17_refused "-H after a starting point is a test GNU does not have" p17 -H
+f17_refused "-HL is not a cluster"            -HL p17
+
+# ⛔ -newer's reference is FOLLOWED under -H and -L, as a starting point is; it
+# was always lstat'ed. And it compares NANOSECONDS: whole seconds missed
+# everything written in the reference's own second.
+mkdir -p n17
+touch -d '2020-01-01 00:00:00' n17/old
+touch -d '2023-01-01 00:00:00' n17/mid
+ln -s old n17/lnew; touch -h -d '2025-01-01 00:00:00' n17/lnew
+for _o in -P -H -L; do
+    f17_same "-newer a link under $_o" "$_o" n17 -newer n17/lnew
+done
+touch -d '2024-05-05 05:05:05.100000000' n17/ns1
+touch -d '2024-05-05 05:05:05.600000000' n17/ns2
+f17_same "-newer within one second"           n17 -newer n17/ns1
+f17_same "-newer within one second, reversed" n17 -newer n17/ns2
+
+# ⭐ GNU's `,`: both sides always run, the value is the right one's, and it binds
+# looser than -o.
+f17_same ", keeps the right side's value"     p17 -maxdepth 1 -name 'f6*' , -name 's*'
+f17_same ", runs the left side's action"      p17 -maxdepth 1 -name 'f6*' -print , -name 's*'
+f17_same ", with actions on both sides"       p17 -maxdepth 1 -name 'f6*' -print , -name 's*' -print
+f17_same ", is looser than -o (left)"         p17 -maxdepth 1 -name 'f6*' -o -name s3 , -name 's*'
+f17_same ", is looser than -o (right)"        p17 -maxdepth 1 -name 'f6*' , -name s3 -o -name 'f7*'
+f17_same ", inside parentheses"               p17 -maxdepth 1 '(' -name 'f6*' , -name s3 ')' -print
+f17_same ", after a global option"            p17 -maxdepth 1 , -print
+f17_same ", with -exec {} + on both sides"    p17 -maxdepth 0 -exec echo A {} + , -exec echo B {} +
+f17_same ", with -prune"                      p17 -name a -prune , -name x -print
+f17_refused ", with nothing after it"         p17 -maxdepth 1 -print ,
+f17_refused ", , with nothing between"        p17 -maxdepth 1 -print , , -print
+
+# ⭐ -uid / -gid take +N and -N, and GNU's number shape.
+_u=$(id -u); _gi=$(id -g)
+for _a in "$_u" "+$((_u - 1))" "-$((_u + 1))" "+$_u" "-$_u" "++$((_u - 1))" "-+$((_u + 1))" \
+          " $_u" "+ $((_u - 1))" -0 +0 18446744073709551615 -18446744073709551615 \
+          +18446744073709551615 4294967296 -4294967296 +4294967295; do
+    f17_same "-uid '$_a'" p17 -maxdepth 1 -uid "$_a"
+done
+for _a in "$_gi" "+$((_gi - 1))" "-$((_gi + 1))" "-$_gi" "+$_gi"; do
+    f17_same "-gid '$_a'" p17 -maxdepth 1 -gid "$_a"
+done
+for _a in +-1 --1 18446744073709551616 -18446744073709551616 0x10 '' + 12a; do
+    f17_refused "-uid '$_a'" p17 -uid "$_a"
+    f17_refused "-gid '$_a'" p17 -gid "$_a"
+done
+
+# ⭐ -size Nw — two-byte words — and GNU's number shape for -size.
+for _a in 0w 1w 2w 3w -2w +1w -3w +2w "++1c" " 3c" "-+4c" "+ 2c" 18446744073709551615c \
+          -18446744073709551615c; do
+    f17_same "-size '$_a'" p17 -maxdepth 1 -type f -size "$_a"
+done
+for _a in w 2ww 2W 2x +c -c '' 18446744073709551616c; do
+    f17_refused "-size '$_a'" p17 -size "$_a"
+done
+
+# ⛔ -L: a directory the walk is already inside is a LOOP — reported, not
+# entered, exit 1. It went forty levels deep, listing the tree forty times —
+# and on THIS fixture, where `self` and two `up`s compose, it branches at every
+# level: 1.7.0 grew past 25 GB before it was killed. ⚠ Every call has `timeout`.
+mkdir -p l17/a/b && ln -s .. l17/a/up && ln -s . l17/self && ln -s ../.. l17/a/b/up
+f17_err "-L names a loop and does not enter it" -L l17
+f17_err "-L loop under -depth"                  -L l17 -depth
+f17_err "-L loop with -prune"                   -L l17 -name up -prune -o -print
+f17_err "-P never follows, so never loops"      l17
+expect_eq "-L loop: no path goes round" "0" \
+    "$(timeout 30 "$BIN" find -L l17 2>/dev/null | grep -c 'up/' || true)"
+
+# ⛔ A link through a non-directory (ENOTDIR): reported, exit 1, and below a
+# starting point still listed as the link — GNU's `fallback_stat`. At a starting
+# point it is not listed.
+ln -s f644/x p17/lnotdir
+f17_err "-L: a link through a file"             -L p17 -name lnotdir
+f17_err "-L: ...is the link itself"             -L p17 -name lnotdir -type l
+f17_err "-H: as a starting point"               -H p17/lnotdir
+rm -f p17/lnotdir
+
+# ⭐ An unreadable directory: its error, and under -depth still the directory
+# itself, after its error — GNU's FTS_DNR handling.
+mkdir -p u17/ok u17/no/in && : > u17/ok/g && : > u17/no/in/f && chmod 000 u17/no
+f17_err "an unreadable directory"               u17
+f17_err "an unreadable directory under -depth"  u17 -depth
+f17_err "...and -depth -name"                   u17 -depth -name no
+f17_same "...pruned, it is never opened"        u17 -name no -prune -o -print
+chmod 755 u17/no
+
+# --- 1.7.1: what the adversarial review found ---------------------------------
+#
+# ⛔ An entry below a starting point that cannot be stat'd is still EVALUATED, as
+# GNU does: reported once, exit 1, its name tested, and a test that needs its
+# metadata false. -L used to skip a link into an unsearchable directory.
+mkdir -p r17/t r17/locked/in && : > r17/locked/in/z
+ln -s ../locked/in r17/t/lin && ln -s ../locked/in/z r17/t/linz && chmod 000 r17/locked
+f17_err "-L: an unsearchable target is still listed"   -L r17/t
+f17_err "-L: ...and its name tested"                   -L r17/t -name 'lin*'
+f17_err "-L: ...but not a test that needs its stat"    -L r17/t -type l
+f17_err "-L: ...either side of -o"                     -L r17/t -name 'lin*' -o -type l
+f17_err "-L: ...-size, -perm, -newer, -empty"          -L r17/t -size -1 -o -perm -000 -o -empty
+f17_err "-H: an unsearchable starting point is not"    -H r17/t/lin
+chmod 755 r17/locked
+# ⚠ A readable directory that cannot be searched (chmod 600): the listing is
+# GNU's; the ERRORS are not — GNU stats only what a test needs (`d_type`), so it
+# reports the subdirectory alone where kriya reports every entry (roadmap 1.9.6).
+mkdir -p r17/dnx/in && : > r17/dnx/q && chmod 600 r17/dnx
+f17_same "an unsearchable directory's entries are listed" r17/dnx
+chmod 755 r17/dnx
+
+# ⛔ -empty reports a directory it cannot open, and the exit is 1. It was
+# silently "not empty" at exit 0.
+mkdir -p r17/e/d000 r17/e/d300 r17/e/ok && chmod 000 r17/e/d000 && chmod 300 r17/e/d300
+f17_err "-empty on directories it cannot open"         r17/e -maxdepth 1 -empty
+f17_err "...as starting points"                        r17/e/d000 r17/e/d300 r17/e/ok -maxdepth 0 -empty
+chmod 755 r17/e/d000 r17/e/d300
+
+# ⛔ -name sees a starting point without its trailing slashes, as GNU's
+# base_name does: `find dir/ -name dir -prune` listed the tree it was told to prune.
+mkdir -p r17/s/sub && ln -s s r17/sl
+f17_same "-name on 'dir/'"                             r17/s/ -maxdepth 0 -name s
+f17_same "-name on 'dir//'"                            r17/s// -maxdepth 0 -name s
+f17_same "-name on './'"                               ./ -maxdepth 0 -name .
+f17_same "-name on '//'"                               // -maxdepth 0 -name /
+f17_same "-prune on 'link/'"                           r17/sl/ -name sl -prune -o -print
+f17_same "-regex still sees the path as written"       r17/s/ -maxdepth 0 -regex '.*/s/'
+
+# ⛔ -regextype is an option, true where it stands, and each -regex keeps the
+# dialect it was compiled in: a second -regextype ran an ERE through the BRE
+# engine, and `-regextype X -not …` and a trailing -regextype were usage errors.
+f17_same "a later -regextype leaves an earlier -regex"  r17/s -maxdepth 1 -regextype posix-extended -regex '.*/(sub|x)' -regextype posix-basic -name '*'
+f17_same "-regextype before -not"                       r17/s -maxdepth 1 -regextype posix-extended -not -regex '.*/sub'
+f17_same "a trailing -regextype"                        r17/s -maxdepth 0 -regextype posix-extended
+f17_same "-regextype is true where it stands"           r17/s -maxdepth 1 -regextype posix-extended -o -print
+
+# ⛔ Starting points GNU takes that kriya refused: `--` ends -H/-L/-P, and a bare
+# `-` or a leading `)` is a file.
+( cd r17 && : > ./- && mkdir -p ')' )
+f17_same "-- ends the options"                          -- r17/s -maxdepth 0
+f17_same "-L -- ..."                                    -L -- r17/sl -maxdepth 0
+( cd r17 && f17_same "'-' is a file"                    - -maxdepth 0 )
+( cd r17 && f17_same "')' is a starting point"          ')' -maxdepth 0 )
+( cd r17 && f17_same "...among others"                  s ')' -maxdepth 0 )
+
+# ⛔ Deep expressions died of SIGSEGV. A chain of any length is walked in a loop;
+# parentheses nest to half the stack, and deeper is a usage error — never a
+# signal. The chain is built in a file (a shell variable of 50,000 words is slow)
+# and compared with GNU at 2,000 terms; at 50,000 — past where 1.7.0 crashed —
+# kriya's answer is asserted directly, because GNU takes 33 s over it.
+for _n in 2000 50000; do
+    awk -v n="$_n" 'BEGIN { print "r17/s"; print "-maxdepth"; print "0"; print "-name"; print "x0";
+        for (i = 1; i < n; i++) { print "-o"; print "-name"; print "x" i } print "-o"; print "-print" }' \
+        > r17/chain.args
+    _k=0; _ko=$(tr '\n' '\0' < r17/chain.args | timeout 60 xargs -0 -x -s 2000000 "$BIN" find 2>/dev/null) || _k=$?
+    if [ "$_n" = 2000 ]; then
+        _g=0; _go=$(tr '\n' '\0' < r17/chain.args | timeout 60 xargs -0 -x -s 2000000 find 2>/dev/null) || _g=$?
+        expect_eq "a $_n-term -o chain, against GNU" "$_g|$_go" "$_k|$_ko"
+    else
+        expect_eq "a $_n-term -o chain runs (it died of SIGSEGV)" "0|r17/s" "$_k|$_ko"
+    fi
+done
+_p=""; _q=""; _i=0
+while [ "$_i" -lt 1000 ]; do _p="$_p ("; _q="$_q )"; _i=$((_i + 1)); done
+# shellcheck disable=SC2086
+f17_same "1,000 nested parentheses"                     r17/s -maxdepth 0 $_p -print $_q
+_i=0
+while [ "$_i" -lt 5000 ]; do _p="$_p ( ( ( ("; _q="$_q ) ) ) )"; _i=$((_i + 1)); done
+_k=0
+# shellcheck disable=SC2086
+timeout 60 "$BIN" find r17/s -maxdepth 0 $_p -print $_q >/dev/null 2>&1 || _k=$?
+expect_eq "21,000 nested parentheses: refused, not a signal" "2" "$_k"
+_n=""; _i=0
+while [ "$_i" -lt 5001 ]; do _n="$_n !"; _i=$((_i + 1)); done
+# shellcheck disable=SC2086
+f17_same "5,001 negations are one"                     r17/s -maxdepth 0 $_n -name zz
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

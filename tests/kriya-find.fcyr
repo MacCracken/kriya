@@ -71,6 +71,23 @@ fn _ff_lexicon(): i64 {
     vec_push(v, "echo");
     vec_push(v, ";");
     vec_push(v, "{}");
+    # 1.7.1: -prune, -depth / -d, -perm and its three forms, -H, the `,`
+    # operator, -uid / -gid with a comparison, -size in words.
+    vec_push(v, "-prune");
+    vec_push(v, "-depth");
+    vec_push(v, "-d");
+    vec_push(v, "-perm");
+    vec_push(v, "-644");
+    vec_push(v, "/u+w,g=u");
+    vec_push(v, "u=rwxs,+X");
+    vec_push(v, "+222");
+    vec_push(v, "-H");
+    vec_push(v, ",");
+    vec_push(v, "-uid");
+    vec_push(v, "-gid");
+    vec_push(v, "+0");
+    vec_push(v, "++18446744073709551615");
+    vec_push(v, "3w");
     return v;
 }
 

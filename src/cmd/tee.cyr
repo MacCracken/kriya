@@ -33,7 +33,10 @@
 #
 # ⚠ On agnos both calls are no-ops (ring-3 has no signal delivery yet), so `-i`
 # and `-p` are accepted and there is nothing to ignore. That is the honest
-# behaviour, not a stub: the signals do not arrive.
+# behaviour, not a stub: the signals do not arrive. ⚠ But the EPIPE `-p`
+# discounts does (1.7.1): a readerless pipe answers -1 there, which `k_write`
+# records as EPIPE on an inherited descriptor — and as EIO on a file this utility
+# opened, which no mode forgives (ADR 0016, amended).
 
 enum TeeErrMode {
     # ⛔ TWO INDEPENDENT BITS, NOT FIVE MODES. GNU spells them as five names but

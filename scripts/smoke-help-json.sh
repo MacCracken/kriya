@@ -294,13 +294,17 @@ for u in df du date seq env; do
     expect_eq "$u rejects an unadvertised long option" "2" "$rc"
 done
 
-# ⚠ `find -H` is advertised AND refused, deliberately — it is a named deferral
-# (roadmap 1.7.1) and "unknown option" would be a worse answer than naming it.
-# Its description says NOT IMPLEMENTED, which is what excludes it above; pin
-# both halves so neither drifts.
+# ⭐ `find -H` is advertised and WORKS since 1.7.1; it was a named deferral that
+# said NOT IMPLEMENTED in its description. ⛔ The refusal this block used to pin
+# ran `find . -maxdepth 0 -H` — -H AFTER a starting point, which is a test GNU
+# does not have either — so it passed for a reason that had nothing to do with
+# the deferral, and would have gone on passing once -H shipped. Both positions
+# are pinned now, each for what it actually is.
+rc=0; "$BIN" find -H . -maxdepth 0 >/dev/null 2>&1 || rc=$?
+expect_eq "find -H before the starting points is accepted" "0" "$rc"
 rc=0; "$BIN" find . -maxdepth 0 -H >/dev/null 2>&1 || rc=$?
-expect_eq "find -H is refused, not silently accepted" "2" "$rc"
-expect_eq "find -H says so in its description" "yes" \
+expect_eq "find -H after a starting point is an unknown test, as in GNU" "2" "$rc"
+expect_eq "find -H no longer says NOT IMPLEMENTED" "no" \
     "$("$BIN" find --help=json | python3 -c '
 import json, sys
 d = json.load(sys.stdin)

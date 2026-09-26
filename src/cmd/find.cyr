@@ -3,45 +3,63 @@
 # Argument shape:
 #   find [STARTPATH...] [EXPRESSION]
 #
-# Predicates (each evaluates true/false per entry):
+# Tests (each evaluates true/false per entry). A number N may be written +N (more
+# than N) or -N (less than N), as GNU reads it:
 #   -name PAT       basename matches fnmatch-style glob (`*`, `?`, `[...]`)
 #   -type X         entry is one of {f, d, l, s, p, b, c}
-#   -size [+-]N[ckMG]   size match (default 512-byte blocks; suffixes
-#                       c=bytes, k=KiB, M=MiB, G=GiB)
+#   -size [+-]N[bcwkMG]  size in units, rounded up (default 512-byte blocks;
+#                   c=bytes, w=two-byte words, k=KiB, M=MiB, G=GiB)
 #   -mtime [+-]N    last-modified N*24h ago (sign per GNU semantics)
 #   -mmin  [+-]N    last-modified N minutes ago
+#   -perm MODE      the permission bits are exactly MODE; -perm -MODE: at least
+#                   those bits; -perm /MODE: any of them. MODE is octal or
+#                   symbolic (`u=rwx,go=rx`), as `chmod` takes it (1.7.1)
+#   -uid / -gid [+-]N    the numeric owner or group
+#   -user / -group NAME  the owner or group by name, or by number
+#   -nouser / -nogroup   no passwd / group entry for the id
 #   -empty          regular file size 0 OR directory has no entries
-#   -newer REF      mtime newer than the reference path's mtime
-#   -maxdepth N     prune descent beyond depth N
-#   -mindepth N     skip emitting entries above depth N
+#   -newer REF      mtime newer than REF's (REF followed under -H and -L)
+#
+# Global options — they apply to the whole walk wherever they are written, and
+# evaluate TRUE where they stand (GNU; the last -maxdepth / -mindepth wins):
+#   -maxdepth N     descend at most N levels below the starting points
+#   -mindepth N     apply the expression only N levels down and below
+#   -depth / -d     a directory's entries before the directory (post-order)
 #
 # Actions (also predicates; default-true unless noted):
 #   -print          print the path + newline (default action when none given)
 #   -print0         print the path + NUL byte (-print0; pairs with xargs -0)
+#   -prune          true; do not descend into this directory. No effect under
+#                   -depth (POSIX). Not an action for the implicit -print.
 #   -exec CMD... \; fork+exec for each match, `{}` substituted with the path
 #   -exec CMD... {} +   one command per BATCH of matches, as many as fit in
 #                   131,072 bytes (GNU's accounting, `src/lib/argbatch.cyr`);
 #                   always true, a failure is the exit status (1.7.0)
 #
-# Operators (precedence: ! > -a > -o; juxtaposition is implicit -a):
+# Operators (precedence: ! > -a > -o > ,; juxtaposition is implicit -a):
 #   ! EXPR / -not EXPR
 #   EXPR1 -a EXPR2 / EXPR1 -and EXPR2
 #   EXPR1 -o EXPR2 / EXPR1 -or EXPR2
+#   EXPR1 , EXPR2   both, always; the value is EXPR2's (GNU)
 #   ( EXPR )        grouping (each paren is its own argv token)
 #
-# Symlink policy (ADR 0003):
-#   default (-P)    never follow symlinks during the walk
-#   -L              follow all symlinks (operands + descent)
-#   -H              deferred — follow operands only (waits on the (roadmap 1.7.1)
-#                   operand-vs-descent stat-mode plumbing in fs.cyr)
+# Symlink policy (ADR 0003), last of -H / -L / -P wins:
+#   default (-P)    never follow symlinks
+#   -H              follow a starting point that is a symlink, nothing below it
+#   -L              follow every symlink; a directory reached twice on one path
+#                   is a loop, reported, and not entered
 #
 # Exit codes:
 #   0   walk completed; predicates evaluated for every entry
-#   1   one or more entries failed to open / stat / exec, or an `-exec … +`
-#       command failed
+#   1   one or more entries failed to open / stat / exec, an `-exec … +`
+#       command failed, or -L found a loop
 #   2   usage error (bad expression, unknown predicate)
 # ⚠ One deliberate divergence: a `-exec … ;` command that cannot be run or is
 # killed makes find exit 1. GNU reports it and exits 0 in that form.
+# ⚠ GNU's warnings about `-d` and about a global option written after a test go
+# to a TERMINAL only (its `-warn` default follows `isatty(0)`), and kriya prints
+# neither. Its warning that `-perm /000` changed meaning in 2007 is about GNU's
+# own history — kriya never had the old meaning — and is not printed either.
 
 var _find_spec    = 0;
 var _f_L_idx      = 0;
@@ -53,6 +71,7 @@ enum FindNode {
     F_N_AND       = 1,
     F_N_OR        = 2,
     F_N_NOT       = 3,
+    F_N_COMMA     = 4,
     F_N_NAME      = 10,
     F_N_TYPE      = 11,
     F_N_SIZE      = 12,
@@ -60,8 +79,8 @@ enum FindNode {
     F_N_MMIN      = 14,
     F_N_EMPTY     = 15,
     F_N_NEWER     = 16,
-    F_N_MAXDEPTH  = 17,
-    F_N_MINDEPTH  = 18,
+    F_N_TRUE      = 17,    # a global option where it stands: -depth, -maxdepth, -mindepth
+    F_N_PERM      = 18,
     F_N_REGEX     = 19,
     F_N_UID       = 20,
     F_N_GID       = 21,
@@ -71,12 +90,20 @@ enum FindNode {
     F_N_PRINT0    = 31,
     F_N_EXEC      = 32,
     F_N_EXECPLUS  = 33,
+    F_N_PRUNE     = 34,
 }
 
 enum FindSign {
     F_SIGN_EXACT = 0,
     F_SIGN_PLUS  = 1,
     F_SIGN_MINUS = 2,
+}
+
+# `-perm`'s three readings of a mode (GNU's `permissions_type`).
+enum FindPerm {
+    F_PERM_EXACT = 0,    # MODE:  the permission bits are exactly these
+    F_PERM_ALL   = 1,    # -MODE: at least these bits are set
+    F_PERM_ANY   = 2,    # /MODE: at least one of them is (GNU's extension)
 }
 
 # Parse state — globals for the recursive descent.
@@ -91,8 +118,41 @@ var _f_path_env  = 0;   # cached PATH (heap-copied at startup, stable across exe
 # Walk state.
 var _f_any_failed = 0;
 
-# Symlink follow mode: 0=P (default), 1=L (follow everywhere).
+# Symlink follow mode: 0=P (default), 1=L (follow everywhere), 2=H (the starting
+# points only).
 var _f_follow_mode = 0;
+
+# ⛔ THE GLOBAL OPTIONS ARE WALK SETTINGS, NOT TESTS. `-mindepth` used to be a
+# test evaluated where it stood, so `find t -print -mindepth 2` printed every
+# entry and `find t -mindepth 2 -o -print` printed the shallow ones — both at
+# exit 0, where GNU applies the expression only from depth 2 down and prints
+# nothing above it. And `-maxdepth` was FIRST-wins where GNU's is last (1.7.1).
+# ⚠ `-1` for "no -maxdepth" is set in `cmd_find`: a module-scope `var x = 0 - 1;`
+# is an expression initializer and costs a `gvar_toks` slot (CLAUDE.md).
+var _f_maxdepth    = 0;
+var _f_mindepth    = 0;
+var _f_depth_first = 0;    # -depth: post-order
+var _f_prune_hit   = 0;    # -prune ran for the entry being evaluated
+var _f_walk_path   = 0;    # -L: the directories the walk is inside (`fs_dirstack_*`)
+var _f_nostat      = 0;    # the entry being evaluated could not be stat'd (`_f_eval_leaf`)
+var _f_nest        = 0;    # parentheses open while parsing
+var _f_nest_cap    = 0;    # ...and how many may be: `_f_nest_max`, read once
+
+# ⛔ HOW DEEP `(` MAY NEST. The parser recurses five calls per parenthesis, about
+# 1 KiB of stack a level (measured: 2,048 levels overflow a 2 MiB stack, 8,000 fit
+# in 8 MiB), and past the stack it died of SIGSEGV where GNU runs it. So the
+# limit is half the stack, read from RLIMIT_STACK — 4,096 levels at Linux's usual
+# 8 MiB — and deeper is a usage error. Chains of any length are not affected
+# (`_f_chain`), and a run of `!` costs a counter (`_f_parse_unary`). ⚠ agnos has
+# no rlimits, and its 3,584-byte command line cannot reach 1,024 levels.
+fn _f_nest_max(): i64 {
+    var sl = ab_stack_limit();
+    if (sl == 0) { return 1024; }
+    var lim = sl >> 11;                   # bytes / 2,048; RLIM_INFINITY is all ones
+    if (lim > 16384) { return 16384; }
+    if (lim < 64) { return 64; }
+    return lim;
+}
 
 # Cached AST root.
 var _f_ast = 0;
@@ -114,7 +174,7 @@ fn _f_init_spec(): i64 {
     if (_find_spec != 0) { return 0; }
     var s = flags_new();
     _f_L_idx = flags_add_bool(s, 76, "follow",         0, "follow all symlinks");
-    _f_H_idx = flags_add_bool(s, 72, "follow-operand", 0, "NOT IMPLEMENTED - refused; use -P or -L (roadmap 1.7.1)");
+    _f_H_idx = flags_add_bool(s, 72, "follow-operand", 0, "follow symlinks given as starting points only");
     _f_P_idx = flags_add_bool(s, 80, "no-follow",      0, "never follow symlinks (default)");
     _find_spec = s;
     return 0;
@@ -262,42 +322,83 @@ fn _f_parse_signed_int(s, sign_ptr): i64 {
     return n;
 }
 
-# Parse a -size argument like "+10c", "-1M", "100": returns the COUNT, in the
-# unit its suffix names, and stores the sign in `*sign_ptr` and the unit's size
-# in bytes in `*unit_ptr`. -1 when it is not one.
+# A number the way GNU's `get_num` reads one for -uid, -gid and -size: `+` (more
+# than) or `-` (less than), then `xstrtoumax`'s shape — blanks, one optional `+`,
+# digits, nothing after — up to 2^64 - 1. Stores the sign and the value, the value
+# as -1 when it is past 2^63 - 1 (`_f_cmp_num` reads that as larger than anything
+# a file has). Returns 0, or -1 when it is not a number.
 #
-# ⛔ IT RETURNED BYTES — the count times the unit — and compared those with the
-# file's size, so `find -size -1M` matched every file under a megabyte. GNU
-# rounds the file's size UP to the unit and compares counts: `-size -1M` is
-# only the empty files, and `-size 1k` includes a one-byte file. POSIX defines
-# only blocks and `c`; `k`, `M` and `G` are GNU's, and so is that rule (1.6.16).
-# The multiplication also WRAPPED past 2^63; there is none now, and a count past
-# 2^63 - 1 is refused.
-fn _f_parse_size(s, sign_ptr, unit_ptr): i64 {
+# ⛔ `-uid` AND `-gid` TOOK ONLY AN EXACT, BARE NUMBER until 1.7.1, so `-uid +999`
+# and `-gid -100` were usage errors where GNU compares, and `-uid ' 5'` and
+# `-size ++1c` were refused where GNU reads them. ⚠ The second sign is GNU's too:
+# the first `+` is the comparison and the next one belongs to the number.
+fn _f_parse_num(s, sign_ptr, val_ptr): i64 {
     if (s == 0) { return 0 - 1; }
     var i: i64 = 0;
     var sign: i64 = F_SIGN_EXACT;
     if (load8(s) == 43) { sign = F_SIGN_PLUS;  i = 1; }
     elif (load8(s) == 45) { sign = F_SIGN_MINUS; i = 1; }
-    var len: i64 = 0;
-    var n = kriya_count_digits(s + i, &len);
-    if (len == 0) { return 0 - 1; }
-    if (n == KRIYA_COUNT_MAX) { return 0 - 1; }
-    var suf = load8(s + i + len);
-    var unit: i64 = 512;  # default unit = 512-byte block
-    if      (suf == 0)   { unit = 512; }
-    elif    (suf == 98)  { unit = 512; }
-    elif    (suf == 99)  { unit = 1; }
-    elif    (suf == 107) { unit = 1024; }
-    elif    (suf == 77)  { unit = 1048576; }
-    elif    (suf == 71)  { unit = 1073741824; }
-    else { return 0 - 1; }
-    if (suf != 0) {
-        if (load8(s + i + len + 1) != 0) { return 0 - 1; }
+    var v = kriya_parse_bounded(s + i, KRIYA_COUNT_MAX);
+    if (v == (0 - 1)) { return 0 - 1; }
+    if (v == (0 - 2)) {
+        if (kriya_fits_u64(s + i) == 0) { return 0 - 1; }
+        v = 0 - 1;
     }
     store64(sign_ptr, sign);
+    store64(val_ptr, v);
+    return 0;
+}
+
+# GNU's `compare_num`: `actual` against `want` under `sign`. `want` = -1 stands
+# for a number past 2^63 - 1, more than any size or id: never equal, never
+# exceeded, always more.
+fn _f_cmp_num(sign, want, actual): i64 {
+    if (want < 0) {
+        if (sign == F_SIGN_MINUS) { return 1; }
+        return 0;
+    }
+    if (sign == F_SIGN_PLUS)  { if (actual > want) { return 1; } return 0; }
+    if (sign == F_SIGN_MINUS) { if (actual < want) { return 1; } return 0; }
+    if (actual == want) { return 1; }
+    return 0;
+}
+
+# Parse a -size argument like "+10c", "-1M", "100": the COUNT, in the unit its
+# suffix names, as `_f_parse_num` reads it (sign and count to `*sign_ptr` and
+# `*val_ptr`), and the unit's size in bytes to `*unit_ptr`. Returns 0, or -1 when
+# it is not one. GNU's rule: the LAST character is the unit when it is one of
+# `bcwkMG`, and must be a digit otherwise.
+#
+# ⛔ IT RETURNED BYTES — the count times the unit — and compared those with the
+# file's size, so `find -size -1M` matched every file under a megabyte. GNU
+# rounds the file's size UP to the unit and compares counts: `-size -1M` is
+# only the empty files, and `-size 1k` includes a one-byte file. POSIX defines
+# only blocks and `c`; `k`, `M`, `G` and `w` are GNU's, and so is that rule
+# (1.6.16). There is no multiplication to wrap.
+fn _f_parse_size(s, sign_ptr, val_ptr, unit_ptr): i64 {
+    if (s == 0) { return 0 - 1; }
+    var len = strlen(s);
+    if (len == 0) { return 0 - 1; }
+    var suf = load8(s + len - 1);
+    var unit: i64 = 0;
+    if      (suf == 98)  { unit = 512; }           # b
+    elif    (suf == 99)  { unit = 1; }             # c
+    elif    (suf == 119) { unit = 2; }             # w: two-byte words (1.7.1)
+    elif    (suf == 107) { unit = 1024; }          # k
+    elif    (suf == 77)  { unit = 1048576; }       # M
+    elif    (suf == 71)  { unit = 1073741824; }    # G
+    elif    (suf < 48)   { return 0 - 1; }
+    elif    (suf > 57)   { return 0 - 1; }
+    # The number is everything before the unit — a copy, since argv is shared.
+    var nlen = len;
+    if (unit != 0) { nlen = len - 1; }
+    else { unit = 512; }
+    var num = alloc(nlen + 1);
+    memcpy(num, s, nlen);
+    store8(num + nlen, 0);
+    if (_f_parse_num(num, sign_ptr, val_ptr) != 0) { return 0 - 1; }
     store64(unit_ptr, unit);
-    return n;
+    return 0;
 }
 
 # --- AST node allocator -----------------------------------------------
@@ -332,10 +433,13 @@ fn _f_parse_primary(): i64 {
     var t = _f_tok();
     if (t == 0) { _f_set_err("missing operand"); return 0; }
 
-    # Group: ( EXPR )
+    # Group: ( EXPR ), where EXPR may hold `,` too.
     if (streq(t, "(") == 1) {
+        if (_f_nest >= _f_nest_cap) { _f_set_err("parentheses nested too deeply for the stack"); return 0; }
+        _f_nest = _f_nest + 1;
         _f_consume();
-        var inner = _f_parse_or();
+        var inner = _f_parse_list();
+        _f_nest = _f_nest - 1;
         if (_f_err == 1) { return 0; }
         if (_f_tok_eq(")") == 0) { _f_set_err("expected ')' to close group"); return 0; }
         _f_consume();
@@ -353,8 +457,13 @@ fn _f_parse_primary(): i64 {
         _f_consume();
         var rt = _f_consume();
         if (rt == 0) { _f_set_err("-regextype needs an argument"); return 0; }
-        if (streq(rt, "posix-basic") == 1) { _f_regextype = F_RX_BRE; return _f_parse_primary(); }
-        if (streq(rt, "posix-extended") == 1) { _f_regextype = F_RX_ERE; return _f_parse_primary(); }
+        # ⛔ AN OPTION, TRUE WHERE IT STANDS, and it sets the dialect of the -regex
+        # tests AFTER it, which record it. It used to swallow the next test as its
+        # own operand — so `-regextype posix-extended -not -regex X` and a trailing
+        # `-regextype` were usage errors — and the dialect was read again at MATCH
+        # time, so a second -regextype ran an ERE through the BRE engine (1.7.1).
+        if (streq(rt, "posix-basic") == 1) { _f_regextype = F_RX_BRE; return _f_node_new(F_N_TRUE, 0, 0, 0); }
+        if (streq(rt, "posix-extended") == 1) { _f_regextype = F_RX_ERE; return _f_node_new(F_N_TRUE, 0, 0, 0); }
         # ⛔ REFUSED BY NAME, not quietly aliased. GNU's default and its `emacs`
         # type accept `a+` as one-or-more; kriya's engines are POSIX BRE and ERE
         # (ADR 0005), where an unescaped `+` is a LITERAL under BRE. Silently
@@ -370,7 +479,7 @@ fn _f_parse_primary(): i64 {
         if (rp == 0) { _f_set_err("-regex needs an argument"); return 0; }
         var rn = _f_regex_compile(rp, 0);
         if (rn == 0) { _f_set_err("-regex pattern failed to compile"); return 0; }
-        return _f_node_new(F_N_REGEX, rn, 0, 0);
+        return _f_node_new(F_N_REGEX, rn, 0, _f_regextype);
     }
     if (streq(t, "-iregex") == 1) {
         _f_consume();
@@ -401,7 +510,7 @@ fn _f_parse_primary(): i64 {
         }
         var inn = _f_regex_compile(ifold, 1);
         if (inn == 0) { _f_set_err("-iregex pattern failed to compile"); return 0; }
-        return _f_node_new(F_N_REGEX, inn, 1, 0);
+        return _f_node_new(F_N_REGEX, inn, 1, _f_regextype);
     }
     if (streq(t, "-type") == 1) {
         _f_consume();
@@ -415,10 +524,10 @@ fn _f_parse_primary(): i64 {
         var sa = _f_consume();
         if (sa == 0) { _f_set_err("-size needs an argument"); return 0; }
         var sign: i64 = 0;
+        var count: i64 = 0;
         var unit: i64 = 0;
-        var b = _f_parse_size(sa, &sign, &unit);
-        if (b < 0) { _f_set_err("bad -size argument"); return 0; }
-        return _f_node_new(F_N_SIZE, sign, b, unit);
+        if (_f_parse_size(sa, &sign, &count, &unit) != 0) { _f_set_err("bad -size argument"); return 0; }
+        return _f_node_new(F_N_SIZE, sign, count, unit);
     }
     if (streq(t, "-mtime") == 1) {
         _f_consume();
@@ -447,10 +556,13 @@ fn _f_parse_primary(): i64 {
         var rp = _f_consume();
         if (rp == 0) { _f_set_err("-newer needs an argument"); return 0; }
         # stat the ref now; cache mtime in the node.
+        # ⛔ FOLLOWED UNDER -H AND -L, as a starting point is. It was always
+        # `lstat`ed, so `find -L d -newer LINK` compared against the LINK's own
+        # mtime where GNU uses its target's (1.7.1).
         var st[144];
-        var r = fs_lstat_at(0 - 100, rp, &st);
+        var r = _f_xstat(rp, 0, &st);
         if (r < 0) { _f_set_err("-newer reference path not found"); return 0; }
-        return _f_node_new(F_N_NEWER, load64(&st + 88), 0, 0);
+        return _f_node_new(F_N_NEWER, load64(&st + FS_STAT_MTIME), load64(&st + FS_STAT_MTIME_NSEC), 0);
     }
     # ⛔ `-user` takes a NAME **or** a numeric id, and the NAME wins when both
     # readings are possible. Measured: with a user literally named `4242` whose
@@ -467,7 +579,7 @@ fn _f_parse_primary(): i64 {
         # 4294967295 it is refused, where it used to WRAP past 2^64 (1.6.16).
         if (uid < 0) { uid = kriya_parse_bounded(ua, 4294967295); }
         if (uid < 0) { _f_set_err("-user: not the name of a known user"); return 0; }
-        return _f_node_new(F_N_UID, uid, 0, 0);
+        return _f_node_new(F_N_UID, uid, F_SIGN_EXACT, 0);
     }
     if (streq(t, "-group") == 1) {
         _f_consume();
@@ -476,25 +588,69 @@ fn _f_parse_primary(): i64 {
         var gid = userdb_group_id(ga);
         if (gid < 0) { gid = kriya_parse_bounded(ga, 4294967295); }
         if (gid < 0) { _f_set_err("-group: not the name of a known group"); return 0; }
-        return _f_node_new(F_N_GID, gid, 0, 0);
+        return _f_node_new(F_N_GID, gid, F_SIGN_EXACT, 0);
     }
     # ⚠ `-uid` / `-gid` are NUMERIC ONLY — a name is not accepted, which is what
-    # makes them the unambiguous form when a user is named after a number.
+    # makes them the unambiguous form when a user is named after a number. They
+    # take `+N` and `-N` as -size does (1.7.1).
     if (streq(t, "-uid") == 1) {
         _f_consume();
         var un = _f_consume();
         if (un == 0) { _f_set_err("-uid needs an argument"); return 0; }
-        var uv = kriya_parse_nonneg_int(un);
-        if (uv < 0) { _f_set_err("bad -uid value"); return 0; }
-        return _f_node_new(F_N_UID, uv, 0, 0);
+        var us: i64 = 0;
+        var uv: i64 = 0;
+        if (_f_parse_num(un, &us, &uv) != 0) { _f_set_err("bad -uid value"); return 0; }
+        return _f_node_new(F_N_UID, uv, us, 0);
     }
     if (streq(t, "-gid") == 1) {
         _f_consume();
         var gn = _f_consume();
         if (gn == 0) { _f_set_err("-gid needs an argument"); return 0; }
-        var gv = kriya_parse_nonneg_int(gn);
-        if (gv < 0) { _f_set_err("bad -gid value"); return 0; }
-        return _f_node_new(F_N_GID, gv, 0, 0);
+        var gs: i64 = 0;
+        var gv: i64 = 0;
+        if (_f_parse_num(gn, &gs, &gv) != 0) { _f_set_err("bad -gid value"); return 0; }
+        return _f_node_new(F_N_GID, gv, gs, 0);
+    }
+    # `-perm MODE`: the mode is compiled once and applied to 0 with a umask of 0,
+    # twice — for a directory and for anything else, which differ only through
+    # `X` — exactly as GNU's `parse_perm` does (`src/lib/mode.cyr`).
+    if (streq(t, "-perm") == 1) {
+        _f_consume();
+        var pa = _f_consume();
+        if (pa == 0) { _f_set_err("-perm needs an argument"); return 0; }
+        var pkind: i64 = F_PERM_EXACT;
+        var pstart: i64 = 0;
+        if (load8(pa) == 45) { pkind = F_PERM_ALL; pstart = 1; }
+        elif (load8(pa) == 47) { pkind = F_PERM_ANY; pstart = 1; }
+        var mc = kmode_compile(pa + pstart);
+        # ⛔ `+` BEFORE AN OCTAL DIGIT IS REFUSED, as GNU refuses it. It was GNU's
+        # old spelling of `/`, removed in 2005 because `chmod` reads `+222` as
+        # "add these bits"; accepting it under either meaning would answer a
+        # script written for the other. `+w` and `-+222` are ordinary modes.
+        if (load8(pa) == 43) {
+            var p1 = load8(pa + 1);
+            if (p1 >= 48) { if (p1 < 56) { mc = 0; } }
+        }
+        if (mc == 0) { _f_set_err("-perm: invalid file mode"); return 0; }
+        var pfile = kmode_adjust(0, 0, 0, mc);
+        var pdir  = kmode_adjust(0, 1, 0, mc);
+        # ⚠ `/MODE` that names no bit at all (`/000`, `/u=`) matches EVERY file,
+        # like `-000`: GNU changed it in 2007 from matching none.
+        if (pkind == F_PERM_ANY) {
+            if (pfile == 0) { if (pdir == 0) { pkind = F_PERM_ALL; } }
+        }
+        return _f_node_new(F_N_PERM, pkind, pfile, pdir);
+    }
+    if (streq(t, "-prune") == 1) {
+        _f_consume();
+        return _f_node_new(F_N_PRUNE, 0, 0, 0);
+    }
+    # ⚠ `-d` is BSD's spelling, and GNU takes it too; its warning that `-d` is
+    # deprecated is printed only on a terminal (see the header).
+    if (streq(t, "-depth") == 1 || streq(t, "-d") == 1) {
+        _f_consume();
+        _f_depth_first = 1;
+        return _f_node_new(F_N_TRUE, 0, 0, 0);
     }
     # ⚠ "no entry in the database", NOT "id is zero" and NOT "lookup failed" —
     # with /etc/passwd absent entirely, GNU's `-nouser` matches EVERY file.
@@ -515,7 +671,8 @@ fn _f_parse_primary(): i64 {
         var dv = kriya_parse_nonneg_int(dx);
         if (dv > 2147483647) { dv = 0 - 1; }
         if (dv < 0) { _f_set_err("bad -maxdepth value"); return 0; }
-        return _f_node_new(F_N_MAXDEPTH, dv, 0, 0);
+        _f_maxdepth = dv;
+        return _f_node_new(F_N_TRUE, 0, 0, 0);
     }
     if (streq(t, "-mindepth") == 1) {
         _f_consume();
@@ -524,7 +681,8 @@ fn _f_parse_primary(): i64 {
         var dv2 = kriya_parse_nonneg_int(dy);
         if (dv2 > 2147483647) { dv2 = 0 - 1; }
         if (dv2 < 0) { _f_set_err("bad -mindepth value"); return 0; }
-        return _f_node_new(F_N_MINDEPTH, dv2, 0, 0);
+        _f_mindepth = dv2;
+        return _f_node_new(F_N_TRUE, 0, 0, 0);
     }
     if (streq(t, "-print") == 1) {
         _f_consume();
@@ -589,79 +747,132 @@ fn _f_parse_primary(): i64 {
 # Pull the unit-suffix indicator out of an unparsed -size arg so the
 # evaluator can choose between byte-exact (`c`) and block-rounded
 # (default / `b`). Returns 0 for blocks (default), 1 for bytes.
+# ⚠ A run of `!` is COUNTED, not recursed: `! ! x` is `x`, and fifty thousand of
+# them cost one counter (GNU recurses, and dies of SIGSEGV at 50,001).
 fn _f_parse_unary(): i64 {
-    var t = _f_tok();
-    if (t == 0) { _f_set_err("missing operand"); return 0; }
-    if (streq(t, "!") == 1 || streq(t, "-not") == 1) {
-        _f_consume();
-        var inner = _f_parse_unary();
-        if (_f_err == 1) { return 0; }
-        return _f_node_new(F_N_NOT, inner, 0, 0);
+    var neg: i64 = 0;
+    var more: i64 = 1;
+    while (more == 1) {
+        var t = _f_tok();
+        if (t == 0) { more = 0; }
+        elif (streq(t, "!") == 1 || streq(t, "-not") == 1) { _f_consume(); neg = 1 - neg; }
+        else { more = 0; }
     }
-    return _f_parse_primary();
+    if (_f_tok() == 0) { _f_set_err("missing operand"); return 0; }
+    var inner = _f_parse_primary();
+    if (_f_err == 1) { return 0; }
+    if (neg == 1) { return _f_node_new(F_N_NOT, inner, 0, 0); }
+    return inner;
+}
+
+# A chain of `kind` nodes over the operands in `ops`, built RIGHT-deep.
+# ⛔ RIGHT-DEEP ON PURPOSE: `_f_eval`, `_f_has_action` and `_f_flush_execs` walk a
+# chain's right spine in a loop and recurse only into left children, so a chain of
+# any length costs one frame. Built left-deep, `find . -name a -o -name b -o …`
+# over 50,000 names recursed 50,000 deep and died of SIGSEGV where GNU runs it
+# (1.7.1). All three operators are associative, `,` included: every operand still
+# runs left to right, and the value is the last one's.
+fn _f_chain(kind, ops): i64 {
+    var i = vec_len(ops) - 1;
+    var node = vec_get(ops, i);
+    i = i - 1;
+    while (i >= 0) {
+        node = _f_node_new(kind, vec_get(ops, i), node, 0);
+        i = i - 1;
+    }
+    return node;
 }
 
 fn _f_parse_and(): i64 {
-    var lhs = _f_parse_unary();
+    var first = _f_parse_unary();
     if (_f_err == 1) { return 0; }
+    var ops: i64 = 0;
     var loop: i64 = 1;
     while (loop == 1) {
-        if (_f_err == 1) { return 0; }
         var t = _f_tok();
+        var more: i64 = 0;
         if (t == 0) { loop = 0; }
-        elif (streq(t, "-a") == 1 || streq(t, "-and") == 1) {
-            _f_consume();
+        elif (streq(t, "-a") == 1 || streq(t, "-and") == 1) { _f_consume(); more = 1; }
+        # Implicit AND: any token that isn't `)`, `-o`, `-or`, `,`, or EOF
+        # is the start of another predicate.
+        elif (streq(t, ")") == 1 || streq(t, "-o") == 1 || streq(t, "-or") == 1) { loop = 0; }
+        elif (streq(t, ",") == 1) { loop = 0; }
+        else { more = 1; }
+        if (more == 1) {
             var rhs = _f_parse_unary();
             if (_f_err == 1) { return 0; }
-            lhs = _f_node_new(F_N_AND, lhs, rhs, 0);
-        }
-        # Implicit AND: any token that isn't `)`, `-o`, `-or`, or EOF
-        # is the start of another predicate.
-        elif (streq(t, ")") == 1 || streq(t, "-o") == 1 || streq(t, "-or") == 1) {
-            loop = 0;
-        } else {
-            var rhs2 = _f_parse_unary();
-            if (_f_err == 1) { return 0; }
-            lhs = _f_node_new(F_N_AND, lhs, rhs2, 0);
+            if (ops == 0) { ops = vec_new(); vec_push(ops, first); }
+            vec_push(ops, rhs);
         }
     }
-    return lhs;
+    if (ops == 0) { return first; }
+    return _f_chain(F_N_AND, ops);
 }
 
 fn _f_parse_or(): i64 {
-    var lhs = _f_parse_and();
+    var first = _f_parse_and();
     if (_f_err == 1) { return 0; }
+    var ops: i64 = 0;
     var loop: i64 = 1;
     while (loop == 1) {
-        if (_f_err == 1) { return 0; }
         var t = _f_tok();
         if (t == 0) { loop = 0; }
         elif (streq(t, "-o") == 1 || streq(t, "-or") == 1) {
             _f_consume();
             var rhs = _f_parse_and();
             if (_f_err == 1) { return 0; }
-            lhs = _f_node_new(F_N_OR, lhs, rhs, 0);
+            if (ops == 0) { ops = vec_new(); vec_push(ops, first); }
+            vec_push(ops, rhs);
         } else { loop = 0; }
     }
-    return lhs;
+    if (ops == 0) { return first; }
+    return _f_chain(F_N_OR, ops);
+}
+
+# The whole expression: `-o` lists joined by GNU's `,` — both sides always run,
+# and the value is the right one's. Lowest precedence, left to right (1.7.1).
+fn _f_parse_list(): i64 {
+    var first = _f_parse_or();
+    if (_f_err == 1) { return 0; }
+    var ops: i64 = 0;
+    var loop: i64 = 1;
+    while (loop == 1) {
+        if (_f_tok_eq(",") == 1) {
+            _f_consume();
+            var rhs = _f_parse_or();
+            if (_f_err == 1) { return 0; }
+            if (ops == 0) { ops = vec_new(); vec_push(ops, first); }
+            vec_push(ops, rhs);
+        } else { loop = 0; }
+    }
+    if (ops == 0) { return first; }
+    return _f_chain(F_N_COMMA, ops);
 }
 
 # Return 1 if `n` (rooted at the top of the AST) contains an action node
 # anywhere (-print, -print0, -exec). When the expression has no
 # explicit action, find appends an implicit -print.
+# ⚠ `-prune` is NOT one: GNU's rule is "no actions other than -prune or -print",
+# so `find . -name x -prune` still prints what it matched.
 fn _f_has_action(n): i64 {
-    if (n == 0) { return 0; }
-    var k = load64(n);
-    if (k == F_N_PRINT || k == F_N_PRINT0 || k == F_N_EXEC) { return 1; }
-    if (k == F_N_EXECPLUS) { return 1; }
-    if (k == F_N_AND || k == F_N_OR) {
-        if (_f_has_action(load64(n + 8))  == 1) { return 1; }
-        if (_f_has_action(load64(n + 16)) == 1) { return 1; }
+    var cur = n;
+    var found: i64 = 0;
+    var more: i64 = 1;
+    while (more == 1) {
+        if (cur == 0) { more = 0; }
+        else {
+            var k = load64(cur);
+            if (k == F_N_PRINT || k == F_N_PRINT0 || k == F_N_EXEC) { found = 1; more = 0; }
+            elif (k == F_N_EXECPLUS) { found = 1; more = 0; }
+            elif (k == F_N_NOT) { cur = load64(cur + 8); }
+            elif (k == F_N_AND || k == F_N_OR || k == F_N_COMMA) {
+                # The left child by recursion, the right spine by the loop.
+                if (_f_has_action(load64(cur + 8)) == 1) { found = 1; more = 0; }
+                else { cur = load64(cur + 16); }
+            } else { more = 0; }
+        }
     }
-    if (k == F_N_NOT) {
-        return _f_has_action(load64(n + 8));
-    }
-    return 0;
+    return found;
 }
 
 # --- Predicate evaluators ---------------------------------------------
@@ -671,9 +882,28 @@ fn _f_eval_size_predicate(sign, want, unit, actual_size): i64 {
     # one `k` — so an empty file is the only thing smaller than one of anything.
     var actual = actual_size / unit;
     if (actual * unit < actual_size) { actual = actual + 1; }
-    if (sign == F_SIGN_PLUS)  { if (actual > want) { return 1; } return 0; }
-    if (sign == F_SIGN_MINUS) { if (actual < want) { return 1; } return 0; }
-    return (actual == want);
+    return _f_cmp_num(sign, want, actual);
+}
+
+# GNU's `pred_perm`. `vfile` / `vdir` are the mode compiled for a file and for a
+# directory; they differ only when the mode used `X`.
+fn _f_eval_perm_predicate(kind, vfile, vdir, stat_buf): i64 {
+    var m = load64(stat_buf + 24);
+    var want = vfile;
+    if ((m & FS_S_IFMT) == FS_S_IFDIR) { want = vdir; }
+    if (kind == F_PERM_ALL) {
+        if ((m & want) == want) { return 1; }
+        return 0;
+    }
+    if (kind == F_PERM_ANY) {
+        # ⚠ No bit to test is a match — `/u=X` holds none for a plain file, and
+        # GNU matches it (Savannah bug 14748).
+        if (want == 0) { return 1; }
+        if ((m & want) != 0) { return 1; }
+        return 0;
+    }
+    if ((m & KMODE_ALL) == want) { return 1; }
+    return 0;
 }
 
 fn _f_eval_mtime_predicate(sign, want_days, mtime): i64 {
@@ -711,7 +941,7 @@ fn _f_eval_type_predicate(letter, stat_buf): i64 {
 
 # Returns 1 (regular file size 0) OR (directory with no entries beyond .. /.
 # Other types yield 0.
-fn _f_eval_empty_predicate(path, stat_buf): i64 {
+fn _f_eval_empty_predicate(path, stat_buf, depth): i64 {
     var m = load64(stat_buf + 24);
     var ifmt = m & FS_S_IFMT;
     if (ifmt == FS_S_IFREG) {
@@ -725,9 +955,15 @@ fn _f_eval_empty_predicate(path, stat_buf): i64 {
         # Mirrors the conditional NOFOLLOW pattern used at the main
         # descent site (_f_descend / line ~918).
         var open_flags: i64 = FS_O_DIRECTORY;  # | O_RDONLY
-        if (_f_follow_mode == 0) { open_flags = open_flags | FS_O_NOFOLLOW; }
+        if (_f_follows(depth) == 0) { open_flags = open_flags | FS_O_NOFOLLOW; }
         var dfd = fs_openat(0 - 100, path, open_flags, 0);
-        if (dfd < 0) { return 0; }
+        if (dfd < 0) {
+            # ⛔ REPORTED, as GNU's `pred_empty` does, and the exit is 1. A directory
+            # -empty could not open was silently "not empty" at exit 0 (1.7.1).
+            _f_report_path(path, 0 - dfd);
+            _f_any_failed = 1;
+            return 0;
+        }
         var dbuf = alloc(4096);
         var any: i64 = 0;
         var loop: i64 = 1;
@@ -879,12 +1115,20 @@ fn _f_execplus_add(st, path): i64 {
 
 # After the walk: every batch still holding paths runs, in expression order.
 fn _f_flush_execs(n): i64 {
-    if (n == 0) { return 0; }
-    var k = load64(n);
-    if (k == F_N_AND) { _f_flush_execs(load64(n + 8)); _f_flush_execs(load64(n + 16)); }
-    if (k == F_N_OR) { _f_flush_execs(load64(n + 8)); _f_flush_execs(load64(n + 16)); }
-    if (k == F_N_NOT) { _f_flush_execs(load64(n + 8)); }
-    if (k == F_N_EXECPLUS) { _f_execplus_run(load64(n + 24)); }
+    var cur = n;
+    var more: i64 = 1;
+    while (more == 1) {
+        if (cur == 0) { more = 0; }
+        else {
+            var k = load64(cur);
+            if (k == F_N_AND || k == F_N_OR || k == F_N_COMMA) {
+                _f_flush_execs(load64(cur + 8));
+                cur = load64(cur + 16);
+            } elif (k == F_N_NOT) { cur = load64(cur + 8); }
+            elif (k == F_N_EXECPLUS) { _f_execplus_run(load64(cur + 24)); more = 0; }
+            else { more = 0; }
+        }
+    }
     return 0;
 }
 
@@ -1007,21 +1251,57 @@ fn _f_run_exec(arg_lo, arg_hi, path): i64 {
 #   8  name (cstr)
 #   16 stat_buf ptr
 #   24 depth (i64)
+# The operators, in a loop down the right spine (see `_f_chain`), recursing only
+# into left children. A `!` on the way flips the value the rest produces: under
+# `-a` a false left side IS the value, under `-o` a true one is, and past either
+# the value is the right side's — so one parity bit carries every `!` above.
 fn _f_eval(n, ctx): i64 {
     if (n == 0) { return 1; }
+    var cur = n;
+    var neg: i64 = 0;
+    var result: i64 = 0 - 1;
+    while (result < 0) {
+        var k = load64(cur);
+        if (k == F_N_NOT) { neg = 1 - neg; cur = load64(cur + 8); }
+        elif (k == F_N_AND) {
+            if (_f_eval(load64(cur + 8), ctx) == 0) { result = 0; }
+            else { cur = load64(cur + 16); }
+        } elif (k == F_N_OR) {
+            if (_f_eval(load64(cur + 8), ctx) == 1) { result = 1; }
+            else { cur = load64(cur + 16); }
+        } elif (k == F_N_COMMA) {
+            _f_eval(load64(cur + 8), ctx);
+            cur = load64(cur + 16);
+        } else {
+            result = _f_eval_leaf(cur, ctx);
+        }
+    }
+    if (neg == 1) { return 1 - result; }
+    return result;
+}
+
+# 1 for the tests that need the entry's stat: GNU's `need_stat` / `need_type`.
+# ⚠ -prune is one of them only without -depth, where it has to know a directory.
+fn _f_needs_stat(k): i64 {
+    if (k == F_N_TYPE || k == F_N_SIZE || k == F_N_MTIME || k == F_N_MMIN) { return 1; }
+    if (k == F_N_EMPTY || k == F_N_NEWER || k == F_N_PERM) { return 1; }
+    if (k == F_N_UID || k == F_N_GID || k == F_N_NOUSER || k == F_N_NOGROUP) { return 1; }
+    if (k == F_N_PRUNE) {
+        if (_f_depth_first == 0) { return 1; }
+    }
+    return 0;
+}
+
+fn _f_eval_leaf(n, ctx): i64 {
     var k = load64(n);
-    if (k == F_N_AND) {
-        var a = _f_eval(load64(n + 8), ctx);
-        if (a == 0) { return 0; }
-        return _f_eval(load64(n + 16), ctx);
-    }
-    if (k == F_N_OR) {
-        var a2 = _f_eval(load64(n + 8), ctx);
-        if (a2 == 1) { return 1; }
-        return _f_eval(load64(n + 16), ctx);
-    }
-    if (k == F_N_NOT) {
-        return 1 - _f_eval(load64(n + 8), ctx);
+    if (k == F_N_TRUE) { return 1; }
+    # ⛔ AN ENTRY THAT COULD NOT BE STAT'D IS STILL EVALUATED, below a starting
+    # point: its name is known, its metadata is not. A test that needs the stat is
+    # FALSE — silently, since the walk already reported the failure — and one that
+    # does not is answered as usual. GNU's FTS_NS; kriya skipped the entry, so
+    # `find -L t` did not list a link into an unsearchable directory (1.7.1).
+    if (_f_nostat == 1) {
+        if (_f_needs_stat(k) == 1) { return 0; }
     }
 
     var path = load64(ctx + 0);
@@ -1042,14 +1322,14 @@ fn _f_eval(n, ctx): i64 {
         var slen = strlen(subj);
         var fold = load64(n + 16);
         if (fold == 1) {
-            if (_f_regextype == F_RX_BRE) {
+            if (load64(n + 24) == F_RX_BRE) {
                 var fb = alloc(slen + 1);
                 _f_fold_bytes(subj, fb, slen);
                 subj = fb;
             }
         }
         var nfa = load64(n + 8);
-        if (_f_regextype == F_RX_ERE) {
+        if (load64(n + 24) == F_RX_ERE) {
             var rp = niyama_re2_search_at(nfa, subj, slen, 0);
             if (rp != 0) { return 0; }
             if (niyama_re2_group_end(nfa, 0) != slen) { return 0; }
@@ -1065,19 +1345,31 @@ fn _f_eval(n, ctx): i64 {
           load64(st + 48)); }
     if (k == F_N_MTIME)  { return _f_eval_mtime_predicate(load64(n + 8), load64(n + 16), load64(st + 88)); }
     if (k == F_N_MMIN)   { return _f_eval_mmin_predicate (load64(n + 8), load64(n + 16), load64(st + 88)); }
-    if (k == F_N_EMPTY)  { return _f_eval_empty_predicate(path, st); }
+    if (k == F_N_EMPTY)  { return _f_eval_empty_predicate(path, st, depth); }
+    if (k == F_N_PERM)   { return _f_eval_perm_predicate(load64(n + 8), load64(n + 16), load64(n + 24), st); }
+    if (k == F_N_PRUNE) {
+        # POSIX: always true, and no effect under -depth, where the entries are
+        # already done by the time their directory is evaluated.
+        if (_f_depth_first == 0) {
+            if ((load64(st + 24) & FS_S_IFMT) == FS_S_IFDIR) { _f_prune_hit = 1; }
+        }
+        return 1;
+    }
     if (k == F_N_NEWER)  {
-        var ref_mtime = load64(n + 8);
-        if (load64(st + 88) > ref_mtime) { return 1; }
+        # ⛔ TO THE NANOSECOND, as GNU's `timespec_cmp` compares. Whole seconds
+        # made `touch stamp; make; find . -newer stamp` miss everything written
+        # in stamp's own second — at exit 0 (1.7.1).
+        var fsec = load64(st + FS_STAT_MTIME);
+        if (fsec > load64(n + 8)) { return 1; }
+        if (fsec < load64(n + 8)) { return 0; }
+        if (load64(st + FS_STAT_MTIME_NSEC) > load64(n + 16)) { return 1; }
         return 0;
     }
     if (k == F_N_UID) {
-        if ((load64(st + 28) & 4294967295) == load64(n + 8)) { return 1; }
-        return 0;
+        return _f_cmp_num(load64(n + 16), load64(n + 8), load64(st + 28) & 4294967295);
     }
     if (k == F_N_GID) {
-        if ((load64(st + 32) & 4294967295) == load64(n + 8)) { return 1; }
-        return 0;
+        return _f_cmp_num(load64(n + 16), load64(n + 8), load64(st + 32) & 4294967295);
     }
     if (k == F_N_NOUSER) {
         if (userdb_user_name(load64(st + 28) & 4294967295) == 0) { return 1; }
@@ -1085,11 +1377,6 @@ fn _f_eval(n, ctx): i64 {
     }
     if (k == F_N_NOGROUP) {
         if (userdb_group_name(load64(st + 32) & 4294967295) == 0) { return 1; }
-        return 0;
-    }
-    if (k == F_N_MAXDEPTH) { return 1; }   # filter applied at walk level
-    if (k == F_N_MINDEPTH) {
-        if (depth >= load64(n + 8)) { return 1; }
         return 0;
     }
     if (k == F_N_PRINT) {
@@ -1113,39 +1400,103 @@ fn _f_eval(n, ctx): i64 {
     return 0;
 }
 
-# Extract max-depth from the AST (-1 if none).
-fn _f_get_maxdepth(n): i64 {
-    if (n == 0) { return 0 - 1; }
-    var k = load64(n);
-    if (k == F_N_MAXDEPTH) { return load64(n + 8); }
-    if (k == F_N_AND || k == F_N_OR) {
-        var a = _f_get_maxdepth(load64(n + 8));
-        if (a >= 0) { return a; }
-        return _f_get_maxdepth(load64(n + 16));
-    }
-    if (k == F_N_NOT) { return _f_get_maxdepth(load64(n + 8)); }
-    return 0 - 1;
-}
-
 # --- Walk -------------------------------------------------------------
 
-fn _f_walk(path, depth, max_depth): i64 {
+# 1 when the walk follows a symlink at `depth`: always under -L, at the starting
+# points under -H, never under -P.
+fn _f_follows(depth): i64 {
+    if (_f_follow_mode == 1) { return 1; }
+    if (_f_follow_mode == 2) {
+        if (depth == 0) { return 1; }
+    }
+    return 0;
+}
+
+# Stat `path` as -P, -H or -L says for `depth` — GNU's `optionp_stat`,
+# `optionh_stat` and `optionl_stat`, the stat its TESTS use (`-newer`'s reference
+# here). A link that cannot be followed because it is dangling (ENOENT) or runs
+# through a non-directory (ENOTDIR) answers as the link itself (`fallback_stat`).
+fn _f_xstat(path, depth, buf): i64 {
+    if (_f_follows(depth) == 0) { return fs_lstat_at(0 - 100, path, buf); }
+    var r = fs_fstatat(0 - 100, path, buf, 0);
+    if (r == (0 - 2))  { return fs_lstat_at(0 - 100, path, buf); }
+    if (r == (0 - 20)) { return fs_lstat_at(0 - 100, path, buf); }
+    return r;
+}
+
+# The name -name tests: the last component, with a starting point's trailing
+# slashes left off, as GNU's `base_name` + `strip_trailing_slashes` leave them —
+# `t/` is `t`, `./` is `.`, and `/` and `//` are `/`.
+# ⛔ `find dir/ -name dir` matched nothing, because the name was the empty string
+# after the slash — and so `find dir/ -name dir -prune -o -print` listed the tree
+# it was told to prune (1.7.1). Only a starting point can end in a slash; the walk
+# builds every other path.
+fn _f_name_of(path): i64 {
+    var len = strlen(path);
+    var end = len;
+    var more: i64 = 1;
+    while (more == 1) {
+        if (end <= 1) { more = 0; }
+        elif (load8(path + end - 1) != 47) { more = 0; }
+        else { end = end - 1; }
+    }
+    var p = path;
+    if (end < len) {
+        p = alloc(end + 1);
+        memcpy(p, path, end);
+        store8(p + end, 0);
+    }
+    var b = path_basename_ptr(p);
+    if (b == 0) { return p; }
+    if (load8(b) == 0) { return p; }
+    return b;
+}
+
+# Evaluate the expression for one entry, when it is deep enough to be looked at.
+# ⛔ THE PRUNE FLAG IS CLEARED FIRST, EVEN FOR AN ENTRY ABOVE -mindepth. Cleared
+# only on the way to `_f_eval`, it survived from the last entry evaluated to the
+# next one that was not — so `find a b -mindepth 1 -name x -prune -o -print`,
+# with `a/x` the last entry under `a`, never entered `b` at all.
+fn _f_visit(ctx, depth): i64 {
+    _f_prune_hit = 0;
+    if (depth < _f_mindepth) { return 0; }
+    _f_eval(_f_ast, ctx);
+    return 0;
+}
+
+fn _f_walk(path, depth): i64 {
+    # The WALK's stat, which is fts's rather than the tests': a dangling link
+    # (ENOENT) is the link itself, silently, and any other failure is reported.
+    # ⛔ BELOW A STARTING POINT, AN ENTRY THAT CANNOT BE STAT'D IS STILL EVALUATED,
+    # as GNU does (FTS_NS): reported once, exit 1, its name tested and its
+    # metadata unknown (`_f_nostat`). A link through a non-directory (ENOTDIR,
+    # `l -> file/x`) is the one exception to "unknown": GNU's tests fall back to
+    # the link's own stat, so `-type l` is true of it. ELOOP is a loop and is not
+    # evaluated; neither is a starting point. kriya skipped every such entry, so
+    # `find -L t` did not list a link into an unsearchable directory (1.7.1).
     var st_buf = alloc(144);
     var r: i64 = 0;
-    if (_f_follow_mode == 1) {
+    var follows = _f_follows(depth);
+    if (follows == 1) {
         r = fs_fstatat(0 - 100, path, st_buf, 0);
-        if (r < 0 && (0 - r) == 2) {
-            # Following a dangling symlink → fall back to lstat so the
-            # entry still shows up in the walk per GNU behaviour.
-            r = fs_lstat_at(0 - 100, path, st_buf);
-        }
+        if (r == (0 - 2)) { r = fs_lstat_at(0 - 100, path, st_buf); }
     } else {
         r = fs_lstat_at(0 - 100, path, st_buf);
     }
+    var nostat: i64 = 0;
     if (r < 0) {
         _f_report_path(path, 0 - r);
         _f_any_failed = 1;
-        return 0;
+        if (depth == 0) { return 0; }
+        if (r == (0 - 40)) { return 0; }
+        if (r == (0 - 20)) {
+            if (follows == 1) { r = fs_lstat_at(0 - 100, path, st_buf); }
+        }
+        if (r < 0) {
+            nostat = 1;
+            var z: i64 = 0;
+            while (z < 144) { store8(st_buf + z, 0); z = z + 1; }
+        }
     }
     # ⛔ 32, NOT 4. A FUNCTION-LOCAL `var X[N]` IS N BYTES — the ×8 u64 unit applies only at module
     # scope. This held four i64 fields in a 4-byte slot and smashed 24 bytes of neighbouring stack.
@@ -1157,30 +1508,74 @@ fn _f_walk(path, depth, max_depth): i64 {
     # here at 6.5.18 with a two-local probe (`&b - &a` = 8 for `var x[4]`).
     var ctx[32];
     store64(&ctx + 0,  path);
-    var slash = path_basename_ptr(path);
-    if (slash == 0) { slash = path; }
-    store64(&ctx + 8,  slash);
+    store64(&ctx + 8,  _f_name_of(path));
     store64(&ctx + 16, st_buf);
     store64(&ctx + 24, depth);
 
-    _f_eval(_f_ast, &ctx);
-
-    var ifmt = load64(st_buf + 24) & FS_S_IFMT;
-    var is_dir: i64 = 0;
-    if (ifmt == FS_S_IFDIR) { is_dir = 1; }
-    if (is_dir == 0) { return 0; }
-
-    if (max_depth >= 0) {
-        if (depth >= max_depth) { return 0; }
+    var descend: i64 = 0;
+    if ((load64(st_buf + 24) & FS_S_IFMT) == FS_S_IFDIR) { descend = 1; }
+    # ⛔ -L: A DIRECTORY THE WALK IS ALREADY INSIDE IS A LOOP. `find -L` over a
+    # link to an ancestor went forty levels deep — until the path held forty
+    # links and the kernel said ELOOP — listing the same tree forty times where
+    # GNU names the loop and goes on (1.7.1). GNU does not evaluate the entry
+    # either. ⚠ -P and -H cannot loop: nothing below a starting point is followed.
+    # ⚠ An inode of 0 is agnos saying "no inode" (FAT), not an inode to compare.
+    if (descend == 1) {
+        if (_f_follow_mode == 1) {
+            if (fs_ino(st_buf) != 0) {
+                if (fs_dirstack_has(_f_walk_path, fs_dev(st_buf), fs_ino(st_buf)) == 1) {
+                    report_note("find", path, "file system loop detected");
+                    _f_any_failed = 1;
+                    return 0;
+                }
+            }
+        }
+    }
+    if (_f_maxdepth >= 0) {
+        if (depth >= _f_maxdepth) { descend = 0; }
     }
 
-    var open_flags: i64 = 65536;  # O_RDONLY | O_DIRECTORY
-    if (_f_follow_mode == 0) { open_flags = open_flags | 131072; }  # O_NOFOLLOW
+    if (nostat == 1) {
+        # Its type is unknown, so it is not entered — GNU's `state.type` of 0.
+        _f_nostat = 1;
+        _f_visit(&ctx, depth);
+        _f_nostat = 0;
+        return 0;
+    }
+    if (_f_depth_first == 0) {
+        _f_visit(&ctx, depth);
+        if (_f_prune_hit == 1) { descend = 0; }
+        if (descend == 1) { _f_descend(path, depth, st_buf); }
+        return 0;
+    }
+    # -depth: the entries first. ⚠ An unreadable directory is still evaluated
+    # after its error, as GNU's -depth does; without -depth it already was.
+    if (descend == 1) { _f_descend(path, depth, st_buf); }
+    _f_visit(&ctx, depth);
+    return 0;
+}
+
+# Walk the entries of the directory `path`, whose stat is `st_buf`.
+fn _f_descend(path, depth, st_buf): i64 {
+    var open_flags: i64 = FS_O_DIRECTORY;  # | O_RDONLY
+    if (_f_follows(depth) == 0) { open_flags = open_flags | FS_O_NOFOLLOW; }
     var dfd = fs_openat(0 - 100, path, open_flags, 0);
     if (dfd < 0) {
         _f_report_path(path, 0 - dfd);
         _f_any_failed = 1;
         return 0;
+    }
+    # ⛔ A push that fails leaves the ancestor unrecorded, which is exactly what a
+    # loop needs to go unnoticed — so do not descend (`fs_dirstack_push`).
+    var pushed: i64 = 0;
+    if (_f_follow_mode == 1) {
+        if (fs_dirstack_push(_f_walk_path, fs_dev(st_buf), fs_ino(st_buf)) != 0) {
+            report_note("find", path, "cannot track directory depth: out of memory");
+            _f_any_failed = 1;
+            fs_close(dfd);
+            return 0;
+        }
+        pushed = 1;
     }
     var dbuf = alloc(4096);
     var loop: i64 = 1;
@@ -1192,8 +1587,7 @@ fn _f_walk(path, depth, max_depth): i64 {
             } else {
                 _f_report_path(path, 0 - nb);
                 _f_any_failed = 1;
-                fs_close(dfd);
-                return 0;
+                loop = 0;
             }
         } else {
             if (nb == 0) { loop = 0; }
@@ -1215,13 +1609,14 @@ fn _f_walk(path, depth, max_depth): i64 {
                         if (sep == 1) { store8(sub + plen, 47); }
                         memcpy(sub + plen + sep, ename, elen);
                         store8(sub + plen + sep + elen, 0);
-                        _f_walk(sub, depth + 1, max_depth);
+                        _f_walk(sub, depth + 1);
                     }
                     off = off + reclen;
                 }
             }
         }
     }
+    if (pushed == 1) { fs_dirstack_pop(_f_walk_path); }
     fs_close(dfd);
     return 0;
 }
@@ -1242,6 +1637,15 @@ fn cmd_find(start: i64): i64 {
     _f_err = 0;
     _f_err_msg = 0;
     _f_follow_mode = 0;
+    _f_maxdepth = 0 - 1;
+    _f_mindepth = 0;
+    _f_depth_first = 0;
+    _f_prune_hit = 0;
+    _f_walk_path = 0;
+    _f_nostat = 0;
+    _f_nest = 0;
+    _f_nest_cap = _f_nest_max();
+    _f_regextype = F_RX_BRE;
     # Snapshot PATH up-front, once, for every `-exec`. ⚠ It began as a
     # workaround: the stdlib `getenv` read /proc/self/environ into a stack
     # buffer on every call, which came back empty after a fork+exec+waitpid
@@ -1279,13 +1683,12 @@ fn cmd_find(start: i64): i64 {
                     if (kriya_short_type(_find_spec, load8(t0 + 1)) >= 0) { is_pre = 1; }
                 }
             }
-            if (is_pre == 0) { consumed_head = 0; }
+            # `--` ends the leading options, as in GNU: `find -- "$dir"` (1.7.1).
+            if (streq(t0, "--") == 1) { head = head + 1; }
+            elif (is_pre == 0) { consumed_head = 0; }
             elif (streq(t0, "-L") == 1) { _f_follow_mode = 1; head = head + 1; consumed_head = 1; }
             elif (streq(t0, "-P") == 1) { _f_follow_mode = 0; head = head + 1; consumed_head = 1; }
-            elif (streq(t0, "-H") == 1) {
-                _f_report_usage("-H is deferred in this release; use -P or -L");  # roadmap 1.7.1
-                return EXIT_USAGE;
-            }
+            elif (streq(t0, "-H") == 1) { _f_follow_mode = 2; head = head + 1; consumed_head = 1; }
         }
     }
 
@@ -1307,10 +1710,12 @@ fn cmd_find(start: i64): i64 {
             var t = load64(_f_argv_flat + expr_start * 8);
             var c0 = load8(t);
             var stop: i64 = 0;
-            if (c0 == 45) { stop = 1; }
+            # GNU's `looks_like_expression(arg, leading)`: `-X…` and a bare `!` or
+            # `(` start the expression. A bare `-` is a file, and so are `)` and `,`
+            # among the starting points (1.7.1; `)` and `-` were usage errors).
+            if (c0 == 45) { if (load8(t + 1) != 0) { stop = 1; } }
             if (c0 == 33) { if (load8(t + 1) == 0) { stop = 1; } }
             if (c0 == 40) { if (load8(t + 1) == 0) { stop = 1; } }
-            if (c0 == 41) { if (load8(t + 1) == 0) { stop = 1; } }
             if (stop == 1) { scanning = 0; }
             else { expr_start = expr_start + 1; }
         }
@@ -1328,7 +1733,7 @@ fn cmd_find(start: i64): i64 {
     if (_f_pos >= _f_argv_n) {
         _f_ast = _f_node_new(F_N_PRINT, 0, 0, 0);
     } else {
-        _f_ast = _f_parse_or();
+        _f_ast = _f_parse_list();
         if (_f_err == 1) {
             _f_report_usage(_f_err_msg);
             return EXIT_USAGE;
@@ -1344,13 +1749,13 @@ fn cmd_find(start: i64): i64 {
         }
     }
 
-    var max_depth = _f_get_maxdepth(_f_ast);
+    if (_f_follow_mode == 1) { _f_walk_path = fs_dirstack_new(); }
 
     var npaths = vec_len(start_paths);
     var pi: i64 = 0;
     while (pi < npaths) {
         var p = vec_get(start_paths, pi);
-        _f_walk(p, 0, max_depth);
+        _f_walk(p, 0);
         pi = pi + 1;
     }
     _f_flush_execs(_f_ast);
@@ -1367,10 +1772,12 @@ fn find_help_declare(): i64 {
       "find [STARTPATH...] [EXPRESSION]");
     help_positional(0, HELP_POS_UNBOUNDED, "STARTPATH,EXPRESSION");
     help_destructive(1);
-    help_operands("Predicates combine with ! , -a and -o; parentheses group. The default action is -print. Symlinks are not followed unless -L is given (ADR 0003). ⚠ -regex/-iregex match the WHOLE PATH as written (leading `./` included) and default to POSIX BRE — GNU defaults to EMACS regex, where an unescaped `+` is a quantifier rather than a literal. Use -regextype posix-extended for `+`/`?`; -regextype emacs is refused by name (ADR 0005). `-exec CMD {} +` runs CMD once per batch of paths, as many as fit in 131,072 bytes, as GNU does; it is always true, and a CMD that fails makes find exit 1.");  #skip-lint
-    help_exit(1, "an entry could not be read, or -exec reported failure");
+    help_operands("Predicates combine with !, -a, -o and GNU's `,` (both sides run; the value is the right one's); parentheses group. The default action is -print. -maxdepth, -mindepth and -depth are global: they apply to the whole walk wherever they are written. -prune stops the walk entering a directory, and has no effect under -depth. -perm takes a mode as chmod does, octal or symbolic: MODE is exactly those bits, -MODE all of them, /MODE any of them. Numbers take +N (more than) and -N (less than). Symlinks are not followed unless -L is given; -H follows only the starting points (ADR 0003). ⚠ -regex/-iregex match the WHOLE PATH as written (leading `./` included) and default to POSIX BRE — GNU defaults to EMACS regex, where an unescaped `+` is a quantifier rather than a literal. Use -regextype posix-extended for `+`/`?`; -regextype emacs is refused by name (ADR 0005). `-exec CMD {} +` runs CMD once per batch of paths, as many as fit in 131,072 bytes, as GNU does; it is always true, and a CMD that fails makes find exit 1.");  #skip-lint
+    help_exit(1, "an entry could not be read, -exec reported failure, or -L found a loop");
     help_example("find . -name '*.log'");
     help_example("find /var -type f -size +1M");
+    help_example("find . -name .git -prune -o -type f -print");
+    help_example("find /usr/bin -perm -4000");
     help_example("find . -name '*.tmp' -exec rm {} ';'");
     help_example("find . -name '*.o' -exec rm -- {} +");
     return 0;

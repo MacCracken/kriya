@@ -67,6 +67,8 @@ include "src/cmd/printf.cyr"
 # ⚠ M15e, PRE-EMPTIVELY (1.7.0). The batch builder `find -exec +` and `xargs`
 # share; pure but for the rlimit and /proc/self/environ reads.
 include "src/lib/argbatch.cyr"
+# ⚠ M15e (1.7.1): the mode compiler `find -perm` uses. Pure.
+include "src/lib/mode.cyr"
 
 # ⭐ The modes the real callers use, so a test reads as "FORMAT says this, `%b`
 # says that" rather than as a bitmask.
@@ -93,6 +95,14 @@ fn _t_u64(v, base, upper, want): i64 {
 fn _t_pfn(s, uns): i64 {
     _pf_failed = 0;
     return _pf_num(s, uns);
+}
+
+# A mode string as `find -perm` compiles it — applied to 0, umask 0 — for a file
+# (`dir` 0) or a directory; -1 when it is not a mode.
+fn _t_perm(text, dir): i64 {
+    var mc = kmode_compile(text);
+    if (mc == 0) { return 0 - 1; }
+    return kmode_adjust(0, dir, 0, mc);
 }
 
 # Decode the escape at the START of `lit`, which must begin with a backslash.
@@ -1502,6 +1512,106 @@ fn main() {
     assert_eq(ab_update_limit(ab3, 1, 3), 4, "...and again");
     assert_eq(ab_update_limit(ab3, 0, 4), 3, "the failure moves down");
     assert_eq(ab_update_limit(ab3, 0, 1), 2, "never under one argument past the command");
+
+    # ⭐ Every expected value below is GNU's: on a fixture holding a file and a
+    # directory of each of the 4,096 modes, `find -type f -perm S` matches
+    # exactly one file, whose mode is what GNU compiled S to.
+    test_group("mode — gnulib's modechange, as find -perm applies it (1.7.1)");
+    assert_eq(_t_perm("644", 0), 0o644, "octal");
+    assert_eq(_t_perm("0644", 0), 0o644, "...with a leading zero");
+    assert_eq(_t_perm("4755", 1), 0o4755, "set-uid in octal, directory too");
+    assert_eq(_t_perm("02755", 1), 0o2755, "five digits");
+    assert_eq(_t_perm("7777", 0), 0o7777, "every bit");
+    assert_eq(_t_perm("10000", 0), 0 - 1, "past 07777: not a mode");
+    assert_eq(_t_perm("8", 0), 0 - 1, "not octal");
+    assert_eq(_t_perm("644,u+s", 0), 0 - 1, "an octal mode stands alone");
+    assert_eq(_t_perm("u=rwx,go=rx", 0), 0o755, "symbolic, two clauses");
+    assert_eq(_t_perm("a+w", 0), 0o222, "a+w");
+    assert_eq(_t_perm("+w", 0), 0o222, "no who: all three, under umask 0");
+    assert_eq(_t_perm("u+s", 0), 0o4000, "s for u is set-uid");
+    assert_eq(_t_perm("g+s", 0), 0o2000, "s for g is set-gid");
+    assert_eq(_t_perm("o+s", 0), 0, "s for o is nothing");
+    assert_eq(_t_perm("+t", 0), 0o1000, "t with no who");
+    assert_eq(_t_perm("u+t", 0), 0, "t for u is nothing");
+    assert_eq(_t_perm("o+t", 0), 0o1000, "t for o is sticky");
+    assert_eq(_t_perm("a+rwxst", 0), 0o7777, "everything");
+    assert_eq(_t_perm("u=s,g=s", 0), 0o6000, "= s and nothing else");
+    assert_eq(_t_perm("a=X", 0), 0, "X: not for a file with no execute bit");
+    assert_eq(_t_perm("a=X", 1), 0o111, "X: always for a directory");
+    assert_eq(_t_perm("u+x,g+X", 0), 0o110, "X sees an execute bit set earlier in the string");
+    assert_eq(_t_perm("u+X,g+x", 0), 0o010, "...and not one set later");
+    assert_eq(_t_perm("u+X,g+x", 1), 0o110, "...except for a directory");
+    assert_eq(_t_perm("u=rwx,g=u", 0), 0o770, "g=u copies what u has so far");
+    assert_eq(_t_perm("go=u", 0), 0, "...which from 0 is nothing");
+    assert_eq(_t_perm("a=r,u+w,g=u", 0), 0o664, "copies in order");
+    assert_eq(_t_perm("u+s,u=rwx", 0), 0o700, "= replaces set-uid on a file");
+    assert_eq(_t_perm("u+s,u=rwx", 1), 0o4700, "...and keeps it on a directory, unmentioned");
+    assert_eq(_t_perm("ug+w-x", 0), 0o220, "two operators in one clause");
+    assert_eq(_t_perm("a-w,u+s", 0), 0o4000, "- then +");
+    assert_eq(_t_perm("=644", 0), 0o644, "an octal operand after =");
+    assert_eq(_t_perm("u=644", 0), 0 - 1, "...but not after a who");
+    assert_eq(_t_perm("=", 0), 0, "= with nothing clears everything");
+    assert_eq(_t_perm("-", 0), 0, "- with nothing is a mode (find's `--`)");
+    assert_eq(_t_perm("", 0), 0 - 1, "empty: not a mode");
+    assert_eq(_t_perm("u", 0), 0 - 1, "a who with no operator");
+    assert_eq(_t_perm("u+z", 0), 0 - 1, "an unknown permission");
+    assert_eq(_t_perm("u+w,", 0), 0 - 1, "a trailing comma");
+    assert_eq(_t_perm(",u+w", 0), 0 - 1, "a leading comma");
+    assert_eq(_t_perm("u+w,,g+w", 0), 0 - 1, "an empty clause");
+    # The umask filters only a clause that named no class — the rule `mkdir -m`
+    # needs (roadmap 1.8.5). ⚠ This is `mode_adjust` alone: `mkdir -m +t` ends at
+    # 1755 under umask 022 because mkdir(2) applies the umask AFTER, to 01777.
+    assert_eq(kmode_adjust(0, 0, 0o022, kmode_compile("+w")), 0o200, "umask filters a bare +w");
+    assert_eq(kmode_adjust(0, 0, 0o022, kmode_compile("a+w")), 0o222, "...not a+w");
+    assert_eq(kmode_adjust(0o777, 1, 0o022, kmode_compile("+t")), 0o1777, "+t, before mkdir(2)'s umask");
+    assert_eq(kmode_adjust(0o777, 0, 0o022, kmode_compile("o-rx")), 0o772, "o-rx");
+    assert_eq(kmode_adjust(0o777, 1, 0o022, kmode_compile("g+s")), 0o2777, "g+s");
+    assert_eq(kmode_adjust(0o777, 0, 0o022, kmode_compile("=r")), 0o444, "= with no class: all, under the umask");
+
+    test_group("kriya_fits_u64 — find's uintmax range (1.7.1)");
+    assert_eq(kriya_fits_u64("18446744073709551615"), 1, "2^64 - 1 fits");
+    assert_eq(kriya_fits_u64("18446744073709551616"), 0, "2^64 does not");
+    assert_eq(kriya_fits_u64("99999999999999999999"), 0, "twenty nines do not");
+    assert_eq(kriya_fits_u64("9223372036854775808"), 1, "2^63 fits");
+    assert_eq(kriya_fits_u64("000018446744073709551615"), 1, "leading zeros are not digits");
+    assert_eq(kriya_fits_u64(" +18446744073709551615"), 1, "blanks and a plus, as GNU reads them");
+    assert_eq(kriya_fits_u64("100000000000000000000"), 0, "twenty-one digits");
+
+    test_group("k_write's stall bound — time first (1.7.1)");
+    # ⛔ The bound was 20,000 rounds, 200 s once agnos's `#44` parked for a tick.
+    assert_eq(_k_write_stalled(1, 0), 0, "one round, no time: keep going");
+    assert_eq(_k_write_stalled(20001, 4999), 0, "the old round bound is not the bound");
+    assert_eq(_k_write_stalled(2, 5000), 1, "five seconds with no progress: stop");
+    assert_eq(_k_write_stalled(500000, 0), 1, "a clock that never moves: the round backstop");
+    assert_eq(_k_write_stalled(499999, 4999), 0, "...not a round sooner");
+    assert_eq(K_WRITE_STALL_MS, 5000, "the bound is five seconds");
+    # ⛔ One stall per descriptor: a utility that ignores the result must not wait
+    # five seconds again on every later write.
+    assert_eq(_k_stall_dead(1), 0, "no descriptor has stalled");
+    _k_stall_mark(1);
+    assert_eq(_k_stall_dead(1), 1, "fd 1 stalled: its next write fails at once");
+    assert_eq(_k_stall_dead(2), 0, "...and fd 2 still writes (the error message)");
+    _k_stall_mark(2);
+    assert_eq(_k_stall_dead(1), 1, "a second stalled fd does not evict the first");
+    _k_fd_forget(2);
+    assert_eq(_k_stall_dead(1), 1, "closing another fd keeps the mark");
+    _k_fd_forget(1);
+    assert_eq(_k_stall_dead(1), 0, "closing fd 1 clears it, before the number is reused");
+    assert_eq(_k_stall_dead(62), 0, "the highest tracked fd");
+    _k_stall_mark(62);
+    assert_eq(_k_stall_dead(62), 1, "...is tracked");
+    _k_fd_forget(62);
+    _k_stall_mark(63);
+    assert_eq(_k_stall_dead(63), 0, "past 62: untracked, never wrongly dead");
+    _k_stall_mark(0 - 1);
+    assert_eq(_k_stall_dead(0 - 1), 0, "a negative fd is never marked");
+    # A file kriya opened is never a pipe on agnos: its -1 is EIO, not EPIPE.
+    assert_eq(_k_is_file(5), 0, "fd 5 not opened by kriya");
+    _k_file_mark(5);
+    assert_eq(_k_is_file(5), 1, "opened: a file");
+    assert_eq(_k_is_file(1), 0, "stdout, inherited, is not");
+    _k_fd_forget(5);
+    assert_eq(_k_is_file(5), 0, "closed: the number is free again");
 
     return assert_summary();
 

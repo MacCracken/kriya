@@ -6,6 +6,213 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.7.1] - 2026-09-26 — `find` predicates, and a write that stalled for 200 seconds
+
+The 1.7.1 slot — `find`'s `-prune`, `-depth`, `-perm`, `-H`, GNU's `,` operator, `-uid`/`-gid`
+with `+N`/`-N` and `-size Nw` — and the issue agnos 1.57.9's end review filed against `k_write`
+(`docs/development/issue/archive/2026-09-26-k-write-stall-bound-is-200-seconds-on-agnos.md`).
+Every `find` form was measured against findutils 4.11 (this box) and 4.9 (CI's) first, and `-perm`
+is gnulib's `modechange.c`, ported from its source and fuzzed against GNU over every mode. Measuring
+the new options turned up six older wrong answers in `find`, and an adversarial review six more.
+The `k_write` fix was run on agnos itself, in QEMU — which showed that the bound the issue asked for
+was not enough on its own.
+
+### ⛔ Breaking
+
+- **`find -mindepth` and `-maxdepth` are global options**, as in GNU: they apply to the whole walk
+  wherever they are written, and evaluate true where they stand.
+  - `find t -print -mindepth 2` prints only the entries two levels down. It printed every entry,
+    because `-mindepth` was a test evaluated after the `-print` before it.
+  - `find t -mindepth 2 -o -print` prints nothing: nothing above depth 2 is looked at. It printed
+    the shallow entries.
+  - A repeated `-maxdepth` or `-mindepth` takes the LAST value. It took the first.
+  - **Migration:** none for a script that writes them first, which GNU asks for anyway.
+- ⚠ **agnos: a pipe write now waits for its reader**, as the issue asked (a4 = 0). With agnsh 2.0.0,
+  which keeps its own copy of a pipeline's read end, a pipeline whose consumer exits early —
+  `grep . big | echo x` — therefore waits for ever where kriya used to give up after about 200 s;
+  every other agnos program on 1.57.9 already did. The fix is agnoshi's (its issue
+  `2026-09-26-pipeline-keeps-read-end-and-hangs`, with a patch): with the patch applied, measured
+  below, the same pipeline returns at once.
+
+### Added
+
+- **`find -prune`**: true, and a directory it matches is not entered. It is not an action for the
+  implicit `-print` (GNU's rule), and under `-depth` it has no effect (POSIX).
+- **`find -depth`**, and BSD's **`-d`**, which GNU takes too: a directory after its entries. An
+  unreadable directory is still evaluated, after its error, as GNU's `-depth` does.
+- **`find -perm MODE`, `-perm -MODE`, `-perm /MODE`**: exactly these bits, at least these, any of
+  these. MODE is octal or symbolic as `chmod` takes it — `u=rwx,go=rx`, `a+w`, `g=u`, `+X`, `=644` —
+  compiled once for files and once for directories, which differ through `X`. `+` before an octal
+  digit is refused, as GNU refuses it: it was GNU's old spelling of `/`, and `chmod` reads it as
+  "add". `/000` matches everything, as in GNU since 2007.
+- **`find -H`**: a starting point that is a symlink is followed, and nothing below it is. It was the
+  one [ADR 0003](docs/adr/0003-symlink-follow-policy.md) mode `find` still refused. `-H`, `-L` and
+  `-P` are last-wins.
+- **GNU's `,` operator**: both sides always run, the value is the right one's, and it binds looser
+  than `-o`. `find d -name '*.c' -exec cc {} + , -name '*.h' -print` walks once.
+- **`find -uid` / `-gid` take `+N` and `-N`**, and they and `-size` read numbers in GNU's shape: an
+  optional comparison, then blanks, one `+`, digits, up to 2^64 − 1 (`-uid ' 5'`, `-size ++1c`).
+  (`-mtime` and `-mmin`, which GNU reads as fractions, are roadmap 1.8.0.)
+- **`find -size Nw`**: two-byte words.
+- **`src/lib/mode.cyr`**: `kmode_compile` / `kmode_adjust`, gnulib's `mode_compile` /
+  `mode_adjust`, line for line. `mkdir -m`'s symbolic modes (roadmap 1.8.5) will call it.
+- **`scripts/difffuzz-find-perm.py`**: random octal and symbolic modes, with each prefix and
+  malformed strings mixed in, against GNU `find` over a fixture holding a file of every mode and a
+  directory of 3,648 of them. **9,000 modes over three seeds, 0 differences**; four hand-made mutants
+  of `mode.cyr` turned it red (30, 18, 14 and 25 differences in 400).
+
+### Fixed — ⛔ agnos: a write that could not progress stalled for 200 seconds
+
+`k_write` retried a stalled write 20,000 times with `sched_yield`#44 between tries. Since agnos
+1.57.7 a `#44` with nothing else ready parks the CPU until the next 10 ms tick, and since 1.57.9 it
+wakes no other CPU, so the bound was about **200 s**: a producer whose consumer had gone looked hung
+for minutes.
+
+- **A write passes a4 = 0**, so on agnos ≥ 1.57.9 a pipe write blocks until a reader makes room,
+  and answers -1 once no reader is left. ⛔ The three-argument `syscall(1, …)` passed whatever `r10`
+  held, and a non-zero `r10` is O_NONBLOCK: the same call blocked on one pass and short-wrote on the
+  next.
+- **A write with no progress gives up after 5 s**, by `uptime_ms`#40, not by a round count; the
+  500,000-round backstop is for a clock that does not move (before 1.57.7 it stood still for a
+  foreground program). It returns ENOSPC, as gnulib's `full_write` calls a write that takes nothing.
+- ⛔ **A descriptor that stalled out stays failed**: later writes to it fail at once, and `k_close`
+  clears the mark. Without it the time bound did not fix the symptom — measured in QEMU, below:
+  `grep` writes each line in two calls and never looks at the result, so every call waited its own
+  5 s and the pipeline was still hung at 40 s.
+- **The kernel's -1 is EPIPE on a descriptor kriya inherited** — agnos has no SIGPIPE and no errno,
+  and its ABI names one cause for a -1 on a pipe, no reader. `kriya yes | head -1` ends *write error:
+  broken pipe* / exit 1 there, GNU's exit with SIGPIPE ignored, where it said *operation not
+  permitted*. ⛔ **On a file kriya opened it is EIO** (and a file that takes nothing is ENOSPC at
+  once): agnos's `open` returns no pipes, and calling a FAT output's -1 at the kernel's 4 KiB
+  write-back limit a pipe error let `tee -p` drop that file silently at exit 0 (found by review;
+  [ADR 0016](docs/adr/0016-tee-signal-dispositions.md) amended).
+- **`k_write` never returns a short count**, on either target — `n` or a negative errno. Seven
+  utilities (`cp`, `cut`, `head`, `sort`, `tail`, `tee`, `tr`) loop "write the rest" around it, and a
+  short count sent them back into the stall for ever. The Linux arm's zero-byte write is ENOSPC too
+  (proven by review with a seccomp filter forcing `write` to return 0: every utility now exits 1,
+  where `head` looped).
+- **`k_read` passes a4 = 0**, so a pipe read blocks in the kernel (agnos 1.57.8) instead of polling
+  at up to a tick per round; the `-2` retry stays for kernels that ignore a4.
+- ⭐ **Measured on agnos, in QEMU** — agnos's own `pipeline-smoke.sh`, `grep . /etc/ssl/cert.pem |
+  echo x` (185 KB into a consumer that never reads) and a pipeline whose second stage fails to spawn,
+  each required to return to the prompt within 40 s, at `-smp 1`, from scratch copies:
+  - **1.57.9 with its blocking pipe writes reverted** — the kernel the issue describes: 1.7.0 fails
+    both; this release with the time bound alone fails both; this release passes both, **4.0 s**,
+    saying *write error: no space left on device* — gnulib's name for a write that takes nothing,
+    which is all a kernel without a reader-gone signal can show.
+  - **Stock 1.57.9 with agnoshi's patch**: both builds pass in 0.0 s; 1.7.0 says *write error:
+    operation not permitted*, this release *write error: broken pipe*.
+
+### Fixed — ⛔ `find`: six wrong answers found while measuring
+
+- **`-mindepth` was positional and `-maxdepth` first-wins** — see Breaking.
+- **`-newer` compared whole seconds.** `touch stamp; make; find . -newer stamp` missed everything
+  written in stamp's second, at exit 0. It compares nanoseconds, as GNU's `timespec_cmp` does.
+- **`-newer`'s reference was never followed.** Under `-L` (and now `-H`) GNU uses the target's
+  mtime; kriya used the link's.
+- **`-L` did not see loops.** A link to an ancestor was walked forty levels deep, until the path held
+  forty links and the kernel said ELOOP, listing the tree forty times; with two such links the walk
+  branches at every level (the 1.7.0 binary passed 25 GB on the test fixture). A directory the walk
+  is already inside is now reported — *file system loop detected* — not entered, and the exit is 1,
+  as in GNU. Two links to one directory that are not a loop are still walked twice.
+- **A link through a non-directory** (`l -> file/x`) under `-L` dropped the entry. GNU reports it,
+  exits 1, and below a starting point still lists the link, with its own stat; so does kriya.
+
+### Fixed — ⛔ `find`: six more, found by adversarial review
+
+- **An entry that cannot be stat'd was skipped.** Below a starting point GNU still evaluates it:
+  reported once, exit 1, its name tested and a test that needs its metadata false. `find -L t` did
+  not list a link into an unsearchable directory; a readable, unsearchable directory's entries were
+  not listed at all.
+- **`-empty` on a directory it could not open** was silently "not empty" at exit 0. It is reported,
+  and the exit is 1, as GNU's `pred_empty` does.
+- **`-name` on `dir/`** matched nothing: the name was the empty string after the slash, so `find
+  dir/ -name dir -prune -o -print` listed the tree it was told to prune. A starting point's
+  trailing slashes are left off, as GNU's `base_name` does (`//` is `/`).
+- **`-regextype`** swallowed the next test as its operand — `-regextype posix-extended -not
+  -regex X` and a trailing `-regextype` were usage errors — and was read again at match time, so a
+  second `-regextype` ran an ERE through the BRE engine. It is an option, true where it stands, and
+  each `-regex` keeps the dialect it was compiled in.
+- **Deep expressions died of SIGSEGV**: 20,000 nested parentheses, or a 50,000-term `-o` chain, which
+  GNU runs. Chains are built right-deep and walked in a loop, whatever their length; a run of `!`
+  is counted, not recursed (GNU itself dies at 50,001); and parentheses nest to half the stack —
+  4,096 levels at 8 MiB — past which it is a usage error, never a signal.
+- **`--`, a bare `-`, and a leading `)`** were usage errors. `--` ends `-H`/`-L`/`-P`, as in GNU,
+  and `-` and `)` are starting points.
+
+### Changed
+
+- **One walk, two stats**, as GNU has: the walk's, where only a dangling link falls back to the link
+  itself, and the tests' (`-newer`'s reference), where a link through a non-directory does too.
+- **`ab_stack_limit()`** in `src/lib/argbatch.cyr` reads RLIMIT_STACK once for both ARG_MAX and
+  `find`'s nesting limit — no new raw `getrlimit` site (roadmap 1.7.4 counts them).
+- `find`'s header, `--help` and `--help=json` describe the new options; `-H` no longer says NOT
+  IMPLEMENTED.
+- ⚠ GNU's warnings about `-d` and about a global option written after a test go to a terminal only,
+  and kriya prints neither. Its warning that `-perm /000` changed meaning in 2007 is about its own
+  history, and is not printed either.
+
+### Documentation
+
+- **Architecture 002** gains *agnos has no SIGPIPE*: what a write to a readerless pipe returns
+  there, the inherited/opened split, the 5-second bound and the per-descriptor mark, the
+  n-or-errno contract, and the shell's read end.
+- **[ADR 0016](docs/adr/0016-tee-signal-dispositions.md) amended**: on agnos `-p` discounts the
+  EPIPE a readerless pipe returns, and never a file's failure.
+- **Roadmap**: 1.7.1 retired, next up 1.7.2.
+  - 1.8.0 gains `find -mtime`/`-mmin` fractions, which GNU reads with `xstrtod`.
+  - 1.8.5 records that the mode parser exists and that `mkdir -m` is more than `mode_adjust`.
+  - 1.9.5 gains the utilities that blame the INPUT for a stdout write error (`head`, `tail`, `tr`,
+    `sort`).
+  - **1.9.6, new**: `find` stats only what a test needs (`d_type`), walks in constant memory (94.7
+    MB against GNU's 10.3 MB over `/usr`), and past PATH_MAX.
+- **Lessons**: an option every test writes first; a fixture seconds apart; a fixture built to hang
+  the old binary; a refusal that refused for another reason; a loop inside and a loop outside; a
+  timeout per call is not a timeout per stream; an iteration count as a time bound; two stats for
+  one question; the register nobody passed; a whole utility's answer is not one function's; a
+  changed return value is a changed policy.
+
+### Tests
+
+- Smoke **7,451 → 7,723** across 41 scripts: `smoke-find.sh` 172 → **443**, and
+  `smoke-help-json.sh` 1,845 → **1,846**, where the old "`-H` is refused" case had passed because it
+  wrote `-H` after a starting point — an unknown test in both.
+  - Every new `find` case runs the same argv through GNU and compares stdout BYTES UNSORTED — order is
+    the point of `-depth`, and both walk in readdir order — and the exit status; error cases compare
+    the number of stderr lines too.
+  - ⭐ The same 443 pass in `ubuntu:24.04` against findutils 4.9.
+- `kriya.tcyr` **764 → 838**: `kmode_*` against values GNU compiled (a fixture of every mode, where
+  an exact `-perm` matches one entry), `kriya_fits_u64`, the stall bound and the descriptor masks.
+- ⭐ **Run against the 1.7.0 binary, 160 of the new assertions fail**: `find` 158, `help-json` 2.
+- ⭐ That run caught a harness fault first: one capture without `timeout` let the 1.7.0 binary's
+  `find -L` grow past **25 GB** on the loop fixture before it was killed.
+- ⭐ **Two reviews, one per half.** The `find` review confirmed eight divergences — six fixed above,
+  two filed (roadmap 1.9.6) — and ran 1,600 generated expressions and several hundred hand-built
+  cases to 0 differences. The `k_write` review confirmed the `tee -p` file drop, and that the new
+  comments promised `yes | head -1` an ending the shipped agnsh cannot give (they name the shell's
+  read end now); it proved the Linux arm with a seccomp filter.
+- ⭐ One defect was this release's own and never shipped: the prune flag outlived its entry, so
+  `find a b -mindepth 1 -name x -prune -o -print`, with `a/x` last under `a`, never entered `b`.
+
+### Release totals
+
+**7,723 smoke cases across 41 scripts** (from 7,451), **838 unit**, 18 POSIX. The rest of the gate
+is clean:
+- fuzz green under poison (1,127 / 201 / 201), the `find` harness's lexicon grown by the new tokens;
+- `cyrius lint`, `lint-deferrals.sh`, `lint-help-schema.sh` and `check-oracles.sh`;
+- `watchlist-scan.py`: 189 declarations, M15a 0, M15c the 3 known, M15d 0, M15i 0;
+- `vet` reports **57** deps (one more: `mode.cyr`), and both targets build warning-free.
+
+`difffuzz-find-perm.py`: 9,000 modes over three seeds, 0 differences. `find` over 10,000 files is
+flat against 1.7.0 (23–25 ms both).
+
+⭐ Verified in the `ubuntu:24.04` container (coreutils **9.4**, findutils **4.9**, grep **3.11**) as
+a non-root user: 39 of 41 scripts green, **5,217** cases. The two exceptions need `python3`, which
+the image lacks.
+
+Binary 1,248,168 → **1,265,480** bytes on host (+17,312), 1,243,888 → **1,257,104** on agnos
+(+13,216).
+
 ## [1.7.0] - 2026-09-23 — batched exec
 
 The 1.7.0 slot, the first of the 1.7.x arc: `find -exec … {} +`, and `xargs -L`, `-x` and

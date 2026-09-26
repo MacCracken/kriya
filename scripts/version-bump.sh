@@ -73,8 +73,8 @@ cat > "$ROOT/src/version_str.cyr" <<EOF
 # pre-v5.6.39 the per-binary literals drifted across hotfix bumps).
 #
 # \`_VERSION_LEN_KRIYA\` is the BYTE length of \`_VERSION_STR_KRIYA\`
-# including the trailing \`\\n\` — used directly with \`syscall(1, fd,
-# &str, len)\` so the writer never needs \`strlen()\` at the version
+# including the trailing \`\\n\` — handed straight to \`k_write(1,
+# str, len)\` so the writer never needs \`strlen()\` at the version
 # print site.
 
 var _VERSION_STR_KRIYA = "$KSTR\\n";

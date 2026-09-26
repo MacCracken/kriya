@@ -1,0 +1,226 @@
+# mode.cyr — file modes written the way `chmod` takes them: octal (`644`, `4755`)
+# or symbolic (`u=rwx,go=rx`, `a+w`, `g=u`, `+X`). Two steps, as in gnulib's
+# `modechange.c`, which this is ported from line for line (findutils 4.11's copy):
+#
+#   `kmode_compile(text)`               the text as a list of changes, or 0
+#   `kmode_adjust(old, dir, umask, mc)` a mode with those changes applied
+#
+# ⭐ ONE PARSER, SEVERAL CALLERS, AND EACH SUPPLIES ITS OWN START AND UMASK. `find
+# -perm` applies the changes to 0 with a umask of 0 (1.7.1); `mkdir -m` will apply
+# them to 0777 under the process umask, which is where "a clause with no u/g/o/a is
+# filtered through the umask" comes from (roadmap 1.8.5). The rule lives in
+# `kmode_adjust`, so neither caller re-derives it.
+#
+# ⛔ AN ALGORITHM, SO THE SOURCE IS THE SPECIFICATION. Three rules in it are easy to
+# miss and each changes an answer:
+#   - An octal mode of fewer than five digits does not MENTION the set-id bits it
+#     leaves out, so `adjust` keeps a directory's set-id bits (`chmod 755 dir`).
+#   - `X` means execute only for a directory, or for a mode that already has an
+#     execute bit — including one set earlier in the SAME string (`u+x,g+X`).
+#   - `g=u` copies bits from the mode being built, so under `find -perm` (which
+#     starts from 0) it copies nothing.
+
+enum KModeFlag {
+    KMODE_DONE          = 0,    # the list's terminator
+    KMODE_ORDINARY      = 1,
+    KMODE_X_IF_ANY_X    = 2,    # `X`: execute only for a directory or an already-executable mode
+    KMODE_COPY_EXISTING = 3,    # `=u`, `+g`, `-o`: another class's bits from the mode itself
+}
+
+# One change: five i64 fields, 40 bytes.
+enum KModeRec {
+    KMODE_R_OP        = 0,     # `=`, `+` or `-`, as a byte
+    KMODE_R_FLAG      = 8,
+    KMODE_R_AFFECTED  = 16,    # the u/g/o/a mask; 0 when the clause named none
+    KMODE_R_VALUE     = 24,
+    KMODE_R_MENTIONED = 32,
+    KMODE_R_SIZE      = 40,
+}
+
+enum KModeBits {
+    KMODE_ALL  = 0o7777,       # CHMOD_MODE_BITS: every bit a mode string can name
+    KMODE_ISID = 0o6000,       # S_ISUID | S_ISGID
+    KMODE_R    = 0o444,
+    KMODE_W    = 0o222,
+    KMODE_X    = 0o111,
+}
+
+fn _kmode_is_op(c): i64 {
+    if (c == 61) { return 1; }     # =
+    if (c == 43) { return 1; }     # +
+    if (c == 45) { return 1; }     # -
+    return 0;
+}
+
+fn _kmode_set(rec, op, flag, affected, value, mentioned): i64 {
+    store64(rec + KMODE_R_OP, op);
+    store64(rec + KMODE_R_FLAG, flag);
+    store64(rec + KMODE_R_AFFECTED, affected);
+    store64(rec + KMODE_R_VALUE, value);
+    store64(rec + KMODE_R_MENTIONED, mentioned);
+    return 0;
+}
+
+# `text` as a list of changes, terminated by a KMODE_DONE record; 0 when it is not
+# a mode. The grammar, per clause: `[ugoa]*([-+=]([rwxXst]*|[ugo]))+`, or an op and
+# octal digits, clauses separated by `,`. A whole-string octal number is the
+# absolute form (`=644`).
+fn kmode_compile(text): i64 {
+    if (text == 0) { return 0; }
+    var c0 = load8(text);
+    if (c0 >= 48) {
+        if (c0 < 56) {
+            var k: i64 = 0;
+            var octal: i64 = 0;
+            var digits: i64 = 1;
+            while (digits == 1) {
+                octal = octal * 8 + load8(text + k) - 48;
+                k = k + 1;
+                if (octal > KMODE_ALL) { return 0; }
+                var d = load8(text + k);
+                if (d < 48) { digits = 0; }
+                if (d > 55) { digits = 0; }
+            }
+            if (load8(text + k) != 0) { return 0; }
+            # ⚠ Fewer than five digits leave the set-id bits the number does not set
+            # UNMENTIONED — the difference between `chmod 755 dir` and `chmod 00755 dir`.
+            var named: i64 = KMODE_ALL;
+            if (k < 5) { named = (octal & KMODE_ISID) | 0o1000 | 0o777; }
+            var one = alloc(2 * KMODE_R_SIZE);
+            _kmode_set(one, 61, KMODE_ORDINARY, KMODE_ALL, octal, named);
+            store64(one + KMODE_R_SIZE + KMODE_R_FLAG, KMODE_DONE);
+            return one;
+        }
+    }
+
+    # Enough records for one per operator, plus the terminator.
+    var needed: i64 = 1;
+    var q: i64 = 0;
+    while (load8(text + q) != 0) {
+        needed = needed + _kmode_is_op(load8(text + q));
+        q = q + 1;
+    }
+    var mc = alloc(needed * KMODE_R_SIZE);
+    var used: i64 = 0;
+    var p: i64 = 0;
+    var clauses: i64 = 1;
+    while (clauses == 1) {
+        # Who: u, g, o and a, until the first operator.
+        var affected: i64 = 0;
+        var who: i64 = 1;
+        while (who == 1) {
+            var w = load8(text + p);
+            if (w == 117)      { affected = affected | 0o4700; p = p + 1; }   # u
+            elif (w == 103)    { affected = affected | 0o2070; p = p + 1; }   # g
+            elif (w == 111)    { affected = affected | 0o1007; p = p + 1; }   # o
+            elif (w == 97)     { affected = affected | KMODE_ALL; p = p + 1; }   # a
+            elif (_kmode_is_op(w) == 1) { who = 0; }
+            else { return 0; }
+        }
+        # One or more operators, each with its permissions.
+        var ops: i64 = 1;
+        while (ops == 1) {
+            var op = load8(text + p);
+            p = p + 1;
+            var value: i64 = 0;
+            var mentioned: i64 = 0;
+            var flag: i64 = KMODE_COPY_EXISTING;
+            var c = load8(text + p);
+            if (c >= 48) {
+                if (c < 56) {
+                    var ov: i64 = 0;
+                    var more: i64 = 1;
+                    while (more == 1) {
+                        ov = ov * 8 + load8(text + p) - 48;
+                        p = p + 1;
+                        if (ov > KMODE_ALL) { return 0; }
+                        var od = load8(text + p);
+                        if (od < 48) { more = 0; }
+                        if (od > 55) { more = 0; }
+                    }
+                    # An octal operand stands alone: no who before it, nothing after it
+                    # but the end or a comma (`u=644` and `=644+w` are not modes).
+                    if (affected != 0) { return 0; }
+                    var after = load8(text + p);
+                    if (after != 0) { if (after != 44) { return 0; } }
+                    affected = KMODE_ALL;
+                    mentioned = KMODE_ALL;
+                    value = ov;
+                    flag = KMODE_ORDINARY;
+                    c = 0 - 1;     # handled: skip the arms below
+                }
+            }
+            if (c == 117) { value = 0o700; p = p + 1; }        # =u: the user bits, copied
+            elif (c == 103) { value = 0o070; p = p + 1; }      # =g
+            elif (c == 111) { value = 0o007; p = p + 1; }      # =o
+            elif (c != (0 - 1)) {
+                flag = KMODE_ORDINARY;
+                var perms: i64 = 1;
+                while (perms == 1) {
+                    var r = load8(text + p);
+                    if (r == 114)      { value = value | KMODE_R; p = p + 1; }       # r
+                    elif (r == 119)    { value = value | KMODE_W; p = p + 1; }       # w
+                    elif (r == 120)    { value = value | KMODE_X; p = p + 1; }       # x
+                    elif (r == 88)     { flag = KMODE_X_IF_ANY_X; p = p + 1; }       # X
+                    elif (r == 115)    { value = value | KMODE_ISID; p = p + 1; }    # s
+                    elif (r == 116)    { value = value | 0o1000; p = p + 1; }        # t
+                    else { perms = 0; }
+                }
+            }
+            if (mentioned == 0) {
+                if (affected != 0) { mentioned = affected & value; }
+                else { mentioned = value; }
+            }
+            _kmode_set(mc + used * KMODE_R_SIZE, op, flag, affected, value, mentioned);
+            used = used + 1;
+            if (_kmode_is_op(load8(text + p)) == 0) { ops = 0; }
+        }
+        # A comma starts the next clause; anything else ends the list.
+        if (load8(text + p) == 44) { p = p + 1; }
+        else { clauses = 0; }
+    }
+    if (load8(text + p) != 0) { return 0; }
+    store64(mc + used * KMODE_R_SIZE + KMODE_R_FLAG, KMODE_DONE);
+    return mc;
+}
+
+# `oldmode` with the changes `mc` applied, for a directory when `dir` is 1, under
+# `umask` — which filters only the clauses that named no u/g/o/a. The result holds
+# permission bits only (07777).
+fn kmode_adjust(oldmode, dir, umask, mc): i64 {
+    var newmode = oldmode & KMODE_ALL;
+    var rec = mc;
+    while (load64(rec + KMODE_R_FLAG) != KMODE_DONE) {
+        var affected = load64(rec + KMODE_R_AFFECTED);
+        var omit: i64 = 0;
+        if (dir == 1) { omit = KMODE_ISID & (~load64(rec + KMODE_R_MENTIONED)); }
+        var value = load64(rec + KMODE_R_VALUE);
+        var flag = load64(rec + KMODE_R_FLAG);
+        if (flag == KMODE_COPY_EXISTING) {
+            # The named class's bits of the mode so far, copied to all three classes.
+            value = value & newmode;
+            var spread: i64 = 0;
+            if ((value & KMODE_R) != 0) { spread = spread | KMODE_R; }
+            if ((value & KMODE_W) != 0) { spread = spread | KMODE_W; }
+            if ((value & KMODE_X) != 0) { spread = spread | KMODE_X; }
+            value = value | spread;
+        }
+        if (flag == KMODE_X_IF_ANY_X) {
+            if ((newmode & KMODE_X) != 0) { value = value | KMODE_X; }
+            elif (dir == 1) { value = value | KMODE_X; }
+        }
+        if (affected != 0) { value = value & affected & (~omit); }
+        else { value = value & (~umask) & (~omit); }
+        var op = load64(rec + KMODE_R_OP);
+        if (op == 61) {
+            # `=`: the classes the clause named are replaced; with none named, all are.
+            var keep: i64 = omit;
+            if (affected != 0) { keep = keep | (~affected); }
+            newmode = (newmode & keep) | value;
+        }
+        if (op == 43) { newmode = newmode | value; }
+        if (op == 45) { newmode = newmode & (~value); }
+        rec = rec + KMODE_R_SIZE;
+    }
+    return newmode & KMODE_ALL;
+}

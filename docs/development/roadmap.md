@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.7.1** — `find` predicates |
+| **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.7.2** — destructive and parallel |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.8.0** — floats |
 | **1.9.x** | Performance | niyama regex speed (upstream) | **1.9.0** — `wc -c` fast path |
 
@@ -52,13 +52,6 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 (`src/lib/argbatch.cyr`), which counts as GNU's `buildcmd` does
 ([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
 
-- **1.7.1 — `find` predicates.** `-prune`, `-depth` (DFS post-order), `-perm`, `-H` (operand-only
-  follow — the one [ADR 0003](../adr/0003-symlink-follow-policy.md) mode still refused).
-  - **GNU's `,` operator** (evaluate both, the result is the right one's) is missing: `find d
-    -type f -exec echo {} + , -print` is a usage error here. Measured at 1.7.0.
-  - **`-uid` / `-gid` take `+N` and `-N`** in GNU (more than, less than), as `-mtime` and `-size`
-    already do here through `_f_parse_signed_int`; kriya refuses them. And `-size Nw` (two-byte
-    words) is GNU's too. Both measured at 1.6.16.
 - **1.7.2 — Destructive and parallel.** ⛔ `find -delete` **must inherit the
   [ADR-0004](../adr/0004-rm-refuses-root.md) `/` refusal and the
   [ADR-0010](../adr/0010-rm-refuses-a-trailing-slash-symlink-operand.md) trailing-slash-symlink
@@ -127,6 +120,10 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
   - **GNU's `%q`** — the argument shell-quoted — is refused by name today. GNU uses
     `shell_escape_quoting_style`, which `src/lib/quote.cyr` already renders for `ls`; ⚠ except
     that `ls` never quotes an empty name, and `%q ''` is `''`.
+  - **`find -mtime` and `-mmin` take fractions in GNU**, read with `xstrtod`: `-mtime 0.5`,
+    `-mtime -0.5`, `-mmin -1.5` and `-mtime 1e1` all run there, and kriya refuses them as bad
+    arguments. The float READER `printf %f` needs for its arguments is the one to use; measured at
+    1.7.1.
 - **1.8.1 — Sort keys.**
   - ⛔ **First, a wrong answer: a repeated `-k` keeps only the LAST key.** `sort -k2,2 -k1,1` sorts
     exactly as `sort -k1,1` does and exits 0, where GNU sorts by field 2 then field 1 (measured at
@@ -157,9 +154,17 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 - **1.8.5 — Symbolic file modes.** `mkdir -m` takes only an octal mode
   (`kriya_parse_octal_mode`) and refuses every symbolic one, exit 2, where GNU takes all of them.
   Measured at 1.6.16 with umask 022: `u=rwx,go=` is 700, `a+w` 777, `o-rx` 772, `g+s` 2777, `=` 0,
-  and `+t` **1755**. ⚠ That last one is the rule to get right: a clause with no `u`/`g`/`o`/`a`
-  is filtered through the umask, and one that names them is not. ⚠ One parser, then its callers:
-  `mkdir -m` first, and `install -m` / `chmod` if either is ever added.
+  and `+t` **1755**; at 1.7.1, `+w` 777 and `=rwx` 755.
+  - ⭐ **The parser exists**: `src/lib/mode.cyr`, gnulib's `mode_compile` / `mode_adjust` ported for
+    `find -perm` at 1.7.1 and fuzzed against GNU `find` over every mode. What is left is the caller.
+  - ⚠ **`mode_adjust` is only half of GNU's answer.** From 0777 under umask 022 it gives `+t`
+    01777, yet GNU's directory ends 1755; `+w` and `=rwx` start from the same 0777 and end 777 and
+    755. mkdir(2) applies the umask again, and gnulib's `dirchownmod` then chmods back only some of
+    what it cleared. ⛔ Read coreutils' `mkdir.c` and gnulib's `mkdir-p.c` / `dirchownmod.c` and
+    port them; the eight answers above are the test, and no single "the umask filters X" rule
+    produces all of them.
+  - ⚠ One parser, then its callers: `mkdir -m` first, and `install -m` / `chmod` if either is ever
+    added.
 
 ---
 
@@ -200,6 +205,26 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
   each literal character of its format; only their padding is buffered (`k_write_fill` in
   `src/lib/sys.cyr`). One shared stdout buffer, flushed at exit and on a write error, serves all
   three.
+  - ⛔ **And it is where a stdout write error gets its name.** `kriya head -1 in.txt >/dev/full`
+    says *in.txt: no space left on device*, blaming the INPUT; so do `tail`, and `tr` names
+    `'(stdin)'`, and `sort` says `'(write)'`. GNU says *write error: No space left on device*
+    (`sort`: *fflush failed: 'standard output'*). Measured at 1.7.1, and older than it; `cut`,
+    `wc` and every utility the dispatcher's write net reports already say *write error*.
+- **1.9.6 — `find` stats only what a test needs, and walks in constant memory.**
+  - **The stat.** GNU asks fts for no stat (`FTS_NOSTAT`) and takes an entry's type from
+    `d_type`, so a name-only walk stats nothing but directories. kriya stats every entry — the
+    4.8× in `docs/benchmarks.md` is partly this — and it is visible as a DIFFERENT ANSWER in a
+    readable directory that cannot be searched (chmod 600): GNU lists its entries, runs `-type f`
+    on them from `d_type`, and reports only the subdirectory; kriya lists them too since 1.7.1, but
+    reports every entry and cannot answer `-type` (`smoke-find.sh` pins the listing). Measured at
+    1.7.1 by review.
+  - **The memory.** Every entry's path and stat buffer, and a 4 KiB `getdents64` buffer per
+    directory, are bump-allocated and never freed: `find /usr -name none` peaks at **94.7 MB
+    against GNU's 10.3 MB** (204,491 entries), 180.7 MB under `-L` — the defect 1.7.3 names for
+    `du`. Measured at 1.7.1.
+  - **The depth.** Every path is opened whole from the current directory, so a walk stops at
+    PATH_MAX: a 3,000-level tree lists 2,047 lines and fails with *file name too long*, exit 1,
+    where GNU (fts, fd-relative) lists all 3,001. Measured at 1.7.1.
 
 ---
 

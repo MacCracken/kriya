@@ -141,6 +141,17 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 
 ---
 
+- ⛔ *An option every test writes FIRST cannot show that it is positional.* `find -mindepth` was
+  a test evaluated where it stood, and every smoke case put it before the other tests — where a
+  positional reading and GNU's global one agree. `find t -print -mindepth 2` printed every entry and
+  `-mindepth 2 -o -print` the shallow ones, both at exit 0, for as long as `find` had had
+  `-mindepth` (1.7.1). **A global option is tested after an action and across `-o`.**
+
+- ⛔ *A fixture whose files are seconds apart cannot see a sub-second rule.* `find -newer`
+  compared whole seconds where GNU compares nanoseconds, and every fixture built its reference with
+  `touch -d '2 days ago'`. `touch stamp; make; find . -newer stamp` missed everything written in
+  stamp's own second, at exit 0 (1.7.1). `touch -d '… 05.100'` against `… 05.600` sees it.
+
 ### Testing the tests: mutation and adversarial review
 
 - ⛔ **A new block that passes against the OLD binary has proved nothing, and three kinds of block
@@ -254,6 +265,23 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   missing-destination check is unreachable from all three utilities, which hook inside their own
   existence branch. It stays as the contract, with the unreachability written down rather than
   left for a reader to assume a test covers it. `-b`/`--backup[=CONTROL]` and
+
+- ⛔ **A fixture built to catch an unbounded walk makes the OLD binary unbounded.** 1.7.1's `-L`
+  loop fixture (`self -> .` beside two `up -> ..` links) branches at every level under a walk that
+  cannot see loops, and the 1.7.0 binary reached **25 GB** in the mutation run through the one call
+  written without `timeout` — a `$(… | grep -c …)` that counted its output. The shape of 1.6.17's
+  padding hang, one release on: the fixture was designed to misbehave, so against the old code it did.
+- ⛔ **A refusal test must refuse for the reason it names.** `smoke-help-json.sh` pinned "`find -H`
+  is refused" with `find . -maxdepth 0 -H` — -H AFTER a starting point, which is an unknown test in
+  kriya and GNU alike. It passed because of the argument's position, not the deferral, and would
+  have gone on passing once `-H` shipped. Write the refused form the way a user would type it.
+
+- ⛔ **A change to what a shared function RETURNS is a change to every policy that reads the
+  value.** 1.7.1 taught `k_write` to call agnos's bare -1 EPIPE — right for the stdout pipe it was
+  written for — and `tee -p`, whose whole meaning is "forgive EPIPE", then forgave a FAT file's
+  failure at 4 KiB and exited 0. Neither half was wrong alone; the defect sat at the join, and the
+  review found it by being told to read the CALLERS. **Grep for the value (`errno == 32`), not the
+  function name.**
 
 ### Measuring: the number, and the thing beside it
 
@@ -444,6 +472,29 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   Where kriya has chosen a side, compare against the spelling every version agrees on
   (`-l --dired`) and gate the direct comparison on a probe of the oracle.
 
+- ⛔ *A function that loops internally must not hand its caller a short count.* `k_write`
+  retried a short write itself and, when it gave up, returned what it had written — and seven
+  utilities wrap it in their own "write the rest" loop, which added the short count and called again.
+  After one give-up every later call took nothing and returned 0, and the caller looped for ever: on
+  agnos, 200 s a round (1.7.1). **Loop inside, or report partial progress — never both.** It
+  returns `n` or a negative errno now.
+- ⛔ *A timeout per call is not a timeout per stream, and only the symptom can tell them apart.*
+  The issue asked for `k_write`'s stall to be bounded by time, and it was: 5 s. Measured in QEMU on
+  the kernel shape the issue described, the pipeline still hung past 40 s — `grep` writes each line
+  in two calls and never looks at the result, so every call paid its own 5 s. The fix that holds is
+  a mark on the DESCRIPTOR (1.7.1). **Verify a fix on the symptom that was reported, not on the
+  function that was named.**
+- ⛔ *An iteration count is a time bound only while an iteration costs the same.* `k_write` gave
+  up after 20,000 rounds of `sched_yield`: a short spin, until agnos 1.57.7 made the yield park the
+  CPU for a 10 ms tick when nothing else was ready, and the bound became **200 s**. Nothing in kriya
+  changed. **Bound a wait by the clock**; keep a count only as the backstop for a clock that does not
+  move (before 1.57.7 `uptime_ms` stood still for a foreground program).
+- ⭐ *When the reference answers one question on two paths, port both.* GNU `find` stats a
+  followed link twice over: fts's walk stat, where only ENOENT falls back to the link and any other
+  error is reported (and, below a starting point, the entry still visited), and its tests' stat,
+  `fallback_stat`, where ENOTDIR falls back too. Porting the second for both hid a link through a
+  file behind exit 0 — `find -L t -name l` — where GNU says *Not a directory* and exits 1 (1.7.1).
+
 ### Cyrius specifics
 
 - ⛔ *`match` is a reserved keyword in Cyrius.* Costs one build. Worth knowing before naming a
@@ -464,6 +515,12 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   out twice as slow as the code it replaced. ⭐ Time a change against the binary it replaces, at a
   size where a complexity class shows, not only at the size the tests use. `kriya_arg(i)` is the
   O(1) accessor.
+
+- ⛔ **An argument you do not pass is still an argument if the kernel reads its register.** A
+  three-argument `syscall(1, fd, buf, n)` leaves `r10` as the last code set it, and agnos reads a4
+  from `r10` for `write` and `read`: zero blocks, anything else is O_NONBLOCK. So one call site
+  blocked on one pass and spun on the next (1.7.1). Pass the argument; the five-argument form
+  compiles to `xor eax,eax; push rax; pop r10` — disassemble a two-line probe to see it.
 
 ## Discoverability and single sources of truth
 
@@ -594,6 +651,13 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   and overlays the variable.
 
 ---
+
+- ⚠ **A measured answer of a whole utility is not the answer of one function inside it.**
+  The roadmap recorded GNU's `mkdir -m +t` as 1755 under umask 022 and called it "the rule" for
+  the mode parser, and a unit test written from it failed against a correct port: gnulib's
+  `mode_adjust` gives 01777, and the 1755 is mkdir(2) applying the umask again afterwards, with
+  `dirchownmod` restoring only some of what that cleared (`+w` ends 777, `=rwx` 755). The test
+  had to be re-derived from `find -perm`, where GNU calls `mode_adjust` and nothing else (1.7.1).
 
 ## The compiler watchlist
 

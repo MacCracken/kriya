@@ -4,7 +4,7 @@ kriya utilities run as short-lived processes invoked from a shell or pipeline. T
 
 ## Default behaviour (M1, no installed handlers)
 
-- **SIGPIPE** — kernel default terminates the process with exit code `141` (128 + 13). For `yes`, `head`, `tail`, `tee`, and any other utility that writes to a downstream pipe, this is the correct end state when the reader closes. kriya does not install a handler; the existing default does the right thing and avoids the overhead of a per-write `write()` return-value branch.
+- **SIGPIPE** — kernel default terminates the process with exit code `141` (128 + 13). For `yes`, `head`, `tail`, `tee`, and any other utility that writes to a downstream pipe, this is the correct end state when the reader closes. kriya does not install a handler; the existing default does the right thing. (Every write's return value IS checked, since v1.1.8 — by `k_write`, which records a failure for the dispatcher to report — and on agnos, which has no SIGPIPE, that check is the whole mechanism; see below.)
 - **SIGINT** — kernel default terminates with exit `130`. M1 utilities (`true`, `false`, `echo`, `pwd`, `yes`, `sleep`) hold no resources that need rollback, so the default termination is the right answer. `sleep` interrupted by SIGINT exits 130 without printing — same as GNU `sleep`.
 - **SIGTERM** — kernel default terminates with exit `143`. Same reasoning as SIGINT.
 - **SIGQUIT, SIGSEGV, SIGBUS, SIGFPE** — kernel defaults (core dump or terminate). kriya does not catch these.
@@ -42,6 +42,46 @@ When a handler lands, it gets its own ADR (the policy decision: "destructive uti
 ⚠ **The trigger table above still has no entry that has fired.** The flag-based handler it describes for `cp`/`mv`/`rm` and `find`/`xargs` is still ahead, and [ADR 0016](../adr/0016-tee-signal-dispositions.md) deliberately does not authorise it.
 
 ⛔ **`signal_ignore`/`signal_default` existed in the Cyrius stdlib the whole time** (`lib/syscalls.cyr`, since v6.4.51, with `SIGINT` and `SIGPIPE` already enumerated). `tee`'s header deferred `-i` on "the signal-handler infrastructure ... not yet installed" for six releases and there was nothing to build. ⚠ **Second kriya deferral to outlive its blocker**, after `sleep`'s fractional durations waited on a chrono duration parser that was never coming. **A deferral naming a blocker is a claim with an expiry date; re-check it before repeating it.**
+
+## agnos has no SIGPIPE (1.7.1)
+
+agnos delivers default actions for 9, 18 and 19 only, so the "downstream reader is gone" signal the
+rows above rely on never arrives there. What arrives instead is a return value, and `k_write`
+(`src/lib/sys.cyr`) is the one place that reads it:
+
+- **From agnos 1.57.9 a pipe write with a4 = 0 blocks** until a reader makes room. `k_write` passes
+  a4 = 0 explicitly: a three-argument `syscall(1, …)` passed whatever `r10` held, and a non-zero
+  `r10` is O_NONBLOCK, so the same write blocked on one call and short-wrote on the next.
+- **With no read end open anywhere the kernel answers -1** — after the part it took, if any. It
+  carries no errno. On a descriptor kriya INHERITED (stdout, stderr) `k_write` records it as EPIPE,
+  the one cause agnos's ABI names for a -1 on a pipe (and "peer gone" on a channel), and the
+  dispatcher prints `write error: broken pipe` and exits 1 — GNU's exit on Linux with SIGPIPE
+  ignored, the only environment agnos has (GNU's words differ: `yes: standard output: Broken pipe`).
+  `kriya yes | head -1` ends that way there, where Linux kills `yes` with 141 and prints nothing.
+- **A file kriya opened itself is never a pipe** on agnos — `open#7` returns no FIFOs — so its -1
+  is EIO, and one that takes nothing is ENOSPC at once. ⛔ Labelled EPIPE, a FAT output's -1 at the
+  kernel's 4 KiB write-back limit was a "pipe error" to `tee -p`, which dropped it silently at
+  exit 0 ([ADR 0016](../adr/0016-tee-signal-dispositions.md), amended).
+- ⚠ **"No read end open anywhere" includes the SHELL's copy.** agnsh 2.0.0 keeps its read end while
+  it reaps a pipeline, so the write waits for the shell and the pipeline never finishes — as on Linux
+  whenever any process holds the read end. It is agnoshi's to fix (issue
+  `2026-09-26-pipeline-keeps-read-end-and-hangs` there, with a patch); measured in QEMU with that
+  patch applied, `grep . cert.pem | echo x` returns at once and says *broken pipe*.
+- **A write that makes no progress for 5 s gives up** with ENOSPC, the name gnulib's `full_write`
+  gives a zero-byte write. From 1.57.9 a pipe never gets there; it is the only reader-gone test an
+  older kernel allows (a full ring answered 0 forever), and the bound is TIME because `sched_yield`
+  parks for a 10 ms tick since 1.57.7 — the 20,000-round bound it replaced was 200 s. ⚠ On such a
+  kernel a reader that is alive but stops reading for 5 s looks the same as one that has gone.
+- **A descriptor that stalled out stays failed.** Most utilities never look at `k_write`'s result —
+  `grep` writes each line in two calls and carries on — so without this every later write to the
+  same pipe waited its own 5 s, and a 185 KB `grep` into a stuck pipe took minutes (measured in
+  QEMU: the time bound alone left the pipeline hung past 40 s). Later writes to it fail at once;
+  `k_close` clears the mark before the number is reused.
+- **`k_write` never returns a short count**, on either target: `n`, or a negative errno. Seven
+  utilities loop "write the rest" around it, and a short count sent them straight back into the
+  stall, for ever.
+- **`k_read` passes a4 = 0 too**, so a pipe read blocks in the kernel (1.57.8) instead of polling
+  at up to one timer tick per round; its `-2` retry loop stays for kernels that ignore a4.
 
 ## Why so light at M1
 

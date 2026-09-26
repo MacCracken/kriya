@@ -30,24 +30,32 @@ enum ArgBatchLimit {
     AB_ARG_MAX_CAP   = 6291456;   # the kernel's 3/4 of an 8 MiB _STK_LIM
 }
 
+# The soft RLIMIT_STACK in bytes; 0 when it cannot be read, and on agnos, which
+# has no rlimits. ⚠ RLIM_INFINITY is all ones, which is -1 as an i64: callers
+# shift it (`>>` is logical in Cyrius) rather than compare it.
+fn ab_stack_limit(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var rl[16];
+    var r = syscall(97, 3, &rl);              # getrlimit(RLIMIT_STACK)
+    if (r != 0) { return 0; }
+    return load64(&rl);
+    #endif
+}
+
 # ARG_MAX as glibc's `sysconf (_SC_ARG_MAX)` computes it: RLIMIT_STACK / 4,
 # clamped to [131,072, 6,291,456].
 # ⚠ agnos has no rlimits and its exec passes no arguments at all
 # (`lib/process_agnos.cyr`); it gets the floor.
 fn ab_sys_arg_max(): i64 {
-    #ifdef CYRIUS_TARGET_AGNOS
-    return AB_ARG_MAX_FLOOR;
-    #endif
-    #ifndef CYRIUS_TARGET_AGNOS
-    var rl[16];
-    var r = syscall(97, 3, &rl);              # getrlimit(RLIMIT_STACK)
-    if (r != 0) { return AB_ARG_MAX_FLOOR; }
-    # Unsigned: RLIM_INFINITY is all ones, and `>>` is logical in Cyrius.
-    var q = load64(&rl) >> 2;
+    var sl = ab_stack_limit();
+    if (sl == 0) { return AB_ARG_MAX_FLOOR; }
+    var q = sl >> 2;
     if (q > AB_ARG_MAX_CAP) { return AB_ARG_MAX_CAP; }
     if (q < AB_ARG_MAX_FLOOR) { return AB_ARG_MAX_FLOOR; }
     return q;
-    #endif
 }
 
 # --- the environment, read once -----------------------------------------

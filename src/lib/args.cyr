@@ -1232,6 +1232,39 @@ fn kriya_parse_bounded(s, max): i64 {
     return n;
 }
 
+# 1 when `s`, a number `kriya_parse_bounded` accepts, is at most 2^64 - 1 — the
+# range of the `uintmax_t` GNU `find` reads -uid, -gid and -size into (1.7.1);
+# 0 when it is larger. Decided on the DIGITS, since the value is past an i64.
+fn kriya_fits_u64(s): i64 {
+    var i: i64 = 0;
+    var ws: i64 = 1;
+    while (ws == 1) {
+        var c = load8(s + i);
+        var sp: i64 = 0;
+        if (c == 32) { sp = 1; }
+        if (c >= 9) {
+            if (c <= 13) { sp = 1; }
+        }
+        if (sp == 1) { i = i + 1; } else { ws = 0; }
+    }
+    if (load8(s + i) == 43) { i = i + 1; }
+    while (load8(s + i) == 48) { i = i + 1; }
+    var nd: i64 = 0;
+    while (load8(s + i + nd) != 0) { nd = nd + 1; }
+    if (nd < 20) { return 1; }
+    if (nd > 20) { return 0; }
+    var max = "18446744073709551615";
+    var k: i64 = 0;
+    while (k < 20) {
+        var a = load8(s + i + k);
+        var b = load8(max + k);
+        if (a < b) { return 1; }
+        if (a > b) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
 # A SIGNED decimal number in GNU's `xstrtoimax` shape — optional leading blanks,
 # one optional `+` or `-`, digits, nothing after. Returns 0 and stores the value
 # at `out_p`; -1 when it is malformed; -2 when it is well formed but outside i64.

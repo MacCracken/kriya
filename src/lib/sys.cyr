@@ -72,21 +72,29 @@ fn k_read(fd, buf, n): i64 {
     # out-ran the writer and silently report a truncated result — the worst failure shape available,
     # because the output looks plausible.
     #
+    # ⛔ a4 = 0, SPELLED OUT, OR THE KERNEL READS WHATEVER r10 HOLDS. Since agnos 1.57.8 a pipe or
+    # channel read BLOCKS its caller when a4 == 0 and answers -2 (O_NONBLOCK) when it is anything
+    # else, and a three-argument `syscall(5, …)` leaves r10 as the last code to touch it did — so
+    # the same call blocked in the kernel on one pass and spun here on the next (1.7.1). The kernel's
+    # wait is woken by the writer; the spin below paid up to a 10 ms timer tick per round once
+    # `#44` stopped waking other CPUs (1.57.9). Before 1.57.8 a pipe read ignores a4 and -2 still
+    # comes back; those kernels are what the loop below is kept for. (On the console's fd 0, a4 has
+    # chosen since 1.44.x between the non-blocking line read and — at 0 — the blocking one.)
+    #
     # ⭐ THE LOOP TERMINATES ON THE KERNEL'S OWN ANSWER, so it needs no timeout: the kernel returns 0
     # the instant the last write end closes (`pipe_writers_open` scans real fd tables), and 0 exits
     # this loop. A producer that neither writes nor exits blocks us forever — which is exactly what
     # Linux's blocking `read()` does in the same situation, so it is the correct semantic, not a hang
     # we failed to bound.
     #
-    # ⛔ THE WAIT IS A PREEMPTIBLE SPIN, NOT `sleep_ms#41`. sleep_ms is `preempt_disable; sti; hlt` —
-    # it would starve the very producer this read is waiting for. `sched_yield` is donated first, but
-    # it is a documented silent no-op under several guards, so it cannot be the only thing here.
-    var r = syscall(SYS_READ, fd, buf, n);         # agnos #5
+    # ⛔ THE WAIT IS A PREEMPTIBLE SPIN, NOT `sleep_ms#41`. Before 1.57.7 sleep_ms was
+    # `preempt_disable; sti; hlt` — it would starve the very producer this read is waiting for.
+    var r = syscall(SYS_READ, fd, buf, n, 0);      # agnos #5, a4 = 0: block in the kernel
     while (r == 0 - 2) {
         syscall(44);                               # donate the rest of the slice to the producer
         var sp = 0;
         while (sp < 20000) { sp = sp + 1; }        # preemptible: the timer can take us off here
-        r = syscall(SYS_READ, fd, buf, n);
+        r = syscall(SYS_READ, fd, buf, n, 0);
     }
     return r;
     #endif
@@ -119,8 +127,13 @@ fn k_read(fd, buf, n): i64 {
 # — so it is still parity, not divergence. An earlier version of this comment said EPIPE could not
 # reach here at all, which is what made a hardcoded `141` in scripts/smoke-write-errors.sh look safe;
 # that assertion went red on a CI runner whose parent ignores SIGPIPE.
+# ⚠ ON agnos IT IS THE ONLY ENVIRONMENT THERE IS: the kernel has no SIGPIPE, and from 1.57.9 a write
+# to a pipe nobody can read answers -1, which `k_write` records as EPIPE. `kriya yes | head -1` ends
+# `write error: broken pipe` / exit 1 there — GNU's exit with SIGPIPE ignored, in kriya's words.
+# ⚠ Only once nobody holds the read end: agnsh 2.0.0 keeps its own copy while it reaps a pipeline,
+# and the write then waits for the shell (agnoshi issue 2026-09-26-pipeline-keeps-read-end-and-hangs).
 var _K_WRITE_BAD:   i64 = 0;    # 1 once any write has failed
-var _K_WRITE_ERRNO: i64 = 0;    # errno of the FIRST failure; 0 = short write with no errno
+var _K_WRITE_ERRNO: i64 = 0;    # errno of the FIRST failure
 
 fn _k_write_note(errno): i64 {
     # First failure wins — later ones are usually consequences of the first.
@@ -154,6 +167,79 @@ fn k_write_forgive(errno): i64 {
     return 1;
 }
 
+# How long a write may make NO progress before `k_write` gives up (agnos only; a Linux write blocks
+# in the kernel). ⛔ TIME FIRST: the bound was 20,000 rounds of `sched_yield`#44, which was a short
+# spin until agnos 1.57.7 made `#44` park the CPU until the next 10 ms tick when nothing else is
+# READY — and 20,000 ticks is 200 s. A producer whose consumer had gone looked hung for minutes
+# (issue 2026-09-26, found by agnos 1.57.9's end review). ⚠ The round count stays as a BACKSTOP
+# for a clock that does not move: before 1.57.7 `uptime_ms`#40 counted timer ticks, and a
+# foreground program ran with interrupts off. A round then cost microseconds, so 500,000 of them
+# is seconds too.
+enum KWriteStall {
+    K_WRITE_STALL_MS     = 5000;
+    K_WRITE_STALL_ROUNDS = 500000;
+}
+
+# 1 when a write that has taken nothing for `rounds` calls, over `waited_ms`, should stop trying.
+fn _k_write_stalled(rounds, waited_ms): i64 {
+    if (waited_ms >= K_WRITE_STALL_MS) { return 1; }
+    if (rounds >= K_WRITE_STALL_ROUNDS) { return 1; }
+    return 0;
+}
+
+# Two bitmasks over descriptors 0..62 (agnos hands out fewer than 32), each bit
+# cleared by `k_close` before the number can be reused (1.7.1):
+#
+# ⛔ `_k_stalled` — ONE STALL PER DESCRIPTOR, NOT ONE PER CALL. Most utilities never
+# look at what `k_write` returns — `grep` writes each line in two calls and carries
+# on — so a descriptor that timed out once timed out again on every later call,
+# five seconds each: measured in QEMU, a 185 KB `grep` into a stuck pipe was still
+# hung at 40 s with the time bound alone. And any byte that did get through after
+# the first give-up would sit behind a gap. Later writes to a marked descriptor
+# fail at once, with the same ENOSPC.
+#
+# ⛔ `_k_files` — THE DESCRIPTORS KRIYA OPENED ITSELF, which on agnos are never
+# pipes: `open#7` has no FIFOs to return. agnos answers every failed write with a
+# bare -1, and calling it EPIPE on a FILE let `tee -p` — whose whole meaning is
+# "a pipe error is not an error" — drop a FAT output silently at 4 KiB, the
+# kernel's write-back limit, and exit 0. A file's -1 is EIO, and a file that
+# takes nothing is ENOSPC at once: waiting cannot make room in a file.
+var _k_stalled = 0;
+var _k_files   = 0;
+
+fn _k_fd_bit(fd): i64 {
+    if (fd < 0) { return 0; }
+    if (fd > 62) { return 0; }
+    return 1 << fd;
+}
+
+fn _k_stall_mark(fd): i64 { _k_stalled = _k_stalled | _k_fd_bit(fd); return 0; }
+fn _k_stall_dead(fd): i64 {
+    var b = _k_fd_bit(fd);
+    if (b == 0) { return 0; }
+    if ((_k_stalled & b) != 0) { return 1; }
+    return 0;
+}
+fn _k_file_mark(fd): i64 { _k_files = _k_files | _k_fd_bit(fd); return 0; }
+fn _k_is_file(fd): i64 {
+    var b = _k_fd_bit(fd);
+    if (b == 0) { return 0; }
+    if ((_k_files & b) != 0) { return 1; }
+    return 0;
+}
+fn _k_fd_forget(fd): i64 {
+    var b = _k_fd_bit(fd);
+    _k_stalled = _k_stalled & (~b);
+    _k_files = _k_files & (~b);
+    return 0;
+}
+
+# Write all `n` bytes of `buf` to `fd`. Returns `n`, or a NEGATIVE errno — ⛔ NEVER A SHORT COUNT.
+# Seven utilities wrap this in their own "write the rest" loop (`cp`, `cut`, `head`, `sort`,
+# `tail`, `tee`, `tr`) that adds a non-negative result and calls again, so a short count from a
+# write that could not progress came straight back here, failed again with 0, and looped for ever:
+# on agnos, 200 s per round (1.7.1). A write that takes NOTHING is ENOSPC on both targets, as
+# gnulib's `full_write` calls it, and the failure is recorded for the dispatcher either way.
 fn k_write(fd, buf, n): i64 {
     # write is #1 on BOTH targets, but route it for one consistent layer.
     #ifdef CYRIUS_TARGET_AGNOS
@@ -164,26 +250,46 @@ fn k_write(fd, buf, n): i64 {
     # Measured: `grep . /etc/ssl/cert.pem | wc` delivered 70347 of 185311 bytes — streaming, but
     # lossy, and the missing 62% looked exactly like a plausible answer.
     #
-    # ⛔ THE STALL BOUND IS NOT A TIMEOUT ON SUCCESS, IT IS A GUARD AGAINST AN ABANDONED PIPE. Every
-    # accepted byte resets it, so a merely-slow consumer never trips it however long it takes. It only
-    # fires when the ring stays full with NO progress at all — a reader that died or stopped reading —
-    # where the alternative is spinning forever, since a pipe has no reader-gone signal to test.
-    # ⛔ The wait is a preemptible spin, not `sleep_ms#41`: that is `preempt_disable; sti; hlt` and
-    # would starve the very consumer whose progress we are waiting for.
+    # ⭐ a4 = 0 MAKES A PIPE WRITE BLOCK (agnos 1.57.9): the kernel waits until a reader makes room
+    # and returns every byte — or, once no read end is open anywhere, the part it took and then -1
+    # (EPIPE; agnos has no SIGPIPE). ⛔ A three-argument `syscall(1, …)` passed whatever r10 held,
+    # and a non-zero r10 is O_NONBLOCK: the same write blocked on one call and short-wrote on the
+    # next. Before 1.57.9 a4 is ignored, a full ring short-writes (0 once full), and the loop below
+    # is the only wait there is.
+    #
+    # ⛔ THE STALL BOUND IS NOT A TIMEOUT ON SUCCESS. Every accepted byte resets it, so a consumer
+    # that keeps reading never trips it however slowly it reads; it fires only after
+    # K_WRITE_STALL_MS with NO progress at all. From 1.57.9 a pipe never gets here — it blocks or
+    # answers -1 — so what is left is an older kernel's full ring, whose reader may be gone (there
+    # was no reader-gone signal then) or may have stopped reading for five seconds, and an inherited
+    # descriptor that is not a pipe and takes nothing.
+    # ⛔ The wait is a preemptible spin, not `sleep_ms#41`: before 1.57.7 that was
+    # `preempt_disable; sti; hlt` and would starve the very consumer we are waiting for.
+    if (_k_stall_dead(fd) == 1) { return 0 - 28; }  # it stalled out once already
     var done = 0;
-    var stall = 0;
+    var rounds = 0;                                # consecutive calls that took nothing
+    var since = 0;                                 # uptime_ms when the first of them returned
     while (done < n) {
-        var r = syscall(1, fd, buf + done, n - done);
-        if (r > 0) { done = done + r; stall = 0; }
-        else {
-            if (r < 0) {                           # a real error — surface it, do not spin on it
-                _k_write_note(0 - r);
-                return r;
-            }
-            stall = stall + 1;
-            if (stall > 20000) {                   # abandoned pipe: report the short count honestly
-                _k_write_note(0);
-                return done;
+        var r = syscall(1, fd, buf + done, n - done, 0);   # a4 = 0: a pipe write blocks
+        if (r > 0) { done = done + r; rounds = 0; }
+        elif (r < 0) {
+            # ⚠ agnos returns a bare -1 with no errno. On a descriptor kriya did not open — the
+            # stdout and stderr it inherited — its ABI names one cause, no read end open: EPIPE
+            # on a pipe, "peer gone" on a channel. On a file kriya opened it is an I/O failure.
+            var e: i64 = 32;
+            if (_k_is_file(fd) == 1) { e = 5; }
+            _k_write_note(e);
+            return 0 - e;
+        } elif (_k_is_file(fd) == 1) {
+            _k_write_note(28);                     # a file that takes nothing: ENOSPC at once
+            return 0 - 28;
+        } else {
+            if (rounds == 0) { since = syscall(SYS_UPTIME_MS); }
+            rounds = rounds + 1;
+            if (_k_write_stalled(rounds, syscall(SYS_UPTIME_MS) - since) == 1) {
+                _k_write_note(28);
+                _k_stall_mark(fd);
+                return 0 - 28;
             }
             syscall(44);
             var sp = 0;
@@ -212,10 +318,10 @@ fn k_write(fd, buf, n): i64 {
                     return r;
                 }
             } else {
-                # write() answered 0 with bytes still outstanding: no progress is possible, so
-                # report the short count rather than spinning on it.
-                _k_write_note(0);
-                return done;
+                # write() answered 0 with bytes still outstanding: no progress is possible. ENOSPC,
+                # as gnulib's `full_write` says — and not the short count it used to return.
+                _k_write_note(28);
+                return 0 - 28;
             }
         }
     }
@@ -223,8 +329,8 @@ fn k_write(fd, buf, n): i64 {
     #endif
 }
 
-# `count` copies of the byte `ch` on `fd`, a buffer at a time. Returns `count`,
-# the bytes written before a short write, or the negative errno of a failed one.
+# `count` copies of the byte `ch` on `fd`, a buffer at a time. Returns `count`, or
+# the negative errno of a failed write — `k_write` never returns a short count.
 #
 # ⛔ THREE PADDERS WROTE ONE BYTE PER SYSTEM CALL: `nl`'s (buffered at 1.6.16),
 # `printf`'s and `stat`'s. `printf %100000000d 5` took 50 s against GNU's 31 ms,
@@ -248,13 +354,13 @@ fn k_write_fill(fd, ch, count): i64 {
         if (chunk > 4096) { chunk = 4096; }
         var r = k_write(fd, _k_fill_buf, chunk);
         if (r < 0) { return r; }
-        if (r < chunk) { return count - left + r; }
         left = left - chunk;
     }
     return count;
 }
 
 fn k_close(fd): i64 {
+    _k_fd_forget(fd);
     #ifdef CYRIUS_TARGET_AGNOS
     return syscall(SYS_CLOSE, fd);                 # agnos #6
     #endif
@@ -275,7 +381,9 @@ fn k_open(path, flags, mode): i64 {
     if ((flags & 0x40) != 0)    { af = af | 0x100; }       # Linux O_CREAT(0x40) -> agnos AO_CREAT(0x100)
     if ((flags & 0x200) != 0)   { af = af | 0x200; }       # O_TRUNC (0x200 on both)
     if ((flags & 0x10000) != 0) { af = af | 0x800; }       # Linux O_DIRECTORY(0x10000) -> agnos AO_DIRECTORY(0x800)
-    return syscall(SYS_OPEN, path, strlen(path), af);
+    var fd = syscall(SYS_OPEN, path, strlen(path), af);
+    if (fd >= 0) { _k_file_mark(fd); }                     # never a pipe: see `_k_files`
+    return fd;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     return syscall(2, path, flags, mode);                  # linux open #2 (path,flags,mode)
