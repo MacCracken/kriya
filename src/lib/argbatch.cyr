@@ -39,7 +39,13 @@ fn ab_stack_limit(): i64 {
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     var rl[16];
-    var r = syscall(97, 3, &rl);              # getrlimit(RLIMIT_STACK)
+    var r = 0;
+    #ifdef CYRIUS_ARCH_AARCH64
+    r = syscall(163, 3, &rl);                 # aarch64 getrlimit(RLIMIT_STACK) #163 (97 is unshare there)
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
+    r = syscall(97, 3, &rl);                  # linux getrlimit(RLIMIT_STACK) #97
+    #endif
     if (r != 0) { return 0; }
     return load64(&rl);
     #endif

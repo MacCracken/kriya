@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.7.2** — destructive and parallel |
+| **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | — | the **1.7.2**-labelled slot — destructive and parallel (ships as 1.7.3) |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.8.0** — floats |
 | **1.9.x** | Performance | niyama regex speed (upstream) | **1.9.0** — `wc -c` fast path |
 
@@ -73,7 +73,22 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
     4 KiB `getdents64` buffer per directory and a joined path per entry and frees neither, so
     `kriya du -s /usr` peaks at **68 MB against GNU's 7.7 MB** with dedup switched off entirely.
     Measure it in the same pass.
-- **1.7.4 — Raw syscalls to stdlib wrappers.** kriya issues **44 distinct raw `syscall(N, …)`
+> ⚠ **Slot labels are plan names.** 1.7.2 shipped out of plan (2026-09-28): the aarch64
+> MISROUTING half of 1.7.4 below. The slots here ship under the next free numbers.
+
+- **1.7.4 — Raw syscalls to stdlib wrappers.** ⭐ **The misrouting half SHIPPED in 1.7.2**: every
+  raw number that ran a DIFFERENT call on aarch64 (24 sites — `access` 21 was epoll_ctl, `fchown`
+  93 was `exit`, …) now calls the stdlib wrapper or names the aarch64 number under
+  `#ifdef CYRIUS_ARCH_AARCH64`; `tests/kriya-syscalls.tcyr` pins it. What remains here is the
+  readability sweep of the numbers cyrius DOES renumber, and ⛔ **two aarch64 defects that are not
+  routing**, measured on the pi at 1.7.2: the `FS_O_*` open flags and `fs_opendir_nofollow`'s
+  `0o600000` are x86 values (aarch64 `O_DIRECTORY` is 0o40000, `O_NOFOLLOW` 0o100000), and `k_stat`
+  hands callers the x86 `struct stat` layout while the aarch64 kernel writes the generic one
+  (`st_mode` at 16, not 24) — `ls -l`, `stat`, `which`, `xargs` and `cp -p`'s mode read garbage
+  there. ⚠ And an UPSTREAM gap: native aarch64 `fchown` 55, `setxattr` 5, `fsetxattr` 7,
+  `lgetxattr` 9, `fgetxattr` 10 cannot be issued by number from cyrius (each is a number cyrius
+  renumbers as an x86 call), so 1.7.2 declines the four xattr calls there; stdlib wrappers are the
+  fix. The original entry follows. kriya issues **44 distinct raw `syscall(N, …)`
   numbers across 54 sites** (code lines, counted at 1.7.0), in x86-64 Linux numbering; 17 of those
   sites are the `*at()` family (`openat` 257, `mkdirat` 258, `newfstatat` 262,
   `unlinkat` 263, `utimensat` 280, …). ⭐ **The wrappers exist**: the stdlib has exposed

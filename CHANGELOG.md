@@ -6,6 +6,82 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.7.2] - 2026-09-28 — the syscall layer issues the call it names on aarch64
+
+A patch release outside the slot plan (the roadmap's 1.7.2–1.7.4 slot labels are plan names and
+ship under the next free numbers). It takes the **misrouting half** of roadmap 1.7.4: every raw
+syscall number in `src/lib/sys.cyr`, `src/lib/fs.cyr` and `src/lib/argbatch.cyr` that runs a
+DIFFERENT call on aarch64. Filed from the cyrius 6.6.9 review ("kriya issues raw x86 90/91/97/21
+that misroute on aarch64") and premise-checked at 6.6.10: the four were real, and they were four
+of twenty-four.
+
+### Fixed — ⛔ aarch64: raw x86 numbers ran other system calls
+
+kriya's Linux arms spelled x86_64 numbers. cyrius renumbers SOME of them for aarch64 (`read`,
+`write`, `open`, `mkdir`, `unlink`, `rename`, `newfstatat`, …) and passes every other number to
+the aarch64 kernel verbatim, where it is another call. Measured with `qemu-aarch64 -strace` on the
+1.7.1 build, one probe per number:
+
+- `access` 21 ran **epoll_ctl**, `chmod` 90 **capget**, `fchmod` 91 **capset**, `getrlimit` 97
+  **unshare**, `geteuid` 107 **timer_create**, `lseek` 8 **getxattr**, `link` 86
+  **timerfd_settime**, `fchownat` 260 **wait4**, `renameat` 264 **name_to_handle_at**, `fchmodat`
+  268 **setns**, `symlinkat` 266 **clock_adjtime**, `readlinkat` 267 **syncfs**, and the xattr
+  family 188…196 the SysV IPC calls (`msgrcv`, `semget`, `semctl`, `semtimedop`, `semop`, `shmat`);
+- ⛔ `fchown` 93 is aarch64 **`exit`** — `k_fchown` ended the process with the fd as its status;
+- `openat` 257, `mkdirat` 258, `linkat` 265 and `statx` 332 are unassigned there (-ENOSYS).
+
+The x86 build was right, so every suite was green. On an ARM host `ln` and `mv` failed with
+"invalid argument" / "no such file", `cp -p` reported "bad address".
+
+**Fix.** Every such site calls the stdlib `sys_*` wrapper, which carries each arch's number
+(`sys_access`, `sys_chmod`, `sys_fchmod`, `sys_link`, `sys_lseek`, `sys_geteuid`, `sys_fchownat`,
+`sys_openat`, `sys_mkdirat`, `sys_linkat`, `sys_fchmodat`, `sys_renameat`); where the stdlib has
+no wrapper, the aarch64 number is named under `#ifdef CYRIUS_ARCH_AARCH64` (`getrlimit` 163,
+`symlinkat`/`readlinkat` as the peer's `SYS_SYMLINKAT`/`SYS_READLINKAT`, `statx` 291, `getxattr`
+8, `flistxattr` 13). The x86_64 build issues the same numbers as before.
+
+- ⚠ **Five aarch64 calls cannot be issued by number from cyrius 6.6.9**: native `fchown` 55,
+  `setxattr` 5, `fsetxattr` 7, `lgetxattr` 9 and `fgetxattr` 10 are all numbers cyrius renumbers
+  as x86 calls (`getsockopt`, `fstat`, `poll`, `mmap`, `mprotect`). `k_fchown` becomes
+  `fchownat(fd, "", …, AT_EMPTY_PATH)`, the same call on the fd; the four xattr calls DECLINE with
+  -38 on aarch64 until the stdlib wraps the family — an honest ENOSYS rather than an `mprotect`
+  with a path for an address.
+- ⚠ `getxattr` 8 and `statx` 291 are correct native calls that the aarch64 build still WARNS about
+  ("raw syscall 291 is x86_64 epoll_create1") — the raw-literal diagnostic cannot tell an intended
+  native number from a stray x86 one. The x86_64 and agnos builds are warning-free.
+
+### Changed
+
+- **Toolchain pin 6.6.6 → 6.6.9**, `lib/` re-synced with `cyrius lib sync --full` (111 files).
+
+### Tests
+
+- **New `tests/kriya-syscalls.tcyr`** (33 cases): each wrapper's OBSERVABLE answer — a link that
+  exists, a mode that reads back through the stdlib's per-arch stat offsets, ENOENT rather than
+  EBADF for a missing path, `RLIMIT_STACK` read. ⭐ On aarch64 the 1.7.1 layer fails it (qemu and
+  the pi: 9 FAIL, then the process EXITS inside `k_fchown`, status 3); 1.7.2 is 33/33 on both. It
+  passes on x86_64 either way, so run it on aarch64 (`cyrius build --aarch64
+  tests/kriya-syscalls.tcyr <out>`).
+
+### Not fixed here — roadmap 1.7.4
+
+An aarch64 build is still not usable, for reasons that are not syscall ROUTING and are recorded in
+roadmap 1.7.4: the `FS_O_*` open flags and `0o600000` are x86 values (aarch64 spells
+`O_DIRECTORY` 0o40000 and `O_NOFOLLOW` 0o100000), and `k_stat` hands callers the x86 `struct
+stat` layout while the aarch64 kernel writes the generic one (`st_mode` at 16, not 24) — so
+`ls -l`, `stat`, `which`, `xargs` and `cp -p`'s mode are wrong on ARM.
+
+### Release totals
+
+**7,723 smoke cases across 41 scripts** (unchanged), **838 unit** + **33** new, 18 POSIX; fuzz
+green under poison (1,127 / 201 / 201); `cyrius lint`, `lint-deferrals.sh`, `lint-help-schema.sh`
+clean; `watchlist-scan.py` clean (M15a 0, M15c the 3 known, M15d 0, M15i 0); M15a's premise
+re-measured at 6.6.9, unchanged at 8/32/144; `vet` 57 deps. ⚠ Not re-run in the `ubuntu:24.04`
+container (the image is not on this box).
+
+Binary 1,265,480 → **1,269,896** bytes on host (+4,416, mostly the 6.6.9 stdlib), 1,257,104 →
+**1,274,216** on agnos (+17,112, the same).
+
 ## [1.7.1] - 2026-09-26 — `find` predicates, and a write that stalled for 200 seconds
 
 The 1.7.1 slot — `find`'s `-prune`, `-depth`, `-perm`, `-H`, GNU's `,` operator, `-uid`/`-gid`

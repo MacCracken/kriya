@@ -1,0 +1,121 @@
+# kriya — the syscall layer issues the call it names, on every Linux arch (1.7.2).
+#
+# ⛔ WHY THIS FILE EXISTS. `src/lib/sys.cyr` and `src/lib/fs.cyr` spelled their Linux arms as raw
+# x86_64 numbers. cyrius renumbers SOME x86 numbers for aarch64 (read, write, open, mkdir, unlink,
+# rename, newfstatat, …) and passes every other number to the aarch64 kernel verbatim — where it
+# is a DIFFERENT call. Measured under qemu-aarch64 -strace at 1.7.1: `access` 21 ran epoll_ctl,
+# `chmod` 90 capget, `fchmod` 91 capset, `getrlimit` 97 unshare, `geteuid` 107 timer_create,
+# `lseek` 8 getxattr, `link` 86 timerfd_settime, `fchownat` 260 wait4, `renameat` 264
+# name_to_handle_at, `fchmodat` 268 setns, `symlinkat` 266 clock_adjtime, `readlinkat` 267 syncfs,
+# the xattr family 188..196 the SysV IPC calls, and `fchown` 93 **exit**. `openat` 257,
+# `mkdirat` 258, `linkat` 265 and `statx` 332 were unassigned (-ENOSYS). The x86 build was right,
+# so every existing test was green; `ln`, `mv`, `cp -p` and friends failed on an ARM host.
+#
+# Each assertion below is an OBSERVABLE answer the right call gives and the wrong one does not
+# (a created link exists, a mode reads back, a missing path says ENOENT rather than EBADF), so this
+# file FAILS on an aarch64 build of the 1.7.1 layer — `k_fchown` alone ends the process — and
+# passes on x86_64 either way. Run it on aarch64: `cyrius build --aarch64 tests/kriya-syscalls.tcyr
+# <out>` under qemu-aarch64 or on the pi.
+#
+# ⚠ Four xattr calls DECLINE on aarch64 (-38): their native numbers (5/7/9/10) are ones cyrius
+# renumbers as x86 fstat/poll/mmap/mprotect, so no raw number reaches them. Asserted as -38 there.
+include "src/version_str.cyr"
+include "src/lib/exit.cyr"
+include "src/lib/errmsg.cyr"
+include "src/lib/sys.cyr"
+include "src/lib/path.cyr"
+include "src/lib/str.cyr"
+include "src/lib/fs.cyr"
+include "src/lib/argbatch.cyr"
+
+# Build "/tmp/kriya-sc-<pid>" into `p` (at least 40 bytes).
+fn _ks_mkdir_name(p): i64 {
+    var pre = "/tmp/kriya-sc-";
+    var n = strlen(pre);
+    memcpy(p, pre, n);
+    var pid = sys_getpid();
+    var digits[24];
+    var d = 0;
+    while (pid > 0) { store8(&digits + d, 48 + pid % 10); pid = pid / 10; d = d + 1; }
+    while (d > 0) { d = d - 1; store8(p + n, load8(&digits + d)); n = n + 1; }
+    store8(p + n, 0);
+    return 0;
+}
+
+# The permission bits of `path`, read through the stdlib's per-arch stat offsets.
+fn _ks_mode(path): i64 {
+    var st[144];
+    if (sys_stat(path, &st) != 0) { return 0 - 1; }
+    return load32(&st + STAT_MODE) & 4095;
+}
+
+fn main(): i64 {
+    var dir[64];
+    _ks_mkdir_name(&dir);
+    assert_eq(k_mkdir(&dir, 448), 0, "mkdir the scratch dir");
+    assert_eq(sys_chdir(&dir), 0, "chdir into it");
+
+    test_group("access / chmod / fchmod");
+    var fd = k_open("f", 577, 420);                       # O_WRONLY|O_CREAT|O_TRUNC, 0644
+    assert(fd >= 0, "create f");
+    assert_eq(k_write(fd, "hello", 5), 5, "write 5 bytes");
+    assert_eq(k_access("f", 0), 0, "k_access(f) == 0 (was epoll_ctl on aarch64)");
+    assert_eq(k_access("missing", 0), 0 - 2, "k_access(missing) == -ENOENT");
+    assert_eq(k_chmod("f", 384), 0, "k_chmod(f, 0600) == 0 (was capget)");
+    assert_eq(_ks_mode("f"), 384, "mode reads back 0600");
+    assert_eq(k_fchmod(fd, 416), 0, "k_fchmod(fd, 0640) == 0 (was capset)");
+    assert_eq(_ks_mode("f"), 416, "mode reads back 0640");
+    assert_eq(fs_fchmodat(k_at_fdcwd(), "f", 388, 0), 0, "fs_fchmodat(f, 0604) == 0 (was setns)");
+    assert_eq(_ks_mode("f"), 388, "mode reads back 0604");
+
+    test_group("ownership / identity / seek");
+    assert_eq(k_geteuid(), sys_geteuid(), "k_geteuid() is the euid (was timer_create)");
+    assert_eq(k_fchown(fd, 0 - 1, 0 - 1), 0, "k_fchown(fd, -1, -1) == 0 (x86 93 is EXIT on aarch64)");
+    assert_eq(k_fchownat(k_at_fdcwd(), "f", 0 - 1, 0 - 1, 0), 0, "k_fchownat == 0 (was wait4)");
+    assert_eq(k_lseek(fd, 0, 2), 5, "k_lseek(fd, 0, SEEK_END) == 5 (was getxattr)");
+
+    test_group("links / rename / dirs");
+    assert_eq(k_link("f", "g"), 0, "k_link(f, g) == 0 (was timerfd_settime)");
+    assert_eq(k_access("g", 0), 0, "g exists");
+    assert_eq(fs_linkat(k_at_fdcwd(), "f", k_at_fdcwd(), "h", 0), 0, "fs_linkat(f, h) == 0 (was -ENOSYS)");
+    assert_eq(fs_symlinkat("f", k_at_fdcwd(), "s"), 0, "fs_symlinkat(f, s) == 0 (was clock_adjtime)");
+    var lb[64];
+    assert_eq(fs_readlinkat(k_at_fdcwd(), "s", &lb, 64), 1, "fs_readlinkat(s) == 1 byte (was syncfs)");
+    assert_eq(load8(&lb), 102, "the link text is 'f'");
+    assert_eq(fs_renameat(k_at_fdcwd(), "g", k_at_fdcwd(), "g2"), 0, "fs_renameat(g, g2) == 0");
+    assert_eq(k_access("g", 0), 0 - 2, "g is gone");
+    assert_eq(k_access("g2", 0), 0, "g2 exists");
+    assert_eq(fs_mkdirat(k_at_fdcwd(), "d", 493), 0, "fs_mkdirat(d) == 0 (was -ENOSYS)");
+    var dfd = fs_openat(k_at_fdcwd(), "d", 0, 0);
+    assert(dfd >= 0, "fs_openat(d) opens (was -ENOSYS)");
+    k_close(dfd);
+
+    test_group("rlimit / statx / xattr");
+    assert(ab_stack_limit() != 0, "ab_stack_limit() reads RLIMIT_STACK (was unshare -> 0)");
+    var sx[256];
+    assert_eq(k_statx(k_at_fdcwd(), "f", 0, 4095, &sx), 0, "k_statx(f) == 0 (was -ENOSYS)");
+    var xb[64];
+    var gx = k_getxattr("f", "user.kriya-none", &xb, 64);
+    assert(gx == 0 - 61 || gx == 0 - 95, "k_getxattr of an absent attr is ENODATA/EOPNOTSUPP (was semctl)");
+    var lx = k_flistxattr(fd, &xb, 64);
+    assert(lx >= 0 || lx == 0 - 95, "k_flistxattr answers a list length (was shmat)");
+    #ifdef CYRIUS_ARCH_AARCH64
+    assert_eq(k_fgetxattr(fd, "user.kriya-none", &xb, 64), 0 - 38, "aarch64: k_fgetxattr declines");
+    assert_eq(k_lgetxattr("s", "user.kriya-none", &xb, 64), 0 - 38, "aarch64: k_lgetxattr declines");
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
+    var fx = k_fgetxattr(fd, "user.kriya-none", &xb, 64);
+    assert(fx == 0 - 61 || fx == 0 - 95, "k_fgetxattr of an absent attr is ENODATA/EOPNOTSUPP");
+    var lgx = k_lgetxattr("s", "user.kriya-none", &xb, 64);
+    assert(lgx == 0 - 61 || lgx == 0 - 95 || lgx == 0 - 1, "k_lgetxattr of an absent attr is ENODATA/EOPNOTSUPP/EPERM");
+    #endif
+    k_close(fd);
+
+    # clean up
+    k_unlink("f"); k_unlink("h"); k_unlink("s"); k_unlink("g2"); k_rmdir("d");
+    sys_chdir("/tmp");
+    k_rmdir(&dir);
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

@@ -20,7 +20,14 @@
 # The agnos branch leans on the stdlib `SYS_*` constants + native
 # `sys_*` wrappers from `syscalls_x86_64_agnos.cyr` (pulled in by the
 # `syscalls` dep when building `--agnos`). The Linux branch uses the
-# x86_64 numbers inline (same decimal-with-comment style as fs.cyr).
+# x86_64 numbers inline (same decimal-with-comment style as fs.cyr) ONLY
+# where cyrius renumbers that number for aarch64 (ESYSXLAT: read, write,
+# open, close, mkdir, unlink, rename, …). ⛔ A number aarch64 does NOT
+# renumber runs whatever aarch64 has at that slot — x86 fchown 93 is
+# aarch64 EXIT, fchmod 91 is capset, access 21 is epoll_ctl, getrlimit 97
+# is unshare — so those call the stdlib `sys_*` wrapper, which carries
+# the per-arch number, or name the aarch64 number under
+# `#ifdef CYRIUS_ARCH_AARCH64` where the stdlib has no wrapper (1.7.2).
 
 # --- capability flags: 1 where the target supports the primitive ---
 
@@ -549,7 +556,7 @@ fn k_link(target, linkpath): i64 {
     return syscall(SYS_LINK, target, strlen(target), linkpath, strlen(linkpath));  # agnos #32 (a4)
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(86, target, linkpath);                  # linux link #86
+    return sys_link(target, linkpath);                     # stdlib link: 86 is timerfd_settime on aarch64
     #endif
 }
 
@@ -563,7 +570,7 @@ fn k_lseek(fd, off, whence): i64 {
     return 0 - 38;                                         # no lseek on agnos (ENOSYS)
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(8, fd, off, whence);                    # linux lseek #8
+    return sys_lseek(fd, off, whence);                     # stdlib lseek: 8 is getxattr on aarch64
     #endif
 }
 
@@ -653,7 +660,7 @@ fn k_access(path, mode): i64 {
     return 0 - 2;                                          # ENOENT
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(21, path, mode);                        # linux access #21
+    return sys_access(path, mode);                         # stdlib access: 21 is epoll_ctl on aarch64
     #endif
 }
 
@@ -662,7 +669,7 @@ fn k_chmod(path, mode): i64 {
     return 0 - 38;                                         # no mode bits on agnos
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(90, path, mode);                        # linux chmod #90
+    return sys_chmod(path, mode);                          # stdlib chmod: 90 is capget on aarch64
     #endif
 }
 
@@ -700,7 +707,7 @@ fn k_geteuid(): i64 {
     return 0;                                              # no uid model; treat as unprivileged-equivalent
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(107);                                   # linux geteuid #107
+    return sys_geteuid();                                  # stdlib geteuid: 107 is timer_create on aarch64
     #endif
 }
 
@@ -709,7 +716,14 @@ fn k_fchown(fd, uid, gid): i64 {
     return 0 - 38;                                         # no ownership on agnos
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_ARCH_AARCH64
+    # aarch64: x86 fchown 93 is EXIT there, and the native 55 is unreachable by number — cyrius
+    # renumbers 55 as x86 getsockopt. fchownat(fd, "", …, AT_EMPTY_PATH) is the same call on the fd.
+    return sys_fchownat(fd, "", uid, gid, 4096);           # AT_EMPTY_PATH = 0x1000
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
     return syscall(93, fd, uid, gid);                      # linux fchown #93
+    #endif
     #endif
 }
 
@@ -722,7 +736,7 @@ fn k_fchownat(dirfd, path, uid, gid, flags): i64 {
     return 0 - 38;                                         # no ownership on agnos
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(260, dirfd, path, uid, gid, flags);     # linux fchownat #260
+    return sys_fchownat(dirfd, path, uid, gid, flags);     # stdlib fchownat: 260 is wait4 on aarch64
     #endif
 }
 
@@ -731,7 +745,7 @@ fn k_fchmod(fd, mode): i64 {
     return 0 - 38;                                         # no mode bits on agnos
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(91, fd, mode);                          # linux fchmod #91
+    return sys_fchmod(fd, mode);                           # stdlib fchmod: 91 is capset on aarch64
     #endif
 }
 
@@ -764,7 +778,12 @@ fn k_flistxattr(fd, list, size): i64 {
     return 0 - 38;                                         # no xattrs on agnos
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(13, fd, list, size);                    # aarch64 flistxattr #13 (196 is shmat there)
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
     return syscall(196, fd, list, size);                   # linux flistxattr #196
+    #endif
     #endif
 }
 
@@ -773,18 +792,31 @@ fn k_fgetxattr(fd, name, value, size): i64 {
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_ARCH_AARCH64
+    # aarch64: 193 is semop there, and the native 10 is unreachable by number — cyrius renumbers
+    # 10 as x86 mprotect. Declined until the stdlib wraps the xattr family (roadmap 1.7.4).
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
     return syscall(193, fd, name, value, size);            # linux fgetxattr #193
+    #endif
     #endif
 }
 
 # `statx(2)`, for what `stat(2)` has no field for — the birth time. ⚠ agnos has no
-# statx and declines; aarch64's number differs (291), which is roadmap 1.7.4.
+# statx and declines. aarch64's number is 291; the stdlib wraps no statx, so each arch
+# names its own (1.7.2).
 fn k_statx(dirfd, path, flags, mask, buf): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(291, dirfd, path, flags, mask, buf);   # aarch64 statx #291 (332 is unassigned there)
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
     return syscall(332, dirfd, path, flags, mask, buf);   # linux statx #332
+    #endif
     #endif
 }
 
@@ -795,19 +827,32 @@ fn k_getxattr(path, name, value, size): i64 {
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(8, path, name, value, size);            # aarch64 getxattr #8 (191 is semctl there)
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
     return syscall(191, path, name, value, size);          # linux getxattr #191
+    #endif
     #endif
 }
 
 # lgetxattr(2): the attribute of a symlink ITSELF, never its target — what
 # `stat %C` reads for a link it was not told to follow (`-L`) (1.6.16).
-# ⚠ 192 on x86-64 and 9 on aarch64; see roadmap 1.7.4 on raw numbers.
+# ⚠ 192 on x86-64 and 9 on aarch64 — and 9 cannot be issued from cyrius on aarch64 (see the
+# arm below), so it declines there (1.7.2).
 fn k_lgetxattr(path, name, value, size): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_ARCH_AARCH64
+    # aarch64: 192 is semtimedop there, and the native 9 is unreachable by number — cyrius
+    # renumbers 9 as x86 mmap. Declined until the stdlib wraps the xattr family (roadmap 1.7.4).
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
     return syscall(192, path, name, value, size);          # linux lgetxattr #192
+    #endif
     #endif
 }
 
@@ -816,7 +861,14 @@ fn k_fsetxattr(fd, name, value, size, flags): i64 {
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_ARCH_AARCH64
+    # aarch64: 190 is semget there, and the native 7 is unreachable by number — cyrius renumbers
+    # 7 as x86 poll. Declined until the stdlib wraps the xattr family (roadmap 1.7.4).
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
     return syscall(190, fd, name, value, size, flags);     # linux fsetxattr #190
+    #endif
     #endif
 }
 
@@ -828,6 +880,13 @@ fn k_setxattr(path, name, value, size, flags): i64 {
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_ARCH_AARCH64
+    # aarch64: 188 is msgrcv there, and the native 5 is unreachable by number — cyrius renumbers
+    # 5 as x86 fstat. Declined until the stdlib wraps the xattr family (roadmap 1.7.4).
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
     return syscall(188, path, name, value, size, flags);   # linux setxattr #188
+    #endif
     #endif
 }
