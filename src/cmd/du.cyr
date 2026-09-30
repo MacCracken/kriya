@@ -285,8 +285,8 @@ fn _du_walk(parent_dirfd, name, display, depth): i64 {
     # Directory. Open and walk.
     var dir_fd: i64 = 0;
     if (_du_follow == 1) {
-        # O_RDONLY | O_DIRECTORY = 65536.
-        dir_fd = fs_openat(parent_dirfd, name, 65536, 0);
+        # O_RDONLY | O_DIRECTORY (per-arch value, see fs.cyr).
+        dir_fd = fs_openat(parent_dirfd, name, FS_O_DIRECTORY, 0);
     } else {
         dir_fd = fs_opendir_nofollow(parent_dirfd, name);
     }

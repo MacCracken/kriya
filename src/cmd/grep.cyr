@@ -1468,7 +1468,7 @@ fn _gr_walk_dir(parent_dirfd, dir_name, dir_path, handles, n_handles, opts, term
                                     }
                                 }
                             } elif (fs_is_reg(&st) == 1) {
-                                # M8 mitigation: O_NOFOLLOW (131072) to close
+                                # M8 mitigation: O_NOFOLLOW to close
                                 # the TOCTOU window between lstat-classify and
                                 # this open. If the regular file was swapped
                                 # for a symlink, ELOOP — we report and skip

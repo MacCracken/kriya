@@ -6,6 +6,69 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.7.3] - 2026-09-30 — aarch64 open flags and `struct stat` layout
+
+A patch release outside the slot plan, like 1.7.2: the two aarch64 ABI defects roadmap 1.7.4
+recorded as "not routing", measured on the pi at 1.7.2. With 1.7.2's routing fixes, they were what
+still made an aarch64 kriya unusable.
+
+### Fixed — ⛔ aarch64: the safe directory open lost `O_DIRECTORY` and `O_NOFOLLOW`
+
+`FS_O_DIRECTORY` / `FS_O_NOFOLLOW` were the x86_64 values (0o200000 / 0o400000) and
+`fs_opendir_nofollow` passed the literal `0o600000`. aarch64 spells the two flags 0o40000 /
+0o100000, and the pairs SWAP: x86 `O_DIRECTORY` is arm64 `O_DIRECT` and x86 `O_NOFOLLOW` is arm64
+`O_LARGEFILE`. So on aarch64 the [ADR 0003](docs/adr/0003-symlink-follow-policy.md) safe shape
+was lost entirely — the open FOLLOWED a symlink-to-directory and opened a regular file as a
+"directory" — and every `O_NOFOLLOW` guard in `cp`, `grep -r`, `find` and `rm`'s walks was inert.
+
+- `FS_O_DIRECTORY` / `FS_O_NOFOLLOW` are now taken from the stdlib's `O_DIRECTORY` / `O_NOFOLLOW`,
+  which carry each target's value (x86_64, aarch64, and agnos's neutral set, which `k_open`'s
+  `AO_DIRECTORY` mapping reads). They are vars rather than `FsOpen` members, because an enum member
+  cannot name another constant.
+- Every other x86 flag literal is a named composite now: `fs_opendir_nofollow` (`0o600000`),
+  `fs_opendir_dest`'s `O_PATH` retry (`2293760`), `fs_dir_is_empty`, `ls`'s directory open, `du -L`,
+  and `cp`'s four (`131072`, `131649`, `131265`, `65536`). `FsOpen` gains `FS_O_CREAT`,
+  `FS_O_EXCL` and `FS_O_PATH`, whose values are the same on both arches.
+
+### Fixed — ⛔ aarch64: every `stat` reader looked at the x86_64 offsets
+
+The aarch64 kernel writes the GENERIC `struct stat` (mode u32 at 16, nlink u32 at 20, uid 24,
+gid 28, rdev 32, a 32-bit blksize), while every reader in kriya uses the x86_64 layout (nlink u64
+at 16, mode 24, uid 28, gid 32, rdev 40). On the pi `stat /` said `unknown 0` for the root
+directory, `ls -l` printed a directory as `-rwxr-x-wT` with 12,884,918,781 links, and `cp -p`,
+`du`, `find` and `which` classified nothing.
+
+- `_k_stat_to_x86` (`src/lib/sys.cyr`, `#ifdef CYRIUS_ARCH_AARCH64`) rewrites the moved fields in
+  place, the same pattern as the agnos `_k_agnos_stat` translation; dev, ino, size, blocks and the
+  three timestamps already coincide. Every Linux `newfstatat` site returns through
+  `_k_stat_norm`: `k_stat`, `k_lstat`, `fs_fstatat`, `fs_lstat_at` — and `ls`'s symlink-target
+  stat, which issued a raw `syscall(262, …)` of its own and now calls `fs_fstatat`. So every
+  raw-offset reader stays correct and the x86_64 build is unchanged.
+
+### Tests
+
+- `tests/kriya-syscalls.tcyr` 33 → **56**: a `struct stat layout / open flags` group — `stat /` is a
+  directory; a file's type, mode bits, link count, size and owner read back; `lstat` sees a
+  symlink; `/dev/null` is a device with rdev 1:3; `fs_opendir_nofollow` opens a directory, refuses a
+  symlink-to-directory (ELOOP/ENOTDIR) and a regular file (ENOTDIR); `FS_O_NOFOLLOW` refuses a
+  symlink. ⭐ The 1.7.2 source fails **14** of them on aarch64 (qemu-aarch64 and the pi); 1.7.3 is
+  56/56 on both, and on x86_64.
+- ⭐ **On the pi** (aarch64, GNU coreutils 9.4) the smoke suite against the native aarch64 build
+  goes from **5,582 passed / 474 failed** (1.7.2) to **7,533 / 36**. ⚠ The 36 are not this
+  release's defects: 28 are every case that runs kriya on a TERMINAL (`cp -i`, `mv -i`, `ls` on a
+  pty), which dies with SIGBUS/SIGSEGV on aarch64 in `k_isatty` — its `var tio[16]` is 16 BYTES
+  and `TCGETS` writes 36 — recorded for the next release; 7 are `printf` width cases where GNU is
+  OOM-killed on the pi (exit 137); 1 is `sleep`'s SIGSTOP timing on a loaded board; and
+  `smoke-ownership-xattr.sh` stops at the aarch64 xattr decline (roadmap 1.7.4, upstream wrappers).
+  On x86_64, `ubuntu:24.04` (coreutils 9.4) as a regular user: **7,654 passed, 0 failed**, all 41
+  scripts.
+
+### Changed
+
+- **Pin 6.6.9 → 6.6.11** (`cyrius.lock` re-vendored; no source change needed).
+- Binary 1,269,896 → **1,278,192** bytes host, 1,274,216 → **1,278,392** agnos — all but 24 bytes of
+  it the toolchain (the 1.7.2 source at 6.6.11 is 1,278,168 / 1,278,368).
+
 ## [1.7.2] - 2026-09-28 — the syscall layer issues the call it names on aarch64
 
 A patch release outside the slot plan (the roadmap's 1.7.2–1.7.4 slot labels are plan names and

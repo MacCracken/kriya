@@ -90,6 +90,45 @@ fn main(): i64 {
     assert(dfd >= 0, "fs_openat(d) opens (was -ENOSYS)");
     k_close(dfd);
 
+    # ⛔ 1.7.3: on aarch64 the kernel writes the GENERIC `struct stat` (mode u32@16, nlink u32@20,
+    # uid@24, gid@28, rdev@32) and every kriya reader looks at the x86 offsets (nlink@16, mode@24,
+    # uid@28, gid@32, rdev@40), so `stat /` did not read back as a directory there. And the
+    # directory-open flags were x86's: aarch64 `O_DIRECTORY` is 0o40000 and `O_NOFOLLOW` 0o100000,
+    # so the ADR-0003 safe open passed O_DIRECT|O_LARGEFILE instead and FOLLOWED a symlink.
+    test_group("struct stat layout / open flags (aarch64 ABI)");
+    var st[FS_STAT_BUFSZ];
+    assert_eq(k_stat("/", &st), 0, "k_stat(/) == 0");
+    assert_eq(fs_is_dir(&st), 1, "k_stat(/) reads back a directory");
+    assert_eq(k_stat("f", &st), 0, "k_stat(f) == 0");
+    assert_eq(fs_is_reg(&st), 1, "k_stat(f) reads back a regular file");
+    assert_eq(fs_perms(&st), 388, "k_stat(f) mode bits read back 0604");
+    assert_eq(fs_nlink(&st), 3, "k_stat(f) nlink == 3 (f, h, g2)");
+    assert_eq(load64(&st + FS_STAT_SIZE), 5, "k_stat(f) size == 5");
+    assert_eq(load64(&st + FS_STAT_UID) & 4294967295, k_geteuid(), "k_stat(f) uid is the creator's");
+    assert_eq(k_lstat("s", &st), 0, "k_lstat(s) == 0");
+    assert_eq(fs_is_lnk(&st), 1, "k_lstat(s) reads back a symlink");
+    assert_eq(fs_fstatat(k_at_fdcwd(), "d", &st, 0), 0, "fs_fstatat(d) == 0");
+    assert_eq(fs_is_dir(&st), 1, "fs_fstatat(d) reads back a directory");
+    assert_eq(fs_lstat_at(k_at_fdcwd(), "s", &st), 0, "fs_lstat_at(s) == 0");
+    assert_eq(fs_is_lnk(&st), 1, "fs_lstat_at(s) reads back a symlink");
+    assert_eq(fs_fstatat(k_at_fdcwd(), "/dev/null", &st, 0), 0, "fs_fstatat(/dev/null) == 0");
+    assert_eq(fs_is_dev(&st), 1, "/dev/null reads back a device");
+    assert_eq(fs_dev_major(fs_rdev(&st)), 1, "/dev/null rdev major == 1");
+    assert_eq(fs_dev_minor(fs_rdev(&st)), 3, "/dev/null rdev minor == 3");
+    assert_eq(fs_symlinkat("d", k_at_fdcwd(), "sd"), 0, "symlink sd -> d");
+    var od = fs_opendir_nofollow(k_at_fdcwd(), "d");
+    assert(od >= 0, "fs_opendir_nofollow(d) opens the directory");
+    k_close(od);
+    var osd = fs_opendir_nofollow(k_at_fdcwd(), "sd");
+    assert(osd == 0 - 40 || osd == 0 - 20, "fs_opendir_nofollow(symlink-to-dir) refuses ELOOP/ENOTDIR");
+    if (osd >= 0) { k_close(osd); }
+    var ofl = fs_opendir_nofollow(k_at_fdcwd(), "f");
+    assert_eq(ofl, 0 - 20, "fs_opendir_nofollow(regular file) refuses ENOTDIR");
+    if (ofl >= 0) { k_close(ofl); }
+    var ofs = fs_openat(k_at_fdcwd(), "s", FS_O_NOFOLLOW, 0);
+    assert_eq(ofs, 0 - 40, "fs_openat(symlink, FS_O_NOFOLLOW) refuses ELOOP");
+    if (ofs >= 0) { k_close(ofs); }
+
     test_group("rlimit / statx / xattr");
     assert(ab_stack_limit() != 0, "ab_stack_limit() reads RLIMIT_STACK (was unshare -> 0)");
     var sx[256];
@@ -112,7 +151,7 @@ fn main(): i64 {
     k_close(fd);
 
     # clean up
-    k_unlink("f"); k_unlink("h"); k_unlink("s"); k_unlink("g2"); k_rmdir("d");
+    k_unlink("f"); k_unlink("h"); k_unlink("s"); k_unlink("sd"); k_unlink("g2"); k_rmdir("d");
     sys_chdir("/tmp");
     k_rmdir(&dir);
     return assert_summary();

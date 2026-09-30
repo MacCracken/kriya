@@ -38,15 +38,26 @@ fn fs_at_fdcwd(): i64 {
     return 0 - 100;
 }
 
-# Open flags pertinent to traversal. Subset of <fcntl.h>.
+# Open flags pertinent to traversal. Subset of <fcntl.h>. These values are the
+# same on every Linux arch kriya builds for (x86_64, aarch64) and on agnos.
 enum FsOpen {
     FS_O_RDONLY    = 0;
     FS_O_WRONLY    = 1;
+    FS_O_CREAT     = 0o100;
+    FS_O_EXCL      = 0o200;
     FS_O_TRUNC     = 0o1000;
-    FS_O_DIRECTORY = 0o200000;   # 0x10000
-    FS_O_NOFOLLOW  = 0o400000;   # 0x20000
     FS_O_CLOEXEC   = 0o2000000;  # 0x80000
+    FS_O_PATH      = 0o10000000; # 0x200000
 }
+
+# ⛔ `O_DIRECTORY` and `O_NOFOLLOW` are ARCH-SPECIFIC and are taken from the stdlib,
+# which carries each target's value. x86_64 spells them 0o200000 / 0o400000, aarch64
+# 0o40000 / 0o100000 — and the two pairs SWAP: x86 O_DIRECTORY is arm64 O_DIRECT and
+# x86 O_NOFOLLOW is arm64 O_LARGEFILE. Up to 1.7.2 these were x86 literals here, so on
+# aarch64 the ADR-0003 safe directory open lost BOTH guards and followed a symlink.
+# (An enum member cannot name another constant, hence the vars.) CHANGELOG [1.7.3].
+var FS_O_DIRECTORY = O_DIRECTORY;
+var FS_O_NOFOLLOW  = O_NOFOLLOW;
 
 # linux_dirent64.d_type values. The kernel returns these in the
 # `getdents64` stream and they short-circuit a per-entry lstat for
@@ -171,7 +182,7 @@ fn fs_fstatat(dirfd, path, buf, flags): i64 {
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(262, dirfd, path, buf, flags);
+    return _k_stat_norm(syscall(262, dirfd, path, buf, flags), buf);
     #endif
 }
 
@@ -181,7 +192,7 @@ fn fs_lstat_at(dirfd, path, buf): i64 {
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(262, dirfd, path, buf, 256);  # AT_SYMLINK_NOFOLLOW
+    return _k_stat_norm(syscall(262, dirfd, path, buf, 256), buf);  # AT_SYMLINK_NOFOLLOW
     #endif
 }
 
@@ -249,10 +260,8 @@ fn fs_opendir_nofollow(dirfd, name): i64 {
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    # O_RDONLY | O_DIRECTORY | O_NOFOLLOW, folded: 0o200000 | 0o400000.
-    # ⚠ x86_64 FLAG values: aarch64 spells O_DIRECTORY 0o40000 and O_NOFOLLOW 0o100000,
-    # so on aarch64 this still passes other flags — roadmap 1.7.4 (flag constants).
-    return sys_openat(dirfd, name, 0o600000, 0);
+    # O_RDONLY | O_DIRECTORY | O_NOFOLLOW — per-arch values, see `FS_O_DIRECTORY` above.
+    return sys_openat(dirfd, name, FS_O_DIRECTORY | FS_O_NOFOLLOW, 0);
     #endif
 }
 
@@ -274,7 +283,7 @@ fn fs_opendir_dest(dirfd, name): i64 {
     var fd = fs_opendir_nofollow(dirfd, name);
     #ifndef CYRIUS_TARGET_AGNOS
     if (fd == (0 - 13)) {
-        fd = fs_openat(dirfd, name, 2293760, 0);      # O_PATH | O_DIRECTORY | O_NOFOLLOW
+        fd = fs_openat(dirfd, name, FS_O_PATH | FS_O_DIRECTORY | FS_O_NOFOLLOW, 0);
     }
     #endif
     return fd;
@@ -1573,7 +1582,7 @@ fn fs_xattr_copy(src_fd, dst_fd, out): i64 {
 # ⚠ `.` and `..` are entries too — the dotdot filter is the whole subtlety, and
 # `fs_dent_is_dotdot` above already answers it for both.
 fn fs_dir_is_empty(path): i64 {
-    var fd = fs_openat(fs_at_fdcwd(), path, 65536, 0);      # O_RDONLY|O_DIRECTORY
+    var fd = fs_openat(fs_at_fdcwd(), path, FS_O_DIRECTORY, 0);   # O_RDONLY|O_DIRECTORY
     if (fd < 0) { return fd; }
     var buf = alloc(4096);
     var empty: i64 = 1;

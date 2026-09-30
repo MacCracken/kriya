@@ -489,12 +489,46 @@ fn _k_agnos_stat(path, buf): i64 {
 }
 #endif
 
+# ⛔ The same contract holds on aarch64 Linux, where it did NOT before 1.7.3. There the kernel
+# writes the GENERIC `struct stat` (asm-generic/stat.h, 128 bytes): mode u32@16, nlink u32@20,
+# uid@24, gid@28, rdev@32, blksize i32@56 — while every reader here uses the x86_64 offsets
+# (nlink u64@16, mode@24, uid@28, gid@32, rdev@40). `stat /` did not read back as a directory,
+# and `ls -l`, `stat`, `cp -p`, `du` and `find` read garbage. dev/ino/size/blocks and the
+# three timestamps coincide. `_k_stat_to_x86` rewrites the moved fields in place; every Linux
+# `newfstatat` site (k_stat, k_lstat, fs_fstatat, fs_lstat_at) returns through `_k_stat_norm`.
+#ifdef CYRIUS_ARCH_AARCH64
+fn _k_stat_to_x86(buf): i64 {
+    var mode = load32(buf + 16);
+    var nlink = load32(buf + 20);
+    var uid = load32(buf + 24);
+    var gid = load32(buf + 28);
+    var rdev = load64(buf + 32);
+    var blksize = load32(buf + 56);
+    store64(buf + 16, nlink);                              # st_nlink u64@16
+    store32(buf + 24, mode);                               # st_mode  u32@24
+    store32(buf + 28, uid);                                # st_uid   u32@28
+    store32(buf + 32, gid);                                # st_gid   u32@32
+    store32(buf + 36, 0);                                  # __pad0
+    store64(buf + 40, rdev);                               # st_rdev  u64@40
+    store64(buf + 56, blksize);                            # st_blksize i64@56 (generic: i32 + pad)
+    return 0;
+}
+#endif
+
+# Hand back a `newfstatat` result `r` with `buf` in the x86_64 layout on success.
+fn _k_stat_norm(r, buf): i64 {
+    #ifdef CYRIUS_ARCH_AARCH64
+    if (r == 0) { _k_stat_to_x86(buf); }
+    #endif
+    return r;
+}
+
 fn k_stat(path, buf): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return _k_agnos_stat(path, buf);
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(262, k_at_fdcwd(), path, buf, 0);       # linux newfstatat(AT_FDCWD,path,buf,0)
+    return _k_stat_norm(syscall(262, k_at_fdcwd(), path, buf, 0), buf);   # newfstatat(AT_FDCWD,path,buf,0)
     #endif
 }
 
@@ -511,7 +545,7 @@ fn k_lstat(path, buf): i64 {
     return _k_agnos_stat(path, buf);                       # ⚠ FOLLOWS symlinks — see above
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(262, k_at_fdcwd(), path, buf, 256);     # linux AT_SYMLINK_NOFOLLOW=256
+    return _k_stat_norm(syscall(262, k_at_fdcwd(), path, buf, 256), buf); # AT_SYMLINK_NOFOLLOW=256
     #endif
 }
 

@@ -1138,7 +1138,7 @@ fn _cp_symlink_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_dis
 fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, force, interactive, preserve,
   verbose, src_st, follow): i64 {
     var src_open_flags: i64 = 0;
-    if (follow == 0) { src_open_flags = 131072; }     # O_NOFOLLOW
+    if (follow == 0) { src_open_flags = FS_O_NOFOLLOW; }
     var src_fd = fs_openat(src_dirfd, src_name, src_open_flags, 0);
     if (src_fd < 0) {
         _cp_report(src_display, 0 - src_fd);
@@ -1223,8 +1223,8 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
     }
 
     var perms = _cp_create_mode(src_st, preserve);
-    # O_WRONLY=1, O_CREAT=64, O_TRUNC=512, O_NOFOLLOW=131072 → 131649.
-    var dst_flags = 131649;
+    # O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW — O_NOFOLLOW is per-arch (see fs.cyr).
+    var dst_flags = FS_O_WRONLY | FS_O_CREAT | FS_O_TRUNC | FS_O_NOFOLLOW;
     var dst_fd = fs_openat(dst_dirfd, dst_name, dst_flags, perms);
     # ⭐ ONE RULE FOR EVERY FAILED OPEN UNDER `-f` (1.6.13). This arm used to
     # retry ELOOP alone — the destination was a symlink O_NOFOLLOW refused — and
@@ -1245,7 +1245,7 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
                     return ur;
                 }
             }
-            dst_fd = fs_openat(dst_dirfd, dst_name, 131265, perms);   # O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW
+            dst_fd = fs_openat(dst_dirfd, dst_name, FS_O_WRONLY | FS_O_CREAT | FS_O_EXCL | FS_O_NOFOLLOW, perms);
         }
         if (dst_fd < 0) {
             fs_close(src_fd);
@@ -1456,8 +1456,8 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
 
     var src_fd: i64 = 0;
     if (allow_follow == 1) {
-        # O_RDONLY | O_DIRECTORY = 65536. No NOFOLLOW: policy-driven follow.
-        src_fd = fs_openat(src_dirfd, src_name, 65536, 0);
+        # O_RDONLY | O_DIRECTORY. No NOFOLLOW: policy-driven follow.
+        src_fd = fs_openat(src_dirfd, src_name, FS_O_DIRECTORY, 0);
     } else {
         src_fd = fs_opendir_nofollow(src_dirfd, src_name);
     }

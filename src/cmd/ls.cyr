@@ -917,7 +917,7 @@ fn _ls_load_link_target(parent_dirfd, rec): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     var tst[FS_STAT_BUFSZ];
     # flags 0 = FOLLOW, the opposite of `fs_lstat_at`'s 256.
-    if (syscall(262, parent_dirfd, _ls_rec_name(rec), &tst, 0) != 0) {
+    if (fs_fstatat(parent_dirfd, _ls_rec_name(rec), &tst, 0) != 0) {
         store64(rec + 168, 1);
         if (_ls_color == 1) {
             # ⚠ A MISSING target takes `mi` when set and falls back to `or` —
@@ -1797,7 +1797,7 @@ fn _ls_sort(entries, reverse): i64 {
 # Collect entries from `dir_path`. Returns a vec of records, or 0 on
 # open failure (caller reports its own error).
 fn _ls_collect(dir_path, all_mode, almost_all): i64 {
-    var dir_fd = fs_openat(0 - 100, dir_path, 65536, 0);  # O_RDONLY | O_DIRECTORY
+    var dir_fd = fs_openat(0 - 100, dir_path, FS_O_DIRECTORY, 0);  # O_RDONLY | O_DIRECTORY
     if (dir_fd < 0) { return dir_fd; }
 
     var entries = vec_new();
