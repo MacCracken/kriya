@@ -140,3 +140,13 @@ jobs:
         # faults, so a plain test run is silent about the failure class these
         # harnesses exist to catch.
         run: sh scripts/fuzz.sh
+
+      - name: Lock covers the pinned snapshot
+        # cyrius.lock records all of the pinned stdlib snapshot (`lib sync --full`),
+        # but `cyrius deps` above vendors, and so checks, only the leaves the build
+        # needs. After a pin move, entries for files kriya does not vendor could
+        # keep the OLD pin's hashes (1.7.3's first cut kept 39 at 6.6.9 under a
+        # 6.6.11 pin). Vendor the full snapshot and verify every entry against it.
+        run: |
+          cyrius lib sync --full
+          cyrius deps --verify

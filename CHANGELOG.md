@@ -65,7 +65,12 @@ directory, `ls -l` printed a directory as `-rwxr-x-wT` with 12,884,918,781 links
 
 ### Changed
 
-- **Pin 6.6.9 → 6.6.11** (`cyrius.lock` re-vendored; no source change needed).
+- **Pin 6.6.9 → 6.6.11** (`cyrius.lock` re-locked in full — `lib sync --full` + `deps --lock` at the
+  6.6.11 pin, all 111 entries equal the 6.6.11 snapshot; no source change needed).
+- **CI: `Lock covers the pinned snapshot`** — `lib sync --full` then `deps --verify`. `cyrius deps`
+  vendors only the leaves the build needs, so it never checked the lock's other entries; this
+  release's first cut moved the pin and left 39 of the 111 at the 6.6.9 hashes, and the new step
+  fails it (`72 verified, 39 failed`).
 - Binary 1,269,896 → **1,278,192** bytes host, 1,274,216 → **1,278,392** agnos — all but 24 bytes of
   it the toolchain (the 1.7.2 source at 6.6.11 is 1,278,168 / 1,278,368).
 
