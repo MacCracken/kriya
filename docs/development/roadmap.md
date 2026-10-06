@@ -423,3 +423,19 @@ eventual decision starts from numbers, but do not propose an extraction in a rel
 first in line when it comes: its GNU output surface (dates, `--dired`, tab stops, nine quoting
 styles, the full colour table) makes it half again the next utility, and most of that is rendering
 `src/lib/` does not share.
+
+## Recorded by cyrius 6.6.17 (2026-10-05) — for the next cyrius pin move
+
+⛔ **Nothing to do until cyrius 6.6.17 is tagged and out.** Docs-only note from the cyrius 6.6.17 lanes; each item
+is this repo's to adopt when it pins ≥ 6.6.17. Nothing here gates a cyrius release.
+
+- **The `lib sync --full` lock complaint is fixed in 6.6.17** (cyrius t1). After a pin move, `cyrius lib sync
+  --full` re-locks every file it writes, so rows for files kriya does not vendor no longer keep the previous
+  pin's hashes, and `deps --verify` passes without regenerating the lock from empty.
+- **Order matters.** Run `lib sync --full` right after editing `[package] cyrius`, BEFORE `cyrius deps` /
+  `build` — those re-stamp the lock with the new pin but keep the old pin's rows for files they do not vendor,
+  and a later `lib sync` refuses those rows by name; `cyrius lib sync --full --relock` then accepts the new
+  snapshot explicitly.
+- The CI step `Lock covers the pinned snapshot` (`lib sync --full` then `deps --verify`) still checks
+  something: if the committed lock disagrees with the pinned snapshot, `lib sync` refuses (rc 1) and writes
+  nothing; a lock that already matches is left byte-identical.
