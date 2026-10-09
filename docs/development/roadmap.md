@@ -439,3 +439,18 @@ is this repo's to adopt when it pins ≥ 6.6.17. Nothing here gates a cyrius rel
 - The CI step `Lock covers the pinned snapshot` (`lib sync --full` then `deps --verify`) still checks
   something: if the committed lock disagrees with the pinned snapshot, `lib sync` refuses (rc 1) and writes
   nothing; a lock that already matches is left byte-identical.
+
+## Moved from cyrius's roadmap (2026-10-08) — for the next cyrius pin move
+
+cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
+applies from the cyrius version it names. Everything else that changes between this repo's pin and cyrius
+6.7.6 is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
+
+- **(cyrius ≥ 6.6.18)** `cyrius fuzz --poison` now covers `alloc()` (and arenas, `fl_alloc`, any `_a` API), and an
+  overwrite stops the harness with exit 86 — the "fuzz under poison" step checks something real, and can go red
+  where it passed before.
+- **Same-arity duplicate fns** — cyrius's 6.6.3 ecosystem sweep (2026-09-12) recorded **1** same-arity
+  duplicate-fn warning(s) in this repo's build (not re-derived since). Since cyrius **6.6.20** every call binds
+  the LAST definition (before, a non-tail call to an already-defined fn bound the first), so a duplicate whose
+  body differs changes what runs at the pin bump. Remove the duplicates or confirm the last definition is the
+  intended one.
