@@ -6,6 +6,74 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.8.4] - 2026-11-03 — raw syscalls to stdlib wrappers, and extended attributes on aarch64
+
+The roadmap's 1.8.4 slot. kriya's numeric `syscall(N, …)` literals went from 44 to four, and each of the
+four is a call the stdlib does not wrap, now filed upstream. On x86-64 no utility issues a different system
+call than before. On aarch64, four extended-attribute calls that had answered -38 since 1.7.2 now work.
+
+### Fixed
+
+- ⛔ **On aarch64, `cp` could not copy extended attributes, and `stat %C` could not read a label.** The
+  native aarch64 numbers for `fgetxattr`, `lgetxattr`, `fsetxattr` and `setxattr` (10, 9, 7, 5) are numbers
+  cyrius renumbers as x86 `mprotect` / `mmap` / `poll` / `fstat`, so no raw literal could reach them. From
+  1.7.2 kriya declined them there with -38. The stdlib's wrappers reach them through its private alias band
+  (1005–1016). Measured under qemu-aarch64:
+
+  | Command | 1.8.3 | 1.8.4 |
+  |---|---|---|
+  | `cp --preserve=xattr src d` | *setting attribute 'user.kriya' for 'd': function not implemented*, exit 1 | copies `user.kriya`, exit 0 |
+  | `cp -a src d` | exit 0, attribute **silently dropped** (ADR 0013: `-a` does not report it) | copies `user.kriya`, exit 0 |
+
+  `stat %C` without `-L` reads `security.selinux` through `lgetxattr`, the same declined call.
+
+### Changed — the raw-syscall sweep
+
+- **Through the stdlib's wrappers**, with each target's number in its table instead of at kriya's call
+  sites:
+  - `fchown`, the xattr family, `statx` and `getrlimit` (stdlib 6.6.12).
+  - `read`, `write`, `open`, `close`, `newfstatat`, `mkdir`, `rmdir`, `unlink`, `rename`, `symlink`,
+    `readlink`, `unlinkat`, `utimensat`, `statfs`, `pipe`, `fcntl`, and `ls`'s `TIOCGWINSZ` `ioctl`.
+  - `getcwd` through `SYS_GETCWD`, which both Linux tables name (79 on x86-64, 17 on aarch64).
+  - On agnos, the two argument-less calls through `sys_sched_yield()` and `sys_winsize()`, and the write
+    that must pass a4 = 0 through `SYS_WRITE`, as its read sibling already named `SYS_READ`. The agnos arms
+    stay.
+- **Four literals remain**, each a call the stdlib does not wrap, now filed in cyrius and linked from
+  roadmap § Gated:
+  - `fchdir` (x86 81; aarch64 goes through `/proc/self/fd/N`), filed at 1.8.2.
+  - `fchmodat2` (452 on every arch).
+  - `symlinkat` and `readlinkat` on x86 (266 / 267), for which x86's table has no name either.
+  Each was measured under `qemu-aarch64 -strace` for the filing.
+- **`df` reads its statfs buffer through the stdlib's `Statfs`**: `STATFS_BLOCKS` / `BFREE` / `BAVAIL`,
+  `statfs_bsize()` and the `STATFS_BUFSZ` buffer. Its private offset table had never been read; the code
+  indexed the buffer with bare Linux offsets. `f_files`, `f_ffree` and `f_frsize`, which `Statfs` does not
+  name, stay in `DfStatfs` (filed upstream too).
+- ⭐ **Proof that nothing else moved.** 20 commands cover all 37 system calls involved: `cp -a`, `rm -r`,
+  `mv`, `ln -s`, `readlink`, `touch -t`, `df`, `pwd -P`, `cp --preserve=xattr`, `find -exec`, `xargs` and
+  more. Each was traced under `qemu-x86_64 -strace` and `qemu-aarch64 -strace`, with the 1.8.4 (1/4) binary
+  and with the final one. The sequences are identical on both arches, apart from clock readings and fork
+  interleaving. `ls`'s columns on a 50-column pty are byte-identical. On a real agnos kernel (QEMU,
+  agnos's `pipeline-smoke.sh`), kriya's `grep` writing 185 KB into a pipe passes 6/6, as the baseline did.
+- **Three source citations still named pre-renumber slots.** Each had `roadmap` at the end of one line and
+  the number on the next, so 1.8.2's sweep missed them. `date`'s ISO-week specifiers and `-r`/`-R`/`-I`
+  now point to 1.9.4, `sort`'s per-key ordering letters to 1.9.1, and `touch -d STR` to 1.9.3.
+- Binary 1,334,032 → **1,333,960** bytes host (−72), 1,342,656 → **1,342,584** agnos (−72).
+
+### Tests
+
+- `kriya-syscalls.tcyr` 58 → **72**. The two aarch64 `-38` assertions are real answers now, on every arch.
+  Set/get round trips prove the right call ran: a value written by fd or by path is the value read back,
+  and `flistxattr` lists both names. `getcwd`, `fchmodat2` and `fchdir` are pinned, the last by where it
+  lands. Against the 1.8.3 layer the file fails three times on aarch64. Mutating aarch64's `fchdir` to
+  `syscall(81)` (`sync`, which answers 0) or to `syscall(50)` (`listen`, 1.8.2's bug) fails it too.
+- **852 unit + 72 syscall + 18 POSIX.** Smoke is **7,934 / 0** in ubuntu:24.04 and **7,937 / 0** in 26.04,
+  the same totals as 1.8.3. Fuzz is green under poison. `cyrius lint` (all of `src/`), the lints,
+  `check-oracles.sh` and `watchlist-scan.py` are clean, `vet` reports 57 deps, and all three targets build
+  with zero warnings. The syscall tests pass on aarch64 under qemu, as do `smoke-env` and `smoke-df`.
+- ⚠ **This host's GNU is now coreutils 9.12**, and four scripts fail against it: `smoke-head-tail` 4,
+  `smoke-ls` 18, `smoke-printf` 7 and `smoke-stat` 4. They fail identically with the 1.8.3 binary, so they
+  are new GNU behaviour, not a kriya change. CI's oracle is 9.7, and both containers are green.
+
 ## [1.8.3] - 2026-11-03 — usage reporting: du's memory and options, df -t / -x, env -S / -C
 
 The roadmap's 1.8.3 slot. Every option was measured against coreutils 9.4 and 9.7 before it was

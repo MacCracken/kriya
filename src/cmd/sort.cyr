@@ -626,7 +626,7 @@ fn _so_key_field(s, pos_p): i64 {
 # in `*end_p`, or reports the spec and returns -1.
 #
 # ⚠ WHAT GNU ACCEPTS AND KRIYA CANNOT HONOUR, IT REFUSES, and says which (roadmap
-# 1.8.1): a key's own ordering letters (`2n`, `2,2r`) and a character offset
+# 1.9.1): a key's own ordering letters (`2n`, `2,2r`) and a character offset
 # (`2.3`) are GNU syntax kriya has no semantics for. The one-key case of the
 # first has an exact spelling today — `-n -k2,2` is `-k2,2n`, because a key with
 # no letters of its own takes the global ones and the last-resort comparison

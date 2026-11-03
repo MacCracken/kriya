@@ -7,7 +7,7 @@
 #
 # ⚠ `-r REF` and `-t [[CC]YY]MMDDhhmm[.SS]` SHIPPED in 1.2.5 (see CHANGELOG);
 # only GNU `-d STR` (free-form human date) is still out, and it is roadmap
-# 1.8.3 rather than a vague wait on chrono. The intersection that shipped at M2:
+# 1.9.3 rather than a vague wait on chrono. The intersection that shipped at M2:
 # "create-if-missing + bump times to now", with `-a` / `-m` /
 # `-c` modifiers — covers the common script use (`touch buildmarker`,
 # `touch -c configmark`) and most of the agent surface.

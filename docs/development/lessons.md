@@ -298,6 +298,13 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 
 ### Measuring: the number, and the thing beside it
 
+- ⭐ *A change that must alter nothing is proven by a trace diff, not by green tests.* 1.8.4 swapped 40
+  raw syscalls for stdlib wrappers. Twenty commands covering every converted call ran under
+  `qemu-x86_64 -strace` and `qemu-aarch64 -strace` (no `strace` needed: qemu's user mode traces either
+  arch), with the old binary and the new, on a fresh identical fixture each time. After normalising PIDs,
+  addresses and clock readings, the sequences were identical. ⚠ What is left to explain after
+  normalising is the finding. Here it was only fork interleaving; it could have been a call that changed.
+
 - ⛔ *A trade-off filed as Neutral is a limit nobody measured.* 1.8.2's fd-relative `find` walk closed
   a deletion race, and [ADR 0027](../adr/0027-find-delete-carries-rms-refusals.md) recorded *"the walk
   holds one descriptor per directory level, as it already did"* under Neutral. That swapped PATH_MAX
@@ -356,6 +363,12 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   first assignment ends option parsing and `env A=1 -u A cmd` runs `-u` as the command. smoke-env
   pinned kriya's behaviour, and nothing compared it. 1.8.3 found it while measuring `-S` and corrected
   the comment, leaving the behaviour (a superset) in place.
+
+- ⛔ *...and so is a claim written this session.* Two of 1.8.4's first-draft sentences were wrong when
+  written. `k_getcwd`'s comment said `SYS_GETCWD` (17) could be re-caught on aarch64 by the x86 `pread64`
+  row; measured under `qemu-aarch64 -strace`, it reaches `getcwd`. The roadmap said `kriya-syscalls.tcyr`
+  pinned four unwrapped calls; it pinned two, and the other two got tests. **Measure the call, and grep
+  the test file, before the sentence about it is committed.**
 
 - ⚠ *Arithmetic in a comment is a claim too.* "Four orders of magnitude below the int ceiling" was
   24.9x, and a test comment said the duration ceiling was 292,000 years where the value asserted on
@@ -566,6 +579,13 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 - **A spec the parser does not consult is a second source of truth.** `find` carried one for five
   releases — built, never read, never called. The seven hand-rolled utilities now declare specs their
   own walks use as the acceptance gate.
+- ⚠ **A renumber done by grep misses the citation split across a line break.** 1.8.2 moved 51
+  `roadmap X.Y.Z` citations. Three more read `roadmap` at a line's end and the number on the next
+  (`date`'s ISO-week specifiers, `sort`'s per-key letters, `touch -d`), and kept pre-renumber slots until
+  1.8.4. Search with a multi-line pattern (`roadmap\s*\n\s*#\s*1\.`), or keep the two on one line.
+- ⛔ **An offset table nothing reads is a second source of truth too.** `df`'s `DfStatfs` named every
+  statfs field, and `_df_emit_row` indexed the buffer with bare literals beside it (`load64(st + 16)`).
+  The table looked like the layout's owner and owned nothing. 1.8.4 moved df onto the stdlib's `Statfs`.
 - ⛔ **A hardened shared helper does not reach a private copy of it.** `fs_resolve_in_path`'s comment
   demonstrated the attack: a bare name left for the kernel resolves against the cwd, so an attacker's
   `./ls` runs. It then fixed it for `xargs` and `find`. `env`, the one utility whose whole job is to

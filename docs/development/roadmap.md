@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.4** — raw syscalls to stdlib wrappers |
+| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.5** — deep trees |
 | **1.9.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.9.0** — floats |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
@@ -57,35 +57,6 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 (`src/lib/argbatch.cyr`), which counts as GNU's `buildcmd` does
 ([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
 
-- **1.8.4 — Raw syscalls to stdlib wrappers.** **43 raw `syscall(N, …)` lines** remain in `src/`
-  (37 distinct numbers, agnos arms included; counted at 1.8.1). None misroutes on aarch64 any
-  more, since 1.7.2 converted the 24 that did, and `tests/kriya-syscalls.tcyr` pins that. What
-  is left is two kinds of work:
-  - **The aarch64 xattr declines, now unblocked.** Native aarch64 `fchown` 55, `setxattr` 5,
-    `fsetxattr` 7, `lgetxattr` 9 and `fgetxattr` 10 are numbers cyrius renumbers as x86 calls, so
-    1.7.2 made `k_fgetxattr`, `k_lgetxattr`, `k_setxattr` and `k_fsetxattr` return -38 there. Since
-    cyrius **6.6.12** the stdlib wraps the whole family (`sys_{,l,f}{get,set,list,remove}xattr`,
-    `sys_fchown`, `sys_statx`, `sys_getrlimit`; re-verified at 6.7.18). The aarch64 peer issues the
-    renumbered ones through a private `1000+N` band (`SYS_GETXATTR = 1008`, `SYS_FCHOWN = 1055`,
-    `SYS_STATX = 1291`), and the agnos peer answers -38. Converting `k_*xattr`, `k_fchown`,
-    `k_statx` (`stat %w`/`%W`), `k_getxattr` (`ls`'s `ca` colour), `k_lgetxattr` (`stat %C`) and
-    `argbatch`'s `getrlimit` ends the declines, and turns `tests/kriya-syscalls.tcyr`'s two aarch64
-    `-38` assertions into real answers.
-  - **The readability sweep**: the numbers cyrius DOES renumber, `*at()` family included
-    (`openat` 257, `newfstatat` 262, `unlinkat` 263, `utimensat` 280, …). The stdlib has wrapped them
-    since **6.1.3** (`sys_openat`, `sys_fstatat`, `sys_unlinkat`, `sys_utimensat`, …), and
-    converting them puts the per-target numbering where it belongs, in one reviewable pass.
-  - ⚠ **agnos keeps its own arms.** The agnos syscall peer wraps only `sys_fchownat` of this set
-    (plus the `stat` family), so kriya's `CYRIUS_TARGET_AGNOS` branches in `src/lib/sys.cyr` and
-    `src/lib/fs.cyr` stay; the sweep is the Linux side.
-  - ⛔ **Do not "fix" `k_getdents` by switching to stdlib `io.cyr`'s `xgetdents`**, which is what
-    cyrlint suggests: `xgetdents` returns the RAW agnos record on agnos, while `k_getdents`
-    translates it into `linux_dirent64` so every caller sees one format. The swap would silently
-    mis-parse every directory entry on agnos. The reason is written at the call site.
-  - **`df`'s private `DfStatfs` offset table** (`src/cmd/df.cyr`, commented *"Linux x86_64, 64-bit
-    struct statfs64"*) becomes a shim over 6.6.6's per-OS `Statfs` enums and the `statfs_bsize`
-    accessor. ⚠ An accessor, not a convenience: the field differs by OS, which is why a private
-    table is the wrong long-term answer. The agnos `-38` decline stays.
 - **1.8.5 — Deep trees: a bounded descriptor budget for every `*at()` walk.** Each fd-relative walk
   holds one open directory per level. Under the default `ulimit -n 1024`, a tree deeper than **1,020**
   levels fails with *too many open files* and exits 1: `find` (since 1.8.2's fd-relative walk), `du` and

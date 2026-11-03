@@ -207,7 +207,7 @@ var _date_bad: i64 = 0;
 # strftime specifiers GNU defines that kriya does not render yet. All of them
 # want either locale data or ISO-week arithmetic. ⚠ The ISO-week ones are pure
 # arithmetic on a broken-down time and need no tzfile, so they are roadmap
-# 1.8.4 rather than the Gated chrono item local time waits on.
+# 1.9.4 rather than the Gated chrono item local time waits on.
 fn _date_is_deferred_spec(c): i64 {  #skip-lint
     if (c == 86) { return 1; }   # V  ISO week number
     if (c == 71) { return 1; }   # G  ISO week-based year
@@ -467,7 +467,7 @@ fn cmd_date(start: i64): i64 {
                     }
                 }
                 if (ok == 0) {
-                    k_write( 2, "kriya date: error: unknown short option (only -u accepted at v0.7.0; -d/-r/-R/-I deferred)\n", 91);  # roadmap 1.9.3 (-d) and 1.8.4 (-r/-R/-I)  #skip-lint
+                    k_write( 2, "kriya date: error: unknown short option (only -u accepted at v0.7.0; -d/-r/-R/-I deferred)\n", 91);  # roadmap 1.9.3 (-d) and 1.9.4 (-r/-R/-I)  #skip-lint
                     return EXIT_USAGE;
                 }
                 i = i + 1;
