@@ -322,17 +322,16 @@ same_du "du F G (two names, explicit)"    tree/x/f tree/x/g
 same_du "du -c F G"                       -c tree/x/f tree/x/g
 same_du "du FILE DIR (file counted first)" tree/other tree
 
-# --- ⚠ ONE RECORDED DIVERGENCE, asserted so it cannot drift silently.
-# An operand naming a single-link file that an EARLIER operand's walk already
-# counted: GNU omits it, kriya prints it. kriya tracks operands and multiply-
-# linked files rather than every file it counts, because GNU's every-file set is
-# a sparse structure costing ~1 bit per file and kriya's is a 32-byte hash —
-# 200,000 files measured at 20 KB for GNU against 6 MB here. This asserts
-# kriya's OWN answer; the day it gains the sparse form, this case flips to
-# `same_du` and the line below is what says so out loud.
-expect_eq "recorded divergence: du DIR DIR/file lists the file" "yes" \
-          "$("$BIN" du tree tree/other 2>/dev/null | grep -c 'tree/other' >/dev/null && echo yes || echo no)"
-expect_eq "...while GNU omits it"        "0" "$(du tree tree/other 2>/dev/null | grep -c 'tree/other$')"
+# --- ⭐ The divergence this file used to record is CLOSED (1.8.3). An operand naming a
+# single-link file that an EARLIER operand's walk already counted: GNU omits it, and so
+# does kriya now. GNU tracks every counted file when there are two or more operands, in a
+# sparse set costing about a bit a file; kriya tracked operands and multi-link files only,
+# because its set was a 32-byte-an-entry hash. `fs_inobits_*` is the sparse form.
+same_du "du DIR DIR/file (counted once, as GNU)"   tree tree/other
+same_du "du -c DIR DIR/file"                       -c tree tree/other
+same_du "du -a DIR DIR/sub"                        -a tree tree/x
+same_du "du DIR DIR/sub/file"                      tree tree/x/f
+same_du "du DIR/file DIR (file first, still once)" tree/other tree
 
 # --- -L: dereferencing makes link count useless, same as for cp -------
 rm -rf dtree; mkdir dtree

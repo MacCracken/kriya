@@ -188,6 +188,17 @@ expect_exit "du -d 0x2 refused (GNU reads hex)"  2 "$BIN" du -d 0x2 d16
 err=$("$BIN" du -d 18446744073709551617 d16 2>&1 >/dev/null || true)
 expect_eq "du -d diagnostic" "kriya du: 18446744073709551617: invalid maximum depth" "$err"
 
+# --- the walk's memory (1.8.3) -----------------------------------------
+# ⛔ The walk allocated a 4 KiB getdents buffer per directory and a path per entry and freed
+# neither: `du -s /usr` peaked at 72 MB (GNU 7.6). Over 6,000 directories the 1.8.2 walk
+# needs over 32 MB of address space and dies of SIGSEGV under that cap; the reusing walk runs
+# in under 24 MB.
+rm -rf many; mkdir many
+seq 1 6000 | sed 's|^|many/d|' | xargs mkdir
+_rc=0; ( ulimit -v 32768 2>/dev/null; "$BIN" du -s many >/dev/null 2>&1 ) || _rc=$?
+expect_eq "du -s over 6,000 directories fits in 32 MB of address space" "0" "$_rc"
+expect_eq "...and its total is GNU's" "$(du -s many | cut -f1)" "$("$BIN" du -s many | cut -f1)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

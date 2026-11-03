@@ -1159,6 +1159,121 @@ fn fs_inoset_count(set): i64 {
     return load64(set + FS_INOSET_USED);
 }
 
+# --- the sparse (dev, ino) set — membership only (1.8.3) -------------------------
+#
+# GNU's di-set: about ONE BIT per file, because inode numbers come in dense runs. Each
+# slot holds a device, a 4,096-inode CHUNK of that device's numbers, and a 512-byte
+# bitmap of the chunk. Measured over the host's /usr (202,663 entries on ext4): 85
+# chunks, 43 KB, 1.7 bits an entry; `fs_inoset`'s 32 bytes an entry would be 6.5 MB.
+# ⚠ Membership only: `cp`'s hard-link map needs `fs_inoset`'s data field.
+enum FsInoBits {
+    FS_IB_CAP    = 0;     # slots, a power of two
+    FS_IB_USED   = 8;
+    FS_IB_SLOTS  = 16;
+    FS_IB_SZ     = 24;
+    FS_IB_S_DEV  = 0;     # slot: the device
+    FS_IB_S_KEY  = 8;     #       the chunk number + 1 (0 = an empty slot)
+    FS_IB_S_MAP  = 16;    #       its 512-byte bitmap
+    FS_IB_S_SZ   = 24;
+    FS_IB_CAP0   = 64;
+}
+
+# ⛔ M15h: `>>` is arithmetic, so the chunk is MASKED after the shift (an inode number
+# with bit 63 set would otherwise give a negative chunk), and the hash multiplies two
+# 24-bit-masked halves by odd 32-bit constants, so the sum stays below 2^57.
+fn _fs_ib_chunk(ino): i64 { return (ino >> 12) & 4503599627370495; }   # 2^52 - 1
+fn _fs_ib_hash(dev, chunk): i64 {
+    var h = (dev & 16777215) * 2654435761 + (chunk & 16777215) * 2246822519;
+    h = h + ((chunk >> 24) & 16777215) * 3266489917;
+    return h;
+}
+
+fn fs_inobits_new(): i64 {
+    var set = alloc(FS_IB_SZ);
+    var slots = alloc(FS_IB_CAP0 * FS_IB_S_SZ);
+    var i: i64 = 0;
+    while (i < FS_IB_CAP0 * FS_IB_S_SZ) { store64(slots + i, 0); i = i + 8; }
+    store64(set + FS_IB_CAP, FS_IB_CAP0);
+    store64(set + FS_IB_USED, 0);
+    store64(set + FS_IB_SLOTS, slots);
+    return set;
+}
+
+# The slot for (dev, chunk), or the empty slot it would go in.
+fn _fs_ib_slot(slots, cap, dev, chunk): i64 {
+    var i = _fs_ib_hash(dev, chunk) & (cap - 1);
+    var found: i64 = 0;
+    var s: i64 = 0;
+    while (found == 0) {
+        s = slots + i * FS_IB_S_SZ;
+        var key = load64(s + FS_IB_S_KEY);
+        if (key == 0) { found = 1; }
+        elif (key == chunk + 1) {
+            if (load64(s + FS_IB_S_DEV) == dev) { found = 1; }
+        }
+        if (found == 0) { i = (i + 1) & (cap - 1); }
+    }
+    return s;
+}
+
+# Double the table at half full; the bitmaps move by pointer.
+fn _fs_ib_grow(set): i64 {
+    var cap = load64(set + FS_IB_CAP);
+    var old = load64(set + FS_IB_SLOTS);
+    var ncap = cap * 2;
+    var slots = alloc(ncap * FS_IB_S_SZ);
+    var z: i64 = 0;
+    while (z < ncap * FS_IB_S_SZ) { store64(slots + z, 0); z = z + 8; }
+    var i: i64 = 0;
+    while (i < cap) {
+        var o = old + i * FS_IB_S_SZ;
+        var key = load64(o + FS_IB_S_KEY);
+        if (key != 0) {
+            var n = _fs_ib_slot(slots, ncap, load64(o + FS_IB_S_DEV), key - 1);
+            store64(n + FS_IB_S_DEV, load64(o + FS_IB_S_DEV));
+            store64(n + FS_IB_S_KEY, key);
+            store64(n + FS_IB_S_MAP, load64(o + FS_IB_S_MAP));
+        }
+        i = i + 1;
+    }
+    store64(set + FS_IB_CAP, ncap);
+    store64(set + FS_IB_SLOTS, slots);
+    return 0;
+}
+
+# 1 when (dev, ino) is in `set`.
+fn fs_inobits_has(set, dev, ino): i64 {
+    var chunk = _fs_ib_chunk(ino);
+    var s = _fs_ib_slot(load64(set + FS_IB_SLOTS), load64(set + FS_IB_CAP), dev, chunk);
+    if (load64(s + FS_IB_S_KEY) == 0) { return 0; }
+    var bit = ino & 4095;
+    var w = load64(load64(s + FS_IB_S_MAP) + (bit >> 6) * 8);
+    return (w >> (bit & 63)) & 1;
+}
+
+# Add (dev, ino) to `set`. Returns 1 when it was there already.
+fn fs_inobits_add(set, dev, ino): i64 {
+    var chunk = _fs_ib_chunk(ino);
+    if ((load64(set + FS_IB_USED) + 1) * 2 > load64(set + FS_IB_CAP)) { _fs_ib_grow(set); }
+    var s = _fs_ib_slot(load64(set + FS_IB_SLOTS), load64(set + FS_IB_CAP), dev, chunk);
+    if (load64(s + FS_IB_S_KEY) == 0) {
+        var map = alloc(512);
+        var z: i64 = 0;
+        while (z < 512) { store64(map + z, 0); z = z + 8; }
+        store64(s + FS_IB_S_DEV, dev);
+        store64(s + FS_IB_S_KEY, chunk + 1);
+        store64(s + FS_IB_S_MAP, map);
+        store64(set + FS_IB_USED, load64(set + FS_IB_USED) + 1);
+    }
+    var bit = ino & 4095;
+    var wp = load64(s + FS_IB_S_MAP) + (bit >> 6) * 8;
+    var w = load64(wp);
+    var m = 1 << (bit & 63);
+    if ((w & m) != 0) { return 1; }
+    store64(wp, w | m);
+    return 0;
+}
+
 # `st_nlink` and `st_dev`/`st_ino` off a 144-byte stat buffer. Named
 # accessors because three call sites in two utilities were about to reach
 # for the raw offsets, which is how one of them ends up reading `st_mode`.

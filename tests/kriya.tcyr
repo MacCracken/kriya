@@ -1021,6 +1021,58 @@ fn main() {
     assert_eq(_fs_inoset_hash(4294967295, 9223372036854775807) >= 0, 1, "i64 max ino hashes non-negative");
     assert_eq(_fs_inoset_hash(0, 9223372036854775806) >= 0, 1, "one below it too");
 
+    # ⭐ The sparse (dev, ino) set, `du`'s dedup since 1.8.3: a 512-byte bitmap per
+    # 4,096-inode chunk. ⛔ The edges are the chunk and word boundaries and an inode with
+    # bit 63 set, which the arithmetic `>>` would turn into a negative chunk (M15h).
+    test_group("fs sparse inode set — membership, edges, growth");
+    var ib = fs_inobits_new();
+    assert_eq(fs_inobits_has(ib, 5, 100), 0, "a new set is empty");
+    assert_eq(fs_inobits_add(ib, 5, 100), 0, "the first add is new");
+    assert_eq(fs_inobits_has(ib, 5, 100), 1, "...and is there");
+    assert_eq(fs_inobits_add(ib, 5, 100), 1, "the second add says it was there");
+    assert_eq(fs_inobits_has(ib, 5, 101), 0, "the next inode is not");
+    assert_eq(fs_inobits_has(ib, 6, 100), 0, "the same inode on another device is not");
+    var ibe: i64 = 0;
+    var ib_edges_new: i64 = 1;
+    var ib_edges = alloc(8 * 8);
+    store64(ib_edges, 0); store64(ib_edges + 8, 63); store64(ib_edges + 16, 64);
+    store64(ib_edges + 24, 4095); store64(ib_edges + 32, 4096); store64(ib_edges + 40, 4097);
+    store64(ib_edges + 48, 9223372036854775807); store64(ib_edges + 56, 0 - 1);
+    while (ibe < 8) {
+        if (fs_inobits_add(ib, 9, load64(ib_edges + ibe * 8)) != 0) { ib_edges_new = 0; }
+        ibe = ibe + 1;
+    }
+    assert_eq(ib_edges_new, 1, "word, chunk and i64 edges are eight distinct inodes");
+    var ib_edges_has: i64 = 1;
+    ibe = 0;
+    while (ibe < 8) {
+        if (fs_inobits_has(ib, 9, load64(ib_edges + ibe * 8)) != 1) { ib_edges_has = 0; }
+        ibe = ibe + 1;
+    }
+    assert_eq(ib_edges_has, 1, "...and all eight read back");
+    assert_eq(fs_inobits_has(ib, 9, 62), 0, "62, beside the word edge, was never added");
+    assert_eq(fs_inobits_has(ib, 9, 9223372036854775806), 0, "nor one below i64 max");
+    # 10,000 inodes over 270 chunks: the table doubles several times, and every bitmap
+    # must move with its key.
+    var ibg = fs_inobits_new();
+    var ig: i64 = 0;
+    var ig_new: i64 = 1;
+    while (ig < 10000) {
+        if (fs_inobits_add(ibg, 3, ig * 111) != 0) { ig_new = 0; }
+        ig = ig + 1;
+    }
+    assert_eq(ig_new, 1, "10,000 spread inodes all add as new");
+    var ig_has: i64 = 1;
+    ig = 0;
+    while (ig < 10000) {
+        if (fs_inobits_has(ibg, 3, ig * 111) != 1) { ig_has = 0; }
+        if (fs_inobits_has(ibg, 3, ig * 111 + 1) != 0) { ig_has = 0; }
+        ig = ig + 1;
+    }
+    assert_eq(ig_has, 1, "...every one survives the growth, and its neighbour stays absent");
+    assert_eq(_fs_ib_hash(0 - 1, _fs_ib_chunk(0 - 1)) >= 0, 1, "maximal device and chunk hash non-negative");
+    assert_eq(_fs_ib_chunk(0 - 1) >= 0, 1, "the chunk of an inode with bit 63 set is non-negative");
+
     # ⭐ The walk-ancestor stack. ⛔ It is NOT a visited-set and the tests below
     # are written to fail if someone "simplifies" it into one: a directory that
     # was pushed and POPPED must read as absent, because leaving a walked

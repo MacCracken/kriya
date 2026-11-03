@@ -35,21 +35,12 @@
 # behaviour. A repeat contributes no bytes and prints no line at all —
 # not a zero line, no line — which is what GNU does.
 #
-# ⚠ WHAT GETS TRACKED is narrower than GNU's, deliberately, and the gap
-# is measured rather than assumed:
-#   - always: every command-line operand, and every non-directory whose
-#     `st_nlink > 1`;
-#   - under -L: everything, because dereferencing makes a link count of 1
-#     stop proving "cannot be reached twice".
-# GNU tracks EVERY file it counts even under -P, using a sparse inode
-# structure that costs about one bit per file (measured: 200,000 files
-# cost GNU 20 KB, and the same set in a 32-byte-per-entry hash would cost
-# 6 MB). kriya's `fs_inoset_*` is that hash, so tracking everything under
-# -P would trade a 300x memory regression for one measured shape. That
-# shape: an operand naming a SINGLE-LINK file that an EARLIER operand's
-# walk already counted — `du DIR DIR/f` lists the file where GNU omits
-# it. ⚠ The reverse order matches GNU exactly, because the operand goes
-# into the set at depth 0 and the walk consults it. (roadmap 1.8.3)
+# WHAT GETS TRACKED is GNU's rule (1.8.3): with two or more operands, or under -L,
+# every entry the walk counts; otherwise only non-directories with more than one link,
+# which is the only way a single -P walk reaches a file twice. The set is sparse
+# (`fs_inobits_*`, a 512-byte bitmap per 4,096-inode chunk): /usr's 202,663 entries
+# cost 43 KB. ⭐ Until 1.8.3 it was `fs_inoset`, 32 bytes an entry, so kriya tracked
+# operands and multi-link files only, and `du DIR DIR/f` listed f where GNU omits it.
 #
 # ⛔ CYCLE DETECTION UNDER -L IS NOT PART OF THE DEDUP AND SURVIVES -l.
 # `du -L` over a symlink pointing at an ancestor recursed until the stack
@@ -87,6 +78,66 @@ var _du_count_links: i64 = 0;
 # of the CURRENT PATH means "descending here would not terminate".
 var _du_seen:        i64 = 0;
 var _du_path:        i64 = 0;
+var _du_hash_all:    i64 = 0;    # GNU's `hash_all`: 2+ operands, or -L — track every entry
+
+# ⛔ THE WALK USED TO ALLOCATE AND NEVER FREE (1.8.3): a 4 KiB getdents buffer per directory and a
+# joined path per entry, from the bump allocator. `du -s /usr` (202,663 entries) peaked at 72 MB
+# where GNU's takes 7.6, and 103 MB against 12.6 under -L. Now the walk holds ONE getdents buffer
+# per DEPTH, reused by every directory at that depth, and ONE path buffer that each level appends
+# its name to and truncates again on the way out, as GNU's fts does.
+var _du_pb:          i64 = 0;    # the path being walked, NUL-terminated at the current level
+var _du_pcap:        i64 = 0;
+var _du_bufs:        i64 = 0;    # a getdents buffer per depth (8-byte pointers)
+var _du_bufs_cap:    i64 = 0;
+
+# The getdents buffer for `depth`, made the first time a walk reaches that depth.
+fn _du_depth_buf(depth): i64 {
+    if (depth >= _du_bufs_cap) {
+        var ncap = _du_bufs_cap * 2;
+        if (ncap < 16) { ncap = 16; }
+        while (ncap <= depth) { ncap = ncap * 2; }
+        var nb = alloc(ncap * 8);
+        var i: i64 = 0;
+        while (i < ncap) {
+            if (i < _du_bufs_cap) { store64(nb + i * 8, load64(_du_bufs + i * 8)); }
+            else { store64(nb + i * 8, 0); }
+            i = i + 1;
+        }
+        _du_bufs = nb;
+        _du_bufs_cap = ncap;
+    }
+    var b = load64(_du_bufs + depth * 8);
+    if (b == 0) {
+        b = alloc(4096);
+        store64(_du_bufs + depth * 8, b);
+    }
+    return b;
+}
+
+# Append `/name` to the path buffer at `plen` (no `/` after one already there, and none
+# before the first name — `path_join`'s rule), growing it by doubling; the new length.
+# ⚠ The buffer can MOVE, so a caller reads `_du_pb` again after any call that appends.
+fn _du_path_push(plen, name): i64 {
+    var nl = strlen(name);
+    var sep: i64 = 0;
+    if (plen > 0) {
+        if (load8(_du_pb + plen - 1) != 47) { sep = 1; }
+    }
+    var need = plen + sep + nl + 1;
+    if (need > _du_pcap) {
+        var ncap = _du_pcap * 2;
+        if (ncap < 4096) { ncap = 4096; }
+        while (ncap < need) { ncap = ncap * 2; }
+        var nb = alloc(ncap);
+        if (plen > 0) { memcpy(nb, _du_pb, plen); }
+        _du_pb = nb;
+        _du_pcap = ncap;
+    }
+    if (sep == 1) { store8(_du_pb + plen, 47); }
+    memcpy(_du_pb + plen + sep, name, nl);
+    store8(_du_pb + plen + sep + nl, 0);
+    return plen + sep + nl;
+}
 
 # Round-up division: (a + b - 1) / b.
 fn _du_div_ceil(a, b): i64 {
@@ -209,36 +260,26 @@ fn _du_seen_skip(st, depth): i64 {
         }
     }
     if (_du_count_links == 1) { return 0; }
-    # ⭐ CHECK ALWAYS, INSERT NARROWLY. A lookup is one probe into a table this
-    # walk is already carrying, so every entry gets asked whether it has been
-    # counted — including the ones the insert rule below would not have
-    # recorded. That asymmetry is free and it closes half the reachable-twice
-    # shapes: `du FILE DIR` where FILE lives inside DIR now matches GNU, because
-    # the operand went in at depth 0 and the walk consults the table.
-    if (fs_inoset_find(_du_seen, fs_dev(st), fs_ino(st)) != 0) { return 1; }
-    var track: i64 = 0;
-    if (depth == 0)      { track = 1; }     # a command-line operand
-    if (_du_follow == 1) { track = 1; }     # -L: link count proves nothing
-    # ⚠ DIRECTORIES ARE TRACKED TOO, and the first draft of this rule excluded
-    # them — `if (is_dir == 0)` guarded the nlink test, which reads as "a link
-    # count over 1 only means something for files" and is true, but it left
-    # directories out of the table altogether. `du DIR DIR/sub` then walked and
-    # charged `sub` twice, and `-c` reported a total no line in the output added
-    # up to. There are far fewer directories than files, so the memory argument
-    # that keeps single-link FILES out does not apply to them.
-    if (is_dir == 1) { track = 1; }
+    # ⭐ GNU's rule exactly (1.8.3): with two or more operands, or under -L, EVERY entry is
+    # tracked, so anything reached twice is counted once; otherwise only non-directories with
+    # more than one link, the only way a single -P walk reaches a file twice. The sparse set
+    # (`fs_inobits_*`, about a bit an entry) is what makes "every entry" affordable: with
+    # `fs_inoset`'s 32 bytes an entry kriya tracked operands and multi-link files only, and
+    # `du DIR DIR/f` listed f where GNU omits it.
+    var track = _du_hash_all;
     if (is_dir == 0) {
         if (fs_nlink(st) > 1) { track = 1; }
     }
-    if (track == 1) { fs_inoset_add(_du_seen, fs_dev(st), fs_ino(st), 0); }
-    return 0;
+    if (track == 1) { return fs_inobits_add(_du_seen, fs_dev(st), fs_ino(st)); }
+    return fs_inobits_has(_du_seen, fs_dev(st), fs_ino(st));
 }
 
 # Recursively walk `name` rooted at `parent_dirfd`. `depth` is operand-
 # relative (0 for the operand itself). `display` is the user-visible
 # path used in output. Returns total size of this subtree (including
 # the dir's own block usage; -S removes children before reporting).
-fn _du_walk(parent_dirfd, name, display, depth): i64 {
+fn _du_walk(parent_dirfd, name, plen, depth): i64 {
+    var display = _du_pb;
     # Stat (or lstat) the directory entry itself.
     var st[144];
     var sr: i64 = 0;
@@ -332,7 +373,7 @@ fn _du_walk(parent_dirfd, name, display, depth): i64 {
     if (_du_bytes == 1) { self_blocks = 0; }
     var printed: i64 = self_blocks;
     var full:    i64 = self_blocks;
-    var ent_buf = alloc(4096);
+    var ent_buf = _du_depth_buf(depth);
     var loop: i64 = 1;
     while (loop == 1) {
         var nb = fs_getdents64(dir_fd, ent_buf, 4096);
@@ -351,7 +392,8 @@ fn _du_walk(parent_dirfd, name, display, depth): i64 {
                     var reclen = fs_dent_reclen(ent);
                     if (fs_dent_is_dotdot(ent) == 0) {
                         var ename = fs_dent_name(ent);
-                        var child_disp = path_join(display, ename);
+                        var clen = _du_path_push(plen, ename);
+                        var child_disp = _du_pb;
                         # Classify via lstat (or stat with -L).
                         var cst[144];
                         var csr: i64 = 0;
@@ -382,7 +424,7 @@ fn _du_walk(parent_dirfd, name, display, depth): i64 {
                                 # ⚠ `_du_walk` returns the FULL subtree total, never
                                 # the `-S`-stripped one — that distinction is the
                                 # whole reason the two totals are separate.
-                                var child_full = _du_walk(dir_fd, ename, child_disp, depth + 1);
+                                var child_full = _du_walk(dir_fd, ename, clen, depth + 1);
                                 full = full + child_full;
                                 if (_du_sep_dirs == 0) {
                                     printed = printed + child_full;
@@ -411,6 +453,9 @@ fn _du_walk(parent_dirfd, name, display, depth): i64 {
                             }
                         }
                     }
+                    # Back to this level's path; the buffer may have moved under a child.
+                    store8(_du_pb + plen, 0);
+                    display = _du_pb;
                     off = off + reclen;
                 }
             }
@@ -508,7 +553,7 @@ fn cmd_du(start: i64): i64 {
     # ⚠ Built here, not memoized like `_du_spec`: one set per invocation, shared
     # across every operand, so a hard link is deduped ACROSS operands the way GNU
     # does — and so a second in-process `cmd_du` would not inherit the first's.
-    _du_seen        = fs_inoset_new();
+    _du_seen        = fs_inobits_new();
     _du_path        = fs_dirstack_new();
 
     var n_argv = kriya_argv_count();
@@ -686,11 +731,14 @@ fn cmd_du(start: i64): i64 {
         store64(operands_buf, ".");
         n_operands = 1;
     }
+    _du_hash_all = 0;
+    if (n_operands > 1) { _du_hash_all = 1; }
+    if (_du_follow == 1) { _du_hash_all = 1; }
 
     var oi: i64 = 0;
     while (oi < n_operands) {
         var op = load64(operands_buf + oi * 8);
-        _du_walk(0 - 100, op, op, 0);
+        _du_walk(0 - 100, op, _du_path_push(0, op), 0);
         oi = oi + 1;
     }
 
