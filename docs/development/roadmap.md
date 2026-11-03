@@ -454,3 +454,108 @@ applies from the cyrius version it names. Everything else that changes between t
   the LAST definition (before, a non-tail call to an already-defined fn bound the first), so a duplicate whose
   body differs changes what runs at the pin bump. Remove the duplicates or confirm the last definition is the
   intended one.
+
+## Adopting cmdit (CLI parsing)
+
+⛔ **Not a candidate today.** This is recorded so nobody has to re-derive it. It is demand-gated, not a forced
+sweep, and has no slot on the arc sequence. cmdit's roadmap lists kriya as its `argv[0]` multiplexer case
+(`cmdit_basename` + `cmdit_raw_argv`). This note was read against cmdit 1.2.6 source on 2026-10-14. Nothing was
+built or run.
+
+**The multiplexer half already has cmdit's caller-side shape.**
+
+- `src/main.cyr:277-288` selects the utility from `path_basename_ptr(argv(0))` and falls back to `kriya <util>`
+  with `start = 2`. `:289-318` adds `--list`/`--version`/`--help`, recognised only in that `kriya <util>` form.
+  `:93-153` is the one table that both routes and feeds `--list`.
+- cmdit would only swap `path_basename_ptr` → `cmdit_basename`. That is one call, and the two differ only on a
+  trailing `/`: `src/lib/path.cyr:35` trims it, cmdit returns the empty tail.
+- A `cmdit_verb` row has no place for the `*_help_declare` pointer that `--list` needs. Nothing is gained here.
+
+**The per-utility half is a full option grammar ([ADR 0002](../adr/0002-option-parsing-humans-and-agents.md)) that
+cmdit lacks.** `src/lib/args.cyr` (1,535 lines) wraps stdlib `flags`. It serves 242 `flags_add_*` registrations
+across 38 utilities. 26 of them call `kriya_args_parse*` by grep, although the note at `args.cyr:235` still says
+28. Each item below is something kriya ships and cmdit 1.2.6 does not:
+
+- **Clusters and attached values** (`-rf`, `-n5`, `-rfvn10`): ADR 0002 *Allowed forms*, with the expander at
+  `args.cyr:216-240` and `:385`. cmdit returns `CMDIT_ERR_BUNDLED` for these. They are on cmdit's v2 backlog, and
+  kriya is a second consumer for that item, against the "only darshini needs bundling" line in cmdit's roadmap.
+- **Optional-value longs:** `cp --preserve=LIST`, `sort --check=quiet`, `tail --follow=name`, and
+  `uniq --group`/`--all-repeated` (`args.cyr:24-30`, `:82-89`, `:800-817`). Also on the v2 backlog.
+- **`--bool=VALUE` refused:** `args.cyr:17-22` records that `sort --reverse=nonsense` used to exit 0. cmdit's
+  `_cmdit_apply` sets the bool and drops the value, which is the same defect.
+- **Option recognition stops at the first operand**, which `xargs`/`env` command lines need (`kriya_argv_option_end`,
+  `args.cyr:685-705`). cmdit keeps recognising options after an operand until `--`, and `cmdit_verb_trailing_after`
+  only applies to a verb.
+- **No positional cap:** `args.cyr:953-957` records that `kriya rm *` over 200 files deleted 128 and exited 0, until
+  stdlib 6.6.5 grew the table. cmdit still drops anything past `CMDIT_POS_MAX` (128) silently.
+  ⛔ **Adopting cmdit today would bring that back.**
+- **Linear argv:** `kriya_argv_flat` (`args.cyr:174-203`) walks `/proc/self/cmdline` once. At 1.6.17 this took
+  `rm -f` over 20,000 names from 1,451 ms to 67 ms. `cmdit_argv` calls stdlib `argv(i)` once per argument, which is
+  the quadratic form.
+- **Flag-table introspection:** two parts of kriya read the stdlib `flags` entry layout directly:
+  - the spec-driven expander (`kriya_short_type`/`kriya_long_type`, `args.cyr:248`, `:656`);
+  - the help and `--help=json` renderer (`src/lib/help.cyr:197-232`, `:466-484`).
+  cmdit's layout is not API, and cmdit exposes verb accessors only (1.2.0), with no flag accessors.
+- **Kept in kriya's own code whatever the parser:** grep `-NUM` (`args.cyr:45-54`), head/tail obsolescent counts
+  (ADR 0023), order-sensitive queries (`kriya_opt_seq`, `args.cyr:995-1083`), the `--help=json` pre-scan
+  (`args.cyr:869`), and GNU-shaped diagnostics.
+
+**What does fit:**
+
+- `-h` and `-V` are deliberately unclaimed (ADR 0002; `ls -h`, `sort -V`).
+  `cmdit_help_short(h, 0)`/`cmdit_version_short(h, 0)` free them and keep `--help`/`--version`.
+- `cmdit_repeat` covers `kriya_argv_collect` (`args.cyr:1099`).
+- Exact-name matching and interleaved operands agree with ADR 0002.
+
+- [ ] **Re-check when cmdit grows positionals and makes `cmdit_argv` linear.** Both are internal fixes. Flag
+  introspection and the grammar items would be append-only additions. Gated, no slot. Then:
+  - Add the block below. Keep `"args"` and `"io"`, and keep `"flags"` until the last utility leaves it.
+  - Migrate one utility at a time behind the expander. `1.3.0` is not tagged yet as of 2026-10-14.
+  - The identity bar is the GNU-oracle smoke suite: 41 `scripts/smoke-*.sh`, notably `smoke-option-forms.sh`,
+    `smoke-help.sh`, `smoke-help-json.sh` and `smoke-list.sh`.
+  - Also run `scripts/lint-help-schema.sh`, plus `tests/kriya.tcyr` (about 120 lines on the parse layer) and
+    `tests/kriya.bcyr`. `tests/kriya-posix.tcyr`, `tests/kriya-syscalls.tcyr` and the three `.fcyr` harnesses do
+    not touch parsing (checked).
+
+```
+[deps.cmdit]
+git = "https://github.com/MacCracken/cmdit.git"
+tag = "1.3.0"
+modules = ["dist/cmdit.cyr"]
+```
+
+References: cmdit's [`README.md`](https://github.com/MacCracken/cmdit/blob/main/README.md) (API reference) and
+[`docs/development/roadmap.md`](https://github.com/MacCracken/cmdit/blob/main/docs/development/roadmap.md)
+(v2 backlog, out of scope). Worked migrations: kii `src/cli.cyr` and anuenue `src/main.cyr`.
+
+**Update — cmdit 1.3.0 / 1.3.1 (2026-10-14).** Three items in the list above are now fixed in cmdit:
+
+- **No positional cap (1.3.1):** the positional array doubles instead of dropping past 128, and a refused growth is
+  `CMDIT_ERR_NOMEM`. Adopting cmdit no longer brings back the `rm *` truncation.
+- **`--bool=VALUE` refused (1.3.1):** `CMDIT_ERR_UNEXPECTED_VALUE`, so `sort --reverse=nonsense` fails, as GNU's does.
+- **Linear argv (1.3.0):** `cmdit_argv` walks `/proc/self/cmdline` once on Linux, the same fix as `kriya_argv_flat`.
+
+The verdict stands. Clusters and attached values, optional-value longs, stopping at the first operand, and
+flag-table introspection are still missing, so kriya is not a candidate yet.
+
+**Update — cmdit 1.3.x / 1.4.0 (2026-10-14).** Two more items in the list above are now covered:
+
+- **Option recognition stops at the first operand (1.3.4):** `cmdit_stop_at_positional(h, 1)`. The first operand,
+  a lone `-` included, ends the options, and every later token is an operand, flag-shaped or not. A `--` after it
+  stays data, unlike `cmdit_verb_trailing_after`, which consumes one; that is the `ls -1 | xargs rm --` case.
+- **Flag-table introspection (1.3.7):** `cmdit_flag_count` and `cmdit_flag_short_at` / `_long_at` / `_type_at` /
+  `_help_at`, plus `_long_alias_at`, `_default_at`, `_choices_at`, `_metavar_at`, `cmdit_flag_is_required` and
+  `cmdit_flag_is_repeat`. They cover what `src/lib/help.cyr:197-232` and `:466-484` read from the stdlib entry
+  layout. `cmdit_flag_find_short(h, ch)` and `cmdit_flag_find_long(h, name, len)` return the parser's own `-x` /
+  `--name` lookup as an index or -1, span-based, so the `--name=value` bytes up to the `=` need no copy. With
+  `cmdit_flag_type_at` they answer the expander's question (`kriya_short_type` / `kriya_long_type`,
+  `args.cyr:248`, `:656`) without reading cmdit's layout.
+
+Also since the 1.3.1 update: `cmdit_err_token` / `cmdit_err_value` (1.3.3) give the offending token and value
+for GNU-shaped diagnostics, and `cmdit_help_fd(h, 1)` (1.3.5) prints help on stdout. 1.4.0 changes no API or
+output; it makes a parse about 2× faster and `--help` over 10× faster.
+
+Still missing, both on cmdit's v2 backlog: **clusters and attached values**, which can stay in kriya's
+pre-parse expander now that it can query cmdit's table, and **optional-value longs** (`--preserve[=LIST]`,
+`--check[=quiet]`, `--follow[=name]`), which cmdit has no form for. The verdict stands on the second. If the
+re-check above happens, pin `tag = "1.4.0"` instead of `"1.3.0"`.
