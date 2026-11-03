@@ -52,20 +52,16 @@ var _df_types:        i64 = 0;    # -t TYPE / --type: list only these (a vec), 0
 var _df_xtypes:       i64 = 0;    # -x TYPE / --exclude-type: never these
 var _df_rows:         i64 = 0;    # rows written; the header waits for the first
 
-# statfs buffer offsets (Linux x86_64, 64-bit struct statfs64).
+# The statfs buffer is read through the stdlib's `Statfs` layout (1.8.4): `STATFS_BLOCKS`,
+# `STATFS_BFREE`, `STATFS_BAVAIL`, `statfs_bsize()` and the one-buffer contract `STATFS_BUFSZ`.
+# Until then df indexed it with bare Linux offsets, the hardcoding the stdlib's own comment warns
+# against (statfs layouts differ by OS). ⚠ The stdlib names no inode or fragment field, so the three
+# df reads beyond its four are kriya's, at Linux's `struct statfs` offsets, which are the same
+# 120-byte layout on x86-64 and aarch64 (filed upstream). agnos has no statfs and refuses df.
 enum DfStatfs {
-    DF_STATFS_TYPE    = 0;
-    DF_STATFS_BSIZE   = 8;
-    DF_STATFS_BLOCKS  = 16;
-    DF_STATFS_BFREE   = 24;
-    DF_STATFS_BAVAIL  = 32;
-    DF_STATFS_FILES   = 40;
-    DF_STATFS_FFREE   = 48;
-    DF_STATFS_FSID    = 56;
-    DF_STATFS_NAMELEN = 64;
-    DF_STATFS_FRSIZE  = 72;
-    DF_STATFS_FLAGS   = 80;
-    DF_STATFS_BUFSZ   = 120;
+    DF_STATFS_FILES  = 40;
+    DF_STATFS_FFREE  = 48;
+    DF_STATFS_FRSIZE = 72;
 }
 
 fn _df_statfs(path, buf): i64 {
@@ -366,15 +362,15 @@ fn _df_fmt_cell(buf, pos, frsize, count, width): i64 {
 }
 
 # Render one mount row using the active flag state.
-# `dev`, `mp`, `fs_type` are cstrs; `st` is the 120-byte statfs.
+# `dev`, `mp`, `fs_type` are cstrs; `st` is a filled STATFS_BUFSZ statfs buffer.
 fn _df_emit_row(dev, mp, fs_type, st): i64 {
-    var f_blocks = load64(st + 16);
-    var f_bfree  = load64(st + 24);
-    var f_bavail = load64(st + 32);
-    var f_files  = load64(st + 40);
-    var f_ffree  = load64(st + 48);
-    var f_frsize = load64(st + 72);
-    if (f_frsize == 0) { f_frsize = load64(st + 8); }   # fall back to bsize
+    var f_blocks = load64(st + STATFS_BLOCKS);
+    var f_bfree  = load64(st + STATFS_BFREE);
+    var f_bavail = load64(st + STATFS_BAVAIL);
+    var f_files  = load64(st + DF_STATFS_FILES);
+    var f_ffree  = load64(st + DF_STATFS_FFREE);
+    var f_frsize = load64(st + DF_STATFS_FRSIZE);
+    if (f_frsize == 0) { f_frsize = statfs_bsize(st); }   # fall back to bsize
 
     var used   = f_blocks - f_bfree;
     var iused  = f_files - f_ffree;
@@ -900,10 +896,10 @@ fn cmd_df(start: i64): i64 {
                 }
             }
             if (keep == 1) {
-                var st[120];
+                var st[STATFS_BUFSZ];
                 var sr = _df_statfs(mp_buf, &st);
                 if (sr == 0) {
-                    var f_blocks = load64(&st + 16);
+                    var f_blocks = load64(&st + STATFS_BLOCKS);
                     if (_df_all == 0) {
                         if (n_operands == 0) {
                             if (f_blocks == 0) { keep = 0; }

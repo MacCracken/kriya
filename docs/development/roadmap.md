@@ -369,6 +369,10 @@ no wrapper either, and x86's table has no name for them. None misroutes: `kriya-
 on x86-64 and aarch64. ⭐ When the wrappers land, the four literals go, and with them the last per-arch
 `#ifdef` in kriya's Linux syscall layer.
 
+Filed with them: [`2026-11-03-statfs-names-no-inode-or-fragment-fields.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-statfs-names-no-inode-or-fragment-fields.md).
+Since 1.8.4 `df` reads its statfs buffer through the stdlib's `Statfs`, except for `f_files`, `f_ffree` and
+`f_frsize`, which `Statfs` does not name. Those three stay in df's `DfStatfs`, at Linux offsets, until it does.
+
 ---
 
 ## Standing
