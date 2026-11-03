@@ -18,6 +18,15 @@
 #   -r / --no-run-if-empty do not run CMD when the input has no items
 #   -t / --verbose         print each command to stderr before running it
 #   --show-limits          print the size limits, then run as usual
+#   -a F / --arg-file=F    read items from F; COMMAND keeps xargs's stdin (`-a -`
+#                          is stdin, and COMMAND reads /dev/null) (1.8.2)
+#   -d D / --delimiter=D   items end at D, a byte or a C escape (`\n`, `\t`, `\x41`,
+#                          `\101`, `\0`); quotes and backslash are plain bytes and an
+#                          empty item is an argument. -0 is `-d '\0'`; last wins
+#   -E S / --eof=S         an item equal to S ends the input (POSIX); no effect,
+#                          with a warning, under -0 or -d
+#   -o / --open-tty        COMMAND reads /dev/tty; with no terminal, xargs fails
+#                          before running anything
 #
 # ⭐ THE ACCOUNTING IS GNU's `buildcmd`, to the byte, and it lives in
 # `src/lib/argbatch.cyr` beside `find -exec … +`, which counts the same way
@@ -54,7 +63,10 @@
 #           too long for -s, `-x` exceeded
 #   2       usage error (ADR 0008; GNU exits 1)
 #
-# ⚠ Deliberate divergences: usage errors exit 2; `-l[N]` is not taken, since
+# ⚠ Deliberate divergences: usage errors exit 2, a bad -d DELIM included; -E stops at a
+# matching item even as the last of an unterminated line (GNU passes it through there);
+# -o opens /dev/tty once, before the first command, and a failure is exit 1 with nothing
+# run (GNU's child dies of an assertion); `-e[STR]` is not taken; `-l[N]` is not taken, since
 # ADR 0002 has no optional values (`-L N` is the same thing) — and for the same
 # reason `--max-lines 1 echo` reads 1 as the value, where GNU's `--max-lines` is
 # `-l`'s long form and runs a command named `1`; the diagnostics are kriya's
@@ -70,6 +82,9 @@ var _xa_s_idx    = 0;
 var _xa_L_idx    = 0;
 var _xa_x_idx    = 0;
 var _xa_sl_idx   = 0;
+var _xa_a_idx    = 0;
+var _xa_E_idx    = 0;
+var _xa_o_idx    = 0;
 
 var _xa_path_env = 0;
 
@@ -85,6 +100,10 @@ fn _xa_init_spec(): i64 {
     _xa_s_idx    = flags_add_str (s, 115, "max-chars",          0, "max bytes in a command line");
     _xa_x_idx    = flags_add_bool(s, 120, "exit",               0, "exit if a command line would exceed -s");
     _xa_sl_idx   = flags_add_bool(s, 0,   "show-limits",        0, "print the command-line size limits");
+    _xa_a_idx    = flags_add_str (s, 97,  "arg-file",           0, "read items from FILE; the command keeps stdin");
+    flags_add_str (s, 100, "delimiter",          0, "items end at DELIM (a character or a C escape)");
+    _xa_E_idx    = flags_add_str (s, 69,  "eof",                0, "an item equal to STR ends the input");
+    _xa_o_idx    = flags_add_bool(s, 111, "open-tty",           0, "the command reads /dev/tty");
     _xa_spec = s;
     xargs_help_declare();
     return 0;
@@ -98,8 +117,8 @@ fn xargs_help_declare(): i64 {
       "xargs [OPTIONS] [COMMAND [ARG...]]");
     help_positional(0, HELP_POS_UNBOUNDED, "COMMAND,ARG");
     help_destructive(1);
-    help_operands("⚠ Option recognition stops at the first operand — everything after reaches COMMAND verbatim, including its own flags and its `--`. COMMAND runs once even for empty input unless -r is given. -I replaces REPLSTR in the ARGs, never in COMMAND itself.");  #skip-lint
-    help_exit(1, "unusable input: an unmatched quote, or a command line that cannot fit");
+    help_operands("⚠ Option recognition stops at the first operand — everything after reaches COMMAND verbatim, including its own flags and its `--`. COMMAND runs once even for empty input unless -r is given. -I replaces REPLSTR in the ARGs, never in COMMAND itself. COMMAND reads /dev/null, except under -a FILE (it keeps xargs's stdin) and -o (it reads the terminal). -d DELIM takes a byte or a C escape, and keeps empty items; -E STR ends the input at an item equal to STR.");  #skip-lint
+    help_exit(1, "unusable input: an unmatched quote, a command line that cannot fit, an -a FILE that cannot be opened, or -o with no terminal");  #skip-lint
     help_exit(123, "a command exited non-zero");
     help_exit(124, "a command exited 255; xargs aborted");
     help_exit(125, "a command was killed by a signal");
@@ -109,6 +128,8 @@ fn xargs_help_declare(): i64 {
     help_example("ls | xargs -I{} mv {} dest/");
     help_example("printf 'a\\nb\\n' | xargs -n1 echo");
     help_example("xargs -L 1 --show-limits < /dev/null");
+    help_example("printf 'a,b,c' | xargs -d , -n1 echo");
+    help_example("xargs -a files.txt -o vi");
     return 0;
 }
 
@@ -133,6 +154,12 @@ var _xa_linebuf     = 0;
 var _xa_insertbuf   = 0;
 var _xa_exec_path   = 0;   # CMD resolved once; it never changes
 var _xa_read_failed = 0;
+var _xa_infd        = 0;   # where items are read from: stdin, or -a FILE
+var _xa_delim       = 0;   # the byte that ends an item in -0 / -d mode
+var _xa_eofstr      = 0;   # -E: an item equal to it ends the input, or 0
+var _xa_child_flags = 0;   # K_SPAWN_STDIN_NULL unless -a FILE gave the input elsewhere
+var _xa_open_tty    = 0;   # -o
+var _xa_ttyfd       = 0;   # ...its /dev/tty, opened before the first command (-1 until then)
 
 # Buffered stdin.
 var _xa_ibuf = 0;
@@ -166,7 +193,7 @@ fn _xa_getc(): i64 {
         if (_xa_ieof == 1) { return 0 - 1; }
         var got: i64 = 0;
         while (got == 0) {
-            var n = k_read( 0, _xa_ibuf, 65536);
+            var n = k_read( _xa_infd, _xa_ibuf, 65536);
             if (n > 0) { _xa_ilen = n; _xa_ipos = 0; got = 1; }
             elif (n == 0) { _xa_ieof = 1; return 0 - 1; }
             elif (n != (0 - 4)) {
@@ -243,7 +270,21 @@ fn _xa_run(argvp): i64 {
     # 2, so the child's diagnostics vanished, and it collapses every non-exit
     # outcome to -1, so a signalled child was indistinguishable from a failed
     # fork. POSIX requires xargs to tell five outcomes apart.
-    var r = k_spawn_argv(_xa_exec_path, argvp, ab_envp(), K_SPAWN_STDIN_NULL);
+    # -o: the command reads the terminal. ⛔ /dev/tty is opened HERE, once, before the first
+    # command, and a failure ends xargs (exit 1) with nothing run. GNU opens it in each child,
+    # and with no terminal its child dies of an assertion (SIGABRT) instead of exec'ing.
+    var infd: i64 = 0 - 1;
+    if (_xa_open_tty == 1) {
+        if (_xa_ttyfd < 0) {
+            _xa_ttyfd = k_open("/dev/tty", FS_O_CLOEXEC, 0);
+            if (_xa_ttyfd < 0) {
+                errmsg_report("xargs", "/dev/tty", 0 - _xa_ttyfd);
+                _xa_exit(EXIT_FAILURE);
+            }
+        }
+        infd = _xa_ttyfd;
+    }
+    var r = k_spawn_argv_io(_xa_exec_path, argvp, ab_envp(), _xa_child_flags, 0 - 1, infd);
     if (k_spawn_execfailed(r) == 1) {
         var e = k_spawn_exec_errno(r);
         if (e == 7) { return 0; }                   # E2BIG: fewer arguments
@@ -384,6 +425,19 @@ fn _xa_append(p, c): i64 {
 # GNU's `read_line`: one LOGICAL line, each item pushed as it ends (none under
 # -I, where the line is the item). Returns the last item's length with its NUL,
 # or -1 at EOF.
+# -E: is the item in `_xa_linebuf[0 .. p-1)` the end-of-file string?
+fn _xa_is_eof_item(p): i64 {
+    if (_xa_eofstr == 0) { return 0; }
+    var n = strlen(_xa_eofstr);
+    if (n != p - 1) { return 0; }
+    var i: i64 = 0;
+    while (i < n) {
+        if (load8(_xa_linebuf + i) != load8(_xa_eofstr + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 fn _xa_read_line(): i64 {
     if (_xa_eof == 1) { return 0 - 1; }
     var state: i64 = 1;          # 0 NORM, 1 SPACE, 2 QUOTE, 3 BACKSLASH
@@ -401,6 +455,10 @@ fn _xa_read_line(): i64 {
             store8(_xa_linebuf + p, 0);
             p = p + 1;
             if (state == 2) { _xa_unmatched(quotc); }
+            # ⚠ -E ends the input here too. GNU checks only the line's FIRST item at the end
+            # of the input, so `printf 'a STOP' | xargs -E STOP` passes STOP through; POSIX's
+            # "logical end-of-file string" has no such exception, and neither does kriya.
+            if (_xa_is_eof_item(p) == 1) { return 0 - 1; }
             if (_xa_repl == 0) { _xa_push(_xa_linebuf, p, _xa_initial); }
             return p;
         }
@@ -424,6 +482,7 @@ fn _xa_read_line(): i64 {
                     if (append == 1) {
                         store8(_xa_linebuf + p, 0);
                         p = p + 1;
+                        if (_xa_is_eof_item(p) == 1) { _xa_eof = 1; return 0 - 1; }
                         if (_xa_repl == 0) { _xa_push(_xa_linebuf, p, _xa_initial); }
                         return p;
                     }
@@ -433,6 +492,7 @@ fn _xa_read_line(): i64 {
                         if (_xa_is_blank(c) == 1) {
                             store8(_xa_linebuf + p, 0);
                             p = p + 1;
+                            if (_xa_is_eof_item(p) == 1) { _xa_eof = 1; return 0 - 1; }
                             _xa_push(_xa_linebuf, p, _xa_initial);
                             p = 0;
                             state = 1;
@@ -469,8 +529,9 @@ fn _xa_read_line(): i64 {
     return 0 - 1;
 }
 
-# GNU's `read_string`, for -0: an item ends at NUL, and every NUL ends one, so
-# an empty item is an argument like any other.
+# GNU's `read_string`, for -0 and -d: an item ends at the delimiter (NUL for -0),
+# and every delimiter ends one, so an empty item is an argument like any other.
+# Quotes and backslashes are bytes like any other.
 fn _xa_read_string(): i64 {
     if (_xa_eof == 1) { return 0 - 1; }
     var p: i64 = 0;
@@ -484,7 +545,7 @@ fn _xa_read_string(): i64 {
             if (_xa_repl == 0) { _xa_push(_xa_linebuf, p, _xa_initial); }
             return p;
         }
-        if (c == 0) {
+        if (c == _xa_delim) {
             _xa_lineno = _xa_lineno + 1;
             store8(_xa_linebuf + p, 0);
             p = p + 1;
@@ -663,6 +724,74 @@ fn _xa_is_opt(tok, x, long): i64 {
     return 0;
 }
 
+# -d's DELIM, GNU's `get_input_delimiter` ported as it stands: one byte, or `\a \b \f \n
+# \r \t \v \\`, or `\x` + hex or `\` + octal up to 0xff. ⚠ Its quirks are GNU's too: only
+# the byte after the backslash is read for the letter escapes, and `\x` with no digits is
+# NUL. A bad DELIM is a usage error with GNU's words.
+fn _xa_delim_error(spec, tail): i64 {
+    k_write( 2, "kriya xargs: Invalid escape sequence ", 37);
+    k_write( 2, spec, strlen(spec));
+    k_write( 2, " in input delimiter specification", 33);
+    k_write( 2, tail, strlen(tail));
+    k_write( 2, "\n", 1);
+    _xa_exit(EXIT_USAGE);
+    return 0;
+}
+
+fn _xa_parse_delim(spec): i64 {
+    if (strlen(spec) == 1) { return load8(spec); }
+    if (load8(spec) != 92) {
+        k_write( 2, "kriya xargs: Invalid input delimiter specification ", 51);
+        k_write( 2, spec, strlen(spec));
+        k_write( 2, ": the delimiter must be either a single character or an escape sequence starting with \\.\n", 89);  #skip-lint
+        _xa_exit(EXIT_USAGE);
+    }
+    var c1 = load8(spec + 1);
+    if (c1 == 97)  { return 7; }       # \a
+    if (c1 == 98)  { return 8; }       # \b
+    if (c1 == 102) { return 12; }      # \f
+    if (c1 == 110) { return 10; }      # \n
+    if (c1 == 114) { return 13; }      # \r
+    if (c1 == 116) { return 9; }       # \t
+    if (c1 == 118) { return 11; }      # \v
+    if (c1 == 92)  { return 92; }      # \\
+    var base: i64 = 8;
+    var i: i64 = 1;
+    if (c1 == 120) { base = 16; i = 2; }
+    elif (c1 < 48 || c1 > 57) { _xa_delim_error(spec, "."); }
+    var v: i64 = 0;
+    var more: i64 = 1;
+    while (more == 1) {
+        var c = load8(spec + i);
+        var d: i64 = 0 - 1;
+        if (c >= 48) { if (c <= 57) { d = c - 48; } }
+        if (base == 16) {
+            if (c >= 97) { if (c <= 102) { d = c - 87; } }
+            if (c >= 65) { if (c <= 70) { d = c - 55; } }
+        }
+        if (d < 0) { more = 0; }
+        elif (d >= base) { more = 0; }
+        else {
+            v = v * base + d;
+            if (v > 255) {
+                if (base == 16) { _xa_delim_error(spec, "; character values must not exceed ff."); }
+                _xa_delim_error(spec, "; character values must not exceed 377.");
+            }
+            i = i + 1;
+        }
+    }
+    if (load8(spec + i) != 0) {
+        var t = alloc(strlen(spec) + 64);
+        var lead = "; trailing characters ";
+        memcpy(t, lead, strlen(lead));
+        var tl = strlen(spec + i);
+        memcpy(t + strlen(lead), spec + i, tl);
+        memcpy(t + strlen(lead) + tl, " not recognised.", 17);
+        _xa_delim_error(spec, t);
+    }
+    return v;
+}
+
 # -n, -L, -I and -s IN THE ORDER GIVEN — GNU's option loop, so an option that
 # overrides an earlier one says so, and the last of -n, -L and -I wins.
 fn _xa_walk_options(posix_max): i64 {
@@ -675,7 +804,11 @@ fn _xa_walk_options(posix_max): i64 {
         var val: i64 = 0;
         var which: i64 = 0;
         if (streq(tok, "--") == 1) { i = n; }
-        else {
+        elif (streq(tok, "-0") == 1 || streq(tok, "--null") == 1) {
+            # -0 and -d are last-wins against each other, as in GNU.
+            _xa_null_mode = 1;
+            _xa_delim = 0;
+        } else {
             var k = _xa_is_opt(tok, 110, "max-args");
             if (k > 0) { which = 110; }
             else {
@@ -687,6 +820,10 @@ fn _xa_walk_options(posix_max): i64 {
                     else {
                         k = _xa_is_opt(tok, 115, "max-chars");
                         if (k > 0) { which = 115; }
+                        else {
+                            k = _xa_is_opt(tok, 100, "delimiter");
+                            if (k > 0) { which = 100; }
+                        }
                     }
                 }
             }
@@ -726,6 +863,10 @@ fn _xa_walk_options(posix_max): i64 {
         }
         if (which == 115) {
             _xa_arg_max = _xa_parse_num(val, 115, 1, posix_max, 0);
+        }
+        if (which == 100) {
+            _xa_null_mode = 1;
+            _xa_delim = _xa_parse_delim(val);
         }
         i = i + step;
     }
@@ -796,9 +937,45 @@ fn cmd_xargs(start: i64): i64 {
         return EXIT_FAILURE;
     }
     _xa_arg_max = ab_default_buf(posix_max);
+    _xa_null_mode = 0;
+    _xa_delim = 0;
     _xa_walk_options(posix_max);
 
-    _xa_null_mode = flags_get_bool(_xa_spec, _xa_zero_idx);
+    # -E (POSIX), last wins; an empty STR is none. ⚠ `-e[STR]` and `--eof` with no value
+    # are GNU's optional-value forms, which ADR 0002 does not take: `-E STR` and `--eof=STR`.
+    _xa_eofstr = flags_get_str(_xa_spec, _xa_E_idx);
+    if (_xa_eofstr != 0) {
+        if (load8(_xa_eofstr) == 0) { _xa_eofstr = 0; }
+    }
+    if (_xa_eofstr != 0) {
+        if (_xa_null_mode == 1) {
+            _xa_note("warning: the -E option has no effect if -0 or -d is used.");
+            _xa_eofstr = 0;
+        }
+    }
+    # -a FILE: items come from FILE and the command KEEPS stdin, as GNU's does; `-a -` is
+    # stdin, and then the command reads /dev/null as usual.
+    _xa_infd = 0;
+    _xa_child_flags = K_SPAWN_STDIN_NULL;
+    var afile = flags_get_str(_xa_spec, _xa_a_idx);
+    if (afile != 0) {
+        if (streq(afile, "-") == 0) {
+            var afd = k_open(afile, FS_O_CLOEXEC, 0);
+            if (afd < 0) {
+                var am = "errno";
+                if (errmsg_is_known(0 - afd) == 1) { am = errmsg_for(0 - afd); }
+                var amsg = alloc(strlen(am) + 32);
+                memcpy(amsg, "cannot open input file: ", 24);
+                memcpy(amsg + 24, am, strlen(am) + 1);
+                report_note("xargs", afile, amsg);
+                return EXIT_FAILURE;
+            }
+            _xa_infd = afd;
+            _xa_child_flags = 0;
+        }
+    }
+    _xa_open_tty = flags_get_bool(_xa_spec, _xa_o_idx);
+    _xa_ttyfd = 0 - 1;
     _xa_trace = flags_get_bool(_xa_spec, _xa_t_idx);
     if (flags_get_bool(_xa_spec, _xa_r_idx) == 1) { _xa_always = 0; }
     _xa_exit_x = flags_get_bool(_xa_spec, _xa_x_idx);

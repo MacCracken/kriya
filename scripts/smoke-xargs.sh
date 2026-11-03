@@ -410,6 +410,75 @@ xsame "-I substitutes in arguments"  'x\n'     -I{} echo {} a{}b {}{}
 xsame "exec failure stops"        'a\nb\n'     -n 1 nosuch-cmd-1-7-0
 xsame "exit 3 carries on, 123"    'a\nb\n'     -n 1 sh -c 'echo $1; exit 3' sh
 
+# --- -d, -E, -a, -o (1.8.2) --------------------------------------------
+# Measured against findutils 4.9 and 4.10: identical on every case here.
+xsame "-d , keeps an empty item"     'p,q,,r,'       -d , printf '[%s]'
+xsame "-d , last item unterminated"  'p,q'           -d , printf '[%s]'
+xsame "-d '\\n' keeps blanks"         'a b\n\nc\n'    -d '\n' printf '[%s]'
+xsame "-d: quotes are bytes"         "'a' \"b\""     -d ' ' printf '[%s]'
+xsame "-d '\\t'"                      'a\tb'          -d '\t' printf '[%s]'
+xsame "-d '\\x41' (hex)"              'aAbAc'         -d '\x41' printf '[%s]'
+xsame "-d '\\101' (octal)"            'aAbAc'         -d '\101' printf '[%s]'
+xsame "-d '\\0' is -0"                'a\000b'        -d '\0' printf '[%s]'
+xsame "-d '\\\\' (backslash)"          'a\\b'          -d '\\' printf '[%s]'
+xsame "-d '\\x' alone is NUL (GNU's quirk)" 'a'       -d '\x' printf '[%s]'
+xsame "-d with -n 2"                 'a,b,c'         -d , -n 2 printf '[%s]'
+xsame "-0 then -d: last wins"        'a,b'           -0 -d , printf '[%s]'
+xsame "-d then -0: last wins"        'a\000b'        -d , -0 printf '[%s]'
+xsame "-d backslash in the input stays" 'a\\\nb\n'    -d '\n' printf '[%s]'
+for _d in ab '' '\q' '\x1ff' '\400' '\xg' '\x41z' '\8'; do
+    _k=0; printf 'a' | "$BIN" xargs -d "$_d" echo >/dev/null 2>&1 || _k=$?
+    _g=0; printf 'a' | xargs -d "$_d" echo >/dev/null 2>&1 || _g=$?
+    expect_eq "-d '$_d' is refused (GNU too; usage exit 2)" "refused|2" \
+        "$( [ "$_g" -ne 0 ] && echo refused || echo ran)|$_k"
+done
+xsame "-E ends the input"            'a\nb\nSTOP\nc\n' -E STOP echo
+xsame "-E mid-line"                  'a STOP b\nc\n'   -E STOP echo
+xsame "-E matches a quoted item"     "a 'STOP' b\n"    -E STOP echo
+xsame "-E with -I compares the line" 'a\nSTOP\nb\n'    -E STOP -I{} echo x{}
+xsame "-E '' is none"                'a\n\nb\n'        -E '' echo
+xsame "-E as the first item still runs once" 'STOP\na\n' -E STOP echo
+xsame "-E first item under -r runs nothing"  'STOP\na\n' -r -E STOP echo
+xsame "-E, last wins"                'a\nX\nb\n'       -E STOP -E X echo
+xsame "-E has no effect under -0"    'a\000STOP\000b\000' -0 -E STOP echo
+_ke=$(printf 'a' | "$BIN" xargs -0 -E STOP echo 2>&1 >/dev/null)
+expect_eq "-E under -0 warns, as GNU" "kriya xargs: warning: the -E option has no effect if -0 or -d is used." "$_ke"
+# ⚠ The deliberate divergence: GNU passes the string through as the last item of an
+# unterminated line after another item; kriya stops (POSIX's "logical end-of-file").
+expect_eq "-E at an unterminated end of input stops (GNU passes it)" "a" \
+    "$(printf 'a STOP' | "$BIN" xargs -E STOP echo)"
+printf 'a b\nc d\n' > xa_in1; printf 'x\ny\n' > xa_in2
+xsame "-a FILE"                      ''              -a xa_in1 echo
+xsame "-a, last wins"                ''              -a xa_in1 -a xa_in2 echo
+xsame "-a - is stdin"                'z\n'           -a - echo
+xsame "--arg-file="                  ''              --arg-file=xa_in2 echo
+xsame "--delimiter="                 'a,b'           --delimiter=, printf '[%s]'
+xsame "--eof="                       'a\nX\nb\n'     --eof=X echo
+_k=$(printf 'FROMSTDIN\n' | "$BIN" xargs -a xa_in2 sh -c 'cat; echo $0' 2>&1)
+_g=$(printf 'FROMSTDIN\n' | xargs -a xa_in2 sh -c 'cat; echo $0' 2>&1)
+expect_eq "-a FILE: the command keeps xargs's stdin, as GNU's" "$_g" "$_k"
+_k=$(printf 'x\n' | "$BIN" xargs -a - sh -c 'cat; echo done' 2>&1)
+expect_eq "-a -: the command reads /dev/null" "done" "$_k"
+_k=0; "$BIN" xargs -a xa_nosuch echo >/dev/null 2>&1 || _k=$?
+expect_eq "-a of a missing file: exit 1, as GNU" "1" "$_k"
+# -o: the command reads the terminal. With none, kriya fails before running anything (GNU's
+# child dies of an assertion); on one, the command's stdin is the terminal.
+_k=0; _ke=$(printf 'a\n' | setsid "$BIN" xargs -o echo 2>&1) || _k=$?
+expect_eq "-o with no terminal: exit 1, nothing runs" "1|kriya xargs: /dev/tty: no such device or address" "$_k|$_ke"
+_k=0; (printf '' | setsid "$BIN" xargs -o -r echo >/dev/null 2>&1) || _k=$?
+expect_eq "-o with -r and no input never needs the terminal" "0" "$_k"
+if script -qec true /dev/null >/dev/null 2>&1; then
+    # ⚠ xargs reads its items from a PIPE inside the terminal session, so without -o the
+    # command would get /dev/null; only -o can make its stdin the terminal. (Under -a, or with
+    # xargs on the terminal itself, the case would pass with no -o at all.)
+    # shellcheck disable=SC2016
+    _o=$(script -qec "printf 'a\\n' | '$BIN' xargs -o sh -c '[ -t 0 ] && echo stdin-is-a-tty || echo not-a-tty'" /dev/null < /dev/null 2>&1 | tr -d '\r')
+    expect_eq "-o on a terminal: the command's stdin is the terminal" "stdin-is-a-tty" "$_o"
+    # shellcheck disable=SC2016
+    _o=$(script -qec "printf 'a\\n' | '$BIN' xargs sh -c '[ -t 0 ] && echo stdin-is-a-tty || echo not-a-tty'" /dev/null < /dev/null 2>&1 | tr -d '\r')
+    expect_eq "...and without -o it is not" "not-a-tty" "$_o"
+fi
+
 # --- summary ---------------------------------------------------------
 
 TOTAL=$((PASS + FAIL))
