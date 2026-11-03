@@ -96,7 +96,24 @@ fn k_spawn_as(exec_path, args, env): i64 {
     #endif
 
     #ifndef CYRIUS_TARGET_AGNOS
-    return _k_spawn_linux(exec_path, args, env);
+    return _k_spawn_linux(exec_path, args, env, 0 - 1, 0);
+    #endif
+}
+
+# `k_spawn_as`, with the child's working directory and stdin chosen (1.8.2): it
+# `fchdir`s to `dirfd` before exec when `dirfd >= 0` — `find -execdir` / `-okdir`
+# run the command in the directory holding the entry — and `flags` is KSpawnFlag
+# bits. A failed `fchdir` is reported like a failed exec: the command never ran.
+# ⚠ agnos has no working directory, so `find` refuses -execdir there before any
+# of this; the arm answers fork-failed rather than run in the wrong place.
+fn k_spawn_in(exec_path, args, env, dirfd, flags): i64 {
+    if (vec_len(args) < 1) { return K_SPAWN_FORKFAIL; }
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (dirfd >= 0) { return K_SPAWN_FORKFAIL; }
+    return k_spawn_as(exec_path, args, env);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return _k_spawn_linux(exec_path, args, env, dirfd, flags);
     #endif
 }
 
@@ -123,10 +140,16 @@ enum KSpawnFlag {
 # meant for the commands still to come. GNU's `prep_child_for_exec` gives the
 # child /dev/null; so does this. `find -exec` keeps stdin, as GNU's does.
 fn k_spawn_argv(exec_path, argvp, envp, flags): i64 {
+    return k_spawn_argv_in(exec_path, argvp, envp, flags, 0 - 1);
+}
+
+# `k_spawn_argv` in the directory `dirfd` (`find -execdir … +`, 1.8.2); `-1` for none.
+fn k_spawn_argv_in(exec_path, argvp, envp, flags, dirfd): i64 {
     if (load64(argvp) == 0) { return K_SPAWN_FORKFAIL; }
     #ifdef CYRIUS_TARGET_AGNOS
     # ⚠ agnos passes no arguments and no environment (`lib/process_agnos.cyr`);
-    # only the program runs, as `k_spawn_as`'s agnos arm says.
+    # only the program runs, as `k_spawn_as`'s agnos arm says. No working directory either.
+    if (dirfd >= 0) { return K_SPAWN_FORKFAIL; }
     var v = vec_new();
     vec_push(v, exec_path);
     var ar = exec_vec(v);
@@ -135,7 +158,7 @@ fn k_spawn_argv(exec_path, argvp, envp, flags): i64 {
     return ar;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return _k_spawn_core(exec_path, argvp, envp, flags);
+    return _k_spawn_core(exec_path, argvp, envp, flags, dirfd);
     #endif
 }
 
@@ -143,7 +166,7 @@ fn k_spawn_argv(exec_path, argvp, envp, flags): i64 {
 # — it uses fork/pipe/fcntl/waitpid, none of which agnos provides with these
 # signatures. On agnos it compiles to the fall-through return and is never
 # called, because `k_spawn_as` returns from its own agnos arm first.
-fn _k_spawn_linux(exec_path, args, env): i64 {
+fn _k_spawn_linux(exec_path, args, env, dirfd, flags): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     var argc = vec_len(args);
     if (argc < 1) { return K_SPAWN_FORKFAIL; }
@@ -167,13 +190,38 @@ fn _k_spawn_linux(exec_path, args, env): i64 {
     }
     store64(envp + envc * 8, 0);
 
-    return _k_spawn_core(cmd, argv, envp, 0);
+    return _k_spawn_core(cmd, argv, envp, flags, dirfd);
     #endif
     return K_SPAWN_FORKFAIL;
 }
 
-# The fork, exec and wait, on prepared arrays. `flags` is KSpawnFlag bits.
-fn _k_spawn_core(cmd, argv, envp, flags): i64 {
+# fchdir(fd). ⛔ The stdlib wraps `sys_chdir` but not `fchdir`, and on aarch64 NO literal
+# reaches fchdir (50): cyrius renumbers a literal 50 as x86 `listen`, silently, and passes
+# x86's 81 through, where aarch64 81 is `sync`. Measured with qemu-aarch64 -strace: the child
+# ran `listen(4, 0)` and failed ENOTSOCK. So aarch64 does `chdir("/proc/self/fd/N")` through
+# the per-arch `sys_chdir`: the magic link names exactly the directory the descriptor holds,
+# as fchdir would. Filed upstream: cyrius issues `2026-11-03-stdlib-has-no-sys-fchdir.md`.
+fn _k_fchdir(fd): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_ARCH_AARCH64
+    var p[32];                                     # "/proc/self/fd/" + 10 digits + NUL
+    memcpy(&p, "/proc/self/fd/", 14);
+    var n = str_u64_digits(fd, 10, 0, &p + 14);
+    store8(&p + 14 + n, 0);
+    return sys_chdir(&p);
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
+    return syscall(81, fd);                        # x86_64 fchdir
+    #endif
+    #endif
+}
+
+# The fork, exec and wait, on prepared arrays. `flags` is KSpawnFlag bits; the child
+# `fchdir`s to `dirfd` first when it is `>= 0`.
+fn _k_spawn_core(cmd, argv, envp, flags, dirfd): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     # Two i32 fds in an 8-byte local. ⚠ `var fds[8]` is 8 BYTES here — a
     # function-local `var X[N]` is N bytes (roadmap M15a).
@@ -204,7 +252,9 @@ fn _k_spawn_core(cmd, argv, envp, flags): i64 {
                 k_close(nfd);
             }
         }
-        var xr = sys_execve(cmd, argv, envp);
+        var xr: i64 = 0;
+        if (dirfd >= 0) { xr = _k_fchdir(dirfd); }
+        if (xr == 0) { xr = sys_execve(cmd, argv, envp); }
         # Only reachable when execve failed. Report the errno through the pipe;
         # its closure on success is what the parent reads as "it started".
         if (wfd >= 0) {

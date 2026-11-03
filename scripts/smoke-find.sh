@@ -828,6 +828,76 @@ for _i in 1 2 3 4 5 6 7 8; do echo "$_i" > "race/t/a/b/y$_i"; echo "$_i" > "race
 expect_eq "-delete under a mid-walk symlink swap leaves outside/ intact" "8" "$(ls race/outside/b | wc -l | tr -d ' ')"
 expect_eq "-delete under a mid-walk swap removed the moved tree's files" "0" "$(ls race/a.moved/b 2>/dev/null | wc -l | tr -d ' ')"
 
+# --- -execdir, -ok, -okdir (1.8.2) ----------------------------------------
+# Measured against findutils 4.9, 4.10 and 4.11: identical on every case below.
+rm -rf xd; mkdir -p xd/t/a/b; : > xd/t/f; : > xd/t/a/g; : > xd/t/a/b/h
+xd_same() {
+    name=$1; shift
+    _g=0; _go=$(cd xd && find "$@" 2>&1 | sort) || _g=$?
+    _k=0; _ko=$(cd xd && "$BIN" find "$@" 2>&1 | sort) || _k=$?
+    expect_eq "-execdir $name" "$_g|$_go" "$_k|$_ko"
+}
+# shellcheck disable=SC2016
+xd_same "runs in the entry's directory, {} is ./NAME" t -execdir sh -c 'echo "$(basename "$PWD") $1"' sh {} \;
+# shellcheck disable=SC2016
+xd_same "a starting point runs in its directory part" t/a/b -maxdepth 0 -execdir sh -c 'echo "$(basename "$PWD") $1"' sh {} \;
+for _sp in . .. ./t t/ t//; do
+    # shellcheck disable=SC2016
+    xd_same "starting point '$_sp'" "$_sp" -maxdepth 0 -execdir sh -c 'echo "$(basename "$PWD") $1"' sh {} \;
+done
+xd_same "'/' stays '/'"                    / -maxdepth 0 -execdir echo {} \;
+xd_same "{} inside a word"                 t -name f -execdir echo a{}b \;
+xd_same "+ batches per directory"          t -execdir echo {} +
+xd_same "+ after a test"                   t -name '[fgh]' -execdir echo X {} +
+# GNU refuses a PATH that would let the tree choose the command; kriya too, at its usage code.
+for _c in dot trailing relative doubled; do
+    case $_c in
+        dot) _p=".:$PATH" ;; trailing) _p="$PATH:" ;; relative) _p="relbin:$PATH" ;; doubled) _p="$PATH::/bin" ;;
+    esac
+    _g=0; (cd xd && PATH="$_p" find t -maxdepth 0 -execdir echo {} \; >/dev/null 2>&1) || _g=$?
+    _k=0; _ke=$(cd xd && PATH="$_p" "$BIN" find t -maxdepth 0 -execdir echo {} \; 2>&1) || _k=$?
+    expect_eq "-execdir refuses a PATH with a $_c entry (GNU refuses too)" "refused|2" \
+        "$( [ "$_g" -ne 0 ] && echo refused || echo ran)|$_k"
+    case "$_ke" in *"insecure in combination with the -execdir"*) PASS=$((PASS + 1)) ;;
+        *) FAIL=$((FAIL + 1)); echo "FAIL -execdir PATH refusal: GNU's message missing: $_ke" >&2 ;; esac
+done
+# -ok / -okdir: ADR 0002, a prompt is never read from a pipe.
+_k=0; _ke=$(cd xd && printf 'y\n' | "$BIN" find t -name f -ok echo RAN {} \; 2>&1) || _k=$?
+expect_eq "-ok with stdin not a terminal: usage error, nothing runs" "2|kriya find: error: -ok requires stdin to be a terminal" "$_k|$_ke"
+_k=0; (cd xd && "$BIN" find t -name f -okdir echo {} \; < /dev/null >/dev/null 2>&1) || _k=$?
+expect_eq "-okdir with stdin not a terminal: usage error" "2" "$_k"
+_k=0; (cd xd && "$BIN" find t -ok echo {} + >/dev/null 2>&1) || _k=$?
+expect_eq "-ok takes ';' alone, as GNU's ('+' is no terminator)" "2" "$_k"
+if script -qec true /dev/null >/dev/null 2>&1; then
+    # ⚠ A prompt ends in `? `, not a newline, so a declined one runs on into the next: count
+    # occurrences, not lines.
+    _o=$(cd xd && printf 'y\nn\nyes\n' | script -qec "'$BIN' find t -type f -ok echo RAN {} \\;" /dev/null 2>&1 | tr -d '\r' | grep -o '< echo \.\.\. [^>]*> ? ' | wc -l | tr -d ' ')
+    expect_eq "-ok on a terminal prompts once per entry, GNU's '< CMD ... PATH > ? '" "3" "$_o"
+    _o=$(cd xd && printf 'y\nn\nyes\n' | script -qec "'$BIN' find t -type f -ok echo RAN {} \\;" /dev/null 2>&1 | tr -d '\r' | grep -o 'RAN [^ ]*' | wc -l | tr -d ' ')
+    expect_eq "-ok runs exactly the entries answered y/yes" "2" "$_o"
+    # ⚠ What the child READ goes to a file: the terminal echoes everything typed, so SECRET is in
+    # script's transcript whatever the child does.
+    rm -f xd/got
+    (cd xd && printf 'y\nSECRET\n' | timeout 10 script -qec "'$BIN' find t -name f -ok sh -c 'cat > got' \\;" /dev/null >/dev/null 2>&1) || true
+    expect_eq "-ok's child reads /dev/null, not the answers find is reading" "present|0" \
+        "$( [ -e xd/got ] && echo present || echo absent)|$(wc -c < xd/got 2>/dev/null | tr -d ' ')"
+    # shellcheck disable=SC2016
+    _o=$(cd xd && printf 'y\n' | script -qec "'$BIN' find t -name h -okdir sh -c 'echo \"RAN \$(basename \$PWD) \$1\"' sh {} \\;" /dev/null 2>&1 | tr -d '\r' | grep -o 'RAN .*')
+    expect_eq "-okdir runs in the entry's directory" "RAN b ./h" "$_o"
+    _o=$(cd xd && script -qec "'$BIN' find t -name f -ok echo RAN {} \\; ; echo rc=\$?" /dev/null < /dev/null 2>&1 | tr -d '\r' | grep -o 'RAN\|rc=[0-9]*' | tr '\n' ' ')
+    expect_eq "-ok: end of input is no" "rc=0 " "$_o"
+else
+    echo "skip: no usable script(1) -- the -ok terminal cases are not exercised"
+fi
+# ⛔ The walk's directories are CLOEXEC (1.8.2): an -exec child inherited one per level.
+if [ -d /proc/self/fd ]; then
+    # shellcheck disable=SC2016
+    _g=$(cd xd && find t/a/b -name h -exec sh -c 'ls /proc/$$/fd | tr "\n" " "' \;)
+    # shellcheck disable=SC2016
+    _k=$(cd xd && "$BIN" find t/a/b -name h -exec sh -c 'ls /proc/$$/fd | tr "\n" " "' \;)
+    expect_eq "-exec's child inherits no walk descriptor (GNU's set)" "$_g" "$_k"
+fi
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

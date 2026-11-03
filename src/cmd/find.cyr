@@ -41,6 +41,15 @@
 #                   slashed symlink start or a symlink start under -H is refused
 #                   (ADR 0010). Unlinks from the parent's open directory, never by
 #                   path, so a parent swapped for a symlink cannot redirect it.
+#   -execdir CMD... \; / {} +   -exec run in the directory holding the entry,
+#                   `{}` as `./NAME`, `+` batching per directory (GNU, 1.8.2).
+#                   Refused when PATH holds `.`, an empty or a relative entry.
+#   -ok CMD... \;    -exec after asking `< CMD ... PATH > ? ` on stderr; a line
+#                   starting y/Y runs it. ⚠ stdin must be a terminal (ADR 0002),
+#                   where GNU reads the answers from a pipe; the child reads
+#                   /dev/null (GNU closes its stdin).
+#   -okdir CMD... \; -ok, run as -execdir. ⚠ -execdir / -okdir are refused on
+#                   agnos, which has no working directory.
 #
 # Operators (precedence: ! > -a > -o > ,; juxtaposition is implicit -a):
 #   ! EXPR / -not EXPR
@@ -100,6 +109,9 @@ enum FindNode {
     F_N_EXECPLUS  = 33,
     F_N_PRUNE     = 34,
     F_N_DELETE    = 35,
+    F_N_EXECDIR   = 36,    # -execdir CMD ;  (the `+` form is F_N_EXECPLUS, F_XP_DIR set)
+    F_N_OK        = 37,
+    F_N_OKDIR     = 38,
 }
 
 enum FindSign {
@@ -149,6 +161,8 @@ var _f_nest_cap    = 0;    # ...and how many may be: `_f_nest_max`, read once
 var _f_has_delete  = 0;    # -delete is in the expression (ADR 0027)
 var _f_has_prune   = 0;    # ...and so is -prune, which GNU then refuses without an explicit -depth
 var _f_depth_given = 0;    # -depth / -d was WRITTEN, not implied by -delete
+var _f_ok_name     = 0;    # the first -ok / -okdir written: it needs a terminal (ADR 0002)
+var _f_has_execdir = 0;    # -execdir / -okdir: GNU's PATH check, and refused on agnos
 
 # ⛔ HOW DEEP `(` MAY NEST. The parser recurses five calls per parenthesis, about
 # 1 KiB of stack a level (measured: 2,048 levels overflow a 2 MiB stack, 8,000 fit
@@ -435,6 +449,16 @@ fn _f_node_new(kind, a, b, c): i64 {
 # the primary parser's group handling to call parse_or via a state
 # pump.
 
+# `a` then `b`, as a new string (a diagnostic naming the option that was written).
+fn _f_cat(a, b): i64 {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var out = alloc(la + lb + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb + 1);
+    return out;
+}
+
 fn _f_set_err(msg): i64 {
     _f_err = 1;
     _f_err_msg = msg;
@@ -712,12 +736,22 @@ fn _f_parse_primary(): i64 {
         _f_has_delete = 1;
         return _f_node_new(F_N_DELETE, 0, 0, 0);
     }
-    if (streq(t, "-exec") == 1) {
+    # -exec, and since 1.8.2 -execdir, -ok and -okdir, which share its grammar.
+    var xkind: i64 = 0;
+    if (streq(t, "-exec") == 1)         { xkind = F_N_EXEC; }
+    elif (streq(t, "-execdir") == 1)    { xkind = F_N_EXECDIR; }
+    elif (streq(t, "-ok") == 1)         { xkind = F_N_OK; }
+    elif (streq(t, "-okdir") == 1)      { xkind = F_N_OKDIR; }
+    if (xkind != 0) {
         _f_consume();
         # Collect argv tokens until `;` — or until `+`, when the token before it
         # is exactly `{}`: GNU's rule (Savannah bug 66365, findutils 4.10). Any
         # other `+` is an ordinary argument, so `-exec echo {}x +` still wants
-        # its `;`, and `-exec echo + ;` prints a plus.
+        # its `;`, and `-exec echo + ;` prints a plus. ⚠ -ok and -okdir take
+        # `;` alone, as in GNU, where `-ok echo {} +` is a missing terminator.
+        var plus_ok: i64 = 0;
+        if (xkind == F_N_EXEC)    { plus_ok = 1; }
+        if (xkind == F_N_EXECDIR) { plus_ok = 1; }
         var start_pos = _f_pos;
         var found_end: i64 = 0;
         var plus: i64 = 0;
@@ -726,12 +760,14 @@ fn _f_parse_primary(): i64 {
         while (found_end == 0) {
             var tk = _f_tok();
             if (tk == 0) {
-                _f_set_err("-exec missing ';' terminator");
+                _f_set_err(_f_cat(t, " missing ';' terminator"));
                 return 0;
             }
             if (streq(tk, ";") == 1) { found_end = 1; }
             elif (prev_braces == 1) {
-                if (streq(tk, "+") == 1) { found_end = 1; plus = 1; }
+                if (plus_ok == 1) {
+                    if (streq(tk, "+") == 1) { found_end = 1; plus = 1; }
+                }
             }
             if (found_end == 0) {
                 prev_braces = 0;
@@ -745,19 +781,25 @@ fn _f_parse_primary(): i64 {
         var end_pos = _f_pos;
         _f_consume();  # eat the terminator
         if (end_pos == start_pos) {
-            _f_set_err("-exec needs at least one command argument");
+            _f_set_err(_f_cat(t, " needs at least one command argument"));
             return 0;
         }
+        if (xkind == F_N_OK || xkind == F_N_OKDIR) {
+            if (_f_ok_name == 0) { _f_ok_name = t; }
+        }
+        if (xkind == F_N_EXECDIR || xkind == F_N_OKDIR) { _f_has_execdir = 1; }
         if (plus == 1) {
             # ⚠ EVERY token holding `{}` counts, the command's own included:
             # `-exec sh -c 'echo {}' sh {} +` is refused, as in GNU.
             if (brace_count > 1) {
-                _f_set_err("only one instance of {} is supported with -exec ... +");
+                _f_set_err(_f_cat("only one instance of {} is supported with ", _f_cat(t, " ... +")));
                 return 0;
             }
-            return _f_execplus_new(start_pos, end_pos - 1);
+            var xp = _f_execplus_new(start_pos, end_pos - 1);
+            if (xkind == F_N_EXECDIR) { store64(load64(xp + 24) + F_XP_DIR, 1); }
+            return xp;
         }
-        return _f_node_new(F_N_EXEC, start_pos, end_pos, 0);
+        return _f_node_new(xkind, start_pos, end_pos, 0);
     }
 
     _f_set_err("unknown predicate / operator");
@@ -884,6 +926,7 @@ fn _f_has_action(n): i64 {
             var k = load64(cur);
             if (k == F_N_PRINT || k == F_N_PRINT0 || k == F_N_EXEC) { found = 1; more = 0; }
             elif (k == F_N_EXECPLUS || k == F_N_DELETE) { found = 1; more = 0; }
+            elif (k == F_N_EXECDIR || k == F_N_OK || k == F_N_OKDIR) { found = 1; more = 0; }
             elif (k == F_N_NOT) { cur = load64(cur + 8); }
             elif (k == F_N_AND || k == F_N_OR || k == F_N_COMMA) {
                 # The left child by recursion, the right spine by the loop.
@@ -1033,7 +1076,10 @@ fn _f_has_braces(tok): i64 {
 enum FindExecPlus {
     F_XP_AB   = 0;     # the builder
     F_XP_PATH = 8;     # the command, resolved once, when it has a name of its own
-    F_XP_SIZE = 16;
+    F_XP_DIR  = 16;    # 1: `-execdir … +`, a batch per directory, run in it
+    F_XP_DFD  = 24;    # ...the open directory the pending batch runs in, -1 for none
+    F_XP_DKEY = 32;    # ...and which directory that is, so a new one flushes it first
+    F_XP_SIZE = 40;
 }
 
 # A `-exec` node for the `+` form: the command and its initial arguments are
@@ -1060,6 +1106,9 @@ fn _f_execplus_new(lo, hi): i64 {
     var st = alloc(F_XP_SIZE);
     store64(st + F_XP_AB, b);
     store64(st + F_XP_PATH, 0);
+    store64(st + F_XP_DIR, 0);
+    store64(st + F_XP_DFD, 0 - 1);
+    store64(st + F_XP_DKEY, 0);
     return _f_node_new(F_N_EXECPLUS, lo, hi, st);
 }
 
@@ -1110,10 +1159,177 @@ fn _f_execplus_run(st): i64 {
         report_note("find", name, "command not found");
         _f_any_failed = 1;
     } else {
-        _f_exec_outcome(k_spawn_argv(exec_path, argvp, ab_envp(), 0), name, 1);
+        var dfd = 0 - 1;
+        if (load64(st + F_XP_DIR) == 1) { dfd = load64(st + F_XP_DFD); }
+        _f_exec_outcome(k_spawn_argv_in(exec_path, argvp, ab_envp(), 0, dfd), name, 1);
     }
     ab_clear(b);
     return 0;
+}
+
+# `-execdir … +`: the batch is per directory, run in it, as GNU's is. A path from another
+# directory runs the pending batch first. ⚠ The batch holds its OWN descriptor for the
+# directory — a CLOEXEC duplicate of the walk's — since the walk may have closed its one by
+# the time a later entry, or the end of the walk, runs the batch.
+fn _f_execdirplus_add(st, ctx): i64 {
+    var path = load64(ctx + 0);
+    var depth = load64(ctx + 24);
+    var key = _f_start_dir(path);
+    if (load64(st + F_XP_DFD) >= 0) {
+        if (streq(load64(st + F_XP_DKEY), key) == 0) {
+            _f_execplus_run(st);
+            _f_execdirplus_close(st);
+        }
+    }
+    if (load64(st + F_XP_DFD) < 0) {
+        var dfd: i64 = 0;
+        if (depth == 0) { dfd = _f_open_dir(key); }
+        else { dfd = _f_dup_cloexec(load64(ctx + 32)); }
+        if (dfd < 0) {
+            _f_report_path(key, 0 - dfd);
+            _f_any_failed = 1;
+            return 0;
+        }
+        store64(st + F_XP_DFD, dfd);
+        store64(st + F_XP_DKEY, key);
+    }
+    return _f_execplus_add(st, _f_execdir_name(path));
+}
+
+fn _f_execdirplus_close(st): i64 {
+    if (load64(st + F_XP_DFD) >= 0) { fs_close(load64(st + F_XP_DFD)); }
+    store64(st + F_XP_DFD, 0 - 1);
+    return 0;
+}
+
+# The directory `-execdir` runs a starting point in, by GNU's rule: the path's directory part,
+# `.` when it has none (so `..` runs HERE, as `./..`), `/` for `/x`, and `/` for `/` itself.
+# Below a starting point it is the parent's path, which is the same rule.
+fn _f_start_dir(path): i64 {
+    var end = strlen(path);
+    var more: i64 = 1;
+    while (more == 1) {
+        if (end <= 1) { more = 0; }
+        elif (load8(path + end - 1) != 47) { more = 0; }
+        else { end = end - 1; }
+    }
+    if (end == 1) {
+        if (load8(path) == 47) { return "/"; }
+    }
+    var slash: i64 = 0 - 1;
+    var i: i64 = 0;
+    while (i < end) {
+        if (load8(path + i) == 47) { slash = i; }
+        i = i + 1;
+    }
+    if (slash < 0) { return "."; }
+    if (slash == 0) { return "/"; }
+    var d = alloc(slash + 1);
+    memcpy(d, path, slash);
+    store8(d + slash, 0);
+    return d;
+}
+
+# `{}` under -execdir / -okdir, by GNU's rule: `./` and the last component, with ONE trailing
+# slash kept when the starting point had any (`t//` is `./t/`), and `/` for `/`.
+fn _f_execdir_name(path): i64 {
+    var len = strlen(path);
+    var end = len;
+    var more: i64 = 1;
+    while (more == 1) {
+        if (end <= 1) { more = 0; }
+        elif (load8(path + end - 1) != 47) { more = 0; }
+        else { end = end - 1; }
+    }
+    if (end == 1) {
+        if (load8(path) == 47) { return "/"; }
+    }
+    var start: i64 = 0;
+    var i: i64 = 0;
+    while (i < end) {
+        if (load8(path + i) == 47) { start = i + 1; }
+        i = i + 1;
+    }
+    var keep: i64 = 0;
+    if (end < len) { keep = 1; }
+    var n = end - start;
+    var out = alloc(n + 4);
+    store8(out, 46); store8(out + 1, 47);
+    memcpy(out + 2, path + start, n);
+    if (keep == 1) { store8(out + 2 + n, 47); }
+    store8(out + 2 + n + keep, 0);
+    return out;
+}
+
+fn _f_open_dir(dir): i64 {
+    return fs_openat(0 - 100, dir, FS_O_DIRECTORY | FS_O_CLOEXEC, 0);
+}
+
+# A CLOEXEC duplicate (fcntl F_DUPFD_CLOEXEC). ⚠ Not reached on agnos, which refuses -execdir.
+fn _f_dup_cloexec(fd): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return sys_fcntl(fd, 1030, 0);                   # F_DUPFD_CLOEXEC
+    #endif
+}
+
+# -ok / -okdir: GNU's prompt, `< CMD ... PATH > ? ` on stderr, then a whole line from stdin,
+# yes when it starts with y or Y; the end of input is no. ⚠ Only ever on a terminal: ADR 0002
+# refuses -ok before the walk when stdin is not one.
+fn _f_ok_prompt(n, path): i64 {
+    var cmd = load64(_f_argv_flat + load64(n + 8) * 8);
+    k_write( 2, "< ", 2);
+    k_write( 2, cmd, strlen(cmd));
+    k_write( 2, " ... ", 5);
+    k_write( 2, path, strlen(path));
+    k_write( 2, " > ? ", 5);
+    var c[8];
+    var first: i64 = 0 - 1;
+    var reading: i64 = 1;
+    while (reading == 1) {
+        var r = k_read( 0, &c, 1);
+        if (r < 1) { reading = 0; }
+        else {
+            var ch = load8(&c);
+            if (first < 0) { first = ch; }
+            if (ch == 10) { reading = 0; }
+        }
+    }
+    if (first == 121) { return 1; }
+    if (first == 89) { return 1; }
+    return 0;
+}
+
+# -execdir / -ok / -okdir, the `;` forms. The `dir` forms run in the directory holding the
+# entry, which below a starting point is the walk's own open descriptor for it, and `{}` is
+# `./NAME`. The `ok` forms ask first, and their child reads /dev/null, since find reads the
+# answers. ⚠ GNU CLOSES the child's stdin instead, so a first open() in the child silently
+# becomes its stdin (`cat` there says EBADF); /dev/null is what GNU's manual describes.
+fn _f_run_execdir(k, n, ctx): i64 {
+    var path = load64(ctx + 0);
+    var depth = load64(ctx + 24);
+    if (k == F_N_OK || k == F_N_OKDIR) {
+        if (_f_ok_prompt(n, path) == 0) { return 0; }
+    }
+    if (k == F_N_OK) {
+        return _f_run_exec_in(load64(n + 8), load64(n + 16), path, 0 - 1, K_SPAWN_STDIN_NULL);
+    }
+    var flags: i64 = 0;
+    if (k == F_N_OKDIR) { flags = K_SPAWN_STDIN_NULL; }
+    var dfd = load64(ctx + 32);
+    if (depth == 0) {
+        dfd = _f_open_dir(_f_start_dir(path));
+        if (dfd < 0) {
+            _f_report_path(_f_start_dir(path), 0 - dfd);
+            _f_any_failed = 1;
+            return 0;
+        }
+    }
+    var r = _f_run_exec_in(load64(n + 8), load64(n + 16), _f_execdir_name(path), dfd, flags);
+    if (depth == 0) { fs_close(dfd); }
+    return r;
 }
 
 # Add `path` to its batch, running the batch first when the path would not fit.
@@ -1145,7 +1361,11 @@ fn _f_flush_execs(n): i64 {
                 _f_flush_execs(load64(cur + 8));
                 cur = load64(cur + 16);
             } elif (k == F_N_NOT) { cur = load64(cur + 8); }
-            elif (k == F_N_EXECPLUS) { _f_execplus_run(load64(cur + 24)); more = 0; }
+            elif (k == F_N_EXECPLUS) {
+                _f_execplus_run(load64(cur + 24));
+                _f_execdirplus_close(load64(cur + 24));
+                more = 0;
+            }
             else { more = 0; }
         }
     }
@@ -1158,6 +1378,45 @@ fn _f_flush_execs(n): i64 {
 # found and fixed twice.
 # ⚠ Returns 0 when the command is not found. The caller MUST NOT pass that to
 # exec — it reports the failure instead.
+# GNU's -execdir PATH check: under it a command found through a relative PATH entry would run
+# from whichever directory the walk is in, which the tree's owner chooses. An empty entry
+# (a leading, trailing or doubled colon) or `.` is the current directory; any other entry
+# not starting with `/` is relative. Reports GNU's message and answers 1 when refused.
+fn _f_path_insecure(pe): i64 {
+    if (pe == 0) { return 0; }
+    var i: i64 = 0;
+    var seg: i64 = 0;
+    var more: i64 = 1;
+    while (more == 1) {
+        var c = load8(pe + i);
+        if (c == 0 || c == 58) {
+            var n = i - seg;
+            var cwd: i64 = 0;
+            if (n == 0) { cwd = 1; }
+            if (n == 1) {
+                if (load8(pe + seg) == 46) { cwd = 1; }
+            }
+            if (cwd == 1) {
+                _f_report_usage("The current directory is included in the PATH environment variable, which is insecure in combination with the -execdir action of find.  Please remove the current directory from your $PATH (that is, remove \".\", doubled colons, or leading or trailing colons)");  #skip-lint
+                return 1;
+            }
+            if (load8(pe + seg) != 47) {
+                var rel = alloc(n + 1);
+                memcpy(rel, pe + seg, n);
+                store8(rel + n, 0);
+                k_write( 2, "kriya find: The relative path '", 31);
+                k_write( 2, rel, n);
+                k_write( 2, "' is included in the PATH environment variable, which is insecure in combination with the -execdir action of find.  Please remove that entry from $PATH\n", 152);  #skip-lint
+                return 1;
+            }
+            seg = i + 1;
+            if (c == 0) { more = 0; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn _f_resolve_exec(cmd): i64 {
     return fs_resolve_in_path(cmd, _f_path_env);
 }
@@ -1165,6 +1424,13 @@ fn _f_resolve_exec(cmd): i64 {
 # Run -exec for `path`, with argv tokens at argv_flat[arg_lo..arg_hi).
 # Returns 1 (exit 0) / 0 (anything else).
 fn _f_run_exec(arg_lo, arg_hi, path): i64 {
+    return _f_run_exec_in(arg_lo, arg_hi, path, 0 - 1, 0);
+}
+
+# The same, with `{}` standing for `path`, run in the directory `dirfd` when it is `>= 0`, and
+# `flags` for the spawn (1.8.2: -execdir, -ok, -okdir). ⚠ A command with a slash in it is passed
+# as written (`fs_resolve_in_path`), so under -execdir it resolves in the child's new directory.
+fn _f_run_exec_in(arg_lo, arg_hi, path, dirfd, flags): i64 {
     var args = vec_new();
     var i = arg_lo;
     while (i < arg_hi) {
@@ -1258,7 +1524,7 @@ fn _f_run_exec(arg_lo, arg_hi, path): i64 {
     # the child could not report anything. `find rot -name '*.tmp' -exec rm {} \;`
     # on an unwritable directory printed NOTHING and exited 0 while deleting
     # nothing; GNU prints a "Permission denied" line per file.
-    var r = k_spawn_as(exec_path, args, ab_env());
+    var r = k_spawn_in(exec_path, args, ab_env(), dirfd, flags);
     # POSIX: `-exec` is TRUE only when the utility exits 0.
     # ⚠ A command that could not run or was killed also makes find exit 1 — a
     # kriya decision: GNU says so and exits 0 in this `;` form.
@@ -1415,11 +1681,14 @@ fn _f_eval_leaf(n, ctx): i64 {
         return 1;
     }
     if (k == F_N_EXECPLUS) {
-        return _f_execplus_add(load64(n + 24), path);
+        var xst = load64(n + 24);
+        if (load64(xst + F_XP_DIR) == 1) { return _f_execdirplus_add(xst, ctx); }
+        return _f_execplus_add(xst, path);
     }
     if (k == F_N_EXEC) {
         return _f_run_exec(load64(n + 8), load64(n + 16), path);
     }
+    if (k == F_N_EXECDIR || k == F_N_OK || k == F_N_OKDIR) { return _f_run_execdir(k, n, ctx); }
     if (k == F_N_DELETE) { return _f_delete(ctx); }
     return 0;
 }
@@ -1617,7 +1886,9 @@ fn _f_walk(pdfd, rel, path, depth): i64 {
 
 # Walk the entries of the directory `path` (`rel` in `pdfd`), whose stat is `st_buf`.
 fn _f_descend(pdfd, rel, path, depth, st_buf): i64 {
-    var open_flags: i64 = FS_O_DIRECTORY;  # | O_RDONLY
+    # ⛔ FS_O_CLOEXEC since 1.8.2: without it every -exec child received one open descriptor
+    # per directory level (`ls /proc/$$/fd` in the child: `0 1 2 3 4 5`; GNU's: `0 1 2`).
+    var open_flags: i64 = FS_O_DIRECTORY | FS_O_CLOEXEC;  # | O_RDONLY
     if (_f_follows(depth) == 0) { open_flags = open_flags | FS_O_NOFOLLOW; }
     var dfd = fs_openat(pdfd, rel, open_flags, 0);
     if (dfd < 0) {
@@ -1716,6 +1987,8 @@ fn cmd_find(start: i64): i64 {
     _f_has_delete = 0;
     _f_has_prune = 0;
     _f_depth_given = 0;
+    _f_ok_name = 0;
+    _f_has_execdir = 0;
     _f_regextype = F_RX_BRE;
     # Snapshot PATH up-front, once, for every `-exec`. ⚠ It began as a
     # workaround: the stdlib `getenv` read /proc/self/environ into a stack
@@ -1820,6 +2093,25 @@ fn cmd_find(start: i64): i64 {
         }
     }
 
+    # ⛔ ADR 0002: a prompt that reads stdin needs stdin to be a terminal, or it is a usage error
+    # rather than a hang (or, piped, an answer nobody typed). GNU reads the answers from a pipe;
+    # kriya refuses, as `rm -i` does, before anything runs.
+    if (_f_ok_name != 0) {
+        if (k_isatty(0) == 0) {
+            k_write( 2, "kriya find: error: ", 19);
+            k_write( 2, _f_ok_name, strlen(_f_ok_name));
+            k_write( 2, " requires stdin to be a terminal\n", 33);
+            return EXIT_USAGE;
+        }
+    }
+    if (_f_has_execdir == 1) {
+        #ifdef CYRIUS_TARGET_AGNOS
+        _f_report_usage("-execdir and -okdir need a working directory, which agnos does not have");
+        return EXIT_USAGE;
+        #endif
+        if (_f_path_insecure(_f_path_env) == 1) { return EXIT_USAGE; }
+    }
+
     # ⛔ -delete IS A SECOND DELETION PATH, SO IT CARRIES rm's REFUSALS (ADR 0027), all decided
     # before anything is touched. GNU's own rule first: -delete turns on -depth, under which -prune
     # does nothing, so a -prune without an explicit -depth is refused rather than ignored.
@@ -1892,7 +2184,7 @@ fn find_help_declare(): i64 {
       "find [STARTPATH...] [EXPRESSION]");
     help_positional(0, HELP_POS_UNBOUNDED, "STARTPATH,EXPRESSION");
     help_destructive(1);
-    help_operands("Predicates combine with !, -a, -o and GNU's `,` (both sides run; the value is the right one's); parentheses group. The default action is -print. -maxdepth, -mindepth and -depth are global: they apply to the whole walk wherever they are written. -prune stops the walk entering a directory, and has no effect under -depth. -perm takes a mode as chmod does, octal or symbolic: MODE is exactly those bits, -MODE all of them, /MODE any of them. Numbers take +N (more than) and -N (less than). Symlinks are not followed unless -L is given; -H follows only the starting points (ADR 0003). ⚠ -regex/-iregex match the WHOLE PATH as written (leading `./` included) and default to POSIX BRE — GNU defaults to EMACS regex, where an unescaped `+` is a quantifier rather than a literal. Use -regextype posix-extended for `+`/`?`; -regextype emacs is refused by name (ADR 0005). `-exec CMD {} +` runs CMD once per batch of paths, as many as fit in 131,072 bytes, as GNU does; it is always true, and a CMD that fails makes find exit 1. -delete removes the entry (a directory once its entries are gone) and turns on -depth; it carries rm's refusals: -L is refused, a protected starting point refuses the whole run (ADR 0004), and a symlink starting point with a trailing slash, or one -H would follow, is refused (ADR 0010, ADR 0027).");  #skip-lint
+    help_operands("Predicates combine with !, -a, -o and GNU's `,` (both sides run; the value is the right one's); parentheses group. The default action is -print. -maxdepth, -mindepth and -depth are global: they apply to the whole walk wherever they are written. -prune stops the walk entering a directory, and has no effect under -depth. -perm takes a mode as chmod does, octal or symbolic: MODE is exactly those bits, -MODE all of them, /MODE any of them. Numbers take +N (more than) and -N (less than). Symlinks are not followed unless -L is given; -H follows only the starting points (ADR 0003). ⚠ -regex/-iregex match the WHOLE PATH as written (leading `./` included) and default to POSIX BRE — GNU defaults to EMACS regex, where an unescaped `+` is a quantifier rather than a literal. Use -regextype posix-extended for `+`/`?`; -regextype emacs is refused by name (ADR 0005). `-exec CMD {} +` runs CMD once per batch of paths, as many as fit in 131,072 bytes, as GNU does; it is always true, and a CMD that fails makes find exit 1. -delete removes the entry (a directory once its entries are gone) and turns on -depth; it carries rm's refusals: -L is refused, a protected starting point refuses the whole run (ADR 0004), and a symlink starting point with a trailing slash, or one -H would follow, is refused (ADR 0010, ADR 0027). -execdir runs CMD in the directory holding the entry, with {} as ./NAME, `+` batching per directory; it is refused when PATH holds `.`, an empty or a relative entry, as in GNU. -ok and -okdir ask `< CMD ... PATH > ? ` first and run on an answer starting with y; ⚠ stdin must be a terminal (ADR 0002), and the command reads /dev/null.");  #skip-lint
     help_exit(1, "an entry could not be read or deleted, -exec reported failure, -L found a loop, or -delete refused a starting point");  #skip-lint
     help_example("find . -name '*.log'");
     help_example("find /var -type f -size +1M");
@@ -1901,5 +2193,6 @@ fn find_help_declare(): i64 {
     help_example("find . -name '*.tmp' -exec rm {} ';'");
     help_example("find . -name '*.o' -exec rm -- {} +");
     help_example("find . -name '*.tmp' -delete");
+    help_example("find . -name '*.orig' -ok rm {} ';'");
     return 0;
 }
