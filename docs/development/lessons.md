@@ -546,7 +546,12 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   days before kriya's POSIX `grep` shipped needing them. The one chrono proposal upstream listed local
   time as out of scope, because the only consumer it heard from didn't need it. ⭐ **Filing is the
   work. Recording is not.** A gate is filed upstream, with a repro that calls the upstream code
-  directly, in the same change that records it, and the roadmap links the filing. Measuring for the
+  directly, in the same change that records it, and the roadmap links the filing. ⛔ **File it where the code
+  is OWNED, not where kriya meets it.** A folded stdlib (niyama, sankoch, patra, …) is fixed and tagged in
+  its own repo and re-vendored by cyrius byte-identical from the tag, so its issue goes in that repo's
+  `docs/development/issues/`. The first cut of 1.8.1 put the five niyama items in cyrius, because
+  niyama's roadmap says post-fold work "belongs to cyrius stdlib's `lib/niyama.cyr`". That line is stale:
+  niyama 1.1.0 was released from niyama's own repo. Measuring for the
   filings also corrected two of this file's own claims: the GNU operators "matched nothing" (they
   match the escaped character literally), and ADR 0009 was "a v1 decision" (it is permanent). It also
   found that the "~160× slower" search was really quadratic.

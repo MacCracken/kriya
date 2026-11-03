@@ -15,10 +15,12 @@ when its command line could not be read, and CI's lock check had stopped checkin
 gates had ever been filed upstream.** They had been recorded in kriya's roadmap alone for up to six
 months: chrono local time, plus five niyama items. Each pin bump re-verified them, which confirmed they
 were still broken and changed nothing, because cyrius works from its issue files and niyama extends
-"only if a consumer asks". All six are now filed in cyrius `docs/development/issues/`, each with a
-repro that calls the upstream code directly.
+"only if a consumer asks". All six are now filed, each in the repo that owns the code, with a repro that
+calls that code directly. The five niyama items are in niyama's `docs/development/issues/`, since a folded
+stdlib is fixed and tagged in its own repo and cyrius re-vendors it from the tag. chrono, cyrius's own
+stdlib, is in cyrius's.
 
-### Filed upstream (cyrius `docs/development/issues/`, 2026-11-03)
+### Filed upstream (2026-11-03): niyama `docs/development/issues/` for the five regex items, cyrius `docs/development/issues/` for chrono
 
 - **`2026-11-03-niyama-search-quadratic-in-line-length.md`** (High). `niyama_bre_search_at` and
   `niyama_re2_search_at` restart the Pike VM at every start offset, so a search is O(L²) per line. `a.*b`
@@ -42,8 +44,11 @@ repro that calls the upstream code directly.
   `ls -l`, `stat` and `touch -t` are UTC-only (ADR 0007). The one chrono proposal upstream, samay's, had
   listed local time as out of scope. The filing names the API surface a consumer needs, `local → epoch`
   for `touch -t` included.
-- Repros: `repros/2026-11-03-niyama-posix-gaps.cyr` and `repros/2026-11-03-niyama-search-quadratic.cyr`.
-  Both build and reproduce from inside the cyrius repo.
+- Repros: niyama `docs/development/issues/repros/2026-11-03-niyama-posix-gaps.cyr` and
+  `…-niyama-search-quadratic.cyr`. Both build inside niyama against its own `dist/niyama.cyr` (1.1.0,
+  8df7fb3) and reproduce there. ⚠ kriya is not in niyama's CLAUDE.md § Consumers, which is part of why
+  none of this reached niyama before; the quadratic filing says so, and notes that daimon's stated use of
+  re2 ("DoS-safe pattern gates on untrusted input") is exactly what quadratic search breaks.
 
 ### Fixed — ⛔ every utility died of SIGSEGV when the command line could not be read
 

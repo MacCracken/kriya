@@ -214,7 +214,7 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
     `head -c -30000000` peaks at **64 MB against GNU's 33 MB** (measured at 1.6.15) — about twice
     the held bytes. A ring sized to what is held is the fix, and it is the structure `tail` needs.
 - **1.9.2 — niyama regex speed** — ⚠ upstream Cyrius, **filed 2026-11-03**:
-  [`2026-11-03-niyama-search-quadratic-in-line-length.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-niyama-search-quadratic-in-line-length.md). ⛔ It is not a constant factor. `niyama_bre_search_at` and `niyama_re2_search_at` restart the
+  [`2026-11-03-niyama-search-quadratic-in-line-length.md`](https://github.com/MacCracken/niyama/blob/main/docs/development/issues/2026-11-03-niyama-search-quadratic-in-line-length.md). ⛔ It is not a constant factor. `niyama_bre_search_at` and `niyama_re2_search_at` restart the
   Pike VM at every start offset, so search is O(L²) per line. `a.*b` over 8,000 `a`s takes 6.9 s, and
   every doubling quadruples it, in re2 too, whose ADR 0003 promises linear time. Re-measured at 6.7.18
   against GNU grep 3.12 over 15.9 MB: `line.*005` 6,149 ms against 40. `grep 'line.*005'` over a 13.6 MB fixture
@@ -302,9 +302,12 @@ These are open, but their trigger is outside kriya. Each was re-verified at pin 
 ⛔ **An upstream gate that is not FILED upstream is a gate nobody is working on.** Until 1.8.1 every
 upstream gate here was recorded in this file alone. cyrius fixes what is filed, and niyama extends
 "only if a consumer asks". niyama ADR 0009 even closed BRE backreferences because it had "no identified
-bre consumer", twelve days before kriya's POSIX `grep` shipped. **Every upstream gate names its filing**
-in cyrius `docs/development/issues/`, the home niyama ADR 0010 gives post-fold work as well. A new
-upstream gate is filed in the same change that records it here.
+bre consumer", twelve days before kriya's POSIX `grep` shipped. **Every upstream gate names its filing,
+in the repo that owns the code.** cyrius's own stdlib (chrono, the syscall peers, the compiler) is filed
+in cyrius `docs/development/issues/`. A FOLDED stdlib (niyama, sankoch, patra, sigil and the rest) is
+filed in its own repo's `docs/development/issues/`: it is fixed and tagged there, and cyrius re-vendors
+the fold byte-identical from the tag. A new upstream gate is filed in the same change that records it
+here.
 
 ### M10 — Consumer-burn (closes the last v1.0 criterion)
 
@@ -325,11 +328,12 @@ the agnos target on every push; what is gated is the consumer.
 
 ### M11 — niyama regex gaps (upstream)
 
-Regex-surface gaps whose fix belongs to niyama rather than kriya. Post-fold that means cyrius stdlib's
-`lib/niyama.cyr` (niyama ADR 0010), so each is **filed in cyrius `docs/development/issues/`** (2026-11-03),
-with a shared repro, `repros/2026-11-03-niyama-posix-gaps.cyr`, that calls niyama directly.
+Regex-surface gaps whose fix belongs to niyama rather than kriya. niyama is a fold, fixed and tagged in its
+own repo and re-vendored by cyrius from the tag, so each is **filed in niyama `docs/development/issues/`**
+(2026-11-03). They share a repro, `repros/2026-11-03-niyama-posix-gaps.cyr`, that builds inside niyama
+against its own `dist/niyama.cyr`.
 
-- **The GNU BRE operators** — filed: [`2026-11-03-niyama-bre-gnu-operators-read-as-literals.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-niyama-bre-gnu-operators-read-as-literals.md). `\+` `\?` `\|` `\b` `\B` `\w` `\W` `\s` `\S` compile clean in
+- **The GNU BRE operators** — filed: [`2026-11-03-niyama-bre-gnu-operators-read-as-literals.md`](https://github.com/MacCracken/niyama/blob/main/docs/development/issues/2026-11-03-niyama-bre-gnu-operators-read-as-literals.md). `\+` `\?` `\|` `\b` `\B` `\w` `\W` `\s` `\S` compile clean in
   niyama and match the escaped character LITERALLY: `a\+b` matches `a+b` and not `aab`, `\w` matches `w`
   (measured at 6.7.18, calling niyama directly). ⛔ **In `grep` and `find -regex` that is a WRONG ANSWER, not an error**:
   re-measured at pin 6.6.6, at 6.7.9 and at 6.7.18 (niyama 1.1.0, unchanged since 6.7.9) against
@@ -338,14 +342,14 @@ with a shared repro, `repros/2026-11-03-niyama-posix-gaps.cyr`, that calls niyam
   one pattern is a loud exit 2 in one utility and a silent wrong count in another. ⭐ If kriya closes
   it first by refusing in `grep` too, lift `src/cmd/nl.cyr:_nl_rx_unsupported` into a shared lib so
   every utility reads one list — do NOT copy it. Closing it upstream deletes the guard instead.
-- ⛔ **niyama is LEFTMOST-FIRST, where POSIX and GNU are leftmost-LONGEST** — filed: [`2026-11-03-niyama-leftmost-first-not-posix-leftmost-longest.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-niyama-leftmost-first-not-posix-leftmost-longest.md). It is a Pike VM that
+- ⛔ **niyama is LEFTMOST-FIRST, where POSIX and GNU are leftmost-LONGEST** — filed: [`2026-11-03-niyama-leftmost-first-not-posix-leftmost-longest.md`](https://github.com/MacCracken/niyama/blob/main/docs/development/issues/2026-11-03-niyama-leftmost-first-not-posix-leftmost-longest.md). It is a Pike VM that
   stops at the first alternative to match. Measured at 1.6.14: `grep -oE 'a|ab'` prints `a` where
   GNU prints `ab`, and `grep -oE 'x*|b'` loses the `b` because the empty alternative wins first.
   Line selection is right — `-x` and `-w` are built into the pattern (`_gr_compile`), which a Pike
   VM honours on every alternative — so what is open is `-o`'s extent inside ONE pattern. BRE has no alternation, and there the gap needs contrived repetition
   (`a*\(ab\)*`). `smoke-grep.sh` records the `-oE 'a|ab'` case as a gap, and it flips the day niyama
   is leftmost-longest.
-- **niyama reads the POSIX-literal `*` wrongly and `\(^` as a literal** — filed: [`2026-11-03-niyama-bre-posix-literal-star-and-group-anchor.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-niyama-bre-posix-literal-star-and-group-anchor.md). `^*` came out "zero or more
+- **niyama reads the POSIX-literal `*` wrongly and `\(^` as a literal** — filed: [`2026-11-03-niyama-bre-posix-literal-star-and-group-anchor.md`](https://github.com/MacCracken/niyama/blob/main/docs/development/issues/2026-11-03-niyama-bre-posix-literal-star-and-group-anchor.md). `^*` came out "zero or more
   anchors" (every line), and `\(*a\)` was refused. kriya works around it in
   `icase_bre_literal_stars`, for `grep`, `nl -b p` and `find -regex`: escaping exactly
   those stars, and hoisting a `^` that opens the leading groups. ⚠ A `^` opening a LATER group is
@@ -355,7 +359,7 @@ with a shared repro, `repros/2026-11-03-niyama-posix-gaps.cyr`, that calls niyam
   exit 2) where GNU matches. ⛔ **This roadmap said niyama ADR 0009 was "a v1 decision, not a permanent
   one". It is permanent**: "bre — permanently out of scope for v1.0 *and* post-fold", and its first
   reason is "No identified bre consumer with a hard backref need". kriya is that consumer and never
-  said so. Filed as a reconsideration request: [`2026-11-03-niyama-bre-backreferences-have-a-consumer.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-niyama-bre-backreferences-have-a-consumer.md). It also explains why the ADR's "migrate to pcre"
+  said so. Filed as a reconsideration request: [`2026-11-03-niyama-bre-backreferences-have-a-consumer.md`](https://github.com/MacCracken/niyama/blob/main/docs/development/issues/2026-11-03-niyama-bre-backreferences-have-a-consumer.md). It also explains why the ADR's "migrate to pcre"
   path does not fit a POSIX utility (leftmost-first, backtracking, BRE quirks). ⚠ kriya's [ADR 0005](../adr/0005-regex-engine-niyama.md) says backreferences
   "are honored"; that is not true today. The loud refusal is the right failure until niyama lands
   them.
@@ -403,7 +407,8 @@ sleep) — and the trigger
    against the last release's figure: the skip set moves with the environment.
 7. **Re-verify every gate in this file** (§ Gated, and each arc item citing upstream) — a pin bump
    is when an upstream blocker quietly disappears. ⛔ **And check that each upstream gate names its
-   filing** in cyrius `docs/development/issues/` (or `archived/`, once resolved). One that names none
+   filing** in the owning repo's `docs/development/issues/`: cyrius for cyrius's own stdlib, the fold's
+   own repo for a folded one (niyama, sankoch, …), or `archived/` once resolved. One that names none
    is filed in the same change: at 1.8.1 none of the six had ever been filed, so for up to six months
    nothing upstream was moving on any of them.
 
