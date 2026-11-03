@@ -161,7 +161,7 @@ rc=0; "$BIN" ls -- --version >/dev/null 2>&1 || rc=$?
 expect_eq "-- makes --version an operand" "1" "$rc"
 
 # ⛔ `-V` IS NOT A VERSION ALIAS — reserved for `sort -V` (version-string sort,
-# roadmap 1.8.1), exactly as `-h` is reserved per utility. Pinned so nobody
+# roadmap 1.9.1), exactly as `-h` is reserved per utility. Pinned so nobody
 # "helpfully" adds it.
 rc=0; "$BIN" ls -V >/dev/null 2>&1 || rc=$?
 expect_eq "ls -V is a bad option, not version" "2" "$rc"

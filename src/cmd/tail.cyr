@@ -20,7 +20,7 @@
 # newline (for `-n`) or the byte at offset `size - N` (for `-c`). This is
 # the straightforward path that works for both seekable files and pipes.
 # A seek-back-from-end fast path for huge files is a clearly-named
-# follow-up — see deferrals below. (roadmap 1.9.1) The `+N` forms need no
+# follow-up — see deferrals below. (roadmap 1.10.1) The `+N` forms need no
 # buffer at all: they skip, then stream (`_tail_from`).
 #
 # Cap: if input exceeds 16 MiB, the buffer is truncated to the LAST
@@ -29,7 +29,7 @@
 # user sees up to 16 MiB worth of trailing content. A warning to
 # stderr is emitted when truncation happens.
 #
-# Deferred (each a named follow-up): (roadmap 1.8.2)
+# Deferred (each a named follow-up): (roadmap 1.9.2)
 #   ⚠ `-f` itself SHIPPED at v0.5.0 (200ms stat-cadence poll loop, single file).
 #     This block listed it as deferred until v1.2.0 — verified against the built  #skip-lint
 #     binary, which follows a growing file correctly.
@@ -39,7 +39,7 @@
 #   --pid=PID                terminate when PID exits (with -f).
 #   k/M/G suffixes           on N — shared with head; one parser when extracted.
 #   Seek-from-end fast path  for large seekable files (avoids the 16MB cap),
-#                            and a ring buffer for pipes (roadmap 1.9.1).
+#                            and a ring buffer for pipes (roadmap 1.10.1).
 
 var _tail_spec  = 0;
 var _tail_n_idx = 0;
@@ -398,7 +398,7 @@ fn _tail_count(arg, from_p): i64 {
 # the next read.
 #
 # Single-file -f only at first ship. Multi-file -f (with header
-# switching) is a clear follow-up; stdin -f is silently downgraded (roadmap 1.8.2)
+# switching) is a clear follow-up; stdin -f is silently downgraded (roadmap 1.9.2)
 # to non-follow because we cannot seek/stat a pipe meaningfully.
 #
 # Termination: SIGINT (Ctrl-C) exits via the kernel default (exit
@@ -549,7 +549,7 @@ fn cmd_tail(start: i64): i64 {
     # name is followed either way, where GNU's `=descriptor` would stay with the
     # old fd. Accepted rather than refused because scripts pass it routinely and
     # the difference only shows under rotation; `-F` (the retry compound) stays
-    # deferred. (roadmap 1.8.2)
+    # deferred. (roadmap 1.9.2)
     if (follow == 1) {
         var fv = kriya_long_value();
         if (fv != 0) {
@@ -635,7 +635,7 @@ fn cmd_tail(start: i64): i64 {
     # switching). First ship rejects it cleanly; single-file -f works.
     if (follow == 1) {
         if (npos > 1) {
-            k_write( 2, "kriya tail: error: multi-file --follow not yet supported (single file only)\n", 76);  # roadmap 1.8.2  #skip-lint
+            k_write( 2, "kriya tail: error: multi-file --follow not yet supported (single file only)\n", 76);  # roadmap 1.9.2  #skip-lint
             return EXIT_USAGE;
         }
     }

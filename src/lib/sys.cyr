@@ -832,7 +832,7 @@ fn k_fgetxattr(fd, name, value, size): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     #ifdef CYRIUS_ARCH_AARCH64
     # aarch64: 193 is semop there, and the native 10 is unreachable by number — cyrius renumbers
-    # 10 as x86 mprotect. Declined until the stdlib wraps the xattr family (roadmap 1.7.4).
+    # 10 as x86 mprotect. Declined until the stdlib wraps the xattr family (roadmap 1.8.4).
     return 0 - 38;
     #endif
     #ifndef CYRIUS_ARCH_AARCH64
@@ -885,7 +885,7 @@ fn k_lgetxattr(path, name, value, size): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     #ifdef CYRIUS_ARCH_AARCH64
     # aarch64: 192 is semtimedop there, and the native 9 is unreachable by number — cyrius
-    # renumbers 9 as x86 mmap. Declined until the stdlib wraps the xattr family (roadmap 1.7.4).
+    # renumbers 9 as x86 mmap. Declined until the stdlib wraps the xattr family (roadmap 1.8.4).
     return 0 - 38;
     #endif
     #ifndef CYRIUS_ARCH_AARCH64
@@ -901,7 +901,7 @@ fn k_fsetxattr(fd, name, value, size, flags): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     #ifdef CYRIUS_ARCH_AARCH64
     # aarch64: 190 is semget there, and the native 7 is unreachable by number — cyrius renumbers
-    # 7 as x86 poll. Declined until the stdlib wraps the xattr family (roadmap 1.7.4).
+    # 7 as x86 poll. Declined until the stdlib wraps the xattr family (roadmap 1.8.4).
     return 0 - 38;
     #endif
     #ifndef CYRIUS_ARCH_AARCH64
@@ -920,7 +920,7 @@ fn k_setxattr(path, name, value, size, flags): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     #ifdef CYRIUS_ARCH_AARCH64
     # aarch64: 188 is msgrcv there, and the native 5 is unreachable by number — cyrius renumbers
-    # 5 as x86 fstat. Declined until the stdlib wraps the xattr family (roadmap 1.7.4).
+    # 5 as x86 fstat. Declined until the stdlib wraps the xattr family (roadmap 1.8.4).
     return 0 - 38;
     #endif
     #ifndef CYRIUS_ARCH_AARCH64

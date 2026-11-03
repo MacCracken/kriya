@@ -331,7 +331,7 @@ fn main() {
     assert_eq(kriya_parse_count("+"),     0 - 1, "a plus and no digits");
     assert_eq(kriya_parse_count("-3"),    0 - 1, "a minus is the CALLER's to take");
     assert_eq(kriya_parse_count("3 "),    0 - 1, "a trailing blank");
-    assert_eq(kriya_parse_count("3k"),    0 - 1, "a suffix (roadmap 1.8.2)");
+    assert_eq(kriya_parse_count("3k"),    0 - 1, "a suffix (roadmap 1.9.2)");
     assert_eq(kriya_parse_count(""),      0 - 1, "empty");
     assert_eq(kriya_parse_count(" "),     0 - 1, "a blank alone");
     assert_eq(kriya_parse_count(0),       0 - 1, "null");
@@ -1559,7 +1559,7 @@ fn main() {
     assert_eq(_t_perm(",u+w", 0), 0 - 1, "a leading comma");
     assert_eq(_t_perm("u+w,,g+w", 0), 0 - 1, "an empty clause");
     # The umask filters only a clause that named no class — the rule `mkdir -m`
-    # needs (roadmap 1.8.5). ⚠ This is `mode_adjust` alone: `mkdir -m +t` ends at
+    # needs (roadmap 1.9.5). ⚠ This is `mode_adjust` alone: `mkdir -m +t` ends at
     # 1755 under umask 022 because mkdir(2) applies the umask AFTER, to 01777.
     assert_eq(kmode_adjust(0, 0, 0o022, kmode_compile("+w")), 0o200, "umask filters a bare +w");
     assert_eq(kmode_adjust(0, 0, 0o022, kmode_compile("a+w")), 0o222, "...not a+w");

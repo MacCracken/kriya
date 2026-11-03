@@ -41,7 +41,7 @@
 # 1.6.8. 1.6.12 closed the rest of GNU's output surface this file carries —
 # `total N`, POSIX dates (ADR 0020), `-g`/`-o`/`--time-style`/`--dired`/`-T`,
 # all nine quoting styles and the whole colour table — measured byte for byte
-# against GNU in `scripts/smoke-ls.sh`. `+FORMAT` and TIME_STYLE: roadmap 1.8.4.
+# against GNU in `scripts/smoke-ls.sh`. `+FORMAT` and TIME_STYLE: roadmap 1.9.4.
 #
 # ⭐ Owner/group NAMES shipped at 1.5.0 on `src/lib/userdb.cyr`, and `-n` with
 # them — it forces numeric regardless, and in GNU it also IMPLIES `-l`.
@@ -2665,7 +2665,7 @@ fn _ls_resolve_time_style(): i64 {
     if (load8(v) == 43) {
         # `+FORMAT` wants a strftime shared with `date` — refused by name rather
         # than rendered in some other style.
-        k_write( 2, "kriya ls: error: --time-style=+FORMAT is not implemented (roadmap 1.8.4)\n", 73);
+        k_write( 2, "kriya ls: error: --time-style=+FORMAT is not implemented (roadmap 1.9.4)\n", 73);
         return 2;
     }
     k_write( 2, "kriya ls: error: invalid --time-style (want full-iso, long-iso, iso or locale)\n", 79);

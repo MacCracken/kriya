@@ -326,7 +326,7 @@ fn _date_render_spec(buf, pos, c, parts, wkday, epoch): i64 {
         var eb[8];
         store8(&eb, c);
         k_write( 2, &eb, 1);
-        k_write( 2, ": specifier not implemented (see roadmap 1.8.4)\n", 48);
+        k_write( 2, ": specifier not implemented (see roadmap 1.9.4)\n", 48);
         _date_bad = 1;
         return pos;
     }
@@ -467,7 +467,7 @@ fn cmd_date(start: i64): i64 {
                     }
                 }
                 if (ok == 0) {
-                    k_write( 2, "kriya date: error: unknown short option (only -u accepted at v0.7.0; -d/-r/-R/-I deferred)\n", 91);  # roadmap 1.8.3 (-d) and 1.8.4 (-r/-R/-I)  #skip-lint
+                    k_write( 2, "kriya date: error: unknown short option (only -u accepted at v0.7.0; -d/-r/-R/-I deferred)\n", 91);  # roadmap 1.9.3 (-d) and 1.8.4 (-r/-R/-I)  #skip-lint
                     return EXIT_USAGE;
                 }
                 i = i + 1;

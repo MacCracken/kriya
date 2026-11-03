@@ -154,7 +154,7 @@ expect_exit "no FORMAT"  2 "$BIN" printf
 # %f/%e/%g/%a "invalid directives" and claim GNU exits 1 for them. **That is
 # false**: they are VALID floating-point conversions in GNU, which prints
 # `1.500000` and exits 0. kriya refuses them because it has no float formatter
-# yet (roadmap 1.8.0), and refusing loudly beats printing a wrong number. The
+# yet (roadmap 1.9.0), and refusing loudly beats printing a wrong number. The
 # absolutes below are the point.
 #
 # ⚠ `%Z` on the other hand IS invalid in GNU, so that pair is a real parity

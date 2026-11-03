@@ -49,7 +49,7 @@
 # shape: an operand naming a SINGLE-LINK file that an EARLIER operand's
 # walk already counted — `du DIR DIR/f` lists the file where GNU omits
 # it. ⚠ The reverse order matches GNU exactly, because the operand goes
-# into the set at depth 0 and the walk consults it. (roadmap 1.7.3)
+# into the set at depth 0 and the walk consults it. (roadmap 1.8.3)
 #
 # ⛔ CYCLE DETECTION UNDER -L IS NOT PART OF THE DEDUP AND SURVIVES -l.
 # `du -L` over a symlink pointing at an ancestor recursed until the stack
@@ -58,7 +58,7 @@
 # the same tree in milliseconds with `-l` or without it.
 #
 # -x (one-filesystem), --exclude/--exclude-from, --inodes, and -0
-# NUL-terminated output are deferred. (roadmap 1.7.3)
+# NUL-terminated output are deferred. (roadmap 1.8.3)
 
 var _du_summarize:   i64 = 0;
 var _du_all:         i64 = 0;

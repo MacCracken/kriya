@@ -403,22 +403,23 @@ M5 was resumed on 2026-05-17 by user request, pre-boot-burn. All three utilities
 ### Post-1.0 — sequenced in roadmap.md
 
 [`roadmap.md`](roadmap.md) is **open work only**, forward-facing; what shipped is in `CHANGELOG.md`
-and the version entries above. The 1.6.x repair arc closed at 1.6.17; as of then it sequences three
-independent arcs, every item in its own release slot:
+and the version entries above. It sequences three independent arcs, every item in its own release
+slot. They were renumbered after 1.8.1 to continue from 1.8.2: the old 1.7.2–1.7.4 are 1.8.2–1.8.4,
+1.8.x is 1.9.x, and 1.9.x is 1.10.x.
 
 | Arc | Theme | Next up |
 |---|---|---|
-| **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | the 1.7.2-labelled slot — destructive and parallel (ships under the next free number) |
-| **1.8.x** | Parsers & numerics | the 1.8.0-labelled slot — floats |
-| **1.9.x** | Performance | 1.9.0 — `wc -c` fast path |
+| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | 1.8.2 — destructive and parallel |
+| **1.9.x** | Parsers & numerics | 1.9.0 — floats |
+| **1.10.x** | Performance | 1.10.0 — `wc -c` fast path |
 
 **Gated, off the sequence:** M10 consumer-burn (the AGNOS boot-burn — a parallel signal that may
 resequence everything above), M11 niyama regex gaps (the GNU BRE operators, leftmost-longest, the
 literal `*`, and BRE backreferences), and upstream chrono tzfile (local time in `date`, `ls -l`, `stat`
 and `touch -t`). ⭐ **All upstream gates filed at 1.8.1**, niyama's five in niyama and chrono in cyrius, the
-niyama search speed (roadmap 1.9.2) included; until then none had been. ⚠ Re-verified at 1.6.11: the
+niyama search speed (roadmap 1.10.2) included; until then none had been. ⚠ Re-verified at 1.6.11: the
 octal-literal and `*at()` proposals M11 used to carry both landed upstream in June (cyrius 6.0.62
-and 6.1.3); the octal sweep shipped at 1.6.16 and the `*at()` sweep is the 1.7.4-labelled roadmap slot (its last upstream gate, the xattr / `statx` / `getrlimit` wrappers, cleared at cyrius 6.6.12); M14's `getenv` gate cleared at 6.5.36 (1.6.16);
+and 6.1.3); the octal sweep shipped at 1.6.16 and the `*at()` sweep is roadmap 1.8.4 (its last upstream gate, the xattr / `statx` / `getrlimit` wrappers, cleared at cyrius 6.6.12); M14's `getenv` gate cleared at 6.5.36 (1.6.16);
 and M16's agnos build is done, leaving its consumer to M10.
 
 **Standing:** M15, the compiler watchlist in [`lessons.md`](lessons.md) — never closes; re-run its

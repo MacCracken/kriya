@@ -170,5 +170,5 @@ Not into a cleverer aggregate. The measurements point elsewhere:
 - **`st_dev`/`st_ino` identity for protected paths**, which would close the `/proc/self/root`,
   bind-mount and symlinked-prefix families at once — and which has to answer to ADR 0003 before it
   can answer to this note.
-- **`find -delete` and `find -exec rm`**, already named at roadmap 1.7.2, which the table above shows
+- **`find -delete` and `find -exec rm`**, already named at roadmap 1.8.2, which the table above shows
   is the *more* destructive route and currently has no guard at all.

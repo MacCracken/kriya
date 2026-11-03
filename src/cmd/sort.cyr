@@ -29,10 +29,10 @@
 # Memory cap: a single 256 MiB input buffer (`_SORT_INPUT_CAP`). If
 # the input exceeds the cap, a stderr warning is emitted and the
 # input is truncated to the cap. **External-sort fallback for files
-# larger than this is a clear follow-up**; for typical script use, (roadmap 1.8.2)
+# larger than this is a clear follow-up**; for typical script use, (roadmap 1.9.2)
 # 256 MiB covers the vast majority of cases.
 #
-# Deferred (each a named follow-up): (roadmap 1.8.1 / 1.8.2)
+# Deferred (each a named follow-up): (roadmap 1.9.1 / 1.9.2)
 #   -h / --human-numeric-sort    K/M/G suffix-aware numeric sort.
 #   -V / --version-sort          natural-version-string ordering.
 #   -g / --general-numeric-sort  full strtod-style numeric (scientific).
@@ -96,7 +96,7 @@ fn sort_help_declare(): i64 {
       "sort [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_destructive(1);
-    help_operands("⚠ Sorts in memory with a 256 MiB cap; an external-sort fallback is a named follow-up.");  # roadmap 1.8.2  #skip-lint
+    help_operands("⚠ Sorts in memory with a 256 MiB cap; an external-sort fallback is a named follow-up.");  # roadmap 1.9.2  #skip-lint
     help_exit(1, "-c found the input unsorted, or a file could not be read");
     help_example("sort names.txt");
     help_example("sort -n -r nums");
@@ -660,11 +660,11 @@ fn _so_parse_key(spec, end_p): i64 {
     }
     if (c != 0) {
         if (c == 46) {
-            report_note("sort", spec, "a character offset in a key is not supported yet (roadmap 1.8.1)");  #skip-lint
+            report_note("sort", spec, "a character offset in a key is not supported yet (roadmap 1.9.1)");  #skip-lint
             return 0 - 1;
         }
         if (_so_is_key_letter(c) == 1) {
-            report_note("sort", spec, "a key's own ordering options are not supported yet; -n -k2,2 is -k2,2n (roadmap 1.8.1)");  #skip-lint
+            report_note("sort", spec, "a key's own ordering options are not supported yet; -n -k2,2 is -k2,2n (roadmap 1.9.1)");  #skip-lint
             return 0 - 1;
         }
         report_note("sort", spec, "stray character in field spec");
@@ -769,7 +769,7 @@ fn cmd_sort(start: i64): i64 {
         # `-k2r`, `-k2,2.1` and `-k 2,-1` lost their `r`, `.1` and `-1` the same
         # way. `_so_parse_key` reads the whole spec, and what kriya cannot honour
         # yet — a key's own ordering letters, character offsets — it REFUSES, the
-        # rule the range above already followed (roadmap 1.8.1).
+        # rule the range above already followed (roadmap 1.9.1).
         var kend: i64 = 0;
         var v = _so_parse_key(k_arg, &kend);
         if (v < 0) { return EXIT_USAGE; }
@@ -822,7 +822,7 @@ fn cmd_sort(start: i64): i64 {
     }
 
     if (load64(&overflow_box) == 1) {
-        k_write( 2, "kriya sort: warning: input exceeds 256 MiB; external-sort fallback deferred — truncating\n", 91);  # roadmap 1.8.2  #skip-lint
+        k_write( 2, "kriya sort: warning: input exceeds 256 MiB; external-sort fallback deferred — truncating\n", 91);  # roadmap 1.9.2  #skip-lint
     }
 
     var records = _so_build_records(buf, have, term_byte);

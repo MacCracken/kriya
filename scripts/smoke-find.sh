@@ -673,7 +673,7 @@ f17_err "-H: an unsearchable starting point is not"    -H r17/t/lin
 chmod 755 r17/locked
 # ⚠ A readable directory that cannot be searched (chmod 600): the listing is
 # GNU's; the ERRORS are not — GNU stats only what a test needs (`d_type`), so it
-# reports the subdirectory alone where kriya reports every entry (roadmap 1.9.6).
+# reports the subdirectory alone where kriya reports every entry (roadmap 1.10.6).
 mkdir -p r17/dnx/in && : > r17/dnx/q && chmod 600 r17/dnx
 f17_same "an unsearchable directory's entries are listed" r17/dnx
 chmod 755 r17/dnx

@@ -838,7 +838,7 @@ var _kriya_help_tok = 0;
 #
 # ⚠ `-V` is NOT a version alias, for the same reason `-h` is not a help alias
 # (ADR 0002). GNU gives `sort -V` to version-STRING SORT, and kriya's `sort`
-# header reserves it for exactly that (roadmap 1.8.1) — so claiming `-V` here
+# header reserves it for exactly that (roadmap 1.9.1) — so claiming `-V` here
 # would either collide on arrival or force `sort` to be the one utility where it
 # means something else. A short letter that means one thing on 37 utilities and
 # something else on one is worse than a short letter that never means it.
@@ -1514,7 +1514,7 @@ fn kriya_parse_duration_ms(s): i64 {
 # digit, value >= 010000 (4096).
 #
 # Symbolic forms (`u+rwx`, `g-w`, …) are refused, exit 2, where GNU's `mkdir
-# -m` takes them (roadmap 1.8.5).
+# -m` takes them (roadmap 1.9.5).
 fn kriya_parse_octal_mode(s): i64 {
     if (s == 0) { return 0 - 1; }
     if (load8(s) == 0) { return 0 - 1; }

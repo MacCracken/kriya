@@ -5,7 +5,7 @@
 #                        directories are not an error.
 #   -m / --mode MODE     set the mode of the named directory (final
 #                        component only, per POSIX). Octal only;
-#                        symbolic forms (`u+rwx`) are refused (roadmap 1.8.5).
+#                        symbolic forms (`u+rwx`) are refused (roadmap 1.9.5).
 #   -v / --verbose       print a line for each created directory.
 #
 # Mode handling: sys_mkdir is always called with 0777 so the kernel's

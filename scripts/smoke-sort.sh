@@ -232,7 +232,7 @@ gs "sort -c on a tie"    tie2 -c -n
 # 2 as TEXT at exit 0, and `-k2,2.1`, `-k 2,-1` and `-k 2,2x` lost their tails.
 # Malformed specs are refused in GNU's words; what GNU accepts and kriya cannot
 # honour yet — a key's own letters, a character offset — is refused by name
-# (roadmap 1.8.1), never read as something else.
+# (roadmap 1.9.1), never read as something else.
 for _k in "0" "2,0" "-1" "2,-1" "1x" "2,1x" "" "+1" " 1" "2,+1" "99999999999999999999" \
           "2,99999999999999999999" "18446744073709551617"; do
     gs "sort -k '$_k'" key3.txt -t: -k "$_k"
@@ -242,7 +242,7 @@ for _k in "2n" "2,2n" "2r" "2b" "2.1" "2,2.1" "1.2,3"; do
 done
 err=$("$BIN" sort -t: -k 2n key3.txt 2>&1 >/dev/null || true)
 case "$err" in
-    *"roadmap 1.8.1"*) PASS=$((PASS + 1)) ;;
+    *"roadmap 1.9.1"*) PASS=$((PASS + 1)) ;;
     *) FAIL=$((FAIL + 1)); printf "FAIL -k2n refusal names the slot:\ngot: '%s'\n" "$err" >&2 ;;
 esac
 # ⭐ The one-key case has an exact spelling today: a key with no letters of its

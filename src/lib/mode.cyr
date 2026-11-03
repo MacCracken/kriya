@@ -8,7 +8,7 @@
 # ⭐ ONE PARSER, SEVERAL CALLERS, AND EACH SUPPLIES ITS OWN START AND UMASK. `find
 # -perm` applies the changes to 0 with a umask of 0 (1.7.1); `mkdir -m` will apply
 # them to 0777 under the process umask, which is where "a clause with no u/g/o/a is
-# filtered through the umask" comes from (roadmap 1.8.5). The rule lives in
+# filtered through the umask" comes from (roadmap 1.9.5). The rule lives in
 # `kmode_adjust`, so neither caller re-derives it.
 #
 # ⛔ AN ALGORITHM, SO THE SOURCE IS THE SPECIFICATION. Three rules in it are easy to

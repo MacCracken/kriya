@@ -91,6 +91,6 @@ Every M1 utility is bounded: it either does one syscall and returns (`true`, `fa
 
 - **SIGCHLD reaping** — `find -exec` and `xargs` are parents, but each waits for its one child
   before starting the next, so there is nothing to reap asynchronously. When `xargs -P` lands
-  (roadmap 1.7.2), it gets its own SIGCHLD note.
+  (roadmap 1.8.2), it gets its own SIGCHLD note.
 - **Signal masking around `*at()` syscalls** — POSIX guarantees these are atomic with respect to signals; no masking needed. If a future utility nests `*at()` calls in a way that requires atomic windows, that's its own arch note, not a global policy.
 - **Real-time signals (SIGRTMIN..SIGRTMAX)** — not used by kriya.

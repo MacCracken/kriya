@@ -20,7 +20,7 @@ unset QUOTING_STYLE
 # (ADR 0011's reasoning), so the oracle must not either.
 unset POSIXLY_CORRECT
 # ⛔ ...and TIME_STYLE, LS_BLOCK_SIZE and BLOCK_SIZE, which GNU reads for `-l`'s
-# date and sizes and kriya does not (TIME_STYLE is roadmap 1.8.4).
+# date and sizes and kriya does not (TIME_STYLE is roadmap 1.9.4).
 unset TIME_STYLE LS_BLOCK_SIZE BLOCK_SIZE
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -940,7 +940,7 @@ l612 "--full-time implies -l"                    "" --full-time old recent futur
 l612 "--time-style is inert without -l"          "" -1 --time-style=bogus
 expect_exit "-l --time-style=bogus is a usage error" 2 "$BIN" ls -l --time-style=bogus
 expect_exit "...and GNU agrees"                      2 ls -l --time-style=bogus
-# ⚠ `+FORMAT` IS REFUSED, NOT IGNORED — roadmap 1.8.4. GNU renders it; a silent
+# ⚠ `+FORMAT` IS REFUSED, NOT IGNORED — roadmap 1.9.4. GNU renders it; a silent
 # fallback to the default form would print a date the caller did not ask for.
 expect_exit "--time-style=+FORMAT is refused for now" 2 "$BIN" ls -l --time-style=+%Y
 # ⛔ `-g` AND `-o` ARE STICKY and ARE format members: each implies long, and a

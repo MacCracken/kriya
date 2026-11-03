@@ -14,13 +14,13 @@
 #                          of FIRST and LAST text widths (sign byte
 #                          counted; pad goes after sign).
 #   -f / --format FMT      printf-style format. DEFERRED at v0.7.0
-#                          behind the shared printf float follow-up (roadmap 1.8.0)
+#                          behind the shared printf float follow-up (roadmap 1.9.0)
 #                          (kriya printf doesn't ship %e/%f/%g yet).
 #                          Passing -f errors with a clear usage
 #                          message pointing at the deferred item.  #skip-lint
 #
 # Integer only at v0.7.0. GNU's float behaviour (`seq 0.1 0.1 0.5`)
-# defers behind the same printf float follow-up. (roadmap 1.8.0)
+# defers behind the same printf float follow-up. (roadmap 1.9.0)
 #
 # Empty output is not an error: if direction-of-incr disagrees with
 # direction from FIRST to LAST, exit 0 with no bytes written.
@@ -198,7 +198,7 @@ fn _seq_init_spec(): i64 {
     var s = flags_new();
     flags_add_str(s,  115, "separator", 0, "string between numbers (default newline)");
     flags_add_bool(s, 119, "equal-width", 0, "pad with leading zeroes to equal width");
-    flags_add_str(s,  102, "format",      0, "printf-style format (deferred, roadmap 1.8.0)");
+    flags_add_str(s,  102, "format",      0, "printf-style format (deferred, roadmap 1.9.0)");
     _seq_spec = s;
     return 0;
 }
@@ -284,10 +284,10 @@ fn cmd_seq(start: i64): i64 {
                             continue;
                         }
                     }
-                    # --format / --format=VAL  (deferred) (roadmap 1.8.0)
+                    # --format / --format=VAL  (deferred) (roadmap 1.9.0)
                     if (name_len == 6) {
                         if (_seq_bytes_eq(tok + 2, "format", 6) == 1) {
-                            k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 85);  # roadmap 1.8.0  #skip-lint
+                            k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 85);  # roadmap 1.9.0  #skip-lint
                             return EXIT_USAGE;
                         }
                     }
@@ -339,7 +339,7 @@ fn cmd_seq(start: i64): i64 {
                                 loop = 0;
                             } else {
                                 if (ch == 102) {      # -f
-                                    k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 85);  # roadmap 1.8.0  #skip-lint
+                                    k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 85);  # roadmap 1.9.0  #skip-lint
                                     return EXIT_USAGE;
                                 }
                                 k_write( 2, "kriya seq: error: unknown option\n", 33);

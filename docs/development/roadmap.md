@@ -13,7 +13,7 @@
 
 | Section | Answers | Use it when |
 |---|---|---|
-| **Arcs** (1.7.x → 1.9.x) | *What ships next?* | Picking up work |
+| **Arcs** (1.8.x → 1.10.x) | *What ships next?* | Picking up work |
 | **Non-goals** | *Why will this never ship?* | Before re-adding something that looks missing |
 | **Gated** | *Why isn't this moving?* | Asking why an item is not in an arc |
 | **Standing** | *What must I re-check every time?* | Bumping the toolchain pin |
@@ -36,23 +36,28 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | — | the **1.7.2**-labelled slot — destructive and parallel (ships under the next free number) |
-| **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | the **1.8.0**-labelled slot — floats |
-| **1.9.x** | Performance | niyama regex speed (upstream) | **1.9.0** — `wc -c` fast path |
+| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.2** — destructive and parallel |
+| **1.9.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.9.0** — floats |
+| **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
 No arc depends on another; they can be resequenced by consumer demand, and the M10 boot-burn
 (§ Gated) is the signal most likely to do it. ⚠ Every arc is **new capability**: it changes what
 kriya *does*, so expect an ADR and GNU-comparison work per item.
 
+> **Renumbered 2026-11-03, after 1.8.1.** Versions 1.7.2–1.8.1 shipped out of plan (aarch64 ABI fixes
+> and three cyrius pin moves), so every open slot moved up one minor to continue from 1.8.2: the old
+> **1.7.2–1.7.4 are 1.8.2–1.8.4**, the old **1.8.0–1.8.5 are 1.9.0–1.9.5**, and the old **1.9.0–1.9.6
+> are 1.10.0–1.10.6**. A `CHANGELOG.md` entry from before then cites the old number.
+
 ---
 
-## 1.7.x — Traversal, exec, filesystem reporting & syscall portability
+## 1.8.x — Traversal, exec, filesystem reporting & syscall portability
 
 Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command-line builder
 (`src/lib/argbatch.cyr`), which counts as GNU's `buildcmd` does
 ([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
 
-- **1.7.2 — Destructive and parallel.** ⛔ `find -delete` **must inherit the
+- **1.8.2 — Destructive and parallel.** ⛔ `find -delete` **must inherit the
   [ADR-0004](../adr/0004-rm-refuses-root.md) `/` refusal and the
   [ADR-0010](../adr/0010-rm-refuses-a-trailing-slash-symlink-operand.md) trailing-slash-symlink
   refusal** — a second deletion path that does not is a hole in both. `xargs -P N` (job-table
@@ -64,7 +69,7 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
     GNU refuses `{}` in the command name for. Not taken today; measured at 1.7.0.
   - **GNU `xargs`'s other inputs**: `-a FILE` (the child then keeps stdin), `-d DELIM`, `-E STR`
     and `-o`. Refused today, as unknown options.
-- **1.7.3 — Usage reporting.** `du -x` (one-filesystem), `--exclude` / `--exclude-from`,
+- **1.8.3 — Usage reporting.** `du -x` (one-filesystem), `--exclude` / `--exclude-from`,
   `--inodes` and `-0`; `df -t TYPE` (POSIX-required); `env -S` split-string and `-C DIR`.
   - **The sparse inode set.** GNU's device-inode set costs about **one bit per counted file** —
     200,000 files measured at 20 KB, `/usr`'s 204,110 at 36 KB — where `fs_inoset_*` is a
@@ -73,46 +78,24 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
     4 KiB `getdents64` buffer per directory and a joined path per entry and frees neither, so
     `kriya du -s /usr` peaks at **68 MB against GNU's 7.7 MB** with dedup switched off entirely.
     Measure it in the same pass.
-> ⚠ **Slot labels are plan names.** 1.7.2 shipped out of plan (2026-09-28): the aarch64
-> MISROUTING half of 1.7.4 below; 1.7.3 too (2026-09-30): its two aarch64 ABI defects (open flags,
-> `struct stat` layout); 1.7.4 too (2026-11-03): the pin move to cyrius 6.6.20, carrying
-> `k_isatty`'s buffer from the 1.7.4 slot below; and 1.8.0 (2026-11-03): the pin move to cyrius
-> 6.7.9, ahead of every open slot in this arc, and 1.8.1 (2026-11-03): the pin move to 6.7.18. The
-> slots here ship under the next free numbers.
-
-- **1.7.4 — Raw syscalls to stdlib wrappers.** ⭐ **The misrouting half SHIPPED in 1.7.2**: every
-  raw number that ran a DIFFERENT call on aarch64 (24 sites — `access` 21 was epoll_ctl, `fchown`
-  93 was `exit`, …) now calls the stdlib wrapper or names the aarch64 number under
-  `#ifdef CYRIUS_ARCH_AARCH64`; `tests/kriya-syscalls.tcyr` pins it. ⭐ **The two aarch64 defects
-  that were not routing SHIPPED in 1.7.3** (the open-flag values and the `struct stat` layout). ⭐ **`k_isatty`'s
-  16-byte `TCGETS` buffer SHIPPED in 1.7.4**, with the pin move (its `16` is `sys_ioctl` now). What
-  remains here is the readability sweep of the numbers cyrius DOES renumber, and the aarch64 xattr
-  declines: native aarch64 `fchown` 55, `setxattr` 5, `fsetxattr` 7, `lgetxattr` 9, `fgetxattr` 10
-  cannot be issued by number from cyrius (each is a number cyrius renumbers as an x86 call), so
-  1.7.2 declines the four xattr calls there. ⭐ **That gate is gone — re-verified at pin 6.7.18:**
-  the stdlib has wrapped the family since cyrius **6.6.12** (`sys_{,l,f}{get,set,list,remove}xattr`,
-  `sys_fchown`, `sys_statx`, `sys_getrlimit`), the aarch64 peer issuing the renumbered ones through
-  a private `1000+N` band (`SYS_GETXATTR = 1008`, `SYS_FCHOWN = 1055`, `SYS_STATX = 1291`) and the
-  agnos peer answering -38. Converting the sites is in-tree work now, and it turns
-  `tests/kriya-syscalls.tcyr`'s two aarch64 `-38` assertions into real answers. The original entry follows. kriya issues **44 distinct raw `syscall(N, …)`
-  numbers across 54 sites** (code lines, counted at 1.7.0), in x86-64 Linux numbering; 17 of those
-  sites are the `*at()` family (`openat` 257, `mkdirat` 258, `newfstatat` 262,
-  `unlinkat` 263, `utimensat` 280, …). ⭐ **The wrappers exist**: the stdlib has exposed
-  `sys_openat`, `sys_mkdirat`, `sys_fstatat`, `sys_unlinkat`, `sys_linkat`, `sys_renameat`,
-  `sys_fchmodat`, `sys_fchownat`, `sys_utimensat` and `sys_execveat` since cyrius **6.1.3**.
-  Converting the sites removes the magic numbers and puts the per-target numbering where it
-  belongs, in one reviewable pass.
-  - ⚠ **Measure before scheduling it as a portability fix.** cyrius renumbers raw x86-64 syscalls
-    per target (`ESYSXLAT`, `src/backend/aarch64/emit.cyr` in the cyrius repo), and its
-    aarch64-Linux arm already maps at least `write` 1→64, `exit` 60→93, `fcntl` 72→25,
-    `getdents64` 217→61 and `unlinkat` 263→35; 6.6.6 added `statfs` 137. `openat` and `mkdirat`
-    were not checked. A `qemu-aarch64` run of the smoke suite says whether an aarch64 build is
-    broken today or only hard to read.
-  - ⭐ **The four that had no wrapper have one since 6.6.12**: `statx` (332; **291** on aarch64)
-    for `stat %w`/`%W`, `getxattr` (191; **8**) for `ls`'s `ca` colour and `lgetxattr` (192; **9**)
-    for `stat %C` — `k_statx` / `k_getxattr` / `k_lgetxattr` in `src/lib/sys.cyr` — and
-    `getrlimit` (97; **163**) for ARG_MAX in `src/lib/argbatch.cyr`. Convert them in the sweep. The xattr and `statx` arms already decline with
-    `-38` on agnos, and `getrlimit` is not called there.
+- **1.8.4 — Raw syscalls to stdlib wrappers.** **43 raw `syscall(N, …)` lines** remain in `src/`
+  (37 distinct numbers, agnos arms included; counted at 1.8.1). None misroutes on aarch64 any
+  more, since 1.7.2 converted the 24 that did, and `tests/kriya-syscalls.tcyr` pins that. What
+  is left is two kinds of work:
+  - **The aarch64 xattr declines, now unblocked.** Native aarch64 `fchown` 55, `setxattr` 5,
+    `fsetxattr` 7, `lgetxattr` 9 and `fgetxattr` 10 are numbers cyrius renumbers as x86 calls, so
+    1.7.2 made `k_fgetxattr`, `k_lgetxattr`, `k_setxattr` and `k_fsetxattr` return -38 there. Since
+    cyrius **6.6.12** the stdlib wraps the whole family (`sys_{,l,f}{get,set,list,remove}xattr`,
+    `sys_fchown`, `sys_statx`, `sys_getrlimit`; re-verified at 6.7.18). The aarch64 peer issues the
+    renumbered ones through a private `1000+N` band (`SYS_GETXATTR = 1008`, `SYS_FCHOWN = 1055`,
+    `SYS_STATX = 1291`), and the agnos peer answers -38. Converting `k_*xattr`, `k_fchown`,
+    `k_statx` (`stat %w`/`%W`), `k_getxattr` (`ls`'s `ca` colour), `k_lgetxattr` (`stat %C`) and
+    `argbatch`'s `getrlimit` ends the declines, and turns `tests/kriya-syscalls.tcyr`'s two aarch64
+    `-38` assertions into real answers.
+  - **The readability sweep**: the numbers cyrius DOES renumber, `*at()` family included
+    (`openat` 257, `newfstatat` 262, `unlinkat` 263, `utimensat` 280, …). The stdlib has wrapped them
+    since **6.1.3** (`sys_openat`, `sys_fstatat`, `sys_unlinkat`, `sys_utimensat`, …), and
+    converting them puts the per-target numbering where it belongs, in one reviewable pass.
   - ⚠ **agnos keeps its own arms.** The agnos syscall peer wraps only `sys_fchownat` of this set
     (plus the `stat` family), so kriya's `CYRIUS_TARGET_AGNOS` branches in `src/lib/sys.cyr` and
     `src/lib/fs.cyr` stay; the sweep is the Linux side.
@@ -127,16 +110,13 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 
 ---
 
-## 1.8.x — Parsers & numerics
+## 1.9.x — Parsers & numerics
 
-**Enablers:** a float-formatting story (1.8.0) and a byte-suffix parser in `src/lib/args.cyr`
-(1.8.2).
+**Enablers:** a float-formatting story (1.9.0) and a byte-suffix parser in `src/lib/args.cyr`
+(1.9.2).
 
-> ⚠ **Versions 1.8.0 and 1.8.1 shipped out of plan** (2026-11-03) as the cyrius 6.7.9 and 6.7.18 pin
-> moves. The labels below are plan names, as in 1.7.x, and the floats slot ships under the next free
-> number.
 
-- **1.8.0 — Floats.** `printf %e` / `%E` / `%f` / `%F` / `%g` / `%G` / `%a` / `%A` — refused by name
+- **1.9.0 — Floats.** `printf %e` / `%E` / `%f` / `%F` / `%g` / `%G` / `%a` / `%A` — refused by name
   today — plus positional `%N$s`. `seq -f FORMAT` rides directly on it.
   - ⚠ **`%N$s` is GNU 9.11's, not 9.4's** (measured at 1.6.17: 9.4 says *invalid conversion
     specification*, as kriya does), so the container's GNU cannot be its oracle.
@@ -147,7 +127,7 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
     `-mtime -0.5`, `-mmin -1.5` and `-mtime 1e1` all run there, and kriya refuses them as bad
     arguments. The float READER `printf %f` needs for its arguments is the one to use; measured at
     1.7.1.
-- **1.8.1 — Sort keys.**
+- **1.9.1 — Sort keys.**
   - ⛔ **First, a wrong answer: a repeated `-k` keeps only the LAST key.** `sort -k2,2 -k1,1` sorts
     exactly as `sort -k1,1` does and exits 0, where GNU sorts by field 2 then field 1 (measured at
     1.6.11). Collect every `-k` with `kriya_argv_collect`, the collector `grep -e` already uses — or,
@@ -155,14 +135,14 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
   - Key TYPES: `-h` (human-numeric), `-V` (version), `-g` (general-numeric), `-M` (month),
     `-d` (dictionary), `-i` (ignore-nonprinting), `-R` (shuffle), `-m` (merge pre-sorted).
   - Character offsets (`-k2.3,4.5`) and per-key option suffixes (`-k2,2n`).
-- **1.8.2 — Size limits and follow modes.** The byte-suffix parser (`5K`, `1M`, `1G`) serving
+- **1.9.2 — Size limits and follow modes.** The byte-suffix parser (`5K`, `1M`, `1G`) serving
   `head -c 1K`, `tail -c 1K` and `sort -S`; `tail -F` (follow by name, with retry), multi-file `-f`
   (refused today, not merely absent) and `--pid=PID`; `sort`'s external-sort fallback above the
   256 MiB cap, with `-T DIR`.
-- **1.8.3 — Date input.** `date -d STR` and `touch -d STR`, free-form. ⚠ Genuinely large — GNU's
+- **1.9.3 — Date input.** `date -d STR` and `touch -d STR`, free-form. ⚠ Genuinely large — GNU's
   parser is notorious, and chrono's `dt_strptime` needs a format string, so it does not substitute.
   Scope it to a documented subset (ISO 8601, `@epoch`, `now`, `HH:MM[:SS]`) rather than chasing GNU.
-- **1.8.4 — `date` output flags and specifiers.** ⚠ Distinct from 1.8.3, which is date *input*.
+- **1.9.4 — `date` output flags and specifiers.** ⚠ Distinct from 1.9.3, which is date *input*.
   `-r FILE` (format FILE's mtime rather than now — `touch -r` already ships the reference-stat
   pattern to copy), `-R` (RFC 5322) and `-I[=FMT]` (ISO 8601), plus the strftime specifiers `date`
   refuses by name today: `%V` / `%G` / `%g` (ISO week-date) and the rest of `_date_is_deferred_spec`.
@@ -174,7 +154,7 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
     variable never silently drops a `+FORMAT` ([ADR 0020](../adr/0020-ls-long-format-dates-are-posix.md)).
     ⭐ `TIME_STYLE` passes [ADR 0017](../adr/0017-environment-variables-configure-features-the-caller-turned-on.md)'s
     test — it changes nothing without `-l` — so it lands with `+FORMAT`, not after it.
-- **1.8.5 — Symbolic file modes.** `mkdir -m` takes only an octal mode
+- **1.9.5 — Symbolic file modes.** `mkdir -m` takes only an octal mode
   (`kriya_parse_octal_mode`) and refuses every symbolic one, exit 2, where GNU takes all of them.
   Measured at 1.6.16 with umask 022: `u=rwx,go=` is 700, `a+w` 777, `o-rx` 772, `g+s` 2777, `=` 0,
   and `+t` **1755**; at 1.7.1, `+w` 777 and `=rwx` 755.
@@ -191,15 +171,15 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 
 ---
 
-## 1.9.x — Performance
+## 1.10.x — Performance
 
 Gaps measured against GNU. The first three were re-measured at 1.6.11 on the release box; the
 v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
 
-- **1.9.0 — `wc -c` fast path.** Detect a regular file and return `st_size` from `fstat` without
+- **1.10.0 — `wc -c` fast path.** Detect a regular file and return `st_size` from `fstat` without
   reading it. Measured on a 141 MB file: **537 ms against GNU's 0.9 ms** — and the gap grows with
   the file, since kriya reads every byte.
-- **1.9.1 — `tail` on large input.** ⛔ **Past 16 MiB, every 64 KiB read shifts the whole 16 MiB
+- **1.10.1 — `tail` on large input.** ⛔ **Past 16 MiB, every 64 KiB read shifts the whole 16 MiB
   buffer left ONE BYTE AT A TIME** (`_tail_slurp`'s head-discard loop) — about 256 byte-moves per
   input byte. Measured: `tail -n 1` of a 141 MB file takes **68 s against GNU's 0.7 ms**. Two
   fixes, and both are needed: seek from the end for seekable input (which also lifts the 16 MiB cap
@@ -213,7 +193,7 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
     and the bump allocator never frees the buffer it outgrew, so a pipe under
     `head -c -30000000` peaks at **64 MB against GNU's 33 MB** (measured at 1.6.15) — about twice
     the held bytes. A ring sized to what is held is the fix, and it is the structure `tail` needs.
-- **1.9.2 — niyama regex speed** — ⚠ upstream Cyrius, **filed 2026-11-03**:
+- **1.10.2 — niyama regex speed** — ⚠ upstream Cyrius, **filed 2026-11-03**:
   [`2026-11-03-niyama-search-quadratic-in-line-length.md`](https://github.com/MacCracken/niyama/blob/main/docs/development/issues/2026-11-03-niyama-search-quadratic-in-line-length.md). ⛔ It is not a constant factor. `niyama_bre_search_at` and `niyama_re2_search_at` restart the
   Pike VM at every start offset, so search is O(L²) per line. `a.*b` over 8,000 `a`s takes 6.9 s, and
   every doubling quadruples it, in re2 too, whose ADR 0003 promises linear time. Re-measured at 6.7.18
@@ -222,11 +202,11 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
   against 7 ms. Literal patterns take the byte scanner (119 ms against 6 ms); a Boyer-Moore path
   would close that too. ⚠ `smoke-grep.sh` pins only the literal path under the 1 GiB memory cap —
   pin the regex path as well.
-- **1.9.3 — `cp` `copy_file_range(2)`** — accelerated copy with reflink where the filesystem
+- **1.10.3 — `cp` `copy_file_range(2)`** — accelerated copy with reflink where the filesystem
   supports it. Speculative; check AGNOS kernel availability before committing.
-- **1.9.4 — `find` predicate JIT** — compile the predicate AST to a flat eval loop. ⚠ Not committed;
+- **1.10.4 — `find` predicate JIT** — compile the predicate AST to a flat eval loop. ⚠ Not committed;
   revisit only if benchmark pressure rises after the consumer burn.
-- **1.9.5 — Buffered output for the line utilities.** `nl` writes each line in five system calls
+- **1.10.5 — Buffered output for the line utilities.** `nl` writes each line in five system calls
   (number, padding, separator, text, newline): **776 ms against GNU's 42 ms** on 500,000 lines,
   measured at 1.7.0. `printf` writes each literal byte of its FORMAT in its own call, and `stat`
   each literal character of its format; only their padding is buffered (`k_write_fill` in
@@ -237,7 +217,7 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
     `'(stdin)'`, and `sort` says `'(write)'`. GNU says *write error: No space left on device*
     (`sort`: *fflush failed: 'standard output'*). Measured at 1.7.1, and older than it; `cut`,
     `wc` and every utility the dispatcher's write net reports already say *write error*.
-- **1.9.6 — `find` stats only what a test needs, and walks in constant memory.**
+- **1.10.6 — `find` stats only what a test needs, and walks in constant memory.**
   - **The stat.** GNU asks fts for no stat (`FTS_NOSTAT`) and takes an entry's type from
     `d_type`, so a name-only walk stats nothing but directories. kriya stats every entry — the
     4.8× in `docs/benchmarks.md` is partly this — and it is visible as a DIFFERENT ANSWER in a
@@ -247,7 +227,7 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
     1.7.1 by review.
   - **The memory.** Every entry's path and stat buffer, and a 4 KiB `getdents64` buffer per
     directory, are bump-allocated and never freed: `find /usr -name none` peaks at **94.7 MB
-    against GNU's 10.3 MB** (204,491 entries), 180.7 MB under `-L` — the defect 1.7.3 names for
+    against GNU's 10.3 MB** (204,491 entries), 180.7 MB under `-L` — the defect 1.8.3 names for
     `du`. Measured at 1.7.1.
   - **The depth.** Every path is opened whole from the current directory, so a walk stops at
     PATH_MAX: a 3,000-level tree lists 2,047 lines and fails with *file name too long*, exit 1,
@@ -426,9 +406,9 @@ What still gates the arcs. Ship the enabler and everything under it becomes smal
 
 | Enabler | Home | Unblocks | Slot |
 |---|---|---|---|
-| Float formatting | `src/cmd/printf.cyr` | `printf %e/%f/%g/%a`, `seq -f` | 1.8.0 |
-| Byte-suffix parser | `src/lib/args.cyr` | `head -c 1K`, `tail -c 1K`, `sort -S` | 1.8.2 |
-| niyama regex speed (quadratic search) | **upstream, filed** | `grep` on metacharacter patterns (~150× GNU) | 1.9.2, gated |
+| Float formatting | `src/cmd/printf.cyr` | `printf %e/%f/%g/%a`, `seq -f` | 1.9.0 |
+| Byte-suffix parser | `src/lib/args.cyr` | `head -c 1K`, `tail -c 1K`, `sort -S` | 1.9.2 |
+| niyama regex speed (quadratic search) | **upstream, filed** | `grep` on metacharacter patterns (~150× GNU) | 1.10.2, gated |
 | niyama GNU BRE operators, leftmost-longest, literal `*`, backreferences | **upstream, filed** | `grep`, `find -regex`, `nl -b p` | M11, gated |
 | chrono tzfile reader | **upstream, filed** | local time in `date`, `ls -l`, `stat`, `touch -t` | gated |
 

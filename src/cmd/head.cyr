@@ -26,13 +26,13 @@
 # file, as it does under GNU. Until 1.6.15 the 64 KiB read took the rest
 # with it and `cat` printed nothing, at exit 0.
 #
-# Deferred (GNU extensions, each a named follow-up): (roadmap 1.8.2, 1.9.1)
-#   k/M/G/T/P/E suffixes     on N (e.g. `-c 5K`), roadmap 1.8.2. Wait on a shared
+# Deferred (GNU extensions, each a named follow-up): (roadmap 1.9.2, 1.10.1)
+#   k/M/G/T/P/E suffixes     on N (e.g. `-c 5K`), roadmap 1.9.2. Wait on a shared
 #                            byte-suffix parser; once head + tail +
 #                            dd want it, extract into args.cyr.
 #   `-n -N` by seeking       a seekable file could be scanned backward from
 #                            its end instead of holding its last N lines —
-#                            the same scan `tail` needs (roadmap 1.9.1).
+#                            the same scan `tail` needs (roadmap 1.10.1).
 #
 # Symlink policy: file operands are opened by path; default open
 # follows symlinks (POSIX head/tail semantics). ADR 0003's matrix is
@@ -273,7 +273,7 @@ fn _head_through_nl(p, len, k): i64 {
 # what `alloc` will hand out; past that this reports ENOMEM rather than guess.
 # ⚠ It grows by doubling and the bump allocator never frees the buffer it
 # outgrew, so memory peaks at about twice what is held — a ring sized to the
-# hold is the fix, shared with `tail` (roadmap 1.9.1).
+# hold is the fix, shared with `tail` (roadmap 1.10.1).
 fn _head_elide(fd, n, bytes): i64 {
     if (n == 0) {
         var r0 = _head_copy(fd, KRIYA_COUNT_MAX);
