@@ -6,6 +6,85 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.7.4] - 2026-11-03 — cyrius 6.6.20, and two buffers someone else wrote past
+
+The toolchain pin move 6.6.11 → 6.6.20, with the vendored stdlib and `cyrius.lock` re-taken from
+the new snapshot, and the `k_isatty` buffer 1.7.3 recorded for this release. Running the
+pin-bump checklist turned up a second short buffer, in `--help`. Both buffers were filled by a
+writer kriya does not own, the kernel in one and the stdlib in the other, and the watchlist scan
+checked neither shape until now.
+
+### Fixed — ⛔ aarch64: every tty probe overran its buffer
+
+`k_isatty` (`src/lib/sys.cyr`) handed `ioctl(TCGETS)` a `var tio[16]`, and `TCGETS` writes a whole
+`struct termios`, 36 bytes on x86_64 and aarch64 alike. A function-local `var X[N]` is N bytes
+(M15a), so every probe of a real terminal overran the frame by 20. On x86_64 this was silent. On
+aarch64, `cp -i`, `mv -i` and `ls` on a terminal died of SIGSEGV/SIGBUS: these are the 28 pi smoke
+cases 1.7.3 recorded. It reproduces under `qemu-aarch64` at this pin, where `ls /` on a pty is
+SIGSEGV. With the fix it prints columns, and `cp -i` prompts and declines.
+
+- `var tio[64]`, and the raw `syscall(16, …)` is now the stdlib's `sys_ioctl`, which carries each
+  arch's number. It no longer relies on cyrius translating a literal x86 `16`.
+
+### Fixed — `--help` overran a buffer on every EXIT CODES row
+
+`_help_render_exits` (`src/lib/help.cyr`) passed `fmt_int_buf` a `var nb[8]`. Through the 6.6.11
+pin, `fmt_int_buf` built its digits downward from `buf+23` whatever the value, so each row
+overran by 16 bytes. Nothing ever showed it. cyrius 6.6.18 (CYRIUS-2026-0028) made the function
+write only `len + 1` bytes, which removed the overrun at this pin. The buffer is now `[24]`, as
+are the five other callers and as the stdlib's contract says, so the fix no longer depends on
+that change.
+
+### Changed
+
+- **Pin 6.6.11 → 6.6.20.** `cyrius lib sync --full` ran first, before any `deps` or `build`, the
+  order 6.6.17 requires. `cyrius.lock` was re-locked in full: **113** entries, including two new
+  upstream files (`poison.cyr`, `tls_hostid.cyr`), with 67 hashes moved. `deps --verify` reports
+  113 verified, 0 failed, and CI's `deps` and `Lock covers the pinned snapshot` steps leave the lock
+  byte-identical. Kriya needed no source change for the pin itself.
+- **Checked at the pin move**, against the follow-ups cyrius recorded for this repo and its
+  6.6.12–6.6.20 changelog:
+  - *Duplicate fns now bind the LAST definition* (6.6.20). Neither target warns of a duplicate at
+    either pin. The only fn name defined twice in `src/` is `main`, in `src/main.cyr` and
+    `src/test.cyr`, two entry files that are never compiled together. The one duplicate recorded
+    by cyrius's 6.6.3 sweep does not reproduce.
+  - *`fuzz --poison` covers `alloc()`, and an overwrite exits 86* (6.6.18). Green: 1,127 + 201 + 201
+    cases, also under `--poison=ab`.
+  - *A `var` in an `elif`/`else` arm ends at its `}`* (6.6.17). After the chain, the name silently
+    reads a global of the same name if one exists. No local in the build shares a global's name.
+    The only overlap is `r`, and the global `r` is `src/test.cyr`'s.
+  - *aarch64 raw syscall literals are folded at compile time* (6.6.18). `tests/kriya-syscalls.tcyr`
+    passes 58/58 under `qemu-aarch64`, and `-strace` shows the tty probe issuing `ioctl(TCGETS)`.
+    The aarch64 build is now warning-free, because 6.6.12 silences the raw-literal diagnostic
+    inside `#ifdef CYRIUS_ARCH_AARCH64`.
+  - *M15a's premise* still measures 8 / 32 / 144, and M15i finds 0 shared names over a 40-file
+    stdlib closure.
+  - *Gates.* niyama 1.0.12 → 1.0.13 is packaging only, so M11 and roadmap 1.9.2 hold. chrono gained
+    no tz support, so that gate holds too. ⭐ **The stdlib has wrapped the xattr family, `fchown`,
+    `statx` and `getrlimit` since 6.6.12**, which removes the upstream gate in roadmap 1.7.4. The
+    conversion is in-tree work now and is not part of this release.
+- **CI runs `tests/kriya-syscalls.tcyr`.** It landed at 1.7.2 and was never added to the Test step.
+- **`scripts/watchlist-scan.py` checks two more M15a writers.** An `ioctl` buffer must hold the
+  struct its request writes (`TCGETS` 36, `TIOCGWINSZ` 8), and an unlisted request is reported as
+  a finding. A `fmt_int_buf` / `fmt_hex_buf` buffer must be `[24]`. Each rule fails on the 1.7.3
+  source (`k_isatty`'s `tio`, `help.cyr`'s `nb`) and on an `ls` mutant with `var ws[4]`.
+- Binary 1,278,192 → **1,295,608** bytes host (+17,416), 1,278,392 → **1,299,904** agnos (+21,512).
+  All of the growth is the toolchain: the 1.7.3 source builds to the same two sizes at 6.6.20.
+
+### Tests
+
+- `tests/kriya-syscalls.tcyr` 56 → **58**, adding a `tty probe (TCGETS)` group. `k_isatty` of a
+  regular file is 0. `k_isatty` of a pty master (`/dev/ptmx`) is 1, and the group skips with a note
+  if `/dev/ptmx` does not open. ⭐ Under `qemu-aarch64` the 1.7.3 `k_isatty` dies of SIGSEGV in this
+  group. 1.7.4 passes 58/58 on aarch64 and on x86_64.
+- **838 unit + 58 + 18 POSIX.** The smoke suite ran in `ubuntu:24.04` (coreutils 9.4) as a regular
+  user: **7,629 passed, 0 failed** across all 41 scripts. The 1.7.3 binary in the same container
+  gives the same 7,629 with identical per-script counts, so the gap from 1.7.3's recorded 7,654 is
+  the container, not the release. Fuzz, the lints, `check-oracles.sh` and `watchlist-scan.py` are
+  clean, and `vet` reports 57 deps.
+- ⚠ **aarch64 was checked under `qemu-aarch64` only**: the syscall test, plus `ls` and `cp -i` on a
+  pty. The pi smoke suite was not re-run for this release.
+
 ## [1.7.3] - 2026-09-30 — aarch64 open flags and `struct stat` layout
 
 A patch release outside the slot plan, like 1.7.2: the two aarch64 ABI defects roadmap 1.7.4

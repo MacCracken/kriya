@@ -286,7 +286,9 @@ fn _help_render_exits(): i64 {
     while (i < _help_exit_n) {
         var code = load64(_help_exit_code + i * 8);
         _help_sp(2);
-        var nb[8];
+        # [24], as every other `fmt_int_buf` caller: through the 6.6.11 pin it wrote at buf+23
+        # whatever the value, so `var nb[8]` was a 16-byte overrun on each EXIT CODES row (M15a).
+        var nb[24];
         var nl = fmt_int_buf(code, &nb);
         k_write( 1, &nb, nl);
         _help_sp(4 - nl);

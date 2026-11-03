@@ -26,7 +26,7 @@ Two rules hold across the arcs:
   number of shared capabilities (§ Enabler map). Shipping the enabler *is* the release; the features
   riding on it are the release notes, and one round of test work serves the whole batch.
 - **⚠ Re-check a gate before planning around it — it has been wrong in both directions**
-  ([`lessons.md`](lessons.md)). Every gate below was re-verified at pin 6.6.6.
+  ([`lessons.md`](lessons.md)). Every gate below was re-verified at pin 6.6.20 (1.7.4).
 
 **M-numbers** (`M0`–`M17`) are the milestone identifiers `CHANGELOG.md` entries use. Two are open,
 **M10** and **M11**, both under § Gated, and **M15** is the compiler watchlist in
@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | — | the **1.7.2**-labelled slot — destructive and parallel (ships as 1.7.4) |
+| **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | — | the **1.7.2**-labelled slot — destructive and parallel (ships as 1.7.5) |
 | **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.8.0** — floats |
 | **1.9.x** | Performance | niyama regex speed (upstream) | **1.9.0** — `wc -c` fast path |
 
@@ -75,21 +75,24 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
     Measure it in the same pass.
 > ⚠ **Slot labels are plan names.** 1.7.2 shipped out of plan (2026-09-28): the aarch64
 > MISROUTING half of 1.7.4 below; 1.7.3 too (2026-09-30): its two aarch64 ABI defects (open flags,
-> `struct stat` layout). The slots here ship under the next free numbers.
+> `struct stat` layout); 1.7.4 too (2026-11-03): the pin move to cyrius 6.6.20, carrying
+> `k_isatty`'s buffer from the 1.7.4 slot below. The slots here ship under the next free numbers.
 
 - **1.7.4 — Raw syscalls to stdlib wrappers.** ⭐ **The misrouting half SHIPPED in 1.7.2**: every
   raw number that ran a DIFFERENT call on aarch64 (24 sites — `access` 21 was epoll_ctl, `fchown`
   93 was `exit`, …) now calls the stdlib wrapper or names the aarch64 number under
   `#ifdef CYRIUS_ARCH_AARCH64`; `tests/kriya-syscalls.tcyr` pins it. ⭐ **The two aarch64 defects
-  that were not routing SHIPPED in 1.7.3** (the open-flag values and the `struct stat` layout). What
-  remains here is the readability sweep of the numbers cyrius DOES renumber, and ⛔ **`k_isatty`'s
-  `var tio[16]`**, found running 1.7.3's smoke suite on the pi: a function-local `var X[N]` is N
-  BYTES (M15a) and `TCGETS` writes a 36-byte `struct termios`, so every tty probe overruns the
-  frame — silently on x86_64, SIGBUS/SIGSEGV on aarch64, where `cp -i`, `mv -i` and `ls` on a
-  terminal all die (28 pi smoke cases; a 64-byte buffer passes them, measured). ⚠ And an UPSTREAM gap: native aarch64 `fchown` 55, `setxattr` 5, `fsetxattr` 7,
-  `lgetxattr` 9, `fgetxattr` 10 cannot be issued by number from cyrius (each is a number cyrius
-  renumbers as an x86 call), so 1.7.2 declines the four xattr calls there; stdlib wrappers are the
-  fix. The original entry follows. kriya issues **44 distinct raw `syscall(N, …)`
+  that were not routing SHIPPED in 1.7.3** (the open-flag values and the `struct stat` layout). ⭐ **`k_isatty`'s
+  16-byte `TCGETS` buffer SHIPPED in 1.7.4**, with the pin move (its `16` is `sys_ioctl` now). What
+  remains here is the readability sweep of the numbers cyrius DOES renumber, and the aarch64 xattr
+  declines: native aarch64 `fchown` 55, `setxattr` 5, `fsetxattr` 7, `lgetxattr` 9, `fgetxattr` 10
+  cannot be issued by number from cyrius (each is a number cyrius renumbers as an x86 call), so
+  1.7.2 declines the four xattr calls there. ⭐ **That gate is gone — re-verified at pin 6.6.20:**
+  the stdlib has wrapped the family since cyrius **6.6.12** (`sys_{,l,f}{get,set,list,remove}xattr`,
+  `sys_fchown`, `sys_statx`, `sys_getrlimit`), the aarch64 peer issuing the renumbered ones through
+  a private `1000+N` band (`SYS_GETXATTR = 1008`, `SYS_FCHOWN = 1055`, `SYS_STATX = 1291`) and the
+  agnos peer answering -38. Converting the sites is in-tree work now, and it turns
+  `tests/kriya-syscalls.tcyr`'s two aarch64 `-38` assertions into real answers. The original entry follows. kriya issues **44 distinct raw `syscall(N, …)`
   numbers across 54 sites** (code lines, counted at 1.7.0), in x86-64 Linux numbering; 17 of those
   sites are the `*at()` family (`openat` 257, `mkdirat` 258, `newfstatat` 262,
   `unlinkat` 263, `utimensat` 280, …). ⭐ **The wrappers exist**: the stdlib has exposed
@@ -103,12 +106,10 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
     `getdents64` 217→61 and `unlinkat` 263→35; 6.6.6 added `statfs` 137. `openat` and `mkdirat`
     were not checked. A `qemu-aarch64` run of the smoke suite says whether an aarch64 build is
     broken today or only hard to read.
-  - ⚠ **Four of them have no wrapper to convert to**: `statx` (332; **291** on aarch64) for
-    `stat %w`/`%W`, `getxattr` (191; **8**) for `ls`'s `ca` colour and `lgetxattr` (192; **9**) for
-    `stat %C` — `k_statx` / `k_getxattr` / `k_lgetxattr` in `src/lib/sys.cyr` — and `getrlimit`
-    (97; **163**) for ARG_MAX in `src/lib/argbatch.cyr`. The 6.6.6 stdlib wraps none of them.
-    Check each against cyrius's aarch64 translation table in the same `qemu-aarch64` run; upstream
-    wrappers are the fix where one is missing. The xattr and `statx` arms already decline with
+  - ⭐ **The four that had no wrapper have one since 6.6.12**: `statx` (332; **291** on aarch64)
+    for `stat %w`/`%W`, `getxattr` (191; **8**) for `ls`'s `ca` colour and `lgetxattr` (192; **9**)
+    for `stat %C` — `k_statx` / `k_getxattr` / `k_lgetxattr` in `src/lib/sys.cyr` — and
+    `getrlimit` (97; **163**) for ARG_MAX in `src/lib/argbatch.cyr`. Convert them in the sweep. The xattr and `statx` arms already decline with
     `-38` on agnos, and `getrlimit` is not called there.
   - ⚠ **agnos keeps its own arms.** The agnos syscall peer wraps only `sys_fchownat` of this set
     (plus the `stat` family), so kriya's `CYRIUS_TARGET_AGNOS` branches in `src/lib/sys.cyr` and
@@ -286,7 +287,7 @@ decision, which needs an ADR rather than a roadmap line.
 
 ## Gated — not on the arc sequence
 
-These are open, but their trigger is outside kriya. Each was re-verified at pin 6.6.6.
+These are open, but their trigger is outside kriya. Each was re-verified at pin 6.6.20 (1.7.4).
 
 ### M10 — Consumer-burn (closes the last v1.0 criterion)
 
@@ -355,16 +356,25 @@ the **genuine** chrono gate — re-verified absent at pin 6.6.6 — and the trig
 ([`lessons.md`](lessons.md)).
 
 1. `cyrius.cyml` `[package].cyrius` — the source of truth, never the CI YAML.
-2. **`cyrius lib sync --full`**, not `cyrius deps`. ⚠ `deps` resolves without re-vendoring, and the
-   build then warns that bundled libs are behind the pin. ⚠ `cyrius build` re-copies the modules
+2. **`cyrius lib sync --full`**, not `cyrius deps`, and ⛔ **right after editing the pin, before any
+   `deps` or `build`** — those re-stamp the lock with the new pin but keep the old pin's rows for
+   files they do not vendor, and `lib sync` then refuses those rows by name (`--relock` accepts the
+   new snapshot explicitly). Since 6.6.17 `lib sync --full` re-locks every file it writes; check with
+   `cyrius deps --verify` (all entries, 113 at 6.6.20). ⚠ `deps` resolves without re-vendoring, and
+   the build then warns that bundled libs are behind the pin. ⚠ `cyrius build` re-copies the modules
    `[deps].stdlib` DECLARES on every build and never the rest, so the undeclared bundled libs drift
    silently without `--full`.
 3. `python3 scripts/watchlist-scan.py` — M15a / M15c / M15d / M15i, exits non-zero on a hit.
 4. Re-measure M15a's premise: a two-local probe must still give `|&b - &a|` = 8 / 32 / 144.
 5. Build **both** targets, plus every `tests/*.tcyr` and `tests/*.fcyr` subset (M15e). ⛔ **Read the
    build output**: a `duplicate symbol` / `duplicate fn` warning is a collision with the stdlib (M15i),
-   not noise.
-6. Full smoke suite, both lints, `vet`, fuzz under poison.
+   not noise — and since 6.6.20 every call binds the LAST definition, so a duplicate changes what
+   runs. ⭐ Then the aarch64 build: `cyrius build --aarch64 src/main.cyr` and
+   `tests/kriya-syscalls.tcyr` under `qemu-aarch64`, plus `ls` on a pty (`script -qec`). It is the
+   only run where that test discriminates; on x86_64 it passes the old layer too.
+6. Full smoke suite, both lints, `vet`, fuzz under poison (since 6.6.18 it covers `alloc()` and an
+   overwrite exits 86). ⚠ Compare the smoke total against the OLD binary in the same container, not
+   against the last release's figure: the skip set moves with the environment.
 7. **Re-verify every gate in this file** (§ Gated, and each arc item citing upstream) — a pin bump
    is when an upstream blocker quietly disappears.
 
@@ -423,37 +433,6 @@ eventual decision starts from numbers, but do not propose an extraction in a rel
 first in line when it comes: its GNU output surface (dates, `--dired`, tab stops, nine quoting
 styles, the full colour table) makes it half again the next utility, and most of that is rendering
 `src/lib/` does not share.
-
-## Recorded by cyrius 6.6.17 (2026-10-05) — for the next cyrius pin move
-
-⛔ **Nothing to do until cyrius 6.6.17 is tagged and out.** Docs-only note from the cyrius 6.6.17 lanes; each item
-is this repo's to adopt when it pins ≥ 6.6.17. Nothing here gates a cyrius release.
-
-- **The `lib sync --full` lock complaint is fixed in 6.6.17** (cyrius t1). After a pin move, `cyrius lib sync
-  --full` re-locks every file it writes, so rows for files kriya does not vendor no longer keep the previous
-  pin's hashes, and `deps --verify` passes without regenerating the lock from empty.
-- **Order matters.** Run `lib sync --full` right after editing `[package] cyrius`, BEFORE `cyrius deps` /
-  `build` — those re-stamp the lock with the new pin but keep the old pin's rows for files they do not vendor,
-  and a later `lib sync` refuses those rows by name; `cyrius lib sync --full --relock` then accepts the new
-  snapshot explicitly.
-- The CI step `Lock covers the pinned snapshot` (`lib sync --full` then `deps --verify`) still checks
-  something: if the committed lock disagrees with the pinned snapshot, `lib sync` refuses (rc 1) and writes
-  nothing; a lock that already matches is left byte-identical.
-
-## Moved from cyrius's roadmap (2026-10-08) — for the next cyrius pin move
-
-cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
-applies from the cyrius version it names. Everything else that changes between this repo's pin and cyrius
-6.7.6 is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
-
-- **(cyrius ≥ 6.6.18)** `cyrius fuzz --poison` now covers `alloc()` (and arenas, `fl_alloc`, any `_a` API), and an
-  overwrite stops the harness with exit 86 — the "fuzz under poison" step checks something real, and can go red
-  where it passed before.
-- **Same-arity duplicate fns** — cyrius's 6.6.3 ecosystem sweep (2026-09-12) recorded **1** same-arity
-  duplicate-fn warning(s) in this repo's build (not re-derived since). Since cyrius **6.6.20** every call binds
-  the LAST definition (before, a non-tail call to an already-defined fn bound the first), so a duplicate whose
-  body differs changes what runs at the pin bump. Remove the duplicates or confirm the last definition is the
-  intended one.
 
 ## Adopting cmdit (CLI parsing)
 

@@ -9,7 +9,8 @@ clean, pass lint and are wrong anyway.
 sat in `find.cyr` — the detection had been run by eye. A status established by
 reading is not a status.
 
-Covers M15a (stat buffers must be [144]), M15c (duplicate array declarations in
+Covers M15a (stat buffers must be [144], an ioctl buffer must hold its request's struct, a
+fmt_*_buf buffer must be [24]), M15c (duplicate array declarations in
 one function), M15d (`break` in a `while` that declares a `var`) and M15i (a
 top-level name defined by both kriya and its stdlib closure). M15b has no
 advance detection by construction; M15e is covered by building the .tcyr/.fcyr
@@ -23,7 +24,18 @@ fnre = re.compile(r'^fn\s+([A-Za-z_][A-Za-z0-9_]*)')
 
 # --- M15a: a stat buffer must be [144]; flag any buffer handed to a stat call
 statfns = ('k_stat','k_lstat','fs_lstat_at','fs_fstatat','fs_stat_entry','k_fstat')
-bad_stat, all_decls = [], []
+# ...and an ioctl buffer must hold the struct its request writes, the same on x86_64 and
+# aarch64. `k_isatty`'s `var tio[16]` took TCGETS's 36-byte `struct termios` from v0.x to 1.7.3:
+# silent on x86_64, SIGSEGV on aarch64, found only by running the smoke suite on the pi.
+# A request not in the table is a finding too: record its struct size here.
+IOCTL_SIZES = {21505: 36,                                # TCGETS     struct termios
+               21523: 8}                                 # TIOCGWINSZ struct winsize
+# ...and a `fmt_int_buf` / `fmt_hex_buf` buffer must be [24], the stdlib's stated contract. Through
+# the 6.6.11 pin `fmt_int_buf` wrote at buf+23 whatever the value, and `help.cyr`'s `var nb[8]`
+# overran by 16 on every `--help` EXIT CODES row until 1.7.4.
+fmtbuffns, FMTBUF_MIN = ('fmt_int_buf(', 'fmt_hex_buf('), 24
+ioctlre = re.compile(r'(?:sys_ioctl\(|syscall\((?:16|SYS_IOCTL),)[^,]+,(\w+),&(\w+)\)')
+bad_stat, bad_ioctl, bad_fmtbuf, all_decls = [], [], [], []
 for f in files:
     lines = [re.sub(r'#.*$', '', l) for l in open(f).read().split('\n')]
     sizes = {}
@@ -39,9 +51,24 @@ for f in files:
                 for name, (n, ln) in sizes.items():
                     if ('&' + name) in l and n != 144:
                         bad_stat.append((f, i, fn, name, n, s))
+        for s in fmtbuffns:
+            if s in l:
+                for name, (n, ln) in sizes.items():
+                    if ('&' + name + ')') in l and n < FMTBUF_MIN:
+                        bad_fmtbuf.append((f, i, fn, name, n, s))
+        for c in ioctlre.finditer(re.sub(r'\s+', '', l)):
+            req, name = c.group(1), c.group(2)
+            need = IOCTL_SIZES.get(int(req)) if req.isdigit() else None
+            have = sizes.get(name, (0, 0))[0]
+            if need is None or have < need:
+                bad_ioctl.append((f, i, fn, name, have, req, need))
 print("M15a — declarations scanned:", len(all_decls))
 print("M15a — stat buffers not [144]:", len(bad_stat))
 for b in bad_stat: print("   ", b)
+print("M15a — ioctl buffers smaller than their request's struct:", len(bad_ioctl))
+for b in bad_ioctl: print("   ", b)
+print("M15a — fmt_*_buf buffers under [%d]:" % FMTBUF_MIN, len(bad_fmtbuf))
+for b in bad_fmtbuf: print("   ", b)
 
 # --- M15c: duplicate var names in one function (arrays are the dangerous shape)
 dups = []
@@ -128,7 +155,7 @@ if not closure:
     print("M15i — no stdlib closure found (run from the repo root after `cyrius deps`)")
 
 import sys
-fail = len(bad_stat) + len(hits) + len(clashes) + (0 if closure else 1)
+fail = len(bad_stat) + len(bad_ioctl) + len(bad_fmtbuf) + len(hits) + len(clashes) + (0 if closure else 1)
 if dups and sorted(d[2] for d in dups) != ['klen_box', 'tb', 'ts']:
     print("M15c — the duplicate-array set CHANGED; re-verify each is mutually exclusive")
     fail += 1

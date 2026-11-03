@@ -148,6 +148,19 @@ fn main(): i64 {
     var lgx = k_lgetxattr("s", "user.kriya-none", &xb, 64);
     assert(lgx == 0 - 61 || lgx == 0 - 95 || lgx == 0 - 1, "k_lgetxattr of an absent attr is ENODATA/EOPNOTSUPP/EPERM");
     #endif
+
+    # ⛔ 1.7.4: `k_isatty` handed TCGETS a 16-byte buffer for a 36-byte `struct termios`. A pty
+    # master is a terminal to TCGETS, so the probe below writes the whole struct; on aarch64 the
+    # 1.7.3 layer dies of SIGSEGV here (qemu-aarch64), as `ls` on a terminal did on the pi.
+    test_group("tty probe (TCGETS)");
+    assert_eq(k_isatty(fd), 0, "k_isatty(regular file) == 0");
+    var pt = k_open("/dev/ptmx", 258, 0);                 # O_RDWR|O_NOCTTY
+    if (pt >= 0) {
+        assert_eq(k_isatty(pt), 1, "k_isatty(pty master) == 1 (TCGETS writes 36 bytes)");
+        k_close(pt);
+    } else {
+        k_write(1, "  skip: /dev/ptmx did not open -- the TCGETS write is unexercised\n", 66);
+    }
     k_close(fd);
 
     # clean up

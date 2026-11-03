@@ -673,13 +673,16 @@ pin move is exactly when a latent instance stops being latent.
 **M15a — A function-local `var X[N]` is N BYTES. At module scope it is N×8.**
 The single most expensive rule in this list. Re-measured at pin 6.5.35 with a two-local probe:
 `|&b - &a|` = **8 / 32 / 144** for `var x[4]` / `var x[32]` / `var x[144]` — and again at **6.6.6**
-(1.6.11), unchanged.
+(1.6.11) and **6.6.20** (1.7.4), unchanged.
 - *Detection*: for every `var X[N]` in `src/`, take the maximum byte offset actually accessed
   (`store8`/`store16`/`store64`/`load*`/`memcpy`/a syscall buffer arg) and require it `< N`. Sizes are
   a strong smell on their own: a buffer holding k 64-bit fields must be `[k*8]`, and every `struct stat`
-  buffer must be `[144]`.
-- *Note*: kriya currently has **zero** module-scope arrays — all 136 are function-local — so the
-  N-bytes reading always applies here. A future module-scope array would silently flip the rule.
+  buffer must be `[144]`. ⚠ **The kernel and the stdlib write into buffers too, and that write is the
+  one nobody reads.** `scripts/watchlist-scan.py` checks three such writers mechanically: stat calls
+  (`[144]`), `ioctl` by request (`TCGETS` 36, `TIOCGWINSZ` 8; an unlisted request is a finding), and
+  `fmt_int_buf` / `fmt_hex_buf` (`[24]`, the stdlib's stated contract).
+- *Note*: kriya currently has **zero** module-scope arrays — all 189 are function-local (1.7.4) —
+  so the N-bytes reading always applies here. A future module-scope array would silently flip the rule.
 - *Bit us at v1.1.9*: `find`'s `var ctx[4]` held four i64 fields. Silent for a year because the old
   register allocator left dead space where the overflow landed; the 6.5.18 bump repacked the frame
   onto live state and `find` went 40/40 → 8/40.
@@ -687,6 +690,13 @@ The single most expensive rule in this list. Re-measured at pin 6.5.35 with a tw
   confusing agnos's 48-byte wire struct with the canonical 144-byte layout `_k_agnos_stat` actually
   writes. A 96-byte frame smash on every PATH probe, reachable from `which`, `env`, `xargs` and
   `find -exec`. Reproduced on the host with the same shape: SIGSEGV.
+- *Bit us twice more, fixed at 1.7.4, both buffers handed to someone ELSE's write*: `k_isatty`'s
+  `var tio[16]` took `TCGETS`'s 36-byte `struct termios`, so every probe of a real terminal overran by
+  20. Silent on x86_64 for its whole life; on aarch64 `cp -i`, `mv -i` and `ls` on a terminal died of
+  SIGSEGV, found only by running the smoke suite on the pi. And `help.cyr`'s `var nb[8]` went to a
+  `fmt_int_buf` that, through the 6.6.11 pin, used its buffer as 24 bytes of scratch: a 16-byte
+  overrun on every `--help` EXIT CODES row, never seen at all. ⭐ Neither shape was in the scan, which
+  checked `struct stat` only; both are now, and each rule was confirmed red on the 1.7.3 source.
 
 **M15b — The register allocator can turn a latent frame bug into a live one.**
 6.5.35 fixed two defects that had prevented linear-scan from ever reusing a register, so frame layout

@@ -610,13 +610,17 @@ fn k_lseek(fd, off, whence): i64 {
 
 # isatty(fd) -> 1 if a terminal, else 0. Linux probes via ioctl(TCGETS);
 # agnos has no ioctl/termios so nothing is ever a tty.
+# ⛔ `TCGETS` writes a whole `struct termios`: 36 bytes on x86_64 and aarch64 alike (four u32
+# flags, `c_line`, 19 `c_cc`), and a function-local `var X[N]` is N BYTES (M15a). Until 1.7.4 this
+# was `var tio[16]`, so every probe of a real terminal overran the frame by 20 bytes: silently on
+# x86_64, SIGSEGV/SIGBUS on aarch64, where `cp -i`, `mv -i` and `ls` on a terminal all died.
 fn k_isatty(fd): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    var tio[16];
-    var r = syscall(16, fd, 21505, &tio);                  # SYS_IOCTL, TCGETS=21505
+    var tio[64];
+    var r = sys_ioctl(fd, 21505, &tio);                    # TCGETS=0x5401 on both arches
     if (r == 0) { return 1; }
     return 0;
     #endif

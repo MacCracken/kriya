@@ -49,9 +49,13 @@ jobs:
         # Explicit .tcyr paths — the version-stable form across the 6.0.x line
         # (bare `cyrius test` stopped auto-discovering; `cyrius tests` postdates
         # the pin). Add new tcyr files here when they land.
+        # ⚠ kriya-syscalls.tcyr landed at 1.7.2 and was not added until 1.7.4. On
+        # x86_64 it passes against the old layer too; what it pins is aarch64, so
+        # this run is a compile gate plus its x86 answers, not its aarch64 proof.
         run: |
           cyrius test tests/kriya.tcyr
           cyrius test tests/kriya-posix.tcyr
+          cyrius test tests/kriya-syscalls.tcyr
 
       - name: Bench
         # ⛔ Not a timing gate — a COMPILE gate. `tests/kriya.bcyr` declares its
