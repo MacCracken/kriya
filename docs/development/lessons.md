@@ -176,7 +176,7 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   `FS_S_*` substitutions were built before the version bump and compared byte for byte with the
   committed 1.6.15 binary, on both targets, after every file: identical. A suite can only sample
   behaviour, while `cmp` covers every byte. It works only before the version string changes.
-- ⛔ **`set -e` swallowed a suite a THIRD time (1.6.15, 1.6.16, 1.7.0).** An `err=$(…)` that
+- ⛔ **`set -e` swallowed a suite a THIRD time (1.6.15, 1.6.16, 1.7.0), and a FOURTH at 1.8.3:** `expect_eq … "$(cmd; echo $?)"` — dash leaves the substitution at the failing `cmd`, so BOTH sides of a `df -t` comparison came back empty and the case passed with nothing compared. Capture with `_r=0; cmd || _r=$?`. An `err=$(…)` that
   captures a diagnostic takes the substitution's exit status; against a binary that refuses the
   option under test, the capture fails and the WHOLE SCRIPT ends, printing no summary — which the
   mutation run reports as an empty line, not as failures. Write `|| true` inside every capture of

@@ -351,6 +351,56 @@ expect_exit ".. through a regular file"          1 "$BIN" df "$WORK/df163/f/.."
 expect_exit "...while the file itself is fine"   0 "$BIN" df "$WORK/df163/f"
 expect_exit "...and so is a real directory"      0 "$BIN" df "$WORK/df163/d/"
 
+# --- -t / --type, -x / --exclude-type (1.8.3, ADR 0028) ------------------
+# ⚠ EXACT sets here. `mount_set_check` forgives an extra entry GNU hides by a rule kriya does
+# not have, which is right for the plain listing and wrong for a type filter: a -t that did
+# nothing would pass it (measured: the no-filter mutant did).
+strict_set_check() {
+    name=$1
+    shift
+    _ks=$("$BIN" df "$@" 2>/dev/null | tail -n +2 | awk '{print $NF}' | sort -u | tr '\n' ' ')
+    _gs=$(gnu_df    "$@" 2>/dev/null | tail -n +2 | awk '{print $NF}' | sort -u | tr '\n' ' ')
+    expect_eq "$name (the exact mount set)" "$_gs" "$_ks"
+}
+# GNU's -t TYPE, not XSI's argument-less -t. Measured against coreutils 9.4 and 9.7. The types
+# are whichever this host has: the root's, and tmpfs where something mounts one.
+_rt=$(fstype_of /)
+strict_set_check "-t ROOTTYPE ($_rt)"          -t "$_rt"
+strict_set_check "--type=ROOTTYPE"            --type="$_rt"
+strict_set_check "--type ROOTTYPE (separate word)" --type "$_rt"
+strict_set_check "-tROOTTYPE (attached)"      "-t$_rt"
+strict_set_check "-x ROOTTYPE"                -x "$_rt"
+strict_set_check "--exclude-type=ROOTTYPE"    --exclude-type="$_rt"
+strict_set_check "-i -t ROOTTYPE"             -i -t "$_rt"
+if awk '$3 == "tmpfs" { f = 1 } END { exit !f }' /proc/self/mounts; then
+    strict_set_check "-t tmpfs"                   -t tmpfs
+    strict_set_check "-t tmpfs -t ROOTTYPE (repeated, either)" -t tmpfs -t "$_rt"
+    strict_set_check "-x tmpfs -x ROOTTYPE"       -x tmpfs -x "$_rt"
+    expect_eq "-T -t tmpfs: every Type cell is tmpfs" "tmpfs" \
+        "$("$BIN" df -T -t tmpfs | tail -n +2 | awk '{print $2}' | sort -u)"
+fi
+# A filter that leaves nothing: GNU's message, exit 1, and NO header.
+_k=0; _ko=$("$BIN" df -t no-such-fs-type 2>/dev/null) || _k=$?
+expect_eq "-t NOSUCH: exit 1 and no output" "1|" "$_k|$_ko"
+expect_eq "...with GNU's message" "kriya df: no file systems processed" "$("$BIN" df -t no-such-fs-type 2>&1 >/dev/null)"
+_g=0; gnu_df -t no-such-fs-type >/dev/null 2>&1 || _g=$?
+expect_eq "...and GNU exits 1 too" "1" "$_g"
+# ⚠ `|| _r=$?`, not `$(cmd; echo $?)`: under `set -e` dash leaves the substitution at the
+# failing command, so both sides came back empty and compared EQUAL.
+_g=0; gnu_df -t no-such-fs-type / >/dev/null 2>&1 || _g=$?
+_k=0; "$BIN" df -t no-such-fs-type / >/dev/null 2>&1 || _k=$?
+expect_eq "-t TYPE filters an operand's file system too (GNU: exit 1)" "1|1" "$_g|$_k"
+strict_set_check "-t ROOTTYPE with the operand /" -t "$_rt" /
+_k=0; "$BIN" df -t "$(printf '%s' "$_rt" | tr a-z A-Z)" >/dev/null 2>&1 || _k=$?
+expect_eq "-t is case-sensitive (GNU)" "1" "$_k"
+expect_exit "-t X -x X: refused (GNU too; usage exit 2)" 2 "$BIN" df -t "$_rt" -x "$_rt"
+expect_eq "...in GNU's words" "kriya df: file system type '$_rt' both selected and excluded" \
+    "$("$BIN" df -t "$_rt" -x "$_rt" 2>&1 >/dev/null)"
+expect_exit "-t with no TYPE: usage error" 2 "$BIN" df -t
+# ⚠ The pseudo-FS filter still applies, as GNU's: proc is listed under -t proc only with -a.
+mount_set_check "-t proc (still hidden without -a)" -t proc
+mount_set_check "-a -t proc"                 -a -t proc
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"
