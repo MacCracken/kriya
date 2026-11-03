@@ -6,6 +6,142 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.8.3] - 2026-11-03 — usage reporting: du's memory and options, df -t / -x, env -S / -C
+
+The roadmap's 1.8.3 slot. Every option was measured against coreutils 9.4 and 9.7 before it was
+written, and they agree on every case kriya tests. Measuring `env` turned up a security hole that
+predates the slot.
+
+### Security
+
+- ⛔ **`env` ran a command from the current directory when PATH was unset or matched nothing.** env had
+  its own PATH resolver, which returned the bare name in both cases, and the kernel resolves
+  `execve("ls")` against the cwd. In a directory holding an attacker's `./ls`, both `env -i ls` and
+  `env PATH=/nonexist ls` ran it. GNU runs `/bin/ls` for the first and exits 127 for the second.
+  `xargs` and `find` had already moved to the shared `fs_resolve_in_path`, which searches glibc's
+  `/bin:/usr/bin` when PATH is unset and reports a miss as not found, and now `env` uses it too.
+  `PATH=` (empty) still searches the cwd, as POSIX defines and GNU does.
+
+### Fixed — `du`'s memory
+
+- ⛔ **`du`'s walk never freed.** It bump-allocated a 4 KiB `getdents64` buffer per directory and a
+  joined path per entry. Peak RSS, measured with GNU time over the host's `/usr` (202,663 entries,
+  ext4) in ubuntu:26.04:
+
+  | | 1.8.2 | 1.8.3 | GNU 9.7 |
+  |---|---|---|---|
+  | `du -s /usr` | 72,328 KB | **4,736 KB** | 7,632 KB |
+  | `du -sl /usr` | 70,276 KB | **4,740 KB** | 7,824 KB |
+  | `du -sL /usr` | 103,048 KB | **4,740 KB** | 12,648 KB |
+
+  4.7 MB is kriya's floor: an immediate usage error peaks at the same figure. The walk now holds one
+  buffer per *depth*, reused by every directory at that depth. It also keeps one path buffer, which
+  each level appends its name to and truncates on the way out, as fts does. Totals match GNU in `-s`,
+  `-sL` and `-sb`, and `du -a` over `/usr/lib` matches GNU line for line.
+- ⛔ **`du` leaked a 2 KiB buffer per output line, and could overrun it.** `_du_emit` allocated a fresh
+  buffer for every line it printed. With the walk fixed, `du -a /usr` still peaked at 406,156 KB; it
+  now peaks at **4,748 KB** (GNU 7,916). It also copied the path into that buffer unbounded, so a path
+  past about 2 KB wrote off the end. That stayed silent only because no later allocation had claimed
+  the space yet. There is now one growable buffer, sized to the line.
+- ⭐ **GNU's dedup rule, on a sparse inode set.** `fs_inobits_*` (`src/lib/fs.cyr`) is a (dev, ino)
+  membership set, GNU's di-set idea: a 512-byte bitmap per 4,096-inode chunk, in an open-addressed
+  table. `/usr` costs 85 chunks, which is 43 KB or 1.7 bits per entry. `fs_inoset`'s 32 bytes per entry
+  would be 6.5 MB.
+  - With the cheaper set, `du` takes GNU's tracking rule (its `hash_all`): with two or more operands,
+    or under `-L`, every counted entry is tracked; otherwise only multi-link non-directories are.
+  - That closes the divergence `smoke-hardlinks.sh` had recorded: `du DIR DIR/f` listed `f`, and GNU
+    omits it.
+  - `fs_inoset` stays for `cp`, whose hard-link map needs its data field.
+
+### Added — `du -x`, `--exclude`, `-X`, `--inodes`, `-0`
+
+- **`-x` / `--one-file-system`**: a directory at depth > 0 on another device is not entered, counted
+  or listed, as with GNU's `FTS_XDEV`. An operand that is itself a mount point still counts.
+- **`--exclude=PATTERN`** (repeatable) is GNU's `excluded_file_name` with wildcards and no anchoring:
+  - The match is fnmatch with no flags, so `*` crosses `/` and `\` escapes.
+  - It is tried against the path and against every suffix after a `/`, so `sub`, `a/sub`, `t/a` and
+    `*/a` all match.
+  - A pattern naming the operand prints nothing and exits 0.
+  - It goes through `glob.cyr`, the matcher `find` and `grep` use.
+- **`-X FILE` / `--exclude-from=FILE`**: one pattern per line, read as gnulib's `add_exclude_fp` reads
+  it (trailing whitespace trimmed, blank lines skipped). A missing FILE is exit 1.
+- **`--inodes`** counts entries instead of sizes, and the dedup still applies (a hard link counts
+  once). `-b` is ignored with GNU's warning, and `-h` humanizes the count.
+- **`-0` / `--null`** ends each line with NUL.
+
+### Added — `df -t` / `--type` and `-x` / `--exclude-type` ([ADR 0028](docs/adr/0028-df-t-is-gnus-type-filter-not-xsis-totals.md))
+
+- **The roadmap called `df -t TYPE` POSIX-required. It is not.** POSIX.1-2024's `-t` is XSI-shaded and
+  takes no argument. It means total allocated-space figures, in an unspecified output format. `-t TYPE`
+  is GNU's. The two cannot coexist, and ADR 0028 takes GNU's, which is the `-t` Linux scripts write.
+- `-t` repeats, and the types are ORed. `-x` repeats, and names compare exactly.
+- An operand's file system is filtered too. The pseudo-file-system filter still applies, so `-t proc`
+  lists nothing without `-a`.
+- A type that is both selected and excluded is refused in GNU's words.
+- A filter that leaves nothing prints GNU's *no file systems processed*, with no header, and exits 1.
+  Usage errors exit 2 (kriya's code; GNU's is 1).
+
+### Added — `env -S` / `--split-string` and `-C` / `--chdir`
+
+- **`-S STRING`** splits STRING into words and reads them where `-S` stood, options included. A
+  `#!/usr/bin/env -S cmd -x` line needs this, because the kernel hands env the rest of that line as
+  ONE argument. The grammar is GNU's:
+  - Blanks separate words.
+  - `'…'` keeps everything except `\\` and `\'`.
+  - `"…"` takes `\"`, `\\` and `\$`, reads `\_` as a space, and expands `${NAME}`.
+  - Unquoted, `\_` separates words and `\c` ends the string. `\f \n \r \t \v` are control
+    characters, and `#` at the start of a word begins a comment.
+  - Only `${NAME}` expands. It reads the environment env was given and is not re-split. An unset NAME
+    starts no word, and a set one starts a word even when empty.
+  - GNU's five `-S` errors are reproduced in its words.
+- **`-C DIR`** changes directory before the command is looked up, so `./cmd` and a relative PATH entry
+  are found from DIR, as in GNU. A failure is exit 125, and `-C` with no command is a usage error.
+- ⭐ **A differential fuzz checked `-S` against GNU.** 20,000 random strings, drawn from the grammar's
+  tokens, ran through GNU 9.7 and kriya, then 20,000 more on a new seed through 9.4 and 9.7. The first
+  cut differed in 82 of the first batch, all from one rule: an unset `${NAME}` started a word. After
+  the fix there are no differences.
+- ⚠ **One divergence predates this release and is now written down.** kriya keeps reading options
+  among NAME=VALUE assignments, but in GNU the first assignment ends option parsing, so
+  `env A=1 -u A cmd` runs `-u` as the command. The comment that called kriya's rule GNU's was wrong
+  and is corrected, and `smoke-env.sh` pins kriya's behaviour.
+
+### Changed
+
+- **Roadmap gains 1.8.5, deep trees.** This was measured while checking the roadmap's `find` depth
+  claim. Every fd-relative walk holds one descriptor per level, so under `ulimit -n 1024` `find`, `du`
+  and `rm -r` stop at **1,020** levels with *too many open files*, and `cp -R`, at two per level,
+  stops at **509**. GNU's fts walks have no such limit. It is not a 1.8.3 regression: 1.8.2's `du`
+  stops at the same depth. The `find` memory figures in roadmap 1.10.6 are re-measured too: 99.0 MB
+  against GNU's 8.5.
+- Binary 1,315,464 → **1,334,032** bytes host (+18,568), 1,319,976 → **1,342,656** agnos (+22,680).
+
+### Tests
+
+- Per-script counts, in ubuntu:24.04:
+
+  | Script | 1.8.2 | 1.8.3 |
+  |---|---|---|
+  | `smoke-du.sh` | 62 | **94** |
+  | `smoke-df.sh` | 22 | **46** (24 → 48 on a host with more mounts) |
+  | `smoke-env.sh` | 29 | **84** |
+  | `smoke-hardlinks.sh` | 139 | **142** |
+  | `smoke-help-json.sh` | 1,870 | **1,906** |
+
+  Smoke totals are 7,784 → **7,934** in ubuntu:24.04 and 7,787 → **7,937** in 26.04 (GNU 9.7), across
+  all 41 scripts, run as an unprivileged user.
+- `smoke-du.sh` runs 6,000 directories under `ulimit -v 32768`. The 1.8.2 binary dies of SIGSEGV there
+  (it needs 33–48 MB), and this one finishes in under 24 MB.
+- ⭐ **25 mutants, each caught**: 16 in `env`, 5 in `du`'s options, 3 in `df`, and 1 for `du`'s dedup
+  rule. Writing them caught three vacuous cases in df's first cut. One was a set check that forgave a
+  `-t` that filtered nothing. The other two were `"$(cmd; echo $?)"` cases, which `set -e` dash
+  leaves at the failing `cmd`, so both sides came out empty and equal.
+- **852 unit** (838 → 852; the cases cover the inode set's membership, word, chunk and i64 edges
+  including an inode with bit 63 set, and 10,000 inodes through several doublings) **+ 58 syscall + 18
+  POSIX**.
+- Fuzz is green under poison. `cyrius lint` (all of `src/`), the lints, `check-oracles.sh` and
+  `watchlist-scan.py` are clean, and `vet` reports 57 deps. All three targets build with zero warnings.
+  On the aarch64 build under qemu, the 58 syscall tests and `smoke-env.sh`'s 84 cases pass.
+
 ## [1.8.2] - 2026-11-03 — destructive and parallel: find -delete / -execdir / -ok, xargs -P / -p / -a / -d / -E / -o
 
 The roadmap's next slot, after a renumber that made the slot labels match the versions again. Every

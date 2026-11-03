@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.3** — usage reporting |
+| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.4** — raw syscalls to stdlib wrappers |
 | **1.9.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.9.0** — floats |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
@@ -57,15 +57,6 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 (`src/lib/argbatch.cyr`), which counts as GNU's `buildcmd` does
 ([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
 
-- **1.8.3 — Usage reporting.** `du -x` (one-filesystem), `--exclude` / `--exclude-from`,
-  `--inodes` and `-0`; `df -t TYPE` (POSIX-required); `env -S` split-string and `-C DIR`.
-  - **The sparse inode set.** GNU's device-inode set costs about **one bit per counted file** —
-    200,000 files measured at 20 KB, `/usr`'s 204,110 at 36 KB — where `fs_inoset_*` is a
-    32-byte-per-entry hash. It closes `du`'s last dedup divergence and cuts `du -L`'s memory.
-  - ⛔ **`du`'s walk never frees, and that is the bigger number.** `_du_walk` bump-allocates a
-    4 KiB `getdents64` buffer per directory and a joined path per entry and frees neither, so
-    `kriya du -s /usr` peaks at **68 MB against GNU's 7.7 MB** with dedup switched off entirely.
-    Measure it in the same pass.
 - **1.8.4 — Raw syscalls to stdlib wrappers.** **43 raw `syscall(N, …)` lines** remain in `src/`
   (37 distinct numbers, agnos arms included; counted at 1.8.1). None misroutes on aarch64 any
   more, since 1.7.2 converted the 24 that did, and `tests/kriya-syscalls.tcyr` pins that. What
@@ -95,6 +86,25 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
     struct statfs64"*) becomes a shim over 6.6.6's per-OS `Statfs` enums and the `statfs_bsize`
     accessor. ⚠ An accessor, not a convenience: the field differs by OS, which is why a private
     table is the wrong long-term answer. The agnos `-38` decline stays.
+- **1.8.5 — Deep trees: a bounded descriptor budget for every `*at()` walk.** Each fd-relative walk
+  holds one open directory per level. Under the default `ulimit -n 1024`, a tree deeper than **1,020**
+  levels fails with *too many open files* and exits 1: `find` (since 1.8.2's fd-relative walk), `du` and
+  `rm -r` all stop there. `cp -R` holds two descriptors per level (source and destination) and stops at
+  **509**. GNU's `find`, `du` and `rm -r` (fts) have no depth limit and pass the probe's 2,600-level
+  cap; GNU `cp -R` walks full paths and stops at PATH_MAX, 2,040. Measured at 1.8.3 in ubuntu:26.04,
+  each on a fresh tree of exactly N single-letter levels. `du` at 1.8.2 stops at the same 1,020.
+  - ⛔ **`rm -r` is the one that matters.** Anyone who can make a 1,021-level tree in a shared
+    directory makes it unremovable by kriya's `rm`. `du` also prints a partial total after the error.
+  - **GNU's answer is fts's.** A directory is read whole before its children are entered, so its
+    descriptor is not needed again for reading, and fts keeps a small ring of descriptors. It
+    re-enters a parent through `openat(child, "..")`, checked against the parent's recorded
+    (dev, ino). ⛔ That check is the security half: a `..` that leads elsewhere (a directory moved
+    mid-walk) must stop the walk, never continue it. It is the race the fd-relative walk was
+    adopted to close ([ADR 0027](../adr/0027-find-delete-carries-rms-refusals.md)).
+  - ⚠ **Raising the soft `RLIMIT_NOFILE` is not the fix.** The hard limit can equal the soft one,
+    and an `-exec` child would inherit the raised limit.
+  - The four walks are separate code (`find`'s `_f_walk`, `du`'s `_du_walk`, and `rm`'s and `cp`'s in
+    `src/cmd/`), so the answer should be one shared descriptor policy, not four.
 
 ---
 
@@ -214,12 +224,13 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
     reports every entry and cannot answer `-type` (`smoke-find.sh` pins the listing). Measured at
     1.7.1 by review.
   - **The memory.** Every entry's path and stat buffer, and a 4 KiB `getdents64` buffer per
-    directory, are bump-allocated and never freed: `find /usr -name none` peaks at **94.7 MB
-    against GNU's 10.3 MB** (204,491 entries), 180.7 MB under `-L` — the defect 1.8.3 names for
-    `du`. Measured at 1.7.1.
-  - **The depth.** Every path is opened whole from the current directory, so a walk stops at
-    PATH_MAX: a 3,000-level tree lists 2,047 lines and fails with *file name too long*, exit 1,
-    where GNU (fts, fd-relative) lists all 3,001. Measured at 1.7.1.
+    directory, are bump-allocated and never freed: `find /usr -name none` peaks at **99.0 MB
+    against GNU's 8.5 MB** (202,664 entries), and at 150.2 MB under `-L` against 8.6 MB (measured at
+    1.8.3). `du` had the same defect and 1.8.3 fixed it: a `getdents64` buffer per *depth*, reused by
+    every directory at that depth, and one fts-style path buffer. That is the pattern to copy.
+  - **The depth** is now roadmap 1.8.5's. Since 1.8.2's fd-relative walk, `find` stops at the
+    descriptor limit (1,020 levels under `ulimit -n 1024`) instead of PATH_MAX (2,047 lines at
+    1.7.1).
 
 ---
 

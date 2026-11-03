@@ -64,6 +64,9 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   had three candidate rules; each matched every hand-built fixture, and only a 560-case randomised
   differential separated them. **When a rule is inferred rather than read, hand-written cases
   confirm the inference instead of testing it** — the cases and the model come from the same guess.
+  ⚠ 1.8.3 again: `env -S`'s grammar agreed with GNU on all 58 hand-written probes, and a 20,000-string
+  fuzz drawn from the grammar's own tokens disagreed on 82. Every one came from a rule no probe had
+  isolated: an unset `${NAME}` starts no word, so `${NOPE}#x` is still a comment.
 
 - ⛔ *Widening a fuzz's fixtures finds what the fixtures never contained.* Adding ACLs found the
   ACL gap in one run; adding setuid/setgid/sticky modes found a plain-`cp` divergence older than
@@ -295,6 +298,13 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 
 ### Measuring: the number, and the thing beside it
 
+- ⛔ *A trade-off filed as Neutral is a limit nobody measured.* 1.8.2's fd-relative `find` walk closed
+  a deletion race, and [ADR 0027](../adr/0027-find-delete-carries-rms-refusals.md) recorded *"the walk
+  holds one descriptor per directory level, as it already did"* under Neutral. That swapped PATH_MAX
+  (2,047 levels) for RLIMIT_NOFILE (1,020 under `ulimit -n 1024`; `cp -R`, at two per level, 509), and
+  no release measured it until 1.8.3 checked the roadmap's depth claim. GNU's fts has no such limit.
+  **When a design trades one ceiling for another, measure the new ceiling in the same change.**
+
 - ⛔ *A cold-start number means nothing without the previous binary measured beside it.* One run of
   1.6.1 read 0.599 ms against a recorded 1.6.0 of 0.599 — and building 1.6.0 and re-measuring both
   in the same minute gave 0.884 and 0.899, indistinguishable. **Build the previous release and
@@ -340,6 +350,12 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   agrees"; this one caught `realpath`'s "-e … (default; alias for the default mode)" and `sleep`'s
   "POSIX sleep takes one integer". ⚠ All three were load-bearing, all three were wrong, and in
   every case **the tests had been written to agree with the comment**.
+
+- ⛔ *...and a parity claim can be wrong from the day it is written.* `env`'s parser said it took
+  options among NAME=VALUE assignments "(matches GNU env)". GNU's getopt string starts with `+`, so its
+  first assignment ends option parsing and `env A=1 -u A cmd` runs `-u` as the command. smoke-env
+  pinned kriya's behaviour, and nothing compared it. 1.8.3 found it while measuring `-S` and corrected
+  the comment, leaving the behaviour (a superset) in place.
 
 - ⚠ *Arithmetic in a comment is a claim too.* "Four orders of magnitude below the int ceiling" was
   24.9x, and a test comment said the duration ceiling was 292,000 years where the value asserted on
@@ -550,6 +566,12 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 - **A spec the parser does not consult is a second source of truth.** `find` carried one for five
   releases — built, never read, never called. The seven hand-rolled utilities now declare specs their
   own walks use as the acceptance gate.
+- ⛔ **A hardened shared helper does not reach a private copy of it.** `fs_resolve_in_path`'s comment
+  demonstrated the attack: a bare name left for the kernel resolves against the cwd, so an attacker's
+  `./ls` runs. It then fixed it for `xargs` and `find`. `env`, the one utility whose whole job is to
+  exec a command, had its own copy of the resolver and kept the hole until 1.8.3: `env -i ls` and
+  `env PATH=/nonexist ls` both ran `./ls`. ⭐ When a shared helper is fixed, grep for every hand-rolled
+  equivalent (here, the `PATH=` scan and the `has_slash` loop) in the same change.
 - **Cold start: report the release-over-release delta, never an absolute.** The pre-1.3.2 history is
   mismeasured (it timed kriya plus a whole `date` fork). Name any reference binary `kriya` or the
   dispatcher rejects it on `argv[0]`.
@@ -593,6 +615,10 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   `--`, listed with `-a`, and printed something else — and the difference was recorded as a quoting
   rule, shipped in every diagnostic until 1.6.12. The 1.6.12 fuzz made the same mistake first, which
   is how it was recognised.
+- ⚠ **Run the container suite as an unprivileged user (`docker run -u 1000:1000`).** As root, four
+  scripts fail with nothing wrong: root is not refused EACCES (`touch -c`, find's missing `-exec`
+  command), its chown succeeds (cp's setuid-drop cases), and the denial fixtures cannot deny it. CI's
+  runner is unprivileged, so a root run is a different environment, not a stricter one.
 - ⛔ **Measure the behaviour a roadmap entry ASSERTS before deciding against it.** 1.6.14's entry
   said GNU reads a leading ERE `*` as a literal and asked whether to match it. GNU 3.11 and 3.12
   do neither: they warn and DROP the operator. The decision (ADR 0022) was about a behaviour
