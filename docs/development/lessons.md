@@ -537,6 +537,19 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 - **A green test is not a finding.** Three of the arc's six bugs hid behind something that looked like
   evidence: a comment naming only the cases where the bug is invisible, a local GNU version, and a
   type list that matched by coincidence.
+- ⛔ **A gate recorded only here is a gate nobody upstream knows about.** Until 1.8.1 all six of
+  kriya's upstream gates lived in `roadmap.md` § Gated alone: chrono local time, plus niyama's GNU BRE
+  operators, leftmost-longest, the literal `*`, backreferences and search speed. Each pin bump
+  "re-verified" them, which confirmed they were still broken and changed nothing, because cyrius
+  works from its `docs/development/issues/` and niyama extends "only if a consumer asks". The cost:
+  niyama ADR 0009 closed BRE backreferences permanently citing "no identified bre consumer", twelve
+  days before kriya's POSIX `grep` shipped needing them. The one chrono proposal upstream listed local
+  time as out of scope, because the only consumer it heard from didn't need it. ⭐ **Filing is the
+  work. Recording is not.** A gate is filed upstream, with a repro that calls the upstream code
+  directly, in the same change that records it, and the roadmap links the filing. Measuring for the
+  filings also corrected two of this file's own claims: the GNU operators "matched nothing" (they
+  match the escaped character literally), and ADR 0009 was "a v1 decision" (it is permanent). It also
+  found that the "~160× slower" search was really quadratic.
 
 ---
 

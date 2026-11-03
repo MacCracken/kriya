@@ -272,7 +272,23 @@ fn print_write_error(name): i64 {
 
 fn main(): i64 {
     alloc_init();
-    args_init();
+    # ⛔ A command line that cannot be read is refused, not run. On Linux the stdlib reads argv
+    # from `/proc/self/cmdline`; with no `/proc` (a chroot) or no free descriptor (`ulimit -n 3`)
+    # the open fails, and until 1.8.1 every utility then died of SIGSEGV on a null `argv(0)`.
+    # Since cyrius 6.7.12 `args_init` returns the negative errno. Exit 2, the code every POSIX
+    # utility reads as "an error occurred": 1 is an ANSWER for `grep`, `cmp` and `sort -c`.
+    var ar = args_init();
+    if (ar < 0) {
+        k_write( 2, "kriya: error: cannot read the command line from /proc/self/cmdline: ", 68);
+        if (errmsg_is_known(0 - ar) == 1) {
+            var m = errmsg_for(0 - ar);
+            k_write( 2, m, strlen(m));
+        } else {
+            k_write( 2, "unknown error", 13);
+        }
+        k_write( 2, "\n", 1);
+        return EXIT_USAGE;
+    }
 
     var arg0 = argv(0);
     var name = path_basename_ptr(arg0);

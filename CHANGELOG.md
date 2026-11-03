@@ -6,6 +6,97 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.8.1] - 2026-11-03 — cyrius 6.7.18, and the six upstream gates filed at last
+
+The toolchain pin move 6.7.9 → 6.7.18, with the vendored stdlib and `cyrius.lock` re-taken from the
+new snapshot. The changelog review for 6.7.10–6.7.18 found two things to fix: every utility segfaulted
+when its command line could not be read, and CI's lock check had stopped checking the committed lock.
+⛔ **And the release's real finding: none of kriya's six upstream
+gates had ever been filed upstream.** They had been recorded in kriya's roadmap alone for up to six
+months: chrono local time, plus five niyama items. Each pin bump re-verified them, which confirmed they
+were still broken and changed nothing, because cyrius works from its issue files and niyama extends
+"only if a consumer asks". All six are now filed in cyrius `docs/development/issues/`, each with a
+repro that calls the upstream code directly.
+
+### Filed upstream (cyrius `docs/development/issues/`, 2026-11-03)
+
+- **`2026-11-03-niyama-search-quadratic-in-line-length.md`** (High). `niyama_bre_search_at` and
+  `niyama_re2_search_at` restart the Pike VM at every start offset, so a search is O(L²) per line. `a.*b`
+  over 8,000 `a`s takes 6.9 s, and each doubling quadruples it, in re2 too, whose ADR 0003 promises
+  linear time on untrusted input. Over 15.9 MB, `grep -c 'line.*005'` takes 6,149 ms against GNU grep
+  3.12's 40 ms, and a niyama-only loop gives the same 6,059 ms. This was roadmap 1.9.2's "~160×", which
+  was not a constant factor at all.
+- **`2026-11-03-niyama-bre-gnu-operators-read-as-literals.md`** (High). `\+ \? \| \w \W \s \S \b \B`
+  compile clean and match the escaped character literally: `a\+b` matches `a+b` and not `aab`. The
+  roadmap had said they "match nothing".
+- **`2026-11-03-niyama-leftmost-first-not-posix-leftmost-longest.md`** (Medium). re2 `a|ab` on `ab`
+  gives `a`, and bre `a*\(ab\)*` gives `a`; POSIX gives `ab` for both.
+- **`2026-11-03-niyama-bre-posix-literal-star-and-group-anchor.md`** (Medium). `^*` matches every line,
+  and `\(*a\)` is a compile error. kriya's `icase_bre_literal_stars` works around both.
+- **`2026-11-03-niyama-bre-backreferences-have-a-consumer.md`** (Medium), a reconsideration request.
+  niyama ADR 0009 closed BRE backreferences **permanently**, and its first reason was "No identified bre
+  consumer". It dates from 2026-05-05, twelve days before kriya's POSIX `grep` shipped needing them.
+  kriya's roadmap had called the decision "a v1 decision, not a permanent one", which was wrong. The
+  filing explains why the ADR's "migrate to pcre" path does not fit a POSIX utility.
+- **`2026-11-03-chrono-has-no-local-time.md`** (Medium). No TZif reader and no `TZ` parsing, so `date`,
+  `ls -l`, `stat` and `touch -t` are UTC-only (ADR 0007). The one chrono proposal upstream, samay's, had
+  listed local time as out of scope. The filing names the API surface a consumer needs, `local → epoch`
+  for `touch -t` included.
+- Repros: `repros/2026-11-03-niyama-posix-gaps.cyr` and `repros/2026-11-03-niyama-search-quadratic.cyr`.
+  Both build and reproduce from inside the cyrius repo.
+
+### Fixed — ⛔ every utility died of SIGSEGV when the command line could not be read
+
+On Linux the stdlib reads argv from `/proc/self/cmdline`. With no `/proc` (a chroot, a minimal container) or
+no free descriptor (`ulimit -n 3`), that open fails, and every kriya invocation then dereferenced a null
+`argv(0)` and died with exit 139. GNU tools are unaffected, because they read argv from the stack. Since
+cyrius 6.7.12 `args_init` returns the negative errno (cyrius issue `2026-10-31-cyrius-linux-argv-needs-proc`,
+filed by owl), and `main` now checks it. kriya prints `kriya: error: cannot read the command line from
+/proc/self/cmdline: too many open files` (or `no such file or directory`) and exits **2**: the code every
+POSIX utility reads as "an error occurred", where 1 is an answer for `grep`, `cmp` and `sort -c`. Measured
+with `/proc` hidden by an empty tmpfs: 1.8.0 exits 139, and 1.8.1 refuses with ENOENT and leaves `rm`'s
+operand in place.
+
+### Changed
+
+- **CI vendors with `lib sync --full` first, and verifies the COMMITTED lock.** Since cyrius 6.7.13 `cyrius
+  deps` rewrites `cyrius.lock`, dropping every row for a file absent from `lib/`. On CI's fresh checkout,
+  where `lib/` is gitignored, that took the lock from 113 rows to 40. So the `Lock covers the pinned
+  snapshot` step had started verifying a lock CI had just regenerated, not the committed one. The first
+  step is now `lib sync --full`, then `deps --verify`, then `git diff --exit-code cyrius.lock`.
+  `lib sync --full` refuses a lock that disagrees with the snapshot (rc 1, writes nothing), so a hash
+  tampered on a fresh copy fails the step. The last step re-checks that nothing rewrote the lock.
+  `release.yml` vendors the same way.
+- **Pin 6.7.9 → 6.7.18.** `cyrius lib sync --full` ran first. `cyrius.lock` was re-locked in full: still
+  **113** entries, with 66 hashes moved. `deps --verify` reports 113 verified, 0 failed, and CI's lock
+  steps leave the lock byte-identical. Of the declared modules, `fmt`, `alloc`, `io`, `vec`, `str`,
+  `syscalls`, `args`, `chrono`, `fnptr`, `process` and `unicode/categories` changed. niyama is still
+  1.1.0. chrono's only change is a `cx`-target sleep, so it still has no timezone support.
+- **The roadmap's upstream gates now link their filings.** § Gated opens with the rule that an upstream
+  gate is filed in the same change that records it, and pin-bump checklist step 7 checks that each gate
+  names its filing. The two wrong claims above are corrected.
+- **Checked at the pin move.** No fn is defined twice; `watchlist-scan.py` is clean, M15i included; M15a
+  still measures 8 / 32 / 144. The 6.6.12 wrappers that unblock roadmap 1.7.4 are all still present. The
+  host, agnos and aarch64 builds are warning-free.
+- Binary 1,303,920 → **1,295,792** bytes host (−8,128), 1,308,224 → **1,300,240** agnos (−7,984). The
+  toolchain alone is −8,192 / −8,056, and the `args_init` check +64 / +72.
+
+### Tests
+
+- **838 unit + 58 syscall + 18 POSIX**, unchanged. Fuzz is green under `--poison` and `--poison=ab`. The
+  lints, `check-oracles.sh` and `watchlist-scan.py` are clean, and `vet` reports 57 deps.
+- `smoke-write-errors.sh` 30 → **35**. Under `ulimit -n 3`, `kriya ls` and a symlinked `rm` exit 2 with the
+  diagnostic, list nothing, and leave the operand in place. ⭐ Three of the five fail on the 1.8.0 binary
+  (exit 139). The other two guard against the silent shape (acting with no arguments), which a crash does
+  not show.
+- Smoke as a regular user on the final binary: **7,634 / 0** on `ubuntu:24.04` (GNU coreutils 9.4), where
+  the only per-script change from 1.7.3–1.8.0 is those five, and **7,637 / 0** against GNU coreutils 9.7 on
+  Ubuntu 26.04, CI's oracle.
+- CI's new lock order was checked on a fresh copy with no `lib/`. The committed lock stays byte-identical
+  through vendoring, both builds, the three `.tcyr` suites and bench. A lock with one hash altered fails
+  at `lib sync --full` (rc 1) and at `deps --verify` (rc 1).
+- aarch64, under `qemu-aarch64` only: the syscall test passes 58/58, and `ls` and `cp -i` work on a pty.
+
 ## [1.8.0] - 2026-11-03 — cyrius 6.7.9
 
 The toolchain pin move 6.6.20 → 6.7.9, the first pin on the 6.7 line, with the vendored stdlib and

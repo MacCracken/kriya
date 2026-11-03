@@ -26,7 +26,7 @@ Two rules hold across the arcs:
   number of shared capabilities (§ Enabler map). Shipping the enabler *is* the release; the features
   riding on it are the release notes, and one round of test work serves the whole batch.
 - **⚠ Re-check a gate before planning around it — it has been wrong in both directions**
-  ([`lessons.md`](lessons.md)). Every gate below was re-verified at pin 6.7.9 (1.8.0).
+  ([`lessons.md`](lessons.md)). Every gate below was re-verified at pin 6.7.18 (1.8.1).
 
 **M-numbers** (`M0`–`M17`) are the milestone identifiers `CHANGELOG.md` entries use. Two are open,
 **M10** and **M11**, both under § Gated, and **M15** is the compiler watchlist in
@@ -77,7 +77,8 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 > MISROUTING half of 1.7.4 below; 1.7.3 too (2026-09-30): its two aarch64 ABI defects (open flags,
 > `struct stat` layout); 1.7.4 too (2026-11-03): the pin move to cyrius 6.6.20, carrying
 > `k_isatty`'s buffer from the 1.7.4 slot below; and 1.8.0 (2026-11-03): the pin move to cyrius
-> 6.7.9, ahead of every open slot in this arc. The slots here ship under the next free numbers.
+> 6.7.9, ahead of every open slot in this arc, and 1.8.1 (2026-11-03): the pin move to 6.7.18. The
+> slots here ship under the next free numbers.
 
 - **1.7.4 — Raw syscalls to stdlib wrappers.** ⭐ **The misrouting half SHIPPED in 1.7.2**: every
   raw number that ran a DIFFERENT call on aarch64 (24 sites — `access` 21 was epoll_ctl, `fchown`
@@ -88,7 +89,7 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
   remains here is the readability sweep of the numbers cyrius DOES renumber, and the aarch64 xattr
   declines: native aarch64 `fchown` 55, `setxattr` 5, `fsetxattr` 7, `lgetxattr` 9, `fgetxattr` 10
   cannot be issued by number from cyrius (each is a number cyrius renumbers as an x86 call), so
-  1.7.2 declines the four xattr calls there. ⭐ **That gate is gone — re-verified at pin 6.7.9:**
+  1.7.2 declines the four xattr calls there. ⭐ **That gate is gone — re-verified at pin 6.7.18:**
   the stdlib has wrapped the family since cyrius **6.6.12** (`sys_{,l,f}{get,set,list,remove}xattr`,
   `sys_fchown`, `sys_statx`, `sys_getrlimit`), the aarch64 peer issuing the renumbered ones through
   a private `1000+N` band (`SYS_GETXATTR = 1008`, `SYS_FCHOWN = 1055`, `SYS_STATX = 1291`) and the
@@ -131,8 +132,9 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 **Enablers:** a float-formatting story (1.8.0) and a byte-suffix parser in `src/lib/args.cyr`
 (1.8.2).
 
-> ⚠ **Version 1.8.0 shipped out of plan** (2026-11-03) as the cyrius 6.7.9 pin move. The labels below
-> are plan names, as in 1.7.x, and the floats slot ships under the next free number.
+> ⚠ **Versions 1.8.0 and 1.8.1 shipped out of plan** (2026-11-03) as the cyrius 6.7.9 and 6.7.18 pin
+> moves. The labels below are plan names, as in 1.7.x, and the floats slot ships under the next free
+> number.
 
 - **1.8.0 — Floats.** `printf %e` / `%E` / `%f` / `%F` / `%g` / `%G` / `%a` / `%A` — refused by name
   today — plus positional `%N$s`. `seq -f FORMAT` rides directly on it.
@@ -211,7 +213,11 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
     and the bump allocator never frees the buffer it outgrew, so a pipe under
     `head -c -30000000` peaks at **64 MB against GNU's 33 MB** (measured at 1.6.15) — about twice
     the held bytes. A ring sized to what is held is the fix, and it is the structure `tail` needs.
-- **1.9.2 — niyama regex speed** — ⚠ upstream Cyrius. `grep 'line.*005'` over a 13.6 MB fixture
+- **1.9.2 — niyama regex speed** — ⚠ upstream Cyrius, **filed 2026-11-03**:
+  [`2026-11-03-niyama-search-quadratic-in-line-length.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-niyama-search-quadratic-in-line-length.md). ⛔ It is not a constant factor. `niyama_bre_search_at` and `niyama_re2_search_at` restart the
+  Pike VM at every start offset, so search is O(L²) per line. `a.*b` over 8,000 `a`s takes 6.9 s, and
+  every doubling quadruples it, in re2 too, whose ADR 0003 promises linear time. Re-measured at 6.7.18
+  against GNU grep 3.12 over 15.9 MB: `line.*005` 6,149 ms against 40. `grep 'line.*005'` over a 13.6 MB fixture
   takes **5.2 s against GNU's 33 ms** (~160×), in constant memory, and a bracket pattern 2.7 s
   against 7 ms. Literal patterns take the byte scanner (119 ms against 6 ms); a Boyer-Moore path
   would close that too. ⚠ `smoke-grep.sh` pins only the literal path under the 1 GiB memory cap —
@@ -291,7 +297,14 @@ decision, which needs an ADR rather than a roadmap line.
 
 ## Gated — not on the arc sequence
 
-These are open, but their trigger is outside kriya. Each was re-verified at pin 6.7.9 (1.8.0).
+These are open, but their trigger is outside kriya. Each was re-verified at pin 6.7.18 (1.8.1).
+
+⛔ **An upstream gate that is not FILED upstream is a gate nobody is working on.** Until 1.8.1 every
+upstream gate here was recorded in this file alone. cyrius fixes what is filed, and niyama extends
+"only if a consumer asks". niyama ADR 0009 even closed BRE backreferences because it had "no identified
+bre consumer", twelve days before kriya's POSIX `grep` shipped. **Every upstream gate names its filing**
+in cyrius `docs/development/issues/`, the home niyama ADR 0010 gives post-fold work as well. A new
+upstream gate is filed in the same change that records it here.
 
 ### M10 — Consumer-burn (closes the last v1.0 criterion)
 
@@ -312,43 +325,51 @@ the agnos target on every push; what is gated is the consumer.
 
 ### M11 — niyama regex gaps (upstream)
 
-Two regex-surface gaps whose fix belongs to niyama rather than kriya.
+Regex-surface gaps whose fix belongs to niyama rather than kriya. Post-fold that means cyrius stdlib's
+`lib/niyama.cyr` (niyama ADR 0010), so each is **filed in cyrius `docs/development/issues/`** (2026-11-03),
+with a shared repro, `repros/2026-11-03-niyama-posix-gaps.cyr`, that calls niyama directly.
 
-- **The GNU BRE operators** — `\+` `\?` `\|` `\b` `\B` `\w` `\W` `\s` `\S` compile clean in niyama
-  and then match NOTHING. ⛔ **In `grep` and `find -regex` that is a WRONG ANSWER, not an error**:
-  re-measured at pin 6.6.6 and again at 6.7.9 (niyama 1.1.0, whose changes are PCRE-only) against
+- **The GNU BRE operators** — filed: [`2026-11-03-niyama-bre-gnu-operators-read-as-literals.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-niyama-bre-gnu-operators-read-as-literals.md). `\+` `\?` `\|` `\b` `\B` `\w` `\W` `\s` `\S` compile clean in
+  niyama and match the escaped character LITERALLY: `a\+b` matches `a+b` and not `aab`, `\w` matches `w`
+  (measured at 6.7.18, calling niyama directly). ⛔ **In `grep` and `find -regex` that is a WRONG ANSWER, not an error**:
+  re-measured at pin 6.6.6, at 6.7.9 and at 6.7.18 (niyama 1.1.0, unchanged since 6.7.9) against
   GNU grep 3.12, `kriya grep -c` returns 0 for `a\+b`, `a\?b`,
   `a\|x`, `\w`, `\s` and `\bfoo` where GNU returns 1–4. `nl -b pBRE` REFUSES the same operators, so
-  one pattern is a loud exit 2 in one utility and a silent wrong count in another. ⚠ **Not yet filed
-  at niyama** — filing it is the next step; niyama's roadmap does not mention it. ⭐ If kriya closes
+  one pattern is a loud exit 2 in one utility and a silent wrong count in another. ⭐ If kriya closes
   it first by refusing in `grep` too, lift `src/cmd/nl.cyr:_nl_rx_unsupported` into a shared lib so
   every utility reads one list — do NOT copy it. Closing it upstream deletes the guard instead.
-- ⛔ **niyama is LEFTMOST-FIRST, where POSIX and GNU are leftmost-LONGEST.** It is a Pike VM that
+- ⛔ **niyama is LEFTMOST-FIRST, where POSIX and GNU are leftmost-LONGEST** — filed: [`2026-11-03-niyama-leftmost-first-not-posix-leftmost-longest.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-niyama-leftmost-first-not-posix-leftmost-longest.md). It is a Pike VM that
   stops at the first alternative to match. Measured at 1.6.14: `grep -oE 'a|ab'` prints `a` where
   GNU prints `ab`, and `grep -oE 'x*|b'` loses the `b` because the empty alternative wins first.
   Line selection is right — `-x` and `-w` are built into the pattern (`_gr_compile`), which a Pike
   VM honours on every alternative — so what is open is `-o`'s extent inside ONE pattern. BRE has no alternation, and there the gap needs contrived repetition
   (`a*\(ab\)*`). `smoke-grep.sh` records the `-oE 'a|ab'` case as a gap, and it flips the day niyama
   is leftmost-longest.
-- **niyama reads the POSIX-literal `*` wrongly and `\(^` as a literal.** `^*` came out "zero or more
+- **niyama reads the POSIX-literal `*` wrongly and `\(^` as a literal** — filed: [`2026-11-03-niyama-bre-posix-literal-star-and-group-anchor.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-niyama-bre-posix-literal-star-and-group-anchor.md). `^*` came out "zero or more
   anchors" (every line), and `\(*a\)` was refused. kriya works around it in
   `icase_bre_literal_stars`, for `grep`, `nl -b p` and `find -regex`: escaping exactly
   those stars, and hoisting a `^` that opens the leading groups. ⚠ A `^` opening a LATER group is
   POSIX's "may be an anchor": GNU makes it one and niyama a literal, so `x\(^a\)` matches `x^a` here
   and nothing under GNU. Closing that upstream deletes the workaround.
 - **BRE backreferences** (`\(a\)\1`) are POSIX-required; kriya refuses them loudly (`bad pattern`,
-  exit 2) where GNU matches. niyama's ADR 0009 took them out of its **v1** scope — a v1 decision,
-  not a permanent one. ⚠ kriya's [ADR 0005](../adr/0005-regex-engine-niyama.md) says backreferences
+  exit 2) where GNU matches. ⛔ **This roadmap said niyama ADR 0009 was "a v1 decision, not a permanent
+  one". It is permanent**: "bre — permanently out of scope for v1.0 *and* post-fold", and its first
+  reason is "No identified bre consumer with a hard backref need". kriya is that consumer and never
+  said so. Filed as a reconsideration request: [`2026-11-03-niyama-bre-backreferences-have-a-consumer.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-niyama-bre-backreferences-have-a-consumer.md). It also explains why the ADR's "migrate to pcre"
+  path does not fit a POSIX utility (leftmost-first, backtracking, BRE quirks). ⚠ kriya's [ADR 0005](../adr/0005-regex-engine-niyama.md) says backreferences
   "are honored"; that is not true today. The loud refusal is the right failure until niyama lands
   them.
 
 ### Upstream chrono — local time
 
-`date` local time, and local time in `ls -l` and `stat`'s dates, need tzfile parsing
-(`chrono_tz.cyr`). ⚠ What is gated is the VALUE — every kriya time is UTC — not the spelling:
+**Filed 2026-11-03:** cyrius [`2026-11-03-chrono-has-no-local-time.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-chrono-has-no-local-time.md).
+
+`date` local time, local time in `ls -l` and `stat`'s dates, and `touch -t`'s local-time input need
+tzfile parsing (`chrono_tz.cyr`). ⚠ What is gated is the VALUE — every kriya time is UTC — not the spelling:
 `ls -l` already prints POSIX's date form
 ([ADR 0020](../adr/0020-ls-long-format-dates-are-posix.md)). ⚠ This is
-the **genuine** chrono gate — re-verified absent at pin 6.6.6 — and the trigger
+the **genuine** chrono gate — re-verified absent at pin 6.7.18 (its only change since 6.7.9 is a cx
+sleep) — and the trigger
 [ADR 0007](../adr/0007-date-utc-only-at-v0-7-0.md) already names.
 
 ---
@@ -365,7 +386,7 @@ the **genuine** chrono gate — re-verified absent at pin 6.6.6 — and the trig
    `deps` or `build`** — those re-stamp the lock with the new pin but keep the old pin's rows for
    files they do not vendor, and `lib sync` then refuses those rows by name (`--relock` accepts the
    new snapshot explicitly). Since 6.6.17 `lib sync --full` re-locks every file it writes; check with
-   `cyrius deps --verify` (all entries, 113 at 6.7.9). ⚠ `deps` resolves without re-vendoring, and
+   `cyrius deps --verify` (all entries, 113 at 6.7.18). ⚠ `deps` resolves without re-vendoring, and
    the build then warns that bundled libs are behind the pin. ⚠ `cyrius build` re-copies the modules
    `[deps].stdlib` DECLARES on every build and never the rest, so the undeclared bundled libs drift
    silently without `--full`.
@@ -381,7 +402,10 @@ the **genuine** chrono gate — re-verified absent at pin 6.6.6 — and the trig
    overwrite exits 86). ⚠ Compare the smoke total against the OLD binary in the same container, not
    against the last release's figure: the skip set moves with the environment.
 7. **Re-verify every gate in this file** (§ Gated, and each arc item citing upstream) — a pin bump
-   is when an upstream blocker quietly disappears.
+   is when an upstream blocker quietly disappears. ⛔ **And check that each upstream gate names its
+   filing** in cyrius `docs/development/issues/` (or `archived/`, once resolved). One that names none
+   is filed in the same change: at 1.8.1 none of the six had ever been filed, so for up to six months
+   nothing upstream was moving on any of them.
 
 ### The compiler watchlist
 
@@ -399,9 +423,9 @@ What still gates the arcs. Ship the enabler and everything under it becomes smal
 |---|---|---|---|
 | Float formatting | `src/cmd/printf.cyr` | `printf %e/%f/%g/%a`, `seq -f` | 1.8.0 |
 | Byte-suffix parser | `src/lib/args.cyr` | `head -c 1K`, `tail -c 1K`, `sort -S` | 1.8.2 |
-| niyama regex speed | **upstream** | `grep` on metacharacter patterns (~160× GNU) | 1.9.2, gated |
-| niyama GNU BRE operators and backreferences | **upstream** | `grep`, `find -regex`, `nl -b p` | M11, gated |
-| chrono tzfile reader | **upstream** | local time in `date`, `ls -l` and `stat` | gated |
+| niyama regex speed (quadratic search) | **upstream, filed** | `grep` on metacharacter patterns (~150× GNU) | 1.9.2, gated |
+| niyama GNU BRE operators, leftmost-longest, literal `*`, backreferences | **upstream, filed** | `grep`, `find -regex`, `nl -b p` | M11, gated |
+| chrono tzfile reader | **upstream, filed** | local time in `date`, `ls -l`, `stat`, `touch -t` | gated |
 
 ---
 

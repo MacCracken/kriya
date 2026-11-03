@@ -167,6 +167,36 @@ else
     echo "skip: parent ignores SIGPIPE (GNU yes exited $gnu_rc) — signal-death path not exercised"
 fi
 
+# --- an unreadable command line (1.8.1) ----------------------------------
+# Same family: an environment failure must be named, never turned into something worse. On
+# Linux the stdlib reads argv from /proc/self/cmdline, so with no free descriptor the open
+# fails (EMFILE), and until 1.8.1 every utility died of SIGSEGV (139) on a null argv(0). It
+# now says so and exits 2. ⚠ `ulimit -n 3` leaves exactly 0, 1 and 2 open: the dispatcher's
+# open is the first one to fail, and its diagnostic still reaches fd 2.
+mkdir -p "$WORK/argv"
+: > "$WORK/argv/keep"
+ln -s "$BIN" "$WORK/argv/rm"
+if ! sh -c 'ulimit -n 3' 2>/dev/null; then
+    echo "skip: cannot lower the descriptor limit -- the unreadable-argv path is not exercised"
+else
+    rc=0
+    err=$(sh -c 'ulimit -n 3; exec "$1" ls "$2"' sh "$BIN" "$WORK/argv" 2>&1) || rc=$?
+    expect_eq "unreadable argv: kriya ls exits 2, not SIGSEGV" "2" "$rc"
+    case "$err" in
+        *"cannot read the command line"*) PASS=$((PASS + 1)) ;;
+        *) FAIL=$((FAIL + 1)); printf "FAIL unreadable argv: no diagnostic: %s\n" "$err" >&2 ;;
+    esac
+    case "$err" in
+        *keep*) FAIL=$((FAIL + 1)); printf "FAIL unreadable argv: ls listed with no argv\n" >&2 ;;
+        *) PASS=$((PASS + 1)) ;;
+    esac
+    rc=0
+    sh -c 'ulimit -n 3; exec "$1" "$2"' sh "$WORK/argv/rm" "$WORK/argv/keep" 2>/dev/null || rc=$?
+    expect_eq "unreadable argv: a symlinked rm exits 2" "2" "$rc"
+    if [ -e "$WORK/argv/keep" ]; then PASS=$((PASS + 1)); else
+        FAIL=$((FAIL + 1)); printf "FAIL unreadable argv: rm acted with no argv\n" >&2; fi
+fi
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

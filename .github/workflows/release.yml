@@ -39,9 +39,12 @@ jobs:
 
       - name: Build (host + agnos)
         # Ship both the host build and the CYRIUS_TARGET_AGNOS build (the verbs
-        # staged onto the agnos-fs /bin). ./lib/ is gitignored, so re-vendor first.
+        # staged onto the agnos-fs /bin). ./lib/ is gitignored, so re-vendor first,
+        # the same way the CI gate does: since 6.7.13 `cyrius deps` on a fresh
+        # checkout rewrites cyrius.lock to its closure, and `lib sync --full` does not.
         run: |
-          cyrius deps
+          set -e
+          cyrius lib sync --full
           mkdir -p build
           cyrius build src/main.cyr build/kriya
           cyrius build --agnos src/main.cyr build/kriya_agnos

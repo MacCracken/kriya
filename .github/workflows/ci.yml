@@ -47,10 +47,20 @@ jobs:
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
-      - name: Resolve dependencies
+      - name: Vendor the pinned snapshot, verify the committed lock
         # The vendored ./lib/ snapshot is NOT committed (.gitignore) — re-vendor
         # it from the pinned toolchain before building.
-        run: cyrius deps
+        # ⛔ `lib sync --full` FIRST, not `cyrius deps`. Since cyrius 6.7.13 `deps`
+        # rewrites cyrius.lock, dropping every row for a file absent from lib/ —
+        # on this fresh checkout, 113 rows → 40 — so the old order verified a
+        # lock CI had just regenerated, not the committed one. `lib sync --full`
+        # refuses (rc 1, writes nothing) when the committed lock disagrees with
+        # the pinned snapshot, and leaves a matching one byte-identical.
+        run: |
+          set -e
+          cyrius lib sync --full
+          cyrius deps --verify
+          git diff --exit-code cyrius.lock
 
       - name: Build (host + agnos)
         # kriya is now agnos-capable; build BOTH targets so a PR can't break the
@@ -161,11 +171,12 @@ jobs:
         run: sh scripts/fuzz.sh
 
       - name: Lock covers the pinned snapshot
-        # cyrius.lock records all of the pinned stdlib snapshot (`lib sync --full`),
-        # but `cyrius deps` above vendors, and so checks, only the leaves the build
-        # needs. After a pin move, entries for files kriya does not vendor could
-        # keep the OLD pin's hashes (1.7.3's first cut kept 39 at 6.6.9 under a
-        # 6.6.11 pin). Vendor the full snapshot and verify every entry against it.
+        # cyrius.lock records all of the pinned stdlib snapshot (`lib sync --full`).
+        # After a pin move, entries for files kriya does not vendor could keep the
+        # OLD pin's hashes (1.7.3's first cut kept 39 at 6.6.9 under a 6.6.11 pin).
+        # The first step verified the COMMITTED lock against the snapshot; this one
+        # proves nothing in between (build, test, bench) rewrote it.
         run: |
-          cyrius lib sync --full
+          set -e
           cyrius deps --verify
+          git diff --exit-code cyrius.lock
