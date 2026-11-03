@@ -744,6 +744,90 @@ while [ "$_i" -lt 5001 ]; do _n="$_n !"; _i=$((_i + 1)); done
 # shellcheck disable=SC2086
 f17_same "5,001 negations are one"                     r17/s -maxdepth 0 $_n -name zz
 
+# --- -delete (1.8.2, ADR 0027) --------------------------------------------
+# Each case runs on twin fresh fixtures, GNU in one and kriya in the other, and compares
+# the exit status, stdout, the NUMBER of diagnostics (the wording is kriya's own) and the
+# tree left behind. `real/` sits beside `t/`, reached only through the symlink `t/lnk`.
+_del_mk() {
+    [ -d "$1/t/a" ] && chmod -R u+w "$1" 2>/dev/null
+    rm -rf "$1"
+    mkdir -p "$1/t/a/b" "$1/t/c" "$1/real"
+    echo x > "$1/t/f"; echo y > "$1/t/a/g"; echo z > "$1/t/a/b/h"
+    : > "$1/t/c/e.tmp"; : > "$1/t/k.tmp"; ln -s ../real "$1/t/lnk"; echo r > "$1/real/keep"
+}
+_del_tree() { (cd "$1" && find . | sort | tr '\n' ' '); }
+del_same() {
+    name=$1; shift
+    _del_mk dg; _del_mk dk
+    _g=0; _go=$(cd dg && find "$@" 2>../dg.err) || _g=$?
+    _k=0; _ko=$(cd dk && "$BIN" find "$@" 2>../dk.err) || _k=$?
+    expect_eq "-delete $name (exit|stdout|diagnostics|tree)" \
+        "$_g|$_go|$(wc -l < dg.err)|$(_del_tree dg)" "$_k|$_ko|$(wc -l < dk.err)|$(_del_tree dk)"
+}
+del_same "everything"                    t -delete
+del_same "by name"                       t -name '*.tmp' -delete
+del_same "non-empty dirs fail, post-order" t -type d -delete
+del_same "-mindepth 1 keeps the start"   t -mindepth 1 -delete
+del_same "is true, then -print"          t -name '*.tmp' -delete -print
+del_same "-print first, same order"      t -name '*.tmp' -print -delete
+del_same "-prune with an explicit -depth" t -depth -name a -prune -o -delete
+del_same "-H, a directory start"         -H t -name '*.tmp' -delete
+del_same "-maxdepth 0 on a non-empty dir" t -maxdepth 0 -delete
+del_same "true, so the next test runs"   t -name f -delete -name f -print
+del_same "a second -delete fails ENOENT" t -name f -delete -delete
+del_same "t/a/.. reaches the kernel"     t/a/.. -maxdepth 0 -delete
+del_same "a symlink start is unlinked, not followed" t/lnk -delete
+del_same "the link inside is unlinked"   t -name lnk -delete
+del_same "'t/.' is EINVAL, as GNU"       t/. -delete
+_del_mk dg; _del_mk dk
+_g=0; (cd dg/t && find . -delete 2>/dev/null) || _g=$?
+_k=0; (cd dk/t && "$BIN" find . -delete 2>/dev/null) || _k=$?
+expect_eq "-delete: a start of exactly '.' is emptied and kept" "$_g|$(_del_tree dg)" "$_k|$(_del_tree dk)"
+_del_mk dg; _del_mk dk; chmod 555 dg/t/a dk/t/a
+_g=0; _go=$(cd dg && find t -delete 2>&1 | wc -l) || _g=$?
+_k=0; _ko=$(cd dk && "$BIN" find t -delete 2>&1 | wc -l) || _k=$?
+chmod 755 dg/t/a dk/t/a
+expect_eq "-delete: an unwritable directory (exit|diagnostics|tree)" \
+    "$_g|$_go|$(_del_tree dg)" "$_k|$_ko|$(_del_tree dk)"
+
+# ⛔ The deliberate differences. Each would delete OUTSIDE the named tree under GNU.
+_del_mk dk; _before=$(_del_tree dk)
+_k=0; (cd dk && "$BIN" find t -name a -prune -o -delete >/dev/null 2>&1) || _k=$?
+expect_eq "-delete with -prune and no -depth: refused, nothing touched" "2|$_before" "$_k|$(_del_tree dk)"
+_k=0; (cd dk && "$BIN" find -L t -delete >/dev/null 2>&1) || _k=$?
+expect_eq "-delete -L: refused, real/keep survives (GNU deletes it)" "2|$_before" "$_k|$(_del_tree dk)"
+ln -s real dk/rl
+_k=0; _ke=$(cd dk && "$BIN" find rl/ -delete 2>&1) || _k=$?
+expect_eq "-delete 'rl/' (a slashed symlink): refused, the target keeps its file" \
+    "1|keep" "$_k|$(ls dk/real)"
+case "$_ke" in *"ADR 0010"*) PASS=$((PASS + 1)) ;; *) FAIL=$((FAIL + 1)); echo "FAIL -delete rl/: no ADR 0010 note: $_ke" >&2 ;; esac
+_k=0; (cd dk && "$BIN" find -H rl -delete >/dev/null 2>&1) || _k=$?
+expect_eq "-delete -H on a symlink start: refused, the target keeps its file" "1|keep" "$_k|$(ls dk/real)"
+_k=0; (cd dk && "$BIN" find rl -delete >/dev/null 2>&1) || _k=$?
+expect_eq "-delete on a symlink start under -P: the link goes, the target stays" \
+    "0|keep|absent" "$_k|$(ls dk/real)|$( [ -L dk/rl ] && echo present || echo absent)"
+# ADR 0004, with -maxdepth 0 as a seatbelt: a regression could at most try rmdir("/").
+_k=0; "$BIN" find / -maxdepth 0 -delete >/dev/null 2>&1 || _k=$?
+expect_eq "-delete refuses '/' (ADR 0004)" "2" "$_k"
+_k=0; (cd / && "$BIN" find . -maxdepth 0 -delete >/dev/null 2>&1) || _k=$?
+expect_eq "-delete refuses '.' when the cwd is '/'" "2" "$_k"
+_del_mk dk
+_k=0; (cd dk && "$BIN" find t / -maxdepth 0 -delete >/dev/null 2>&1) || _k=$?
+expect_eq "-delete with a protected start refuses the WHOLE invocation" "2|present" \
+    "$_k|$( [ -d dk/t ] && echo present || echo absent)"
+
+# ⛔ The race the fd-relative walk exists for. On the first entry it reaches, an -exec moves
+# t/a away and puts a symlink to ../outside in its place. Every later removal must still land
+# in the directory the walk opened (now a.moved/), never in outside/, which a full-path unlink
+# would resolve to. The swap runs once, on whichever entry comes first, so the case does not
+# depend on readdir order.
+rm -rf race; mkdir -p race/t/a/b race/outside/b
+for _i in 1 2 3 4 5 6 7 8; do echo "$_i" > "race/t/a/b/y$_i"; echo "$_i" > "race/outside/b/y$_i"; done
+# shellcheck disable=SC2016
+(cd race && "$BIN" find t -exec sh -c '[ -e .swapped ] || { mv t/a a.moved; ln -s ../outside t/a; : > .swapped; }' \; -delete >/dev/null 2>&1) || true
+expect_eq "-delete under a mid-walk symlink swap leaves outside/ intact" "8" "$(ls race/outside/b | wc -l | tr -d ' ')"
+expect_eq "-delete under a mid-walk swap removed the moved tree's files" "0" "$(ls race/a.moved/b 2>/dev/null | wc -l | tr -d ' ')"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

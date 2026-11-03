@@ -86,3 +86,56 @@ fn is_protected_path(operand): i64 {
     }
     return 0;
 }
+
+# 1 if `op` carried a trailing slash AND its final component (after stripping
+# those slashes) is a symlink — the shape ADR 0010 refuses. ⭐ Shared since 1.8.2:
+# `rm` refuses it as an operand and `find -delete` as a starting point (ADR 0027),
+# because the hazard is the same in both — a second deletion path that let it
+# through would be a hole in ADR 0010.
+#
+# ⛔ `rm -r link/` IS WORSE THAN EITHER FOLLOWING OR REFUSING. A trailing slash is
+# POSIX-defined to resolve to the linked-to directory, so the walk descends into
+# the target and EMPTIES IT — and then fails to unlink `link` itself, because
+# `link/` is not a directory to `unlinkat(AT_REMOVEDIR)`. Measured identical in
+# GNU: `real/` loses every file, the symlink survives, exit is non-zero. The
+# operation reports failure AFTER destroying the data, so the user sees an error,
+# sees the link still there, and reasonably concludes nothing happened.
+#
+# ⚠ It also contradicts kriya's own floor. ADR 0003 hard rule #1 is that `rm`
+# never follows a symlink and no flag opts in; the trailing slash was a
+# POSIX-blessed way to follow one, on the utility CLAUDE.md singles out as the
+# most dangerous. ADR 0010 closes it.
+#
+# `rm link` (no slash) is untouched — it unlinks the link, which is both POSIX
+# and ADR 0003.
+fn protected_is_slashed_symlink(op): i64 {
+    if (op == 0) { return 0; }
+    var len = strlen(op);
+    if (len < 2) { return 0; }
+
+    # Must have carried at least one trailing slash.
+    if (load8(op + len - 1) != 47) { return 0; }
+
+    # Strip them; "/" itself is left to the ADR-0004 protected check.
+    var stripping: i64 = 1;
+    while (stripping == 1) {
+        if (len > 1) {
+            if (load8(op + len - 1) == 47) { len = len - 1; }
+            else { stripping = 0; }
+        } else {
+            stripping = 0;
+        }
+    }
+    if (len < 1) { return 0; }
+
+    # Copy the stripped form so lstat sees the name without the slash — with the
+    # slash, lstat resolves the target and reports a directory, which is exactly
+    # the confusion this guard exists to remove.
+    var bare = alloc(len + 1);
+    memcpy(bare, op, len);
+    store8(bare + len, 0);
+
+    var st[144];
+    if (fs_lstat_at(0 - 100, bare, &st) != 0) { return 0; }
+    return fs_is_lnk(&st);
+}
