@@ -6,6 +6,107 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.8.2] - 2026-11-03 — destructive and parallel: find -delete / -execdir / -ok, xargs -P / -p / -a / -d / -E / -o
+
+The roadmap's next slot, after a renumber that made the slot labels match the versions again. Every
+option was measured against GNU findutils 4.9, 4.10 and (for `-ok` and `-p`) 4.11 before it was
+written. They agree on every case kriya tests.
+
+### Added — `find -delete` ([ADR 0027](docs/adr/0027-find-delete-carries-rms-refusals.md))
+
+- **It carries `rm`'s refusals.** GNU has none, and in each case it deletes outside the named tree:
+  - `-L -delete` follows `t/lnk` into `../real`, deletes `real/keep`, then fails on the link. kriya
+    refuses `-L` with `-delete` (exit 2).
+  - A slashed symlink start (`rlink/`) empties the target, then fails. kriya refuses it per starting
+    point (ADR 0010; exit 1), and so does a symlink start under `-H`.
+  - A protected starting point (`/`, or `.` with `/` as the cwd) refuses the whole invocation before
+    anything is touched (ADR 0004), as in `rm`. `rm`'s check now lives in `src/lib/protected.cyr` as
+    `protected_is_slashed_symlink`, so both deletion paths read one rule.
+- ⛔ **The walk is fd-relative on Linux, for every `find`.** Each entry is stat'd and opened relative to
+  its parent's open directory, and `-delete` unlinks with `unlinkat(parent_fd, name)`. A full-path walk
+  is the classic `find -delete` race: a parent swapped for a symlink mid-walk redirects every later
+  removal. agnos keeps the full path, since it has no open-relative-to-fd and no symlinks.
+- Everything else is GNU's, case for case. `-delete` is an action (no implicit `-print`), turns on
+  `-depth`, and is true when the entry is gone. A failure is reported and exits 1. A start of exactly
+  `.` is emptied and kept, while `./` and `t/.` are EINVAL. `-prune` without an explicit `-depth` is
+  refused in GNU's words, at exit 2 (kriya's usage code, where GNU's is 1).
+
+### Added — `find -execdir`, `-ok`, `-okdir`
+
+- **`-execdir CMD ;` / `{} +`** runs in the directory holding the entry, with `{}` as `./NAME`. A
+  starting point runs in its directory part: `.` when it has none, so `..` runs here as `./..`, `/x`
+  runs in `/`, and `/` stays `/`. One trailing slash is kept, so `t//` is `./t/`. `+` batches per
+  directory, and each batch holds a CLOEXEC duplicate of its directory's descriptor. GNU's three
+  refusals of a PATH holding `.`, an empty entry or a relative entry are reproduced, in its words.
+- **`-ok` / `-okdir`** ask GNU's `< CMD ... PATH > ? ` on stderr, read a whole line, and run on `y`/`Y`.
+  End of input is no.
+  - ⚠ ADR 0002: stdin must be a terminal, or they are a usage error before anything runs, as with
+    `rm -i`. GNU reads the answers from a pipe.
+  - Their child reads `/dev/null`. GNU *closes* the child's stdin, so the child's first `open()`
+    silently becomes its stdin.
+  - Refused on agnos, which has no working directory.
+- The child enters the directory by descriptor (`k_spawn_in`, `k_spawn_argv_in`).
+  - ⛔ **On aarch64 no literal reaches `fchdir`.** cyrius renumbers `50` as x86 `listen` (the child ran
+    `listen(4, 0)`), and passes x86's `81` through as aarch64 `sync`. So aarch64 does
+    `chdir("/proc/self/fd/N")` through `sys_chdir` instead, which lands in exactly the directory the
+    descriptor holds. Filed upstream as cyrius `docs/development/issues/2026-11-03-stdlib-has-no-sys-fchdir.md`.
+- Corrects roadmap's claim that GNU refuses `{}` in an `-execdir` command name: 4.9–4.11 run `./t` as
+  written, and kriya follows.
+
+### Added — `xargs -a`, `-d`, `-E`, `-o`, `-P`, `-p`
+
+- **`-a FILE` / `--arg-file`**: items come from FILE, and the command keeps xargs's stdin. `-a -` is
+  stdin, and the command then reads `/dev/null`. The last `-a` wins.
+- **`-d DELIM` / `--delimiter`**: GNU's `get_input_delimiter`, ported with its quirks and its five
+  refusals (exit 2). Items end at DELIM, quotes and backslash are plain bytes, and an empty item is an
+  argument. `-0` and `-d` are last-wins against each other.
+- **`-E STR` / `--eof=STR`**: an item equal to STR ends the input, quoted or not, and under `-I` the
+  whole line is compared. `-E ''` is none. Under `-0`/`-d` it has no effect, with GNU's warning.
+- **`-o` / `--open-tty`**: the command reads `/dev/tty`.
+- **`-P N` / `--max-procs`**: runs up to N commands at once. 0 is no limit, and INT_MAX is the ceiling.
+  A 255 or a signal stops new starts, and xargs exits once the running commands finish (124 / 125).
+  agnos runs them one at a time, since it has no fork.
+  - ⭐ The roadmap's worry that the one batch buffer must serve running commands was unfounded:
+    `spawn.cyr`'s CLOEXEC pipe returns only after `execve` has taken argv. So `_k_spawn_core` split into
+    `k_spawn_start` and `k_spawn_reap`, and the buffer is reused at once.
+- **`-p` / `--interactive`**: GNU's prompt (the `-t` line, then `?...`) on `/dev/tty`. It implies `-t`,
+  and its transcript is byte-identical to GNU 4.11's. As in GNU, a declined command does not count as
+  run, so when every batch is declined it asks once more for the bare command.
+- ⚠ **Deliberate divergences**, each pinned by a test:
+  - `-E` stops even at the last item of an unterminated line. GNU's EOF arm checks only a line's
+    *first* item, so `printf 'a STOP' | xargs -E STOP echo` prints `a STOP`.
+  - `-o` and `-p` open `/dev/tty` once, before the first command or prompt, and a failure is exit 1 with
+    nothing run. GNU's `-o` child dies of an assertion (SIGABRT), and its `-p` prints the command
+    before it fails.
+  - GNU's optional-value `-e[STR]` and its SIGUSR1/SIGUSR2 adjustment of `-P` are not taken.
+
+### Fixed
+
+- ⛔ **Every `find -exec` child inherited one open descriptor per directory level.** `ls /proc/$$/fd` in
+  the child showed `0 1 2 3 4 5` under kriya and `0 1 2` under GNU. The walk's directories are now
+  `FS_O_CLOEXEC`.
+
+### Changed
+
+- **Roadmap renumbered.** Versions 1.7.2–1.8.1 had shipped out of plan, so every open slot moved up one
+  minor: the old 1.7.2–1.7.4 are 1.8.2–1.8.4, 1.8.x is 1.9.x, and 1.9.x is 1.10.x. All 51
+  `roadmap X.Y.Z` citations in the source moved in the same change, and the shipped notes are gone.
+  CHANGELOG entries before this one cite the old numbers.
+- Binary 1,295,792 → **1,315,464** bytes host (+19,672), 1,300,240 → **1,319,976** agnos (+19,736).
+
+### Tests
+
+- `smoke-find.sh` 443 → **499**, and `smoke-xargs.sh` 167 → **237**. Each option is compared with GNU on
+  twin fixtures, and every refusal and deliberate divergence is asserted. They include a mid-walk
+  symlink swap that a full-path unlink fails. `-ok` and `-p` are driven through `script(1)`, and
+  `-P`'s concurrency is measured as a peak of running commands, not timed.
+- ⭐ **19 mutants, each caught.** Writing them caught three of my own vacuous or flaky cases (an `-o` case
+  that passed with `-o` removed, a racing 255 case, and a sort over interleaved output). They also caught
+  one real divergence: counting a declined `-p` command as run.
+- **838 unit + 58 syscall + 18 POSIX**, unchanged. Fuzz is green under poison. The lints,
+  `check-oracles.sh` and `watchlist-scan.py` are clean, `vet` reports 57 deps, and all three targets
+  build with zero warnings. aarch64 was checked under `qemu-aarch64 -strace` only.
+
 ## [1.8.1] - 2026-11-03 — cyrius 6.7.18, and the six upstream gates filed at last
 
 The toolchain pin move 6.7.9 → 6.7.18, with the vendored stdlib and `cyrius.lock` re-taken from the

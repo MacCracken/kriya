@@ -154,6 +154,16 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 
 ### Testing the tests: mutation and adversarial review
 
+- ⛔ **A surviving mutant is a question about the TEST, and a mutant the oracle agrees with is a
+  question about the CODE.** 1.8.2 wrote 19 mutants for its new cases. Three survived the first run,
+  and each was a test defect:
+  - an `-o` terminal case that passed with `-o` removed, because the child inherited the pty anyway;
+  - a 255 case that raced on which child was reaped first;
+  - a no-wait mutant that passed because an orphaned child kept the `$(...)` pipe open, so its output
+    arrived whether or not xargs waited.
+  ⭐ A fourth "mutant", counting a declined `-p` command as run, was GNU's behaviour exactly, and the
+  code was the divergence. Running the mutant beside the oracle is what told them apart. Two more
+  cases were flaky in a way a single pass hides: run a new case five times before trusting it.
 - ⛔ **A new block that passes against the OLD binary has proved nothing, and three kinds of block
   do.** 1.6.16's run of every changed script against 1.6.15 found each of them in one pass:
   - a helper that adds its own command word: `compare_sorted` prepends `find`, so passing it
@@ -515,6 +525,15 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   out twice as slow as the code it replaced. ⭐ Time a change against the binary it replaces, at a
   size where a complexity class shows, not only at the size the tests use. `kriya_arg(i)` is the
   O(1) accessor.
+
+- ⛔ **A filtered build log is not a read build log.** 1.8.2's aarch64 build warned, accurately,
+  *"raw syscall 50 inside a native-aarch64 region is renumbered → 201 (listen); no 1000+N alias
+  exists for native fchdir"*, and kriya shipped a first cut that ran `listen(dirfd)` on aarch64.
+  The warning was there, but every build in that session went through `| tail -1` or
+  `| grep -v "^  "`, which left only the `OK` line. ⭐ Count warnings rather than looking at a tail:
+  `cyrius build … 2>&1 | grep -ciE "warn|error"` must print 0 on all three targets.
+  ⚠ No literal reaches native aarch64 `fchdir` at all: 81 passes through as `sync`, and there is no
+  1050 alias (filed upstream). `chdir("/proc/self/fd/N")` through `sys_chdir` is the workaround.
 
 - ⛔ **An argument you do not pass is still an argument if the kernel reads its register.** A
   three-argument `syscall(1, fd, buf, n)` leaves `r10` as the last code set it, and agnos reads a4

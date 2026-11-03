@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.2** — destructive and parallel |
+| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.3** — usage reporting |
 | **1.9.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.9.0** — floats |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
@@ -57,18 +57,6 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 (`src/lib/argbatch.cyr`), which counts as GNU's `buildcmd` does
 ([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
 
-- **1.8.2 — Destructive and parallel.** ⛔ `find -delete` **must inherit the
-  [ADR-0004](../adr/0004-rm-refuses-root.md) `/` refusal and the
-  [ADR-0010](../adr/0010-rm-refuses-a-trailing-slash-symlink-operand.md) trailing-slash-symlink
-  refusal** — a second deletion path that does not is a hole in both. `xargs -P N` (job-table
-  management) and `-p` (interactive prompt, which must honour ADR 0002's no-hang-on-non-tty rule).
-  - ⚠ **`-P` needs the batch builder to hand out command lines while others run** — it is one
-    buffer, reused per batch. `--show-limits` already prints GNU's ceiling for `-P`.
-  - **The prompting and per-directory forms that share `-p`'s tty rule**: `find -ok` / `-okdir`
-    (whose child gets `/dev/null` as stdin, since find reads the answers) and `-execdir`, which
-    GNU refuses `{}` in the command name for. Not taken today; measured at 1.7.0.
-  - **GNU `xargs`'s other inputs**: `-a FILE` (the child then keeps stdin), `-d DELIM`, `-E STR`
-    and `-o`. Refused today, as unknown options.
 - **1.8.3 — Usage reporting.** `du -x` (one-filesystem), `--exclude` / `--exclude-from`,
   `--inodes` and `-0`; `df -t TYPE` (POSIX-required); `env -S` split-string and `-C DIR`.
   - **The sparse inode set.** GNU's device-inode set costs about **one bit per counted file** —

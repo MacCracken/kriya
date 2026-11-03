@@ -1037,7 +1037,7 @@ fn _xa_show_limits(posix_max, cmd_name): i64 {
     k_write( 2, "\n", 1);
     _xa_show_num("Size of command buffer we are actually using: ", _xa_arg_max);
     k_write( 2, "\n", 1);
-    # ⚠ -P is roadmap 1.8.2; this is the ceiling it will have, GNU's INT_MAX.
+    # -P's ceiling (1.8.2), GNU's INT_MAX, which `_xa_walk_options` enforces.
     _xa_show_num("Maximum parallelism (--max-procs must be no greater): ", 2147483647);
     k_write( 2, "\n", 1);
     if (k_isatty(0) == 1) {
