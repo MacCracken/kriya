@@ -778,8 +778,12 @@ Opened at 1.6.11. Cyrius resolves a duplicate top-level definition across two no
 ONE symbol — *"last definition wins"* — and says so only in a warning, so the stdlib's own functions
 can end up running kriya's code, or reading kriya's initializer for a variable the stdlib owns.
 - *Detection*: `scripts/watchlist-scan.py` M15i resolves `[deps].stdlib` through every
-  `include "lib/…"` and intersects its top-level `fn` / `var` / enum-member names with `src/`. The
-  build's own `duplicate symbol` / `duplicate fn` warning names the same thing — read it.
+  `include "lib/…"` and intersects its top-level `fn` / `var` / `const` / enum-member names (a `pub`
+  prefix included) with `src/`. The build's own `duplicate symbol` / `duplicate fn` warning names the
+  same thing — read it. ⚠ **The scan reads the stdlib's declaration forms, and those move too**: the
+  6.7.x stdlib declares top-level `const` (`process.cyr`'s `_PROC_KILL_STATE` was a `var` until
+  6.7.9), which a `fn`/`var`-only match never saw. Taught `const` and `pub` at 1.8.0, confirmed on a
+  mutant the old scan passed. A new declaration keyword upstream is a scan change here.
 - *Why at a pin bump*: kriya's names do not move when the pin does; the stdlib's do. A name that was
   kriya's alone becomes a collision the day upstream adds it.
 - *Bit us from 1.6.7 to 1.6.10*: cyrius 6.5.36 gave `lib/io.cyr` `_env_load` / `_env_len`, the names
@@ -788,5 +792,6 @@ can end up running kriya's code, or reading kriya's initializer for a variable t
   stdlib `getenv` on Linux — and ⚠ **the 1.6.9 audit read the warning and filed it as cosmetic**;
   a twenty-line probe said otherwise. Renamed to `_kriya_env_*`.
 - *Status at 1.6.11*: 0 names over a 39-file closure; the scan reports exactly the two above when
-  run against the 1.6.10 `env.cyr`.
+  run against the 1.6.10 `env.cyr`. *At 1.8.0* (pin 6.7.9): 0 names over a 40-file closure, `const`
+  included.
 

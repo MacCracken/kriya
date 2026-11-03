@@ -125,7 +125,9 @@ def toplevel_names(path):
             m = re.match(r'\s+([A-Za-z_][A-Za-z0-9_]*)\s*=', l)
             if m: names.add(m.group(1))
             continue
-        m = re.match(r'(?:fn|var)\s+([A-Za-z_][A-Za-z0-9_]*)', l)
+        # `const` and `pub` since 6.7.x: the stdlib declares top-level `const` now (process.cyr's
+        # `_PROC_KILL_STATE` was a `var` until 6.7.9), and a `fn`/`var`-only match never saw it.
+        m = re.match(r'(?:pub\s+)?(?:fn|var|const)\s+([A-Za-z_][A-Za-z0-9_]*)', l)
         if m: names.add(m.group(1))
         if re.match(r'enum\s+\w+\s*\{', l): in_enum = '}' not in l
     return names

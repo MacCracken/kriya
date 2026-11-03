@@ -6,6 +6,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.8.0] - 2026-11-03 — cyrius 6.7.9
+
+The toolchain pin move 6.6.20 → 6.7.9, the first pin on the 6.7 line, with the vendored stdlib and
+`cyrius.lock` re-taken from the new snapshot. Version 1.8.0 ships out of plan, as 1.7.2–1.7.4 did:
+the roadmap's 1.8.0 label (floats) is a plan name, and that slot ships under the next free number.
+No kriya source changed. Every check the pin-bump checklist names passed at the new pin.
+
+### Changed
+
+- **Pin 6.6.20 → 6.7.9.** `cyrius lib sync --full` ran first, before any `deps` or `build`.
+  `cyrius.lock` was re-locked in full: still **113** entries (no file added or removed), with 67
+  hashes moved. `deps --verify` reports 113 verified, 0 failed, and CI's `deps` and
+  `Lock covers the pinned snapshot` steps leave the lock byte-identical. Of the modules
+  `[deps].stdlib` declares, `fmt`, `alloc`, `io`, `vec`, `str`, `syscalls`, `fnptr`, `niyama`,
+  `process` and `unicode/normalize` changed.
+- **niyama 1.0.13 → 1.1.0.** The changes are in its PCRE engine only: the backtracker keeps its
+  choice points on an explicit heap stack, so how deep it can backtrack no longer depends on the
+  subject's length. kriya does not use that engine (`grep -P` is refused). The BRE/RE2 gaps M11
+  records were re-measured against GNU grep 3.12 and are unchanged: `kriya grep -c` returns 0 for
+  `a\+b`, `a\?b`, `a\|x`, `\w` and `\bfoo` where GNU returns 1–4, `\(a\)\1` is refused where GNU
+  matches, and `-oE 'a|ab'` prints `a` where GNU prints `ab`.
+- **Checked at the pin move.** No fn is defined twice in the build; the only repeated name is `main`,
+  in `src/main.cyr` and `src/test.cyr`, which are never compiled together. `watchlist-scan.py` is
+  clean, including M15i over a 40-file stdlib closure, and M15a's premise still measures 8 / 32 /
+  144. chrono is byte-identical to 6.6.20's, so the local-time gate holds. The 6.6.12 xattr,
+  `fchown`, `statx` and `getrlimit` wrappers are all still present, so roadmap 1.7.4 stays
+  unblocked. The host, agnos and aarch64 builds are all warning-free.
+- **What the 6.7.x line now refuses, and what it fixed silently.** 6.7.7 checks the argument count of
+  every call to a fn defined later, 6.7.9 refuses an unmatched module-scope `}` (it used to drop the
+  rest of the file), and 6.7.0–6.7.8 reserve `trait`, `const`, `true`, `false`, `do` and `dyn`. All
+  three targets build, so kriya meets none of them. 6.7.3 fixed a tail call in a loop that was handed a
+  freed frame, and 6.7.6 a branch on stale x86 flags. The suites and smoke counts are unchanged, so
+  kriya read the right values either way. 6.7.9 resets SIGPIPE, SIGXFSZ and the signal mask in the
+  stdlib exec family's children; that does not reach kriya, whose only `exec_vec` calls are agnos arms,
+  and agnos has no signals.
+- **`scripts/watchlist-scan.py` M15i reads `const` and `pub`.** The 6.7.x stdlib declares top-level
+  `const` (`process.cyr`'s `_PROC_KILL_STATE` was a `var` until 6.7.9), and the scan matched only `fn`
+  and `var`. A kriya `var _PROC_KILL_STATE` passes the 1.7.4 scan and fails this one. The result at
+  this pin is still 0 shared names.
+- Binary 1,295,608 → **1,303,920** bytes host (+8,312), 1,299,904 → **1,308,224** agnos (+8,320).
+  All of it is the toolchain: no source changed apart from the version string, which is the same
+  length.
+
+### Tests
+
+- **838 unit + 58 syscall + 18 POSIX**, unchanged. Fuzz is green under `--poison` and
+  `--poison=ab` (1,127 + 201 + 201). The lints, `check-oracles.sh` and `watchlist-scan.py` are
+  clean, and `vet` reports 57 deps.
+- Smoke as a regular user: **7,629 passed, 0 failed** on `ubuntu:24.04` (GNU coreutils 9.4), with
+  the same per-script counts as 1.7.3 and 1.7.4, and **7,632 / 0** against GNU coreutils 9.7 on
+  Ubuntu 26.04, CI's oracle. All 41 scripts pass in both.
+- aarch64, under `qemu-aarch64` only: `tests/kriya-syscalls.tcyr` passes 58/58, `ls` and `cp -i`
+  work on a pty, and the tty probe issues `ioctl(TCGETS)`. The pi smoke suite was not run.
+
 ## [1.7.4] - 2026-11-03 — cyrius 6.6.20, and two buffers someone else wrote past
 
 The toolchain pin move 6.6.11 → 6.6.20, with the vendored stdlib and `cyrius.lock` re-taken from

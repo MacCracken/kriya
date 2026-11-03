@@ -26,7 +26,7 @@ Two rules hold across the arcs:
   number of shared capabilities (§ Enabler map). Shipping the enabler *is* the release; the features
   riding on it are the release notes, and one round of test work serves the whole batch.
 - **⚠ Re-check a gate before planning around it — it has been wrong in both directions**
-  ([`lessons.md`](lessons.md)). Every gate below was re-verified at pin 6.6.20 (1.7.4).
+  ([`lessons.md`](lessons.md)). Every gate below was re-verified at pin 6.7.9 (1.8.0).
 
 **M-numbers** (`M0`–`M17`) are the milestone identifiers `CHANGELOG.md` entries use. Two are open,
 **M10** and **M11**, both under § Gated, and **M15** is the compiler watchlist in
@@ -36,8 +36,8 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | — | the **1.7.2**-labelled slot — destructive and parallel (ships as 1.7.5) |
-| **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.8.0** — floats |
+| **1.7.x** | Traversal, exec, filesystem reporting, syscall portability | — | the **1.7.2**-labelled slot — destructive and parallel (ships under the next free number) |
+| **1.8.x** | Parsers & numerics | float formatting, byte-suffix parser | the **1.8.0**-labelled slot — floats |
 | **1.9.x** | Performance | niyama regex speed (upstream) | **1.9.0** — `wc -c` fast path |
 
 No arc depends on another; they can be resequenced by consumer demand, and the M10 boot-burn
@@ -76,7 +76,8 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 > ⚠ **Slot labels are plan names.** 1.7.2 shipped out of plan (2026-09-28): the aarch64
 > MISROUTING half of 1.7.4 below; 1.7.3 too (2026-09-30): its two aarch64 ABI defects (open flags,
 > `struct stat` layout); 1.7.4 too (2026-11-03): the pin move to cyrius 6.6.20, carrying
-> `k_isatty`'s buffer from the 1.7.4 slot below. The slots here ship under the next free numbers.
+> `k_isatty`'s buffer from the 1.7.4 slot below; and 1.8.0 (2026-11-03): the pin move to cyrius
+> 6.7.9, ahead of every open slot in this arc. The slots here ship under the next free numbers.
 
 - **1.7.4 — Raw syscalls to stdlib wrappers.** ⭐ **The misrouting half SHIPPED in 1.7.2**: every
   raw number that ran a DIFFERENT call on aarch64 (24 sites — `access` 21 was epoll_ctl, `fchown`
@@ -87,7 +88,7 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
   remains here is the readability sweep of the numbers cyrius DOES renumber, and the aarch64 xattr
   declines: native aarch64 `fchown` 55, `setxattr` 5, `fsetxattr` 7, `lgetxattr` 9, `fgetxattr` 10
   cannot be issued by number from cyrius (each is a number cyrius renumbers as an x86 call), so
-  1.7.2 declines the four xattr calls there. ⭐ **That gate is gone — re-verified at pin 6.6.20:**
+  1.7.2 declines the four xattr calls there. ⭐ **That gate is gone — re-verified at pin 6.7.9:**
   the stdlib has wrapped the family since cyrius **6.6.12** (`sys_{,l,f}{get,set,list,remove}xattr`,
   `sys_fchown`, `sys_statx`, `sys_getrlimit`), the aarch64 peer issuing the renumbered ones through
   a private `1000+N` band (`SYS_GETXATTR = 1008`, `SYS_FCHOWN = 1055`, `SYS_STATX = 1291`) and the
@@ -129,6 +130,9 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 
 **Enablers:** a float-formatting story (1.8.0) and a byte-suffix parser in `src/lib/args.cyr`
 (1.8.2).
+
+> ⚠ **Version 1.8.0 shipped out of plan** (2026-11-03) as the cyrius 6.7.9 pin move. The labels below
+> are plan names, as in 1.7.x, and the floats slot ships under the next free number.
 
 - **1.8.0 — Floats.** `printf %e` / `%E` / `%f` / `%F` / `%g` / `%G` / `%a` / `%A` — refused by name
   today — plus positional `%N$s`. `seq -f FORMAT` rides directly on it.
@@ -287,7 +291,7 @@ decision, which needs an ADR rather than a roadmap line.
 
 ## Gated — not on the arc sequence
 
-These are open, but their trigger is outside kriya. Each was re-verified at pin 6.6.20 (1.7.4).
+These are open, but their trigger is outside kriya. Each was re-verified at pin 6.7.9 (1.8.0).
 
 ### M10 — Consumer-burn (closes the last v1.0 criterion)
 
@@ -312,7 +316,8 @@ Two regex-surface gaps whose fix belongs to niyama rather than kriya.
 
 - **The GNU BRE operators** — `\+` `\?` `\|` `\b` `\B` `\w` `\W` `\s` `\S` compile clean in niyama
   and then match NOTHING. ⛔ **In `grep` and `find -regex` that is a WRONG ANSWER, not an error**:
-  re-measured at pin 6.6.6 against GNU grep 3.12, `kriya grep -c` returns 0 for `a\+b`, `a\?b`,
+  re-measured at pin 6.6.6 and again at 6.7.9 (niyama 1.1.0, whose changes are PCRE-only) against
+  GNU grep 3.12, `kriya grep -c` returns 0 for `a\+b`, `a\?b`,
   `a\|x`, `\w`, `\s` and `\bfoo` where GNU returns 1–4. `nl -b pBRE` REFUSES the same operators, so
   one pattern is a loud exit 2 in one utility and a silent wrong count in another. ⚠ **Not yet filed
   at niyama** — filing it is the next step; niyama's roadmap does not mention it. ⭐ If kriya closes
@@ -360,7 +365,7 @@ the **genuine** chrono gate — re-verified absent at pin 6.6.6 — and the trig
    `deps` or `build`** — those re-stamp the lock with the new pin but keep the old pin's rows for
    files they do not vendor, and `lib sync` then refuses those rows by name (`--relock` accepts the
    new snapshot explicitly). Since 6.6.17 `lib sync --full` re-locks every file it writes; check with
-   `cyrius deps --verify` (all entries, 113 at 6.6.20). ⚠ `deps` resolves without re-vendoring, and
+   `cyrius deps --verify` (all entries, 113 at 6.7.9). ⚠ `deps` resolves without re-vendoring, and
    the build then warns that bundled libs are behind the pin. ⚠ `cyrius build` re-copies the modules
    `[deps].stdlib` DECLARES on every build and never the rest, so the undeclared bundled libs drift
    silently without `--full`.
