@@ -182,6 +182,160 @@ expect_exit "env -u empty NAME"     2 "$BIN" env -u ''
 out=$("$BIN" env -iu PATH FOO=clustered | sort)
 expect_eq "env -iu clustered (print)" "FOO=clustered" "$out"
 
+# --- -S / --split-string (1.8.3): GNU's grammar, measured against coreutils 9.4 and 9.7.
+# ⭐ Most of these print the environment instead of running a command, so the
+# words -S produced show up as NAME=VALUE lines and no external binary is needed.
+out=$("$BIN" env -i -S 'A=1 B=2')
+expect_eq "-S splits on blanks" "A=1
+B=2" "$out"
+out=$("$BIN" env -i -S "$(printf 'A=1\tB=2\nC=3')")
+expect_eq "-S splits on tab and newline" "A=1
+B=2
+C=3" "$out"
+out=$("$BIN" env -i -S "A='x y' B='c\\d' C='e\\\\f' D='g\\'h'")
+expect_eq "-S single quotes: only \\\\ and \\' are special" "A=x y
+B=c\\d
+C=e\\f
+D=g'h" "$out"
+out=$("$BIN" env -i -S 'A="x y" B="q\"r" C="e\\f" D="\$h" E="1\_2"')
+expect_eq "-S double quotes: \\\" \\\\ \\\$ and \\_ is a space" "A=x y
+B=q\"r
+C=e\\f
+D=\$h
+E=1 2" "$out"
+out=$("$BIN" env -i -S 'A=1\_B=2')
+expect_eq "-S unquoted \\_ separates words" "A=1
+B=2" "$out"
+out=$("$BIN" env -i -S 'A=a\#b B=a\$b C=a\tb')
+expect_eq "-S unquoted escapes" "$(printf 'A=a#b\nB=a$b\nC=a\tb')" "$out"
+out=$("$BIN" env -i -S 'A=1 B=2\cC=3 D=4')
+expect_eq "-S \\c ends the string" "A=1
+B=2" "$out"
+out=$("$BIN" env -i -S 'A=1 #B=2 C=3')
+expect_eq "-S # at a word start is a comment" "A=1" "$out"
+out=$("$BIN" env -i -S 'A=1#x')
+expect_eq "-S # inside a word is literal" "A=1#x" "$out"
+# ⚠ The expansion reads the environment env was GIVEN — the `-i` before it has
+# not cleared anything yet, in GNU or here.
+out=$(FOO=x1 "$BIN" env -i -S 'A=${FOO} B=pre${FOO}post C=${NOPE_KRIYA_Q}')
+expect_eq "-S \${VAR}, an unset one empty" "A=x1
+B=prex1post
+C=" "$out"
+out=$(FOO='a b' "$BIN" env -i -S 'A=${FOO}')
+expect_eq "-S \${VAR} is not re-split" "A=a b" "$out"
+out=$(FOO=x "$BIN" env -i -S "A='\${FOO}'")
+expect_eq "-S no expansion in single quotes" "A=\${FOO}" "$out"
+# ⛔ An UNSET name starts no word and a SET one starts one even when empty — GNU
+# calls check_start_new_arg only on a non-NULL getenv. Found by a differential
+# fuzz against GNU 9.7, not by reading: the first cut made a word of every ${…}.
+out=$("$BIN" env -i -S 'A=1 ${NOPE_KRIYA_Q} B=2')
+expect_eq "-S unset \${VAR} alone is no word" "A=1
+B=2" "$out"
+out=$("$BIN" env -i -S 'A=1 ${NOPE_KRIYA_Q}#B=2')
+expect_eq "-S # after an unset \${VAR} is still a comment" "A=1" "$out"
+out=$(E= "$BIN" env -i -S 'A=1 ${E}#B=2')
+expect_eq "-S a set-but-empty \${VAR} starts a word" "A=1
+#B=2" "$out"
+out=$(E= "$BIN" env -i -S "$SH -c 'echo \$#' x \${E} \${NOPE_KRIYA_Q}")
+expect_eq "-S set-but-empty is an argument, unset is none" "1" "$out"
+expect_eq "-S '' has no words" "" "$("$BIN" env -i -S '')"
+
+expect_exit "-S unterminated '"        2 "$BIN" env -i -S "A='x"
+expect_exit "-S unterminated \""       2 "$BIN" env -i -S 'A="x'
+expect_exit "-S unknown escape"        2 "$BIN" env -i -S 'A=\q'
+expect_exit "-S trailing backslash"    2 "$BIN" env -i -S 'A=x\'
+expect_exit "-S bare \$NAME"           2 "$BIN" env -i -S 'A=$FOO'
+expect_exit "-S bad \${NAME}"          2 "$BIN" env -i -S 'A=${1x}'
+expect_exit "-S \\c in double quotes"  2 "$BIN" env -i -S 'A="x\cy"'
+expect_exit "-S no value"              2 "$BIN" env -S
+expect_exit "--split-string no value"  2 "$BIN" env --split-string
+err=$("$BIN" env -i -S "A='x" 2>&1 >/dev/null || true)
+expect_eq "-S error is GNU's text" "kriya env: no terminating quote in -S string" "$err"
+
+# The words re-enter option parsing where -S stood.
+out=$("$BIN" env -S '-i A=1')
+expect_eq "-S words are options too" "A=1" "$out"
+out=$(A=1 B=2 "$BIN" env -S '-u A' | sed -n '/^[AB]=/p')
+expect_eq "-S carries -u" "B=2" "$out"
+out=$("$BIN" env -i -S 'A=1' B=2)
+expect_eq "-S then more words" "A=1
+B=2" "$out"
+out=$("$BIN" env -i '-SA=1 B=2')
+expect_eq "-SSTRING attached" "A=1
+B=2" "$out"
+out=$("$BIN" env -iS 'A=1')
+expect_eq "-iS cluster" "A=1" "$out"
+out=$("$BIN" env -i '--split-string=A=1 B=2')
+expect_eq "--split-string=STRING" "A=1
+B=2" "$out"
+out=$("$BIN" env -i --split-string 'A=1 B=2')
+expect_eq "--split-string STRING" "A=1
+B=2" "$out"
+out=$("$BIN" env -i -S "-S 'A=1 B=2'")
+expect_eq "-S inside -S" "A=1
+B=2" "$out"
+expect_exit "-S after -- is the command" 127 "$BIN" env -i -- -S x
+out=$("$BIN" env -i -S "$SH -c 'echo \"\$0:\$1\"' a b")
+expect_eq "-S runs a command" "a:b" "$out"
+
+# ⭐ What -S is for: a shebang line hands env ONE argument, the whole rest of the line.
+ln -s "$BIN" "$WORK/env"
+cat > "$WORK/sb" <<EOF
+#!$WORK/env -S -i A=1 $SH -c 'echo "\$A:\$0:\$1"'
+EOF
+chmod +x "$WORK/sb"
+out=$("$WORK/sb" arg1)
+expect_eq "-S on a shebang line" "1:$WORK/sb:arg1" "$out"
+
+# --- -C / --chdir (1.8.3)
+out=$("$BIN" env -C / "$SH" -c pwd)
+expect_eq "-C DIR" "/" "$out"
+out=$("$BIN" env -C/ "$SH" -c pwd)
+expect_eq "-CDIR attached" "/" "$out"
+out=$("$BIN" env --chdir=/ "$SH" -c pwd)
+expect_eq "--chdir=DIR" "/" "$out"
+out=$("$BIN" env --chdir / "$SH" -c pwd)
+expect_eq "--chdir DIR" "/" "$out"
+mkdir "$WORK/d"
+printf '#!%s\necho ran-t\n' "$SH" > "$WORK/d/t"
+chmod +x "$WORK/d/t"
+out=$("$BIN" env -C d ./t)
+expect_eq "-C: a relative command is found from DIR" "ran-t" "$out"
+# ⚠ The ordering test: PATH=. only finds `t` if the chdir happened BEFORE the
+# PATH search, as GNU's execvp after chdir does.
+out=$("$BIN" env -C d -i PATH=. t)
+expect_eq "-C: PATH is searched from DIR" "ran-t" "$out"
+expect_exit "-C missing dir"     125 "$BIN" env -C "$WORK/nonexistent" "$SH" -c :
+expect_exit "-C on a file"       125 "$BIN" env -C "$WORK/d/t" "$SH" -c :
+expect_exit "-C with no command" 2   "$BIN" env -C /
+expect_exit "-C no value"        2   "$BIN" env -C
+expect_exit "--chdir no value"   2   "$BIN" env --chdir
+
+# --- PATH search (1.8.3): a bare name is never left for the kernel to resolve
+# against the current directory. env had its own resolver, which did exactly that
+# both when PATH was unset and when the search found nothing.
+mkdir "$WORK/cwd"
+printf '#!%s\necho PWNED-FROM-CWD\n' "$SH" > "$WORK/cwd/kriya-cwd-probe"
+chmod +x "$WORK/cwd/kriya-cwd-probe"
+cd "$WORK/cwd"
+expect_exit "unset PATH: not run from the cwd" 127 "$BIN" env -i kriya-cwd-probe
+out=$("$BIN" env -i kriya-cwd-probe 2>/dev/null || true)
+expect_eq "unset PATH: nothing ran" "" "$out"
+expect_exit "PATH miss: not run from the cwd"  127 "$BIN" env PATH=/nonexistent kriya-cwd-probe
+out=$("$BIN" env PATH=/nonexistent kriya-cwd-probe 2>/dev/null || true)
+expect_eq "PATH miss: nothing ran" "" "$out"
+# ⚠ An EMPTY PATH is POSIX's zero-length prefix, the current directory, and GNU
+# runs ./kriya-cwd-probe too. Only the unset and the unmatched cases are holes.
+out=$("$BIN" env PATH= kriya-cwd-probe)
+expect_eq "PATH= is the cwd, as in GNU" "PWNED-FROM-CWD" "$out"
+cd "$WORK"
+if [ -x /bin/sh ] || [ -x /usr/bin/sh ]; then
+    out=$("$BIN" env -i sh -c 'echo found')
+    expect_eq "unset PATH searches /bin:/usr/bin, as glibc's execvp" "found" "$out"
+else
+    echo "skip: no sh in /bin or /usr/bin — the unset-PATH default is unexercised"
+fi
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"
