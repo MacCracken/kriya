@@ -27,6 +27,13 @@
 #                          with a warning, under -0 or -d
 #   -o / --open-tty        COMMAND reads /dev/tty; with no terminal, xargs fails
 #                          before running anything
+#   -P N / --max-procs=N   run up to N commands at once; 0 is no limit (1.8.2).
+#                          A 255 or a signal stops new starts, and xargs exits
+#                          once the running ones finish, as GNU's does. ⚠ agnos
+#                          has no fork, so there they run one at a time
+#   -p / --interactive     ask `COMMAND LINE?...` on /dev/tty before each command;
+#                          a line starting y/Y runs it (implies -t). With no
+#                          terminal, xargs fails before asking anything
 #
 # ⭐ THE ACCOUNTING IS GNU's `buildcmd`, to the byte, and it lives in
 # `src/lib/argbatch.cyr` beside `find -exec … +`, which counts the same way
@@ -65,8 +72,10 @@
 #
 # ⚠ Deliberate divergences: usage errors exit 2, a bad -d DELIM included; -E stops at a
 # matching item even as the last of an unterminated line (GNU passes it through there);
-# -o opens /dev/tty once, before the first command, and a failure is exit 1 with nothing
-# run (GNU's child dies of an assertion); `-e[STR]` is not taken; `-l[N]` is not taken, since
+# -o and -p open /dev/tty once, before the first command or prompt, and a failure is exit 1
+# with nothing run or asked (GNU's -o child dies of an assertion, and its -p prints the
+# command first); GNU's SIGUSR1 / SIGUSR2 adjustment of -P is not taken, nor
+# --process-slot-var; `-e[STR]` is not taken; `-l[N]` is not taken, since
 # ADR 0002 has no optional values (`-L N` is the same thing) — and for the same
 # reason `--max-lines 1 echo` reads 1 as the value, where GNU's `--max-lines` is
 # `-l`'s long form and runs a command named `1`; the diagnostics are kriya's
@@ -85,6 +94,7 @@ var _xa_sl_idx   = 0;
 var _xa_a_idx    = 0;
 var _xa_E_idx    = 0;
 var _xa_o_idx    = 0;
+var _xa_p_idx    = 0;
 
 var _xa_path_env = 0;
 
@@ -104,6 +114,8 @@ fn _xa_init_spec(): i64 {
     flags_add_str (s, 100, "delimiter",          0, "items end at DELIM (a character or a C escape)");
     _xa_E_idx    = flags_add_str (s, 69,  "eof",                0, "an item equal to STR ends the input");
     _xa_o_idx    = flags_add_bool(s, 111, "open-tty",           0, "the command reads /dev/tty");
+    _xa_p_idx    = flags_add_bool(s, 112, "interactive",        0, "ask on /dev/tty before each command");
+    flags_add_str (s, 80,  "max-procs",          0, "run up to N commands at once (0: no limit)");
     _xa_spec = s;
     xargs_help_declare();
     return 0;
@@ -117,7 +129,7 @@ fn xargs_help_declare(): i64 {
       "xargs [OPTIONS] [COMMAND [ARG...]]");
     help_positional(0, HELP_POS_UNBOUNDED, "COMMAND,ARG");
     help_destructive(1);
-    help_operands("⚠ Option recognition stops at the first operand — everything after reaches COMMAND verbatim, including its own flags and its `--`. COMMAND runs once even for empty input unless -r is given. -I replaces REPLSTR in the ARGs, never in COMMAND itself. COMMAND reads /dev/null, except under -a FILE (it keeps xargs's stdin) and -o (it reads the terminal). -d DELIM takes a byte or a C escape, and keeps empty items; -E STR ends the input at an item equal to STR.");  #skip-lint
+    help_operands("⚠ Option recognition stops at the first operand — everything after reaches COMMAND verbatim, including its own flags and its `--`. COMMAND runs once even for empty input unless -r is given. -I replaces REPLSTR in the ARGs, never in COMMAND itself. COMMAND reads /dev/null, except under -a FILE (it keeps xargs's stdin) and -o (it reads the terminal). -d DELIM takes a byte or a C escape, and keeps empty items; -E STR ends the input at an item equal to STR. -P N runs up to N commands at once (0: no limit); a command that exits 255 or is killed stops new ones, and xargs waits for the rest. -p asks on /dev/tty before each command and runs it on an answer starting with y.");  #skip-lint
     help_exit(1, "unusable input: an unmatched quote, a command line that cannot fit, an -a FILE that cannot be opened, or -o with no terminal");  #skip-lint
     help_exit(123, "a command exited non-zero");
     help_exit(124, "a command exited 255; xargs aborted");
@@ -130,6 +142,8 @@ fn xargs_help_declare(): i64 {
     help_example("xargs -L 1 --show-limits < /dev/null");
     help_example("printf 'a,b,c' | xargs -d , -n1 echo");
     help_example("xargs -a files.txt -o vi");
+    help_example("find . -name '*.png' -print0 | xargs -0 -P 4 -n 16 optipng");
+    help_example("ls *.bak | xargs -p rm");
     return 0;
 }
 
@@ -160,6 +174,12 @@ var _xa_eofstr      = 0;   # -E: an item equal to it ends the input, or 0
 var _xa_child_flags = 0;   # K_SPAWN_STDIN_NULL unless -a FILE gave the input elsewhere
 var _xa_open_tty    = 0;   # -o
 var _xa_ttyfd       = 0;   # ...its /dev/tty, opened before the first command (-1 until then)
+var _xa_interactive = 0;   # -p
+var _xa_max_procs   = 1;   # -P; 0 is read as no limit
+var _xa_parallel    = 0;   # -P other than 1, where commands can run at once (never on agnos)
+var _xa_running     = 0;   # ...how many are running now
+var _xa_abort       = 0;   # ...124 or 125 once one exited 255 or was killed: nothing new starts
+var _xa_cmd_name    = 0;   # COMMAND as written, for the diagnostics about a finished one
 
 # Buffered stdin.
 var _xa_ibuf = 0;
@@ -229,6 +249,13 @@ var _xa_qcap = 0;
 # `-t`: the command on stderr, each argument shell-quoted when it needs it — GNU's
 # `print_args`, which uses the quoting `ls` does.
 fn _xa_print_args(argvp): i64 {
+    _xa_print_cmd(argvp);
+    k_write( 2, "\n", 1);
+    return 0;
+}
+
+# The command line as -t prints it, without the newline (-p's prompt goes on after it).
+fn _xa_print_cmd(argvp): i64 {
     var i: i64 = 0;
     while (load64(argvp + i * 8) != 0) {
         var a = load64(argvp + i * 8);
@@ -247,14 +274,145 @@ fn _xa_print_args(argvp): i64 {
         }
         i = i + 1;
     }
-    k_write( 2, "\n", 1);
     return 0;
+}
+
+# /dev/tty, for -o and -p, opened once. ⛔ A failure ends xargs (exit 1) before anything more
+# runs or is asked, which is ADR 0002's no-hang rule for a prompt: the answers never come from
+# a pipe, and with no terminal there is nowhere to ask.
+fn _xa_tty(): i64 {
+    if (_xa_ttyfd < 0) {
+        _xa_ttyfd = k_open("/dev/tty", FS_O_CLOEXEC, 0);
+        if (_xa_ttyfd < 0) {
+            errmsg_report("xargs", "/dev/tty", 0 - _xa_ttyfd);
+            _xa_wait_all();
+            _xa_exit(EXIT_FAILURE);
+        }
+    }
+    return _xa_ttyfd;
+}
+
+# -p: GNU's prompt — the command line as -t prints it, then `?...` — and a whole line from
+# /dev/tty; yes when it starts with y or Y. ⚠ GNU prints the command BEFORE it finds it cannot
+# open /dev/tty; kriya opens the terminal first, so a refusal leaves no half prompt.
+fn _xa_prompt(argvp): i64 {
+    var tfd = _xa_tty();
+    _xa_print_cmd(argvp);
+    k_write( 2, "?...", 4);
+    var c[8];
+    var first: i64 = 0 - 1;
+    var reading: i64 = 1;
+    while (reading == 1) {
+        var r = k_read( tfd, &c, 1);
+        if (r < 1) { reading = 0; }
+        else {
+            var ch = load8(&c);
+            if (first < 0) { first = ch; }
+            if (ch == 10) { reading = 0; }
+        }
+    }
+    if (first == 121) { return 1; }
+    if (first == 89) { return 1; }
+    return 0;
+}
+
+# What a finished command means for xargs, POSIX's table. 255 and a signal stop xargs: at
+# once when one command runs at a time, and under -P once the others have finished, as GNU's
+# wait does. Returns the abort code, or 0.
+fn _xa_outcome(r, first): i64 {
+    if (k_spawn_signalled(r) == 1) {
+        var sb = alloc(40);
+        memcpy(sb, "terminated by signal ", 21);
+        var sn = str_u64_digits(k_spawn_signal(r), 10, 0, sb + 21);
+        store8(sb + 21 + sn, 0);
+        report_note("xargs", first, sb);
+        return 125;
+    }
+    if (k_spawn_exited(r) == 1) {
+        var st = k_spawn_exit_status(r);
+        if (st == 255) {
+            # POSIX: a utility that exits 255 stops xargs, with a diagnostic.
+            report_note("xargs", first, "exited with status 255; aborting");
+            return 124;
+        }
+        if (st != 0) { _xa_child_error = 123; }
+        return 0;
+    }
+    _xa_die("cannot fork");
+    return 0;
+}
+
+# -P: wait for every running command, reporting each as it ends. The first abort code wins.
+fn _xa_wait_all(): i64 {
+    var more: i64 = 1;
+    while (more == 1) {
+        if (_xa_running <= 0) { more = 0; }
+        else {
+            var pid: i64 = 0;
+            var r = k_spawn_reap(&pid);
+            if (r < 0) { _xa_running = 0; more = 0; }
+            else {
+                _xa_running = _xa_running - 1;
+                var a = _xa_outcome(r, _xa_cmd_name);
+                if (_xa_abort == 0) { _xa_abort = a; }
+            }
+        }
+    }
+    return 0;
+}
+
+# -P: one more command, once a slot is free. ⭐ argv is reused as soon as `k_spawn_start`
+# returns, because it returns only after execve has taken the arguments (the CLOEXEC pipe), so
+# the one argbatch buffer serves every running command. A command that exits 255 or is killed
+# stops new starts, and xargs exits once the others are done (124 / 125), as GNU's does.
+fn _xa_start(argvp, infd): i64 {
+    var waiting: i64 = 1;
+    while (waiting == 1) {
+        if (_xa_running < _xa_max_procs) { waiting = 0; }
+        else {
+            var pid: i64 = 0;
+            var rr = k_spawn_reap(&pid);
+            if (rr < 0) { _xa_running = 0; }
+            else {
+                _xa_running = _xa_running - 1;
+                var a = _xa_outcome(rr, load64(argvp));
+                if (a != 0) {
+                    if (_xa_abort == 0) { _xa_abort = a; }
+                    _xa_wait_all();
+                    _xa_exit(_xa_abort);
+                }
+            }
+        }
+    }
+    var cpid: i64 = 0;
+    var r = k_spawn_start(_xa_exec_path, argvp, ab_envp(), _xa_child_flags, infd, &cpid);
+    if (r != 0) {
+        var first = load64(argvp);
+        if (k_spawn_execfailed(r) == 1) {
+            var e = k_spawn_exec_errno(r);
+            if (e == 7) { return 0; }               # E2BIG: fewer arguments
+            errmsg_report("xargs", first, e);
+            _xa_wait_all();
+            if (e == 2) { _xa_exit(127); }
+            _xa_exit(126);
+        }
+        _xa_wait_all();
+        _xa_die("cannot fork");
+    }
+    _xa_running = _xa_running + 1;
+    _xa_executed = 1;
+    return 1;
 }
 
 # Run one command line — GNU's `xargs_do_exec`. Returns 1 once it ran, whatever
 # its status, and 0 when execve said E2BIG, for the caller to try fewer.
 fn _xa_run(argvp): i64 {
-    if (_xa_trace == 1) { _xa_print_args(argvp); }
+    if (_xa_interactive == 1) {
+        # -p implies -t; the prompt IS the trace line. ⚠ A declined command does NOT count as
+        # run: when every one is declined, "once even for empty input" asks once more for the
+        # bare command at the end, as GNU's does (measured with `-n1` on 4.11).
+        if (_xa_prompt(argvp) == 0) { return 1; }
+    } elif (_xa_trace == 1) { _xa_print_args(argvp); }
     var first = load64(argvp);
     if (_xa_exec_path == 0) {
         # POSIX: 127 when the utility cannot be found. Reported here rather than
@@ -274,16 +432,8 @@ fn _xa_run(argvp): i64 {
     # command, and a failure ends xargs (exit 1) with nothing run. GNU opens it in each child,
     # and with no terminal its child dies of an assertion (SIGABRT) instead of exec'ing.
     var infd: i64 = 0 - 1;
-    if (_xa_open_tty == 1) {
-        if (_xa_ttyfd < 0) {
-            _xa_ttyfd = k_open("/dev/tty", FS_O_CLOEXEC, 0);
-            if (_xa_ttyfd < 0) {
-                errmsg_report("xargs", "/dev/tty", 0 - _xa_ttyfd);
-                _xa_exit(EXIT_FAILURE);
-            }
-        }
-        infd = _xa_ttyfd;
-    }
+    if (_xa_open_tty == 1) { infd = _xa_tty(); }
+    if (_xa_parallel == 1) { return _xa_start(argvp, infd); }
     var r = k_spawn_argv_io(_xa_exec_path, argvp, ab_envp(), _xa_child_flags, 0 - 1, infd);
     if (k_spawn_execfailed(r) == 1) {
         var e = k_spawn_exec_errno(r);
@@ -293,26 +443,9 @@ fn _xa_run(argvp): i64 {
         if (e == 2) { _xa_exit(127); }
         _xa_exit(126);
     }
-    if (k_spawn_signalled(r) == 1) {
-        var sb = alloc(40);
-        memcpy(sb, "terminated by signal ", 21);
-        var sn = str_u64_digits(k_spawn_signal(r), 10, 0, sb + 21);
-        store8(sb + 21 + sn, 0);
-        report_note("xargs", first, sb);
-        _xa_exit(125);
-    }
-    if (k_spawn_exited(r) == 1) {
-        _xa_executed = 1;
-        var st = k_spawn_exit_status(r);
-        if (st == 255) {
-            # POSIX: a utility that exits 255 stops xargs, with a diagnostic.
-            report_note("xargs", first, "exited with status 255; aborting");
-            _xa_exit(124);
-        }
-        if (st != 0) { _xa_child_error = 123; }
-        return 1;
-    }
-    _xa_die("cannot fork");
+    _xa_executed = 1;
+    var a = _xa_outcome(r, first);
+    if (a != 0) { _xa_exit(a); }
     return 1;
 }
 
@@ -823,6 +956,10 @@ fn _xa_walk_options(posix_max): i64 {
                         else {
                             k = _xa_is_opt(tok, 100, "delimiter");
                             if (k > 0) { which = 100; }
+                            else {
+                                k = _xa_is_opt(tok, 80, "max-procs");
+                                if (k > 0) { which = 80; }
+                            }
                         }
                     }
                 }
@@ -867,6 +1004,10 @@ fn _xa_walk_options(posix_max): i64 {
         if (which == 100) {
             _xa_null_mode = 1;
             _xa_delim = _xa_parse_delim(val);
+        }
+        if (which == 80) {
+            # GNU's range: 0 (no limit) to INT_MAX, in its words.
+            _xa_max_procs = _xa_parse_num(val, 80, 0, 2147483647, 1);
         }
         i = i + step;
     }
@@ -939,6 +1080,7 @@ fn cmd_xargs(start: i64): i64 {
     _xa_arg_max = ab_default_buf(posix_max);
     _xa_null_mode = 0;
     _xa_delim = 0;
+    _xa_max_procs = 1;
     _xa_walk_options(posix_max);
 
     # -E (POSIX), last wins; an empty STR is none. ⚠ `-e[STR]` and `--eof` with no value
@@ -976,6 +1118,15 @@ fn cmd_xargs(start: i64): i64 {
     }
     _xa_open_tty = flags_get_bool(_xa_spec, _xa_o_idx);
     _xa_ttyfd = 0 - 1;
+    _xa_interactive = flags_get_bool(_xa_spec, _xa_p_idx);
+    _xa_running = 0;
+    _xa_abort = 0;
+    _xa_parallel = 0;
+    if (_xa_max_procs == 0) { _xa_max_procs = 2147483647; }
+    if (_xa_max_procs > 1) { _xa_parallel = 1; }
+    #ifdef CYRIUS_TARGET_AGNOS
+    _xa_parallel = 0;    # no fork: one at a time, which -P N permits
+    #endif
     _xa_trace = flags_get_bool(_xa_spec, _xa_t_idx);
     if (flags_get_bool(_xa_spec, _xa_r_idx) == 1) { _xa_always = 0; }
     _xa_exit_x = flags_get_bool(_xa_spec, _xa_x_idx);
@@ -999,6 +1150,7 @@ fn cmd_xargs(start: i64): i64 {
         }
     }
 
+    _xa_cmd_name = load64(cmdv);
     if (flags_get_bool(_xa_spec, _xa_sl_idx) == 1) { _xa_show_limits(posix_max, load64(cmdv)); }
 
     _xa_linebuf = alloc(_xa_arg_max + 1);
@@ -1053,6 +1205,10 @@ fn cmd_xargs(start: i64): i64 {
                 _xa_do_exec();
             }
         }
+    }
+    if (_xa_parallel == 1) {
+        _xa_wait_all();
+        if (_xa_abort != 0) { return _xa_abort; }
     }
     if (_xa_child_error != 0) { return _xa_child_error; }
     if (_xa_read_failed == 1) { return EXIT_FAILURE; }

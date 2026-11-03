@@ -226,9 +226,13 @@ fn _k_fchdir(fd): i64 {
     #endif
 }
 
-# The fork, exec and wait, on prepared arrays. `flags` is KSpawnFlag bits; the child
-# `fchdir`s to `dirfd` first when it is `>= 0`, and reads `infd` when that is.
-fn _k_spawn_core(cmd, argv, envp, flags, dirfd, infd): i64 {
+# The fork and exec, on prepared arrays, WITHOUT the wait (1.8.2, `xargs -P`). `flags` is
+# KSpawnFlag bits; the child `fchdir`s to `dirfd` first when it is `>= 0`, and reads `infd`
+# when that is. Returns 0 with the pid in `*pidp` once execve has TAKEN the arguments — the
+# CLOEXEC pipe closes only then — so the caller may reuse argv at once, which is what lets
+# one argbatch buffer feed several running commands. Or K_SPAWN_EXECFAIL + errno, or
+# K_SPAWN_FORKFAIL, the failed child already reaped.
+fn _k_spawn_start(cmd, argv, envp, flags, dirfd, infd, pidp): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     # Two i32 fds in an 8-byte local. ⚠ `var fds[8]` is 8 BYTES here — a
     # function-local `var X[N]` is N bytes (roadmap M15a).
@@ -283,13 +287,60 @@ fn _k_spawn_core(cmd, argv, envp, flags, dirfd, infd): i64 {
         k_close(rfd);
     }
 
-    var stbuf[4];
-    sys_waitpid(pid, &stbuf, 0);
-    var st = load32(&stbuf);
-
-    if (exec_errno > 0) { return K_SPAWN_EXECFAIL + exec_errno; }
-    if (WIFSIGNALED(st) == 1) { return K_SPAWN_SIGNAL_BASE + WTERMSIG(st); }
-    if (WIFEXITED(st) == 1)   { return WEXITSTATUS(st); }
+    if (exec_errno > 0) {
+        var xb[4];
+        sys_waitpid(pid, &xb, 0);
+        return K_SPAWN_EXECFAIL + exec_errno;
+    }
+    store64(pidp, pid);
+    return 0;
     #endif
     return K_SPAWN_FORKFAIL;
+}
+
+# A wait status, as the k_spawn results encode it.
+fn _k_spawn_decode(st): i64 {
+    if (WIFSIGNALED(st) == 1) { return K_SPAWN_SIGNAL_BASE + WTERMSIG(st); }
+    if (WIFEXITED(st) == 1)   { return WEXITSTATUS(st); }
+    return K_SPAWN_FORKFAIL;
+}
+
+# The fork, exec and wait: `_k_spawn_start`, then the wait for that one child.
+fn _k_spawn_core(cmd, argv, envp, flags, dirfd, infd): i64 {
+    #ifndef CYRIUS_TARGET_AGNOS
+    var pid: i64 = 0;
+    var r = _k_spawn_start(cmd, argv, envp, flags, dirfd, infd, &pid);
+    if (r != 0) { return r; }
+    var stbuf[4];
+    sys_waitpid(pid, &stbuf, 0);
+    return _k_spawn_decode(load32(&stbuf));
+    #endif
+    return K_SPAWN_FORKFAIL;
+}
+
+# Start a command and return without waiting (`xargs -P`): 0 with its pid in `*pidp`, or a
+# failure as `k_spawn_argv` reports one. ⚠ agnos has no fork, so it answers fork-failed and
+# `xargs` runs its commands one at a time there, which -P N permits.
+fn k_spawn_start(exec_path, argvp, envp, flags, infd, pidp): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return K_SPAWN_FORKFAIL;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return _k_spawn_start(exec_path, argvp, envp, flags, 0 - 1, infd, pidp);
+    #endif
+}
+
+# Wait for ANY child started by `k_spawn_start`: its result, encoded as `k_spawn_argv`'s are,
+# with its pid in `*pidp`; -1 when none is left.
+fn k_spawn_reap(pidp): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var stbuf[4];
+    var p = sys_waitpid(0 - 1, &stbuf, 0);
+    if (p < 0) { return 0 - 1; }
+    store64(pidp, p);
+    return _k_spawn_decode(load32(&stbuf));
+    #endif
 }

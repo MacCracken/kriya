@@ -479,6 +479,85 @@ if script -qec true /dev/null >/dev/null 2>&1; then
     expect_eq "...and without -o it is not" "not-a-tty" "$_o"
 fi
 
+# --- -P, -p (1.8.2) ----------------------------------------------------
+# -P's concurrency, measured rather than timed: each command logs `+` when it starts and `-`
+# when it ends, and sleeps long enough to overlap; the peak of the running sum is how many ran
+# at once. (Timing bounds would flake on a loaded runner; the peak does not.)
+xp_peak() {
+    rm -f xp.log
+    # shellcheck disable=SC2016
+    printf '1\n2\n3\n4\n5\n6\n' | "$BIN" xargs "$@" -n1 sh -c 'echo + >> xp.log; sleep 0.3; echo - >> xp.log' sh
+    awk 'BEGIN{n=0;m=0} /\+/{n++; if(n>m)m=n} /-/{n--} END{print m}' xp.log
+}
+expect_eq "-P 2 runs two at once"            "2" "$(xp_peak -P 2)"
+expect_eq "-P 0 runs them all at once"       "6" "$(xp_peak -P 0)"
+expect_eq "-P 1 runs one at a time"          "1" "$(xp_peak -P 1)"
+expect_eq "--max-procs=3"                    "3" "$(xp_peak --max-procs=3)"
+xp_sorted() {
+    _n=$1; _i=$2; shift 2
+    _k=0; _ko=$(printf "$_i" | timeout 60 "$BIN" xargs "$@" 2>/dev/null | sort) || _k=$?
+    _g=0; _go=$(printf "$_i" | xargs "$@" 2>/dev/null | sort) || _g=$?
+    expect_eq "$_n (exit|sorted stdout)" "$_g|$_go" "$_k|$_ko"
+}
+xp_sorted "-P: exit 3 everywhere is 123"      'a\nb\nc\n'   -P 3 -n1 sh -c 'exit 3' sh
+# ⚠ 255 stops new starts, but the command already running finishes first. The 255 exits at
+# once and the others sleep, so which one is reaped first is not a race: exactly one `ran 0`.
+# shellcheck disable=SC2016
+xp_sorted "-P: a 255 lets the running one finish, 124" '255\n0\n0\n0\n' -P 2 -n1 sh -c '[ "$1" = 255 ] && exit 255; sleep 0.5; echo ran $1' sh
+# shellcheck disable=SC2016
+# ...and xargs EXITS only once that command has finished. (Captured output cannot show it: a
+# command left running keeps the pipe open, so the output arrives either way.)
+for _x in xargs "$BIN"; do
+    rm -f xp255.out
+    # shellcheck disable=SC2016
+    ( printf '255\n0\n0\n0\n' | if [ "$_x" = xargs ]; then xargs -P 2 -n1 sh -c '[ "$1" = 255 ] && exit 255; sleep 0.5; : > xp255.out' sh; else "$_x" xargs -P 2 -n1 sh -c '[ "$1" = 255 ] && exit 255; sleep 0.5; : > xp255.out' sh; fi >/dev/null 2>&1 ) || true
+    if [ "$_x" = xargs ]; then _gw=$( [ -e xp255.out ] && echo waited || echo did-not-wait ); else _kw=$( [ -e xp255.out ] && echo waited || echo did-not-wait ); fi
+done
+expect_eq "-P: after a 255, xargs exits once the running command is done (GNU too)" "waited|waited" "$_gw|$_kw"
+xp_sorted "-P: a signal is 125"               'a\nb\n'      -P 2 -n1 sh -c 'kill -9 $$' sh
+xp_sorted "-P: a missing command is 127"      'a\nb\nc\nd\n' -P 2 -n1 nosuch-cmd-1-8-2
+xp_sorted "-P with -I"                        'a\nb\nc\n'   -P 3 -I{} echo x{}
+xp_sorted "-P with -t"                        'a\nb\n'      -P 1 -t -n1 echo
+xp_sorted "-P with -n 2"                      'a b c d e\n' -P 2 -n 2 echo
+for _v in -1 x 99999999999 2147483648; do
+    _k=0; printf 'a\n' | "$BIN" xargs -P "$_v" echo >/dev/null 2>&1 || _k=$?
+    _g=0; printf 'a\n' | xargs -P "$_v" echo >/dev/null 2>&1 || _g=$?
+    expect_eq "-P $_v is refused (GNU too; usage exit 2)" "refused|2" "$( [ "$_g" -ne 0 ] && echo refused || echo ran)|$_k"
+done
+xsame "-P 2147483647 is INT_MAX, taken"       'a\n'          -P 2147483647 echo
+# -p: answers come from /dev/tty, never from a pipe (ADR 0002); with no terminal, xargs fails
+# before asking or running anything (GNU prints the command first, then fails).
+_k=0; _ke=$(printf 'a\n' | setsid "$BIN" xargs -p echo 2>&1) || _k=$?
+expect_eq "-p with no terminal: exit 1, nothing asked or run" "1|kriya xargs: /dev/tty: no such device or address" "$_k|$_ke"
+_k=0; (printf '' | setsid "$BIN" xargs -p -r echo >/dev/null 2>&1) || _k=$?
+expect_eq "-p with -r and no input never needs the terminal" "0" "$_k"
+if script -qec true /dev/null >/dev/null 2>&1; then
+    xp_tty() {
+        _ans=$1; shift
+        printf "$_ans" | script -qec "printf 'a\\nb\\nc\\n' | $*" /dev/null 2>&1 | tr -d '\r' | grep -v '^y$\|^n$\|^yes$\|^$'
+    }
+    expect_eq "-p on a terminal: GNU's prompt and answers, byte for byte" \
+        "$(xp_tty 'y\nn\nyes\n' xargs -p -n1 echo RAN)" "$(xp_tty 'y\nn\nyes\n' "'$BIN'" xargs -p -n1 echo RAN)"
+    expect_eq "-p: declining the only command asks nothing more, as GNU" \
+        "$(xp_tty 'n\nn\n' xargs -p echo RAN)" "$(xp_tty 'n\nn\n' "'$BIN'" xargs -p echo RAN)"
+    expect_eq "-p with -t prints the line once, as the prompt" \
+        "$(xp_tty 'y\n' xargs -p -t echo)" "$(xp_tty 'y\n' "'$BIN'" xargs -p -t echo)"
+    expect_eq "-p: when every command is declined, GNU asks once more for the bare one" \
+        "$(xp_tty 'n\nn\nn\nn\n' xargs -p -n1 echo RAN)" "$(xp_tty 'n\nn\nn\nn\n' "'$BIN'" xargs -p -n1 echo RAN)"
+    # ⚠ Under -P a child can write INTO a prompt (both GNU's and kriya's go out in pieces), so
+    # the children write to a file and the terminal holds the prompts alone.
+    printf 'echo "RAN $1" >> xp_par.out\n' > xp_par.sh
+    xp_par() {
+        rm -f xp_par.out
+        _t=$(xp_tty 'y\ny\ny\n' "$@" xargs -p -P 2 -n1 sh xp_par.sh)
+        printf '%s|%s' "$(printf '%s' "$_t" | grep -o 'sh xp_par.sh [abc]?\.\.\.' | wc -l | tr -d ' ')" \
+            "$(sort xp_par.out 2>/dev/null | tr '\n' ' ')"
+    }
+    expect_eq "-p with -P 2: asks in turn, runs them all" "$(xp_par)" "$(xp_par "'$BIN'")"
+else
+    echo "skip: no usable script(1) -- the -p terminal cases are not exercised"
+fi
+
 # --- summary ---------------------------------------------------------
 
 TOTAL=$((PASS + FAIL))
