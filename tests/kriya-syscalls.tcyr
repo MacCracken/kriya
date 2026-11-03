@@ -17,8 +17,10 @@
 # passes on x86_64 either way. Run it on aarch64: `cyrius build --aarch64 tests/kriya-syscalls.tcyr
 # <out>` under qemu-aarch64 or on the pi.
 #
-# ⚠ Four xattr calls DECLINE on aarch64 (-38): their native numbers (5/7/9/10) are ones cyrius
-# renumbers as x86 fstat/poll/mmap/mprotect, so no raw number reaches them. Asserted as -38 there.
+# ⚠ From 1.7.2 to 1.8.3 four xattr calls DECLINED on aarch64 (-38): their native numbers
+# (5/7/9/10) are ones cyrius renumbers as x86 fstat/poll/mmap/mprotect, so no raw number reached
+# them. Since 1.8.4 they go through the stdlib's alias band (1005..1016), and the set/get round
+# trips below prove the RIGHT call ran: a value written is the value read back.
 include "src/version_str.cyr"
 include "src/lib/exit.cyr"
 include "src/lib/errmsg.cyr"
@@ -138,16 +140,22 @@ fn main(): i64 {
     assert(gx == 0 - 61 || gx == 0 - 95, "k_getxattr of an absent attr is ENODATA/EOPNOTSUPP (was semctl)");
     var lx = k_flistxattr(fd, &xb, 64);
     assert(lx >= 0 || lx == 0 - 95, "k_flistxattr answers a list length (was shmat)");
-    #ifdef CYRIUS_ARCH_AARCH64
-    assert_eq(k_fgetxattr(fd, "user.kriya-none", &xb, 64), 0 - 38, "aarch64: k_fgetxattr declines");
-    assert_eq(k_lgetxattr("s", "user.kriya-none", &xb, 64), 0 - 38, "aarch64: k_lgetxattr declines");
-    #endif
-    #ifndef CYRIUS_ARCH_AARCH64
     var fx = k_fgetxattr(fd, "user.kriya-none", &xb, 64);
-    assert(fx == 0 - 61 || fx == 0 - 95, "k_fgetxattr of an absent attr is ENODATA/EOPNOTSUPP");
+    assert(fx == 0 - 61 || fx == 0 - 95, "k_fgetxattr of an absent attr is ENODATA/EOPNOTSUPP (was -38 on aarch64)");
     var lgx = k_lgetxattr("s", "user.kriya-none", &xb, 64);
-    assert(lgx == 0 - 61 || lgx == 0 - 95 || lgx == 0 - 1, "k_lgetxattr of an absent attr is ENODATA/EOPNOTSUPP/EPERM");
-    #endif
+    assert(lgx == 0 - 61 || lgx == 0 - 95 || lgx == 0 - 1, "k_lgetxattr of an absent attr is ENODATA/EOPNOTSUPP/EPERM (was -38 on aarch64)");
+    var sv = k_fsetxattr(fd, "user.kriya-t", "v1", 2, 0);
+    assert(sv == 0 || sv == 0 - 95, "k_fsetxattr answers 0 or EOPNOTSUPP (was -38 on aarch64)");
+    if (sv == 0) {
+        assert_eq(k_fgetxattr(fd, "user.kriya-t", &xb, 64), 2, "...and k_fgetxattr reads 2 bytes back");
+        assert_eq(load8(&xb) * 256 + load8(&xb + 1), 118 * 256 + 49, "...and they are the bytes written");
+        assert_eq(k_setxattr("f", "user.kriya-p", "abc", 3, 0), 0, "k_setxattr by path == 0 (was -38 on aarch64)");
+        assert_eq(k_getxattr("f", "user.kriya-p", &xb, 64), 3, "...and k_getxattr reads it back");
+        assert_eq(k_lgetxattr("f", "user.kriya-p", &xb, 64), 3, "k_lgetxattr of a regular file reads it too");
+        assert_eq(k_flistxattr(fd, &xb, 64), 26, "k_flistxattr lists both names (13 + 13 bytes)");
+    } else {
+        k_write(1, "  skip: no user xattrs on this file system -- the round trips are unexercised\n", 78);
+    }
 
     # ⛔ 1.7.4: `k_isatty` handed TCGETS a 16-byte buffer for a 36-byte `struct termios`. A pty
     # master is a terminal to TCGETS, so the probe below writes the whole struct; on aarch64 the
