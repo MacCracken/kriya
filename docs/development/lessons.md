@@ -615,6 +615,13 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   `--`, listed with `-a`, and printed something else — and the difference was recorded as a quoting
   rule, shipped in every diagnostic until 1.6.12. The 1.6.12 fuzz made the same mistake first, which
   is how it was recognised.
+- ⛔ **A new check that skips the script's tolerance reopens what the tolerance closed.** smoke-df had
+  tolerated, since 1.3.x, the devtmpfs `/dev` that the GitHub runner's GNU 9.7 hides. 1.8.3's `-t`/`-x`
+  checks compared exact sets, with no allowance, and failed on the runner alone, where nothing local
+  could have caught them: GNU 9.11 on the dev box lists `/dev`, and docker's `/dev` is a plain tmpfs.
+  ⭐ **Reproduce a runner-only oracle difference by simulating it.** An oracle wrapper that drops the
+  `/dev` row, with GNU's exit status kept, gave CI's three failures by name on the dev box, and it
+  then ran every mutant against both oracles.
 - ⚠ **Run the container suite as an unprivileged user (`docker run -u 1000:1000`).** As root, four
   scripts fail with nothing wrong: root is not refused EACCES (`touch -c`, find's missing `-exec`
   command), its chown succeeds (cp's setuid-drop cases), and the denial fixtures cannot deny it. CI's

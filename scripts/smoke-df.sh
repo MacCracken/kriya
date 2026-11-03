@@ -126,6 +126,7 @@ mount_set_check() {
     done < "$WORK/k.set"
 
     bad=""
+    : > "$WORK/tol.last"
     for mp in $extra; do
         ft=$(fstype_of "$mp")
         d=$(dev_of_mount "$mp")
@@ -141,6 +142,7 @@ mount_set_check() {
             printf "note: %s: kriya additionally shows %s (%s, device %s is unique — no dedup rule applies;\n" \
                 "$name" "$mp" "$ft" "${d:-?}"
             printf "      this GNU hides it by a rule kriya does not implement)\n"
+            echo "$mp" >> "$WORK/tol.last"
         fi
     done
     if [ -z "$bad" ]; then
@@ -153,6 +155,8 @@ mount_set_check() {
 
 # --- Default mount-point set matches GNU ---
 mount_set_check "default mount set"
+# What the default listing tolerated is the ONLY extra the -t/-x checks below may forgive.
+cp "$WORK/tol.last" "$WORK/tol.default"
 
 # --- hugetlbfs: the case the old name-based skip got wrong ---------------
 #
@@ -352,30 +356,64 @@ expect_exit "...while the file itself is fine"   0 "$BIN" df "$WORK/df163/f"
 expect_exit "...and so is a real directory"      0 "$BIN" df "$WORK/df163/d/"
 
 # --- -t / --type, -x / --exclude-type (1.8.3, ADR 0028) ------------------
-# ⚠ EXACT sets here. `mount_set_check` forgives an extra entry GNU hides by a rule kriya does
-# not have, which is right for the plain listing and wrong for a type filter: a -t that did
-# nothing would pass it (measured: the no-filter mutant did).
+# ⚠ EXACT sets here, with ONE allowance. `mount_set_check` forgives any extra on a device of its
+# own, which is right for the plain listing and wrong for a type filter: a -t that did nothing
+# would pass it (measured: the no-filter mutant did). So a filtered set must equal GNU's, except
+# that a mount the DEFAULT listing tolerated may appear, and only when its own type passes the
+# filter under test, read from /proc/self/mounts rather than from kriya.
+# ⛔ 1.8.3's first cut had no allowance, and it went red on the GitHub runner alone: GNU 9.7 there
+# hides the devtmpfs /dev, kriya lists it, and every `-x ROOTTYPE` case failed. The dev box's GNU
+# 9.11 lists /dev, and docker's /dev is a tmpfs that both list, so no local run had that shape.
+# Usage: strict_set_check NAME "SELECTED TYPES" "EXCLUDED TYPES" DF-ARGS...  ("" = none)
+type_passes() {
+    for _t in $3; do
+        if [ "$_t" = "$1" ]; then return 1; fi
+    done
+    if [ -z "$2" ]; then return 0; fi
+    for _t in $2; do
+        if [ "$_t" = "$1" ]; then return 0; fi
+    done
+    return 1
+}
 strict_set_check() {
     name=$1
-    shift
-    _ks=$("$BIN" df "$@" 2>/dev/null | tail -n +2 | awk '{print $NF}' | sort -u | tr '\n' ' ')
-    _gs=$(gnu_df    "$@" 2>/dev/null | tail -n +2 | awk '{print $NF}' | sort -u | tr '\n' ' ')
-    expect_eq "$name (the exact mount set)" "$_gs" "$_ks"
+    _sel=$2
+    _xcl=$3
+    shift 3
+    "$BIN" df "$@" 2>/dev/null | tail -n +2 | awk '{print $NF}' | sort -u > "$WORK/ks.set"
+    gnu_df    "$@" 2>/dev/null | tail -n +2 | awk '{print $NF}' | sort -u > "$WORK/gs.set"
+    _miss=$(comm -23 "$WORK/gs.set" "$WORK/ks.set" | tr '\n' ' ')
+    _bad=""
+    for mp in $(comm -13 "$WORK/gs.set" "$WORK/ks.set"); do
+        ft=$(fstype_of "$mp")
+        if grep -qxF "$mp" "$WORK/tol.default" && type_passes "$ft" "$_sel" "$_xcl"; then
+            printf "note: %s: kriya additionally shows %s (%s), as in the default listing\n" "$name" "$mp" "$ft"
+        else
+            _bad="$_bad $mp($ft)"
+        fi
+    done
+    if [ -z "$_miss$_bad" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        printf "FAIL %s (the exact mount set):\nGNU:   '%s'\nkriya: '%s'\nmissing: '%s'  unexpected:'%s'\n" \
+            "$name" "$(tr '\n' ' ' < "$WORK/gs.set")" "$(tr '\n' ' ' < "$WORK/ks.set")" "$_miss" "$_bad" >&2
+    fi
 }
 # GNU's -t TYPE, not XSI's argument-less -t. Measured against coreutils 9.4 and 9.7. The types
 # are whichever this host has: the root's, and tmpfs where something mounts one.
 _rt=$(fstype_of /)
-strict_set_check "-t ROOTTYPE ($_rt)"          -t "$_rt"
-strict_set_check "--type=ROOTTYPE"            --type="$_rt"
-strict_set_check "--type ROOTTYPE (separate word)" --type "$_rt"
-strict_set_check "-tROOTTYPE (attached)"      "-t$_rt"
-strict_set_check "-x ROOTTYPE"                -x "$_rt"
-strict_set_check "--exclude-type=ROOTTYPE"    --exclude-type="$_rt"
-strict_set_check "-i -t ROOTTYPE"             -i -t "$_rt"
+strict_set_check "-t ROOTTYPE ($_rt)"          "$_rt" "" -t "$_rt"
+strict_set_check "--type=ROOTTYPE"            "$_rt" "" --type="$_rt"
+strict_set_check "--type ROOTTYPE (separate word)" "$_rt" "" --type "$_rt"
+strict_set_check "-tROOTTYPE (attached)"      "$_rt" "" "-t$_rt"
+strict_set_check "-x ROOTTYPE"                "" "$_rt" -x "$_rt"
+strict_set_check "--exclude-type=ROOTTYPE"    "" "$_rt" --exclude-type="$_rt"
+strict_set_check "-i -t ROOTTYPE"             "$_rt" "" -i -t "$_rt"
 if awk '$3 == "tmpfs" { f = 1 } END { exit !f }' /proc/self/mounts; then
-    strict_set_check "-t tmpfs"                   -t tmpfs
-    strict_set_check "-t tmpfs -t ROOTTYPE (repeated, either)" -t tmpfs -t "$_rt"
-    strict_set_check "-x tmpfs -x ROOTTYPE"       -x tmpfs -x "$_rt"
+    strict_set_check "-t tmpfs"                   tmpfs "" -t tmpfs
+    strict_set_check "-t tmpfs -t ROOTTYPE (repeated, either)" "tmpfs $_rt" "" -t tmpfs -t "$_rt"
+    strict_set_check "-x tmpfs -x ROOTTYPE"       "" "tmpfs $_rt" -x tmpfs -x "$_rt"
     expect_eq "-T -t tmpfs: every Type cell is tmpfs" "tmpfs" \
         "$("$BIN" df -T -t tmpfs | tail -n +2 | awk '{print $2}' | sort -u)"
 fi
@@ -390,7 +428,7 @@ expect_eq "...and GNU exits 1 too" "1" "$_g"
 _g=0; gnu_df -t no-such-fs-type / >/dev/null 2>&1 || _g=$?
 _k=0; "$BIN" df -t no-such-fs-type / >/dev/null 2>&1 || _k=$?
 expect_eq "-t TYPE filters an operand's file system too (GNU: exit 1)" "1|1" "$_g|$_k"
-strict_set_check "-t ROOTTYPE with the operand /" -t "$_rt" /
+strict_set_check "-t ROOTTYPE with the operand /" "$_rt" "" -t "$_rt" /
 _k=0; "$BIN" df -t "$(printf '%s' "$_rt" | tr a-z A-Z)" >/dev/null 2>&1 || _k=$?
 expect_eq "-t is case-sensitive (GNU)" "1" "$_k"
 expect_exit "-t X -x X: refused (GNU too; usage exit 2)" 2 "$BIN" df -t "$_rt" -x "$_rt"
