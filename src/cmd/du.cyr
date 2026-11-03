@@ -18,6 +18,16 @@
 #   -S / --separate-dirs   do not include subdirectories in dir totals
 #   -l / --count-links     count a hard-linked file once per NAME rather
 #                          than once per file (turns the dedup off)
+#   -x / --one-file-system do not enter a directory on another file system;
+#                          it is neither counted nor listed (1.8.3)
+#   --exclude=PATTERN      skip entries matching PATTERN, a glob tried against
+#                          the path and every suffix after a `/` (GNU's rule;
+#                          `*` crosses `/`); repeatable
+#   -X F / --exclude-from=F  the patterns in F, one a line (trailing blanks
+#                          trimmed, blank lines skipped, as gnulib reads them)
+#   --inodes               count entries instead of sizes (-b is ignored, with
+#                          GNU's warning; -h humanizes the count)
+#   -0 / --null            end each output line with NUL, not newline
 #
 # Size accounting:
 #   Default unit is the allocated 1024-byte block. The kernel reports
@@ -48,8 +58,6 @@
 # remembered which directories the walk had already entered. GNU answers
 # the same tree in milliseconds with `-l` or without it.
 #
-# -x (one-filesystem), --exclude/--exclude-from, --inodes, and -0
-# NUL-terminated output are deferred. (roadmap 1.8.3)
 
 var _du_summarize:   i64 = 0;
 var _du_all:         i64 = 0;
@@ -62,6 +70,13 @@ var _du_have_depth:  i64 = 0;
 var _du_sep_dirs:    i64 = 0;
 var _du_grand:       i64 = 0;
 var _du_count_links: i64 = 0;
+var _du_xdev_on:     i64 = 0;    # -x: do not enter a directory on another file system
+var _du_xdev:        i64 = 0;    # ...the current operand's device
+var _du_excl:        i64 = 0;    # --exclude / -X patterns (a vec), 0 for none
+var _du_inodes:      i64 = 0;    # --inodes: count entries, not sizes
+var _du_null:        i64 = 0;    # -0: end each line with NUL
+var _du_obuf:        i64 = 0;    # the output line, reused (see `_du_emit`)
+var _du_ocap:        i64 = 0;
 
 # The (dev, ino) sets. ⚠ Bare-literal init: a `var x = fs_inoset_new();` at
 # module scope would be a non-literal initializer and cost one of the 4,096
@@ -166,6 +181,7 @@ fn _du_apparent_size(st): i64 {
 #   -b:          apparent bytes (st_size) — raw byte count
 #   -b -h:       apparent bytes — formatter picks unit
 fn _du_size(st): i64 {
+    if (_du_inodes == 1) { return 1; }
     if (_du_bytes == 1) {
         return _du_apparent_size(st);
     }
@@ -231,17 +247,115 @@ fn _du_fmt_size(buf, pos, size): i64 {
 }
 
 # Emit a "SIZE\tPATH\n" line.
+# ⛔ ONE REUSED BUFFER (1.8.3). Each line allocated a fresh 2 KiB buffer and never freed it, so
+# `du -a /usr` peaked at 406 MB (GNU 7.9) — and copied the path into it unbounded, so a path past
+# ~2 KB wrote off the end of the allocation (silent only because nothing had claimed the bump
+# space after it yet). The buffer grows to the longest line instead.
 fn _du_emit(size, path): i64 {
-    var buf = alloc(2048);
+    var plen = strlen(path);
+    var need = plen + 64;                          # the size field needs under 32
+    if (need > _du_ocap) {
+        var ncap = _du_ocap * 2;
+        if (ncap < 4096) { ncap = 4096; }
+        while (ncap < need) { ncap = ncap * 2; }
+        _du_obuf = alloc(ncap);
+        _du_ocap = ncap;
+    }
+    var buf = _du_obuf;
     var p = _du_fmt_size(buf, 0, size);
     store8(buf + p, 9);
     p = p + 1;
-    var plen = strlen(path);
     memcpy(buf + p, path, plen);
     p = p + plen;
-    store8(buf + p, 10);
+    if (_du_null == 1) { store8(buf + p, 0); } else { store8(buf + p, 10); }
     p = p + 1;
     k_write( 1, buf, p);
+    return 0;
+}
+
+# --exclude / -X: GNU's `excluded_file_name` with EXCLUDE_WILDCARDS and no EXCLUDE_ANCHORED —
+# fnmatch with no flags, so `*` crosses `/`, against the whole path AND every suffix that starts
+# after a `/` (not after `//`). So `sub`, `a/sub` and `*/a` all match `t/a/sub`-shaped paths, and
+# a pattern naming the operand excludes it.
+fn _du_excluded(path): i64 {
+    if (_du_excl == 0) { return 0; }
+    var n = vec_len(_du_excl);
+    var plen = strlen(path);
+    var k: i64 = 0;
+    while (k < n) {
+        var pat = vec_get(_du_excl, k);
+        var pl = strlen(pat);
+        if (glob_match(pat, pl, path, plen) == 1) { return 1; }
+        var i: i64 = 0;
+        while (i < plen) {
+            if (load8(path + i) == 47) {
+                if (load8(path + i + 1) != 47) {
+                    if (load8(path + i + 1) != 0) {
+                        if (glob_match(pat, pl, path + i + 1, plen - i - 1) == 1) { return 1; }
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# C's isspace(): space, \t \n \v \f \r.
+fn _du_ws(c): i64 {
+    if (c == 32) { return 1; }
+    if (c >= 9) { if (c <= 13) { return 1; } }
+    return 0;
+}
+
+# -X FILE: a pattern per line, as GNU's `add_exclude_file` reads it. 0, or the negative errno.
+fn _du_exclude_file(file): i64 {
+    var fd = k_open(file, FS_O_CLOEXEC, 0);
+    if (fd < 0) { return fd; }
+    var cap: i64 = 4096;
+    var buf = alloc(cap);
+    var len: i64 = 0;
+    var more: i64 = 1;
+    while (more == 1) {
+        if (len + 1024 > cap) {
+            var nb = alloc(cap * 2);
+            memcpy(nb, buf, len);
+            buf = nb;
+            cap = cap * 2;
+        }
+        var r = k_read( fd, buf + len, cap - len - 1);
+        if (r > 0) { len = len + r; }
+        elif (r != (0 - 4)) { more = 0; }
+    }
+    k_close(fd);
+    if (_du_excl == 0) { _du_excl = vec_new(); }
+    var st: i64 = 0;
+    var i: i64 = 0;
+    while (i <= len) {
+        var at_end: i64 = 0;
+        if (i == len) { at_end = 1; }
+        elif (load8(buf + i) == 10) { at_end = 1; }
+        if (at_end == 1) {
+            # ⚠ gnulib's `add_exclude_fp`: the line end is `\n`, a space character, so it trims
+            # TRAILING whitespace off each pattern and skips a line that is empty after that.
+            var e = i;
+            var trimming: i64 = 1;
+            while (trimming == 1) {
+                if (e <= st) { trimming = 0; }
+                elif (_du_ws(load8(buf + e - 1)) == 0) { trimming = 0; }
+                else { e = e - 1; }
+            }
+            if (e > st) {
+                var pat = alloc(e - st + 1);
+                memcpy(pat, buf + st, e - st);
+                store8(pat + e - st, 0);
+                vec_push(_du_excl, pat);
+            }
+            st = i + 1;
+        }
+        i = i + 1;
+    }
     return 0;
 }
 
@@ -280,6 +394,11 @@ fn _du_seen_skip(st, depth): i64 {
 # the dir's own block usage; -S removes children before reporting).
 fn _du_walk(parent_dirfd, name, plen, depth): i64 {
     var display = _du_pb;
+    # A pattern can name an operand: GNU then prints nothing for it, at exit 0. (Children are
+    # tested by the loop below, before their stat.)
+    if (depth == 0) {
+        if (_du_excluded(display) == 1) { return 0; }
+    }
     # Stat (or lstat) the directory entry itself.
     var st[144];
     var sr: i64 = 0;
@@ -300,6 +419,8 @@ fn _du_walk(parent_dirfd, name, plen, depth): i64 {
         _du_any_failed = 1;
         return 0;
     }
+    # -x: the operand's device is the file system this walk stays on.
+    if (depth == 0) { _du_xdev = fs_dev(&st); }
     # ⚠ Before ANY accounting: a repeat contributes nothing, and for a directory
     # under -L that also means the walk does not descend into it a second time.
     if (_du_seen_skip(&st, depth) == 1) { return 0; }
@@ -394,15 +515,31 @@ fn _du_walk(parent_dirfd, name, plen, depth): i64 {
                         var ename = fs_dent_name(ent);
                         var clen = _du_path_push(plen, ename);
                         var child_disp = _du_pb;
+                        var skip_child: i64 = 0;
+                        if (_du_excluded(child_disp) == 1) { skip_child = 1; }
                         # Classify via lstat (or stat with -L).
                         var cst[144];
                         var csr: i64 = 0;
-                        if (_du_follow == 1) {
-                            csr = fs_stat_entry(dir_fd, child_disp, ename, &cst, 1);
-                        } else {
-                            csr = fs_stat_entry(dir_fd, child_disp, ename, &cst, 0);
+                        if (skip_child == 0) {
+                            if (_du_follow == 1) {
+                                csr = fs_stat_entry(dir_fd, child_disp, ename, &cst, 1);
+                            } else {
+                                csr = fs_stat_entry(dir_fd, child_disp, ename, &cst, 0);
+                            }
                         }
-                        if (csr != 0) {
+                        # -x: a directory on another file system is not entered, counted or
+                        # listed, as GNU's FTS_XDEV skip. A non-directory there still counts.
+                        if (skip_child == 0) {
+                            if (csr == 0) {
+                                if (_du_xdev_on == 1) {
+                                    if (fs_is_dir(&cst) == 1) {
+                                        if (fs_dev(&cst) != _du_xdev) { skip_child = 1; }
+                                    }
+                                }
+                            }
+                        }
+                        if (skip_child == 1) { csr = 0 - 1; }
+                        elif (csr != 0) {
                             # ⛔ THIS ARM DID NOT EXIST. A child whose stat failed
                             # was dropped in silence and `du` exited 0 over a tree
                             # it could not fully read — and `-L` makes it easy to
@@ -419,7 +556,7 @@ fn _du_walk(parent_dirfd, name, plen, depth): i64 {
                             k_write( 2, "\n", 1);
                             _du_any_failed = 1;
                         }
-                        if (csr == 0) {
+                        if (skip_child == 0) { if (csr == 0) {
                             if (fs_is_dir(&cst) == 1) {
                                 # ⚠ `_du_walk` returns the FULL subtree total, never
                                 # the `-S`-stripped one — that distinction is the
@@ -451,7 +588,7 @@ fn _du_walk(parent_dirfd, name, plen, depth): i64 {
                                     # fold into the top-level subtree below.
                                 }
                             }
-                        }
+                        } }
                     }
                     # Back to this level's path; the buffer may have moved under a child.
                     store8(_du_pb + plen, 0);
@@ -513,6 +650,11 @@ fn _du_init_spec(): i64 {
     flags_add_bool(s, 83,  "separate-dirs",  0, "do not include subdirectories in directory totals");
     flags_add_bool(s, 108, "count-links",    0, "count sizes many times if hard linked");
     flags_add_int(s,  100, "max-depth",      0, "only print entries at depth <= N");
+    flags_add_bool(s, 120, "one-file-system", 0, "skip directories on other file systems");
+    flags_add_str(s,  0,   "exclude",        0, "skip entries matching PATTERN (a glob; repeatable)");
+    flags_add_str(s,  88,  "exclude-from",   0, "skip entries matching any pattern in FILE");
+    flags_add_bool(s, 0,   "inodes",         0, "count inodes, not sizes");
+    flags_add_bool(s, 48,  "null",           0, "end each output line with NUL, not newline");
     _du_spec = s;
     return 0;
 }
@@ -550,6 +692,10 @@ fn cmd_du(start: i64): i64 {
     _du_grand       = 0;
     _du_any_failed  = 0;
     _du_count_links = 0;
+    _du_xdev_on     = 0;
+    _du_excl        = 0;
+    _du_inodes      = 0;
+    _du_null        = 0;
     # ⚠ Built here, not memoized like `_du_spec`: one set per invocation, shared
     # across every operand, so a hard link is deduped ACROSS operands the way GNU
     # does — and so a second in-process `cmd_du` would not inherit the first's.
@@ -640,6 +786,44 @@ fn cmd_du(start: i64): i64 {
                         if (nlen == 14) {
                             if (_seq_bytes_eq(tok + 2, "no-dereference", 14) == 1) { _du_follow = 0; handled = 1; }
                         }
+                        if (nlen == 15) {
+                            if (_seq_bytes_eq(tok + 2, "one-file-system", 15) == 1) { _du_xdev_on = 1; handled = 1; }
+                        }
+                        if (nlen == 6) {
+                            if (_seq_bytes_eq(tok + 2, "inodes", 6) == 1) { _du_inodes = 1; handled = 1; }
+                        }
+                        if (nlen == 4) {
+                            if (_seq_bytes_eq(tok + 2, "null", 4) == 1) { _du_null = 1; handled = 1; }
+                        }
+                        # --exclude=PATTERN / --exclude-from=FILE (or the value as the next word).
+                        var xkind: i64 = 0;
+                        if (nlen == 7) {
+                            if (_seq_bytes_eq(tok + 2, "exclude", 7) == 1) { xkind = 1; }
+                        }
+                        if (nlen == 12) {
+                            if (_seq_bytes_eq(tok + 2, "exclude-from", 12) == 1) { xkind = 2; }
+                        }
+                        if (xkind != 0) {
+                            var xarg: i64 = 0;
+                            if (eq_off > 0) {
+                                xarg = tok + eq_off + 1;
+                            } else {
+                                i = i + 1;
+                                if (i >= n_argv) {
+                                    k_write( 2, "kriya du: error: --exclude needs an argument\n", 45);
+                                    return EXIT_USAGE;
+                                }
+                                xarg = kriya_arg(i);
+                            }
+                            if (xkind == 1) {
+                                if (_du_excl == 0) { _du_excl = vec_new(); }
+                                vec_push(_du_excl, xarg);
+                            } else {
+                                var xr = _du_exclude_file(xarg);
+                                if (xr < 0) { errmsg_report("du", xarg, 0 - xr); return EXIT_FAILURE; }
+                            }
+                            handled = 1;
+                        }
                         if (handled == 0) {
                             k_write( 2, "kriya du: error: unknown long option\n", 37);
                             return EXIT_USAGE;
@@ -682,6 +866,28 @@ fn cmd_du(start: i64): i64 {
                                                                 _du_sep_dirs = 1; p = p + 1;
                                                             } else { if (c == 108) {       # -l
                                                                     _du_count_links = 1; p = p + 1;
+                                                                } else { if (c == 120) {       # -x
+                                                                    _du_xdev_on = 1; p = p + 1;
+                                                                } else { if (c == 48) {        # -0
+                                                                    _du_null = 1; p = p + 1;
+                                                                } else { if (c == 88) {        # -X FILE
+                                                                    var xfile: i64 = 0;
+                                                                    if (p + 1 < tlen) {
+                                                                        xfile = tok + p + 1;
+                                                                    } else {
+                                                                        if (i + 1 >= n_argv) {
+                                                                            k_write( 2, "kriya du: error: -X requires an argument\n", 41);  #skip-lint
+                                                                            return EXIT_USAGE;
+                                                                        }
+                                                                        xfile = kriya_arg(i + 1);
+                                                                        consumed_next = 1;
+                                                                    }
+                                                                    var xfr = _du_exclude_file(xfile);
+                                                                    if (xfr < 0) {
+                                                                        errmsg_report("du", xfile, 0 - xfr);
+                                                                        return EXIT_FAILURE;
+                                                                    }
+                                                                    loop = 0;
                                                                 } else { if (c == 100) {       # -d N
                                                                         var sarg: i64 = 0;
                                                                         if (p + 1 < tlen) {
@@ -704,7 +910,7 @@ fn cmd_du(start: i64): i64 {
                                                                           "kriya du: error: unknown short option\n",
                                                                           38);
                                                                         return EXIT_USAGE;
-                                                                    } } } } } } } } } } }
+                                                                    } } } } } } } } } } } } } }
                         }
                     }
                     if (consumed_next == 1) { i = i + 2; } else { i = i + 1; }
@@ -716,6 +922,14 @@ fn cmd_du(start: i64): i64 {
         store64(operands_buf + n_operands * 8, tok);
         n_operands = n_operands + 1;
         i = i + 1;
+    }
+
+    # GNU's --inodes: -b (apparent size) means nothing for a count, and GNU says so.
+    if (_du_inodes == 1) {
+        if (_du_bytes == 1) {
+            k_write( 2, "kriya du: warning: options --apparent-size and -b are ineffective with --inodes\n", 80);  #skip-lint
+            _du_bytes = 0;
+        }
     }
 
     # GNU rejects -a + -s as mutually exclusive.
@@ -756,11 +970,13 @@ fn du_help_declare(): i64 {
     help_begin("du", "Summarise disk usage of files and directories.",
       "du [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
-    help_operands("Reports 1024-byte blocks by default. A file reached under several names is counted once; -l counts it every time.");  #skip-lint
+    help_operands("Reports 1024-byte blocks by default. A file reached under several names is counted once; -l counts it every time. --exclude=PATTERN skips an entry whose path, or any part of it after a `/`, matches the glob (repeatable; -X FILE reads one a line). -x does not enter directories on other file systems. --inodes counts entries instead of sizes. -0 ends each line with NUL.");  #skip-lint
     help_exit(1, "a path could not be read");
     help_example("du -sh .");
     help_example("du -a -d 1 /var");
     help_example("du -b file.bin");
     help_example("du -sl /var/cache");
+    help_example("du -sh --exclude='*.o' --exclude=.git src");
+    help_example("du -x --inodes -d 1 /");
     return 0;
 }

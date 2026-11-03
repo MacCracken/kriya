@@ -188,6 +188,54 @@ expect_exit "du -d 0x2 refused (GNU reads hex)"  2 "$BIN" du -d 0x2 d16
 err=$("$BIN" du -d 18446744073709551617 d16 2>&1 >/dev/null || true)
 expect_eq "du -d diagnostic" "kriya du: 18446744073709551617: invalid maximum depth" "$err"
 
+# --- --exclude, -X, --inodes, -0, -x (1.8.3) ---------------------------
+# Measured against coreutils 9.4 and 9.7: identical on every case here.
+rm -rf ex; mkdir -p ex/t/a/sub ex/t/b
+gen_payload ex/t/x.o 5; gen_payload ex/t/a/y.o 9; gen_payload ex/t/a/sub/z.c 3; : > ex/t/b/k
+ln ex/t/x.o ex/t/a/hard
+printf '*.o\nsub  \n\n' > ex/pats
+cd ex
+sorted_check "--exclude='*.o'"                  -a --exclude='*.o' t
+sorted_check "--exclude=sub (a directory, not entered)" -a --exclude=sub t
+sorted_check "--exclude=a/sub (a path suffix)"  -a --exclude=a/sub t
+sorted_check "--exclude=t/a"                    -a --exclude=t/a t
+sorted_check "--exclude='*/a' (* crosses /)"    -a --exclude='*/a' t
+sorted_check "--exclude='?.o'"                  -a --exclude='?.o' t
+sorted_check "--exclude='[xy].o'"               -a --exclude='[xy].o' t
+sorted_check "--exclude twice"                  -a --exclude='*.o' --exclude=sub t
+sorted_check "--exclude PATTERN (separate word)" -a --exclude '*.o' t
+sorted_check "--exclude with -s"                -s --exclude='*.o' t
+sorted_check "--exclude='\\*.o' (escaped: literal)" -a --exclude='\*.o' t
+sorted_check "--exclude='sub/' (matches nothing)" -a --exclude='sub/' t
+sorted_check "--exclude naming the operand prints nothing" --exclude=t t
+sorted_check "-X FILE (trailing blanks trimmed, blank lines skipped)" -a -X pats t
+sorted_check "--exclude-from=FILE"              -a --exclude-from=pats t
+_k=0; "$BIN" du -X nosuch t >/dev/null 2>&1 || _k=$?
+expect_eq "-X of a missing file: exit 1, as GNU" "1" "$_k"
+sorted_check "--inodes"                         --inodes t
+sorted_check "--inodes -a (a hard link once)"   --inodes -a t
+sorted_check "--inodes -s"                      --inodes -s t
+sorted_check "--inodes -c"                      --inodes -c t t/a
+sorted_check "--inodes -l"                      --inodes -sl t
+sorted_check "--inodes -S"                      --inodes -S t
+sorted_check "--inodes -d 1"                    --inodes -d 1 t
+sorted_check "--inodes -b (ignored, with a warning)" --inodes -sb t
+_ke=$("$BIN" du --inodes -sb t 2>&1 >/dev/null)
+expect_eq "--inodes -b warns in GNU's words" "kriya du: warning: options --apparent-size and -b are ineffective with --inodes" "$_ke"
+expect_eq "--inodes -h humanizes the count in powers of 1024, as GNU" \
+    "$(env -u POSIXLY_CORRECT -u DU_BLOCK_SIZE -u BLOCK_SIZE du --inodes -sh "$ROOT/src")" "$("$BIN" du --inodes -sh "$ROOT/src")"
+expect_eq "-0 ends each line with NUL" "$(du -0 t | od -c)" "$("$BIN" du -0 t | od -c)"
+expect_eq "--null -a -c"               "$(du --null -a -c t | od -c)" "$("$BIN" du --null -a -c t | od -c)"
+cd ..
+# -x needs a mount point inside the tree, without privileges: /dev's pts, shm and mqueue mounts.
+if [ "$(stat -c %d /dev)" != "$(stat -c %d /dev/pts 2>/dev/null)" ] 2>/dev/null; then
+    expect_eq "du -xa /dev omits the /dev/pts mount, as GNU" "$(du -xa /dev 2>/dev/null | sort)" "$("$BIN" du -xa /dev 2>/dev/null | sort)"
+    expect_eq "...which -a without -x lists" "1|0" \
+        "$("$BIN" du -a /dev 2>/dev/null | grep -c '/dev/pts$')|$("$BIN" du -xa /dev 2>/dev/null | grep -c '/dev/pts$')"
+else
+    echo "skip: /dev/pts is not a separate mount here -- du -x is not exercised"
+fi
+
 # --- the walk's memory (1.8.3) -----------------------------------------
 # ⛔ The walk allocated a 4 KiB getdents buffer per directory and a path per entry and freed
 # neither: `du -s /usr` peaked at 72 MB (GNU 7.6). Over 6,000 directories the 1.8.2 walk
