@@ -98,7 +98,7 @@ fn k_read(fd, buf, n): i64 {
     # `preempt_disable; sti; hlt` — it would starve the very producer this read is waiting for.
     var r = syscall(SYS_READ, fd, buf, n, 0);      # agnos #5, a4 = 0: block in the kernel
     while (r == 0 - 2) {
-        syscall(44);                               # donate the rest of the slice to the producer
+        sys_sched_yield();                         # agnos #44: donate the rest of the slice to the producer
         var sp = 0;
         while (sp < 20000) { sp = sp + 1; }        # preemptible: the timer can take us off here
         r = syscall(SYS_READ, fd, buf, n, 0);
@@ -106,7 +106,7 @@ fn k_read(fd, buf, n): i64 {
     return r;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(0, fd, buf, n);                 # linux read #0
+    return sys_read(fd, buf, n);
     #endif
 }
 
@@ -277,7 +277,7 @@ fn k_write(fd, buf, n): i64 {
     var rounds = 0;                                # consecutive calls that took nothing
     var since = 0;                                 # uptime_ms when the first of them returned
     while (done < n) {
-        var r = syscall(1, fd, buf + done, n - done, 0);   # a4 = 0: a pipe write blocks
+        var r = syscall(SYS_WRITE, fd, buf + done, n - done, 0);   # agnos #1, a4 = 0: a pipe write blocks
         if (r > 0) { done = done + r; rounds = 0; }
         elif (r < 0) {
             # ⚠ agnos returns a bare -1 with no errno. On a descriptor kriya did not open — the
@@ -298,7 +298,7 @@ fn k_write(fd, buf, n): i64 {
                 _k_stall_mark(fd);
                 return 0 - 28;
             }
-            syscall(44);
+            sys_sched_yield();                     # agnos #44
             var sp = 0;
             while (sp < 2000) { sp = sp + 1; }
         }
@@ -313,7 +313,7 @@ fn k_write(fd, buf, n): i64 {
     # so this is a real path, not a theoretical one, and it loses data silently when it fires.
     var done = 0;
     while (done < n) {
-        var r = syscall(1, fd, buf + done, n - done);
+        var r = sys_write(fd, buf + done, n - done);
         if (r > 0) { done = done + r; }
         else {
             if (r < 0) {
@@ -372,7 +372,7 @@ fn k_close(fd): i64 {
     return syscall(SYS_CLOSE, fd);                 # agnos #6
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(3, fd);                         # linux close #3
+    return sys_close(fd);
     #endif
 }
 
@@ -393,7 +393,7 @@ fn k_open(path, flags, mode): i64 {
     return fd;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(2, path, flags, mode);                  # linux open #2 (path,flags,mode)
+    return sys_open(path, flags, mode);                    # x86 open 2; aarch64 openat(AT_FDCWD, …)
     #endif
 }
 
@@ -528,7 +528,7 @@ fn k_stat(path, buf): i64 {
     return _k_agnos_stat(path, buf);
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return _k_stat_norm(syscall(262, k_at_fdcwd(), path, buf, 0), buf);   # newfstatat(AT_FDCWD,path,buf,0)
+    return _k_stat_norm(sys_fstatat(k_at_fdcwd(), path, buf, 0), buf);
     #endif
 }
 
@@ -545,7 +545,7 @@ fn k_lstat(path, buf): i64 {
     return _k_agnos_stat(path, buf);                       # ⚠ FOLLOWS symlinks — see above
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return _k_stat_norm(syscall(262, k_at_fdcwd(), path, buf, 256), buf); # AT_SYMLINK_NOFOLLOW=256
+    return _k_stat_norm(sys_fstatat(k_at_fdcwd(), path, buf, 256), buf);  # AT_SYMLINK_NOFOLLOW=256
     #endif
 }
 
@@ -554,7 +554,7 @@ fn k_mkdir(path, mode): i64 {
     return syscall(SYS_MKDIR, path, strlen(path));         # agnos #9 (path,pathlen) — no mode
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(83, path, mode);                        # linux mkdir #83
+    return sys_mkdir(path, mode);                          # x86 mkdir 83; aarch64 mkdirat
     #endif
 }
 
@@ -563,7 +563,7 @@ fn k_rmdir(path): i64 {
     return syscall(SYS_RMDIR, path, strlen(path));         # agnos #10
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(84, path);                              # linux rmdir #84
+    return sys_rmdir(path);                                # x86 rmdir 84; aarch64 unlinkat(AT_REMOVEDIR)
     #endif
 }
 
@@ -572,7 +572,7 @@ fn k_unlink(path): i64 {
     return syscall(SYS_UNLINK, path, strlen(path));        # agnos #30
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(87, path);                              # linux unlink #87
+    return sys_unlink(path);                               # x86 unlink 87; aarch64 unlinkat
     #endif
 }
 
@@ -581,7 +581,7 @@ fn k_rename(oldp, newp): i64 {
     return syscall(SYS_RENAME, oldp, strlen(oldp), newp, strlen(newp));  # agnos #31 (a4=r10)
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(82, oldp, newp);                        # linux rename #82
+    return sys_rename(oldp, newp);                         # x86 rename 82; aarch64 renameat
     #endif
 }
 
@@ -636,7 +636,9 @@ fn k_getcwd(buf, sz): i64 {
     return 2;                                              # length incl. NUL, matching Linux getcwd
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(79, buf, sz);                           # linux getcwd #79
+    # The stdlib wraps no getcwd (filed upstream, 1.8.4), but both Linux tables name it: 79 on
+    # x86-64, 17 on aarch64 (measured under qemu-aarch64 -strace to reach getcwd).
+    return syscall(SYS_GETCWD, buf, sz);
     #endif
 }
 
@@ -645,7 +647,7 @@ fn k_statfs(path, buf): i64 {
     return 0 - 38;                                         # no statfs on agnos
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(137, path, buf);                        # linux statfs #137
+    return sys_statfs(path, buf);                          # x86 137; aarch64 43 (ESYSXLAT 137 → 43)
     #endif
 }
 
@@ -660,7 +662,7 @@ fn k_symlink(target, linkpath): i64 {
     return syscall(SYS_SYMLINK, target, strlen(target), linkpath, strlen(linkpath));  # agnos #63 (a4)
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(88, target, linkpath);                  # linux symlink #88
+    return sys_symlink(target, linkpath);                  # x86 symlink 88; aarch64 symlinkat
     #endif
 }
 
@@ -673,7 +675,7 @@ fn k_readlink(path, buf, bufsize): i64 {
     return syscall(SYS_READLINK, path, strlen(path), buf, bufsize);   # agnos #70 (a4)
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(89, path, buf, bufsize);                # linux readlink #89
+    return sys_readlink(path, buf, bufsize);               # x86 readlink 89; aarch64 readlinkat
     #endif
 }
 
@@ -718,7 +720,7 @@ fn k_utimensat(dirfd, path, times, flags): i64 {
     return 0 - 38;                                         # no utimensat on agnos
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(280, dirfd, path, times, flags);        # linux utimensat #280
+    return sys_utimensat(dirfd, path, times, flags);
     #endif
 }
 
@@ -785,7 +787,8 @@ fn k_fchmod(fd, mode): i64 {
 # `fchmodat2` (Linux 6.6+) — the one chmod that honours AT_EMPTY_PATH, so it can
 # act on an O_PATH descriptor, which `fchmod` refuses with EBADF. ⚠ 452 on every
 # architecture: syscalls added since 5.1 share one number. An older kernel
-# answers -ENOSYS and the caller falls back (`fs_fd_chmod`).
+# answers -ENOSYS and the caller falls back (`fs_fd_chmod`). Raw because the stdlib
+# wraps no fchmodat2 (filed upstream, 1.8.4).
 fn k_fchmodat2(dirfd, path, mode, flags): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 38;                                         # no mode bits on agnos

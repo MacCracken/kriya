@@ -355,6 +355,20 @@ the **genuine** chrono gate — re-verified absent at pin 6.7.18 (its only chang
 sleep) — and the trigger
 [ADR 0007](../adr/0007-date-utc-only-at-v0-7-0.md) already names.
 
+### Upstream cyrius — the four syscalls the stdlib does not wrap
+
+**Filed 2026-11-03:** cyrius [`2026-11-03-stdlib-has-no-sys-fchdir.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-stdlib-has-no-sys-fchdir.md)
+(1.8.2) and [`2026-11-03-stdlib-has-no-symlinkat-readlinkat-getcwd-fchmodat2.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-stdlib-has-no-symlinkat-readlinkat-getcwd-fchmodat2.md)
+(1.8.4).
+
+1.8.4 took kriya's numeric `syscall(N, …)` literals from 44 to four, and each of the four is a call the
+stdlib has no wrapper for. `fchdir` (`_k_fchdir`, x86 81) has an aarch64 workaround through
+`/proc/self/fd/N`, because no literal reaches the native call. `fchmodat2` (`k_fchmodat2`, 452 on every
+arch) has no wrapper. `symlinkat` and `readlinkat` (`fs_symlinkat` / `fs_readlinkat`, x86 266 / 267) have
+no wrapper either, and x86's table has no name for them. None misroutes: `kriya-syscalls.tcyr` pins each
+on x86-64 and aarch64. ⭐ When the wrappers land, the four literals go, and with them the last per-arch
+`#ifdef` in kriya's Linux syscall layer.
+
 ---
 
 ## Standing

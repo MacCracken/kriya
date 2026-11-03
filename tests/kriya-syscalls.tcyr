@@ -29,6 +29,7 @@ include "src/lib/path.cyr"
 include "src/lib/str.cyr"
 include "src/lib/fs.cyr"
 include "src/lib/argbatch.cyr"
+include "src/lib/spawn.cyr"
 
 # Build "/tmp/kriya-sc-<pid>" into `p` (at least 40 bytes).
 fn _ks_mkdir_name(p): i64 {
@@ -156,6 +157,23 @@ fn main(): i64 {
     } else {
         k_write(1, "  skip: no user xattrs on this file system -- the round trips are unexercised\n", 78);
     }
+
+    # 1.8.4: the calls the stdlib does not wrap (filed upstream), pinned like the rest. getcwd is
+    # `SYS_GETCWD` (79 / 17), fchmodat2 the literal 452, and fchdir x86's 81 or, on aarch64, a chdir
+    # through /proc/self/fd/N, so its test is where it LANDS.
+    test_group("getcwd / fchmodat2 / fchdir");
+    var cw[256];
+    assert_eq(k_getcwd(&cw, 256), strlen(&dir) + 1, "k_getcwd answers the scratch dir's length + NUL");
+    assert_eq(streq(&cw, &dir), 1, "...and its path");
+    var c2 = k_fchmodat2(k_at_fdcwd(), "f", 420, 0);
+    assert(c2 == 0 || c2 == 0 - 38, "k_fchmodat2(f, 0644) == 0, or ENOSYS before Linux 6.6");
+    if (c2 == 0) { assert_eq(_ks_mode("f"), 420, "...and the mode reads back 0644"); }
+    var dd = fs_opendir_nofollow(k_at_fdcwd(), "d");
+    assert(dd >= 0, "open d");
+    assert_eq(_k_fchdir(dd), 0, "_k_fchdir(d) == 0");
+    assert_eq(k_getcwd(&cw, 256), strlen(&dir) + 3, "...and the cwd is now <dir>/d");
+    sys_chdir(&dir);
+    k_close(dd);
 
     # ⛔ 1.7.4: `k_isatty` handed TCGETS a 16-byte buffer for a 36-byte `struct termios`. A pty
     # master is a terminal to TCGETS, so the probe below writes the whole struct; on aarch64 the

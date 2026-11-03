@@ -237,13 +237,13 @@ fn _k_spawn_start(cmd, argv, envp, flags, dirfd, infd, pidp): i64 {
     # Two i32 fds in an 8-byte local. ⚠ `var fds[8]` is 8 BYTES here — a
     # function-local `var X[N]` is N bytes (roadmap M15a).
     var fds[8];
-    var pr = syscall(22, &fds);                    # SYS_PIPE
+    var pr = sys_pipe(&fds);                       # x86 pipe 22; aarch64 pipe2(fds, 0)
     var rfd: i64 = 0 - 1;
     var wfd: i64 = 0 - 1;
     if (pr == 0) {
         rfd = load32(&fds) & 4294967295;
         wfd = load32(&fds + 4) & 4294967295;
-        syscall(72, wfd, 2, 1);                    # SYS_FCNTL, F_SETFD, FD_CLOEXEC
+        sys_fcntl(wfd, 2, 1);                      # F_SETFD, FD_CLOEXEC
     }
 
     var pid = sys_fork();

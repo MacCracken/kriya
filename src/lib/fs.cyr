@@ -182,7 +182,7 @@ fn fs_fstatat(dirfd, path, buf, flags): i64 {
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return _k_stat_norm(syscall(262, dirfd, path, buf, flags), buf);
+    return _k_stat_norm(sys_fstatat(dirfd, path, buf, flags), buf);
     #endif
 }
 
@@ -192,7 +192,7 @@ fn fs_lstat_at(dirfd, path, buf): i64 {
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return _k_stat_norm(syscall(262, dirfd, path, buf, 256), buf);  # AT_SYMLINK_NOFOLLOW
+    return _k_stat_norm(sys_fstatat(dirfd, path, buf, 256), buf);   # AT_SYMLINK_NOFOLLOW
     #endif
 }
 
@@ -309,7 +309,7 @@ fn fs_unlinkat(dirfd, path, flags): i64 {
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(263, dirfd, path, flags);
+    return sys_unlinkat(dirfd, path, flags);
     #endif
 }
 
@@ -337,6 +337,8 @@ fn fs_symlinkat(target, dirfd, link): i64 {
     return syscall(SYS_SYMLINKAT, target, dirfd, link);     # aarch64 symlinkat #36 (266 is clock_adjtime there)
     #endif
     #ifndef CYRIUS_ARCH_AARCH64
+    # ⚠ Raw: the stdlib wraps no symlinkat, and its x86 table names no SYS_SYMLINKAT (1.8.4,
+    # filed upstream). The aarch64 arm above uses the aarch64 table's name.
     return syscall(266, target, dirfd, link);               # linux symlinkat #266
     #endif
     #endif
@@ -360,7 +362,7 @@ fn fs_utimensat(dirfd, path, times, flags): i64 {
     return 0 - 38;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(280, dirfd, path, times, flags);
+    return sys_utimensat(dirfd, path, times, flags);
     #endif
 }
 
@@ -375,6 +377,7 @@ fn fs_readlinkat(dirfd, path, buf, bufsize): i64 {
     return syscall(SYS_READLINKAT, dirfd, path, buf, bufsize);   # aarch64 readlinkat #78 (267 is syncfs there)
     #endif
     #ifndef CYRIUS_ARCH_AARCH64
+    # ⚠ Raw, as symlinkat above: no stdlib readlinkat, no x86 SYS_READLINKAT (filed, 1.8.4).
     return syscall(267, dirfd, path, buf, bufsize);         # linux readlinkat #267
     #endif
     #endif
@@ -387,7 +390,7 @@ fn fs_rename(oldpath, newpath): i64 {
     return k_rename(oldpath, newpath);           # agnos path-based rename
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return syscall(82, oldpath, newpath);
+    return sys_rename(oldpath, newpath);
     #endif
 }
 

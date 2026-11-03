@@ -1983,14 +1983,14 @@ fn _ls_resolve_width(columnar, color_req): i64 {
         #ifdef CYRIUS_TARGET_AGNOS
         # agnos has no isatty; winsize()#60 returns the live console grid as
         # (cols<<16 | rows) from the framebuffer geometry, standing in for the ioctl.
-        var packed = syscall(60);
+        var packed = sys_winsize();
         var acols = packed >> 16;
         if (acols > 0) { lw = acols; }
         #endif
         #ifndef CYRIUS_TARGET_AGNOS
         if (k_isatty(1) == 1) {
             var ws[8];
-            var r = syscall(16, 1, 21523, &ws);          # SYS_IOCTL, TIOCGWINSZ = 0x5413
+            var r = sys_ioctl(1, 21523, &ws);            # TIOCGWINSZ = 0x5413
             if (r == 0) {
                 var lcols = load16(&ws + 2) & 65535;
                 if (lcols > 0) { lw = lcols; }
