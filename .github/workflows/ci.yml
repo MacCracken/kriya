@@ -18,6 +18,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: GNU coreutils as the smoke oracle
+        # ⛔ ubuntu-latest is 26.04, whose default coreutils is uutils (Rust) 0.10.0. The
+        # smoke suite compares kriya against GNU, and check-oracles.sh refuses anything
+        # else (it failed 25 of 32 oracles here at 1.7.4). Swap in Ubuntu's GNU provider
+        # (coreutils 9.7). The trailing `-` removes the Essential uutils provider in the
+        # same transaction; apt will not swap the two on its own.
+        run: |
+          set -e
+          if ls --version | head -1 | grep -q uutils; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --allow-remove-essential \
+              coreutils-from-gnu coreutils-from-uutils-
+          fi
+          ls --version | head -1
+
       - name: Install Cyrius toolchain
         run: |
           set -e

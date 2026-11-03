@@ -64,6 +64,11 @@ that change.
     `statx` and `getrlimit` since 6.6.12**, which removes the upstream gate in roadmap 1.7.4. The
     conversion is in-tree work now and is not part of this release.
 - **CI runs `tests/kriya-syscalls.tcyr`.** It landed at 1.7.2 and was never added to the Test step.
+- **CI: GNU coreutils on `ubuntu-latest` (26.04).** That image's default coreutils is uutils 0.10.0,
+  so 25 of the 32 smoke oracles were not GNU and `check-oracles.sh` failed the job, which is its
+  purpose. A new first step swaps in Ubuntu's GNU provider (coreutils **9.7**) with
+  `apt-get install --allow-remove-essential coreutils-from-gnu coreutils-from-uutils-`, but only
+  when `ls --version` reports uutils.
 - **`scripts/watchlist-scan.py` checks two more M15a writers.** An `ioctl` buffer must hold the
   struct its request writes (`TCGETS` 36, `TIOCGWINSZ` 8), and an unlisted request is reported as
   a finding. A `fmt_int_buf` / `fmt_hex_buf` buffer must be `[24]`. Each rule fails on the 1.7.3
@@ -80,7 +85,8 @@ that change.
 - **838 unit + 58 + 18 POSIX.** The smoke suite ran in `ubuntu:24.04` (coreutils 9.4) as a regular
   user: **7,629 passed, 0 failed** across all 41 scripts. The 1.7.3 binary in the same container
   gives the same 7,629 with identical per-script counts, so the gap from 1.7.3's recorded 7,654 is
-  the container, not the release. Fuzz, the lints, `check-oracles.sh` and `watchlist-scan.py` are
+  the container, not the release. ⭐ Against **GNU coreutils 9.7 on Ubuntu 26.04**, the new CI
+  oracle, all 41 scripts pass: **7,632 passed, 0 failed**. Fuzz, the lints, `check-oracles.sh` and `watchlist-scan.py` are
   clean, and `vet` reports 57 deps.
 - ⚠ **aarch64 was checked under `qemu-aarch64` only**: the syscall test, plus `ls` and `cp -i` on a
   pty. The pi smoke suite was not re-run for this release.
