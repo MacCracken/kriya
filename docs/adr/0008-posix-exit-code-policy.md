@@ -1,6 +1,6 @@
 # 0008 — POSIX exit-code policy: three-tier convention + per-utility specifics
 
-**Status**: Accepted; amended at 1.8.11 (`ls` keeps the baseline's 1 where GNU exits 2)
+**Status**: Accepted; amended at 1.8.11 (`ls` keeps the baseline's 1 where GNU exits 2) and at 1.9.1 (`sort` exits 2 for every error)
 **Date**: 2026-05-18
 
 ## Context
@@ -65,6 +65,9 @@ The M7 audit catalogs the shipped utilities as conformant for exit codes, but th
 | `test` / `[` (if shipped) | 0 | Expression evaluates to true. |
 |  | 1 | Expression evaluates to false (not an error). |
 |  | 2 | Syntax error in expression. |
+| `sort` | 0 | Output written, or `-c` / `-C` found the input in order. |
+|  | 1 | `-c` or `-C` found the input out of order (NOT an error). |
+|  | 2 | Any error: an input it cannot read, an output it cannot write, a usage error (amended at 1.9.1). |
 
 **Amended at 1.8.11: `ls` exits 1 for an operand it cannot reach, where GNU's exits 2.** GNU's `ls`
 has its own three tiers: 0, 1 for "minor problems" such as a subdirectory it cannot open, and 2 for
@@ -74,6 +77,14 @@ GNU exits 2 for `ls missing`, an operand directory it cannot open, a dangling op
 kriya keeps the baseline, so that 2 means "you called it wrong" in every utility, `ls` included: a
 script that tests for 2 separates a usage error from a failed operand without knowing which utility
 it ran. The smoke tests compare `ls`'s output with GNU's in these cases and assert kriya's 1.
+
+**Amended at 1.9.1: `sort` exits 2 for every error.** POSIX names `sort`'s statuses: 0, 1 when `-c`
+or `-C` finds the input out of order, and ">1" when an error occurs; GNU's is 2. kriya's `sort` exited
+1 for an input it could not read, so `sort -c missing` gave the answer "not sorted", and `-C`, whose
+only output is its status, could not tell a missing file from a disorder. Every error is 2 now. ⚠ One
+GNU status is not followed: a bad `--check=WORD` or `--sort=WORD` is GNU's `argmatch` failure, exit 1,
+which for `--check` is the disorder status; kriya keeps 2, its usage error, and `smoke-sort.sh`
+asserts it ([ADR 0033](0033-sort-compares-keys-as-gnus-keycompare-in-the-c-locale.md)).
 
 **Multi-operand atomicity policy:** for utilities that take multiple operands (`cp foo bar dst/`, `rm a b c`, `wc a b c`), each operand is attempted independently. The invocation exits 1 if *any* operand failed; the others still get processed. Exception: `rm`'s protected-paths refusal (ADR 0004) is invocation-atomic — if any operand matches a protected path, *no* operand is touched and exit is 2.
 

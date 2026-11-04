@@ -66,6 +66,32 @@ GNU's `long double` emulated in integers (ADR 0032), against GNU 9.12 on the sam
 
 The `seq` float path is roadmap 1.10.7.
 
+## Sort (1.9.1)
+
+GNU's key model ported (ADR 0033), against 1.9.0 and GNU 9.12 on the same box, best of five.
+100,000 lines per fixture unless named; `LC_ALL=C` on both sides.
+
+| What | kriya 1.9.1 | kriya 1.9.0 | GNU |
+|---|---|---|---|
+| `sort`, the 1 MiB corpus above (already sorted) | 27 ms | 95 ms | 6 ms |
+| `sort`, words and numbers | 68 ms | 158 ms | 21 ms |
+| `sort -k2,2n -k1,1` | 232 ms | (one key only) | 41 ms |
+| `sort -n`, signed decimals | 256 ms | 325 ms | 37 ms |
+| `sort -f` | 88 ms | 206 ms | 26 ms |
+| `sort -u`, many duplicates | 59 ms | 85 ms | 17 ms |
+| `sort -g` | 145 ms | refused | 202 ms |
+| `sort -h` | 288 ms | refused | 56 ms |
+| `sort -V`, package names | 618 ms | refused | 86 ms |
+| `sort -M` | 145 ms | refused | 53 ms |
+| `sort -R --random-source=FILE` | 193 ms | refused | 297 ms |
+
+- ⭐ Most of the gain over 1.9.0 is the output: it wrote each line and its newline in two system
+  calls, and 1.9.1 buffers 64 KiB.
+- `-g` and `-R` are faster than GNU's because kriya reads the first key's value, or takes its
+  digest, once per line; GNU does both again in every comparison.
+- `-n`, `-h` and `-V` read the key again in every comparison, as GNU does, at five to seven times
+  GNU's cost: roadmap 1.10.8.
+
 ## Exec and argument handling
 
 Measured at 1.6.17 and 1.7.0, against GNU on the same box:
@@ -92,7 +118,8 @@ Measured at 1.6.17 and 1.7.0, against GNU on the same box:
   expressions go through niyama's Pike VM, linear-time but without GNU's DFA and Boyer-Moore (about
   1,500×). The regex speed is upstream Cyrius work (roadmap 1.10.2).
 - `tail -n N` (10×) — kriya reads the input forward, where GNU seeks from the end (roadmap 1.10.1).
-- `sort` (13.6×) and `find` (4.8×) — per-record overhead in kriya's comparison and predicate code.
+- `sort` (13.6× at 1.7.0, 4.6× at 1.9.1 after buffering its output) and `find` (4.8×) — per-record
+  overhead in kriya's comparison and predicate code.
 - Line-at-a-time output — `nl`, `printf` and `stat` write each piece in its own system call:
   `nl` over 500,000 lines takes 776 ms against GNU's 42 ms (roadmap 1.10.5).
 

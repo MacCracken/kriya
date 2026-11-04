@@ -189,6 +189,10 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   sat on one `find` for sixteen minutes at 1.5 GB. `smoke-deep.sh` now runs every kriya call under
   `timeout`, and the harness shortens it through `SMOKE_DEEP_TIMEOUT`. ⚠ Read a harness's output
   unbuffered (`python3 -u`), or a stuck run looks exactly like a slow one.
+  ⚠ The same again at 1.9.1, in a script that had never needed one: two `sort` mutants looped
+  for ever (a saturated `-k` count over a separator never stepped past, and a version compare that
+  stopped advancing), and `smoke-sort.sh` sat on each. ⭐ Put `timeout` in every helper that runs
+  the tool, before the first mutation run rather than after it.
 - ⛔ **A copy of the tree taken during a mutation run can hold the mutant.** At 1.8.6 the agnos and
   aarch64 builds came from a snapshot made while the harness ran, and the snapshot held the mutant in
   progress. ⭐ Build the snapshot for the host first and `cmp` it against the binary saved before the
@@ -214,6 +218,19 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   The fast path dropped every digit past the 72nd, and it reached the full-suite stage before the
   same fuzz, run in a container, said 97 of 10,000. ⭐ Run a fuzz on its own, and read its last line
   before going on.
+- ⛔ **An oracle made deterministic by the harness's guess is only as good as the guess.** At
+  1.9.1 `difffuzz-sort.py` added `--random-source` to a case when an option word held an `R`,
+  and `-k2R` is not an option word. GNU shuffled those cases with `getrandom`, and 20 of the
+  first 2,000 "differed". ⭐ Pin the oracle unconditionally: every case carries the salt, which GNU
+  reads only when some key is random.
+- ⚠ **Keep a failing case's inputs at the moment it fails.** The same fuzz reused one directory
+  for every case and kept it when something differed; the files it kept were the LAST case's,
+  and the failure would not reproduce from them. Each failure now gets a directory of its own.
+- ⛔ **"This option cannot matter here" is a claim, and the fuzz is where it gets tested.** kriya
+  skipped `-f` under `-h`, reasoning that a fold changes no digit. GNU folds the key before it
+  looks for a unit, so `1e3` becomes `1E3`, an exa (1.9.1). ⭐ Port the data flow first (copy,
+  drop, fold, then compare, as GNU's `keycompare` does), and optimise a step out only with a
+  case that shows it inert.
 - ⚠ **A mutant can pass on the byte after the string.** At 1.9.0 one read a byte past a `nan(`
   argument and passed. argv's next string began with a letter, so the "junk after the number" check
   saw junk where there was none. A case whose stop is inside the string, `nan(ab-`, cannot be

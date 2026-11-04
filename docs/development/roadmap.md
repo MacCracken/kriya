@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.9.x** | Parsers & numerics | byte-suffix parser | **1.9.1** — sort keys |
+| **1.9.x** | Parsers & numerics | byte-suffix parser | **1.9.2** — size limits and follow modes |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
 **1.8.x closed at 1.8.11**, when the 9.12 review's two decisions shipped. No arc depends on
@@ -60,16 +60,9 @@ kriya *does*, so expect an ADR and GNU-comparison work per item.
 
 **Enabler:** a byte-suffix parser in `src/lib/args.cyr` (1.9.2). The other, float formatting,
 shipped at 1.9.0 as `src/lib/xfloat.cyr` ([ADR 0032](../adr/0032-floats-are-the-x86-extended-format-computed-in-integers.md)).
+`sort`'s keys shipped at 1.9.1 ([ADR 0033](../adr/0033-sort-compares-keys-as-gnus-keycompare-in-the-c-locale.md)).
 
 
-- **1.9.1 — Sort keys.**
-  - ⛔ **First, a wrong answer: a repeated `-k` keeps only the LAST key.** `sort -k2,2 -k1,1` sorts
-    exactly as `sort -k1,1` does and exits 0, where GNU sorts by field 2 then field 1 (measured at
-    1.6.11). Collect every `-k` with `kriya_argv_collect`, the collector `grep -e` already uses — or,
-    if multi-key is not ready, refuse a second `-k` rather than drop it.
-  - Key TYPES: `-h` (human-numeric), `-V` (version), `-g` (general-numeric), `-M` (month),
-    `-d` (dictionary), `-i` (ignore-nonprinting), `-R` (shuffle), `-m` (merge pre-sorted).
-  - Character offsets (`-k2.3,4.5`) and per-key option suffixes (`-k2,2n`).
 - **1.9.2 — Size limits and follow modes.** The byte-suffix parser (`5K`, `1M`, `1G`) serving
   `head -c 1K`, `tail -c 1K` and `sort -S`; `tail -F` (follow by name, with retry), multi-file `-f`
   (refused today, not merely absent) and `--pid=PID`; `sort`'s external-sort fallback above the
@@ -194,6 +187,12 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
     about 1.1 µs.
   - ⚠ The differential fuzz, `scripts/difffuzz-float.py`, is the acceptance test: every fast path
     must leave it at 0 differences.
+- **1.10.8 — `sort` reads each line's first key once.** At 1.9.1 `-g` and `-R` keep the first key's
+  value or digest per line, and are faster than GNU's; `-n`, `-h` and `-V` read the key again in
+  every comparison, as GNU does, and cost more in Cyrius. Measured at 1.9.1 over 100,000 lines:
+  `sort -n` **256 ms against GNU's 37**, `-h` **288 against 56**, `-V` **618 against 86**. The same
+  cache serves them: the `-n`/`-h` digit-string record (and unit), and for `-V` the prefix length.
+  ⚠ `scripts/difffuzz-sort.py` is the acceptance test, at 0 differences on 9.4, 9.7 and 9.12.
 
 ---
 

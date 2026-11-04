@@ -6,6 +6,125 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.9.1] - 2026-11-04 — sort keys
+
+The roadmap's 1.9.1 slot. `sort` takes every `-k`, character offsets, a key's own letters, and GNU's
+orderings `-g -h -M -V -R`, with `-d`, `-i`, `-m` and `-C`. The key code is GNU's `sort.c` ported
+function for function, in the C locale
+([ADR 0033](docs/adr/0033-sort-compares-keys-as-gnus-keycompare-in-the-c-locale.md)). Every item was
+measured against GNU coreutils 9.4, 9.7 and 9.12 first, and is compared with them byte for byte.
+
+### Breaking
+
+- ⛔ **`sort` exits 2 for every error**, as POSIX names ([ADR 0008](docs/adr/0008-posix-exit-code-policy.md),
+  amended): an input it cannot read, an output it cannot write, a random source it cannot use. It
+  exited 1 for an unreadable input, which under `-c` is the answer "not sorted", and `-C`, whose only
+  output is its status, could not have told the two apart. GNU's is 2. **Migration:** a script that
+  tested `sort`'s status for 1 to catch a missing file tests for 2; 1 now means only that `-c` or `-C`
+  found the input out of order.
+
+### Added
+
+- **Every `-k` is a key**, in command-line order: `sort -t: -k3,3n -k1,1` sorts by field 3 as a number,
+  then by field 1.
+- **Character offsets**, `-k F.C[,F.C]`. An end position counts its characters from the start of its
+  field to the end of the LINE, as GNU's does: `-k1,1.5` of `ab cd` is `ab cd`. With `b` the counting
+  starts after the field's blanks. `-k1.0` is refused (*character offset is zero*); an end offset of
+  0 is the end of the field.
+- **A key's own letters**, `-k2,2nr`, after either position: `b` after the start is the start's,
+  after the end the end's. A key with no letters of its own takes every global one, `-r` included,
+  and a key with any letter takes none, GNU's rule: `-n -k2,2` is `-k2,2n`, and `-n -k2b` is text.
+- **The orderings**, each the comparator GNU calls:
+  - `-g` (`--general-numeric-sort`): `strtold`, the x86 `long double` of ADR 0032, with conversion
+    errors first, then NaNs, `-nan` before `nan`, then numbers;
+  - `-h` (`--human-numeric-sort`): none < K (or k) < M < G < T < P < E < Z < Y < R < Q, a unit counted
+    only on a non-zero number, then the number;
+  - `-M` (`--month-sort`): `JAN` to `DEC` in any case after blanks, anything else first;
+  - `-V` (`--version-sort`): gnulib's `filenvercmp`, in the new `src/lib/vercmp.cyr`;
+  - `-R` (`--random-sort`): the MD5 of a 16-byte salt followed by the key, in the new
+    `src/lib/md5.cyr`, so equal keys stay together. **`--random-source=FILE`** salts it with FILE's
+    first 16 bytes, which gives GNU's shuffle byte for byte; without it the salt is `getrandom`'s;
+  - `-d` (`--dictionary-order`) and `-i` (`--ignore-nonprinting`), alone or with `-f`, `-V` or `-R`.
+  - Two orderings on one key are refused, exit 2, with GNU's message: *options '-dn' are
+    incompatible*.
+- **`--sort=WORD`**: `general-numeric`, `human-numeric`, `month`, `numeric`, `random` or `version`,
+  or any unambiguous prefix of one, as GNU's `argmatch` takes them. `--check=WORD` takes prefixes too.
+- **`-m` (`--merge`)**: GNU's merge, the smallest current line first and a tie to the earlier file.
+  Lines are not sorted within a file, so the order of an unsorted input is GNU's too.
+- **`-C`**, the silent `-c`, the same as `--check=quiet`.
+- **`-t '\0'`**, a NUL separator, as GNU spells it.
+- [ADR 0033](docs/adr/0033-sort-compares-keys-as-gnus-keycompare-in-the-c-locale.md): `sort` compares
+  keys as GNU's `keycompare` does, in the C locale.
+
+### Fixed
+
+- ⛔ **A repeated `-k` kept only the LAST key.** `sort -k2,2 -k1,1` sorted exactly as `sort -k1,1` and
+  exited 0, where GNU sorts by field 2, then field 1. The flag table keeps one value per option;
+  every `-k` is now read off the command line in order.
+- ⛔ **`-f` folded to LOWER case.** POSIX and GNU fold to upper, and the six bytes between `Z` and
+  `a` show it: `sort -f` of `_` and `a` printed `_` first; GNU prints `a` first.
+- ⛔ **A file without a final newline ran into the next file.** The inputs were joined before the
+  lines were split, so `sort a b`, with `a` holding `x` and no newline and `b` holding `a`, printed one
+  line, `xa`. Each file's last line ends with the file, as in GNU.
+- **The conflicts GNU refuses are refused**, exit 2, where kriya took the last value or read on:
+  `-c` or `-C` with two files (*extra operand*), `-c` with `-o`, `-c` with `-C`, `-t ''` (*empty
+  tab*), two different `-t` (*incompatible tabs*), two different `-o`, and two different
+  `--random-source`.
+- **Under `-z` a newline is a blank**, as in GNU: it separates fields and `-b` skips it.
+
+### Divergences, asserted
+
+- A bad `--check=WORD` or `--sort=WORD` exits 2, kriya's usage error, where GNU's `argmatch` exits 1,
+  its disorder status.
+- A character offset near 2^64 gives GNU 9.7's and 9.12's order. GNU 9.4 overflowed a pointer adding
+  it and answered otherwise.
+
+### Performance
+
+- **Output is buffered**, 64 KiB at a time, where each line and its newline were two system calls.
+  The 1 MiB corpus of `docs/benchmarks.md` sorts in **27 ms**, against 95 ms at 1.9.0 and GNU's 6;
+  100,000 words take **68 ms** (1.9.0 158, GNU 21), `-f` **88 ms** (206, GNU 26) and `-n` **256 ms**
+  (325, GNU 37).
+- ⭐ **The first key is read once per line**, as GNU's `fillbuf` finds its bounds, and so are its
+  `-g` value and its `-R` digest. Over 100,000 lines `-g` takes **145 ms** and `-R` **193 ms**,
+  against GNU's 202 and 297, which parse and hash again in every comparison.
+- `-h` (**288 ms**, GNU 56), `-V` (**618 ms**, GNU 86) and `-n` read the key again in every
+  comparison, as GNU does, and cost more in Cyrius. Roadmap 1.10.8.
+
+### Changed (tests)
+
+- **`smoke-sort.sh` 129 → 395.** The eight refusals of a key's letters and offsets became
+  comparisons, and the new cases compare every key form, ordering, mode and conflict with GNU, on
+  bytes and exit status: several keys, offsets inside and past their fields, inheritance, the six
+  types over fixtures of their own, `-R` under a fixed source, `-m` over sorted, unsorted and empty
+  files, `-c`/`-C`/`--check`, `--sort` and every error. Huge offsets and the two exit-status
+  divergences are asserted. Against 1.9.0, 216 of the 395 fail.
+- **`scripts/difffuzz-sort.py`** (new): random inputs of numbers, decimals, floats, NaNs, units,
+  months, versions, punctuation and control bytes, under random global letters, up to three keys
+  with offsets and letters, `-t`, `-s`, `-u`, `-z`, `--sort`, `-c`, `-C` and `-m`, every case salted
+  with `--random-source`. On the final build, 12,000 cases on each of 9.4, 9.7 and 9.12, 36,000 in
+  all, gave 0 differences. It found one defect before release, now fixed and pinned:
+  - ⛔ `-f` is not a no-op under `-h`. GNU folds the key before it looks for a unit, so `1e3` is
+    `1E3`, an exa. kriya had skipped the fold there, reasoning that a fold changes no digit.
+- **57 mutants over `sort`, `md5` and `vercmp`, all killed.** Seven lived on the first run, and each
+  was a missing fixture, now added: DEL under `-i`; `-d` beating `-i`; a `b` after the end
+  position; a `-t` key ending at its separator beside a line with fewer fields; an inverted key over
+  unequal field widths; a newline before a number under `-z -n`; and a tie in `-m` that stands when
+  the first file's next line goes back among the others. Two mutants were killed by HANGS (a
+  saturated field count over a separator never stepped past, and a version compare that stopped
+  advancing), so every kriya call in `smoke-sort.sh`'s helpers runs under `timeout` now.
+- **`smoke-help.sh` 341 → 342** (`sort -h` is human-numeric sort, exit 0, where it was refused) and
+  **`smoke-write-errors.sh` 35 → 36** (`sort` exits 2 on a write error, compared with GNU).
+- **`tests/kriya.bcyr`** times one `-R` key digest (2.6 µs) and one `filenvercmp` (0.95 µs).
+- **Unit 914 → 994**: MD5's vectors (the 55- and 56-byte padding edges among them), version
+  order, key parsing, `begfield`/`limfield`, and the `-h`, `-M`, `-g` and `argmatch` comparators.
+- **994 unit + 72 syscall + 18 POSIX.** Smoke is **9,365 / 0** in ubuntu:24.04 (GNU 9.4), **9,368 / 0** in
+  26.04 (9.7), and **9,460 / 0** on the dev box (9.12), across 44 scripts. On aarch64 under qemu,
+  `smoke-sort`, `-printf` and `-seq` pass against the x86_64 oracle. Fuzz is green under poison;
+  `cyrius lint`, the lints, `check-oracles.sh` and `watchlist-scan.py` are clean; all three targets
+  build warning-free; `vet` 61 deps.
+- **Sizes:** host 1,430,640 → **1,464,872**, agnos 1,439,264 → **1,473,496**.
+
 ## [1.9.0] - 2026-11-04 — floats
 
 The roadmap's 1.9.0 slot, and the 1.9.x arc's first enabler:
