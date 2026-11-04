@@ -6,6 +6,82 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.8.5] - 2026-11-03 — the GNU 9.12 parity review, and `date` stops echoing what it cannot render
+
+Out of plan. The dev box's coreutils moved to 9.12, and the 33 smoke failures that surfaced at 1.8.4 are
+examined in [`docs/audit/2026-11-03-gnu-9.12-parity.md`](docs/audit/2026-11-03-gnu-9.12-parity.md). They come
+from five GNU changes, none of them a kriya regression. The review found a `date` wrong answer that predates
+9.12, and that is fixed here.
+
+### Fixed
+
+- ⛔ **`date` echoed a decorated directive at exit 0.** The format walker read one byte after `%`, took a
+  flag for an unknown specifier, and passed the directive through as text. So `date +%-d`, a common idiom,
+  printed `%-d`. Measured against the 1.8.4 binary:
+
+  | Command | GNU | 1.8.4 | 1.8.5 |
+  |---|---|---|---|
+  | `date -u +%-d` | `4` | `%-d`, exit 0 | refused by name, exit 1 |
+  | `date -u +%10Y` | `0000002026` | `%10Y`, exit 0 | refused, exit 1 |
+  | `date -u +%^a` | `WED` | `%^a`, exit 0 | refused, exit 1 |
+  | `date -u +%C` | `20` | `%C`, exit 0 | refused, exit 1 |
+  | `date -u +%_d` | ` 4` | ` 4` | ` 4` (unchanged; it is `%e`) |
+
+  - **A directive is `%` [flags `_-0^#+`] [width] [`E`|`O`] [`:`…] conversion.** A sweep of 610 such
+    directives found 386 that GNU 9.4, 9.7 and 9.12 render and kriya echoed. Among them were five bare
+    conversions kriya never had: `%C`, `%k`, `%l`, `%U` and `%W`.
+  - **Now every decorated GNU conversion is refused by name**, as `%V` already was. The field is left out,
+    the rest of the format prints, and the exit status is 1:
+    `kriya date: %-d: flags, widths and modifiers are not implemented (see roadmap 1.9.4)`. The five
+    conversions join `%V`'s list.
+  - A decorated byte that is not a conversion (`%-f`, `%E_d`, `%::::z`) is echoed, exactly as GNU echoes
+    it.
+  - ⚠ **Two refusals stand where GNU prints the echo**, deliberate until 1.9.4 renders the forms:
+    - an `E`/`O` on a conversion GNU does not take it on (`%Ea`). That set moved between 9.7 and 9.12:
+      `%Oq` and `%OY`.
+    - a width on an invalid directive (`%_1|`). GNU pads its echo to the width, and kriya does not
+      reproduce the padding.
+- ⛔ **A trailing `%_` read past the end of the format.** The walker stepped over the NUL. It wrote that
+  NUL into the output and carried on into the next argument: `date '+a%_' -u` printed `a%_`, a NUL, then
+  `-u`. A trailing directive now stops at the end and echoes as GNU's does.
+
+### Changed
+
+- **`date`'s refusals go through `report_note`**, architecture 001's frame. A bare specifier's message is
+  byte-identical. A directive that needs quoting in a diagnostic is quoted (`'%^f'`).
+- **The roadmap's open 1.8.x slots moved up one**, since 1.8.5 shipped out of plan:
+  - deep trees is **1.8.6**;
+  - the review's two slots are **1.8.7** (an entry that vanishes mid-walk) and **1.8.8** (9.12's output
+    rules: `ls -w`, `stat %N`, the `printf` ceiling, `ls -m` commas, terminal-only quoting, and the
+    newline decision).
+- **1.9.4 gains the rendering half of the `date` fix**: flags, widths, `E`/`O`, `%:z` and the five
+  conversions, with the 610-directive sweep as its acceptance test.
+
+### Tests
+
+- **The 9.12 review's version gates** (in the review commit): `smoke-head-tail`, `smoke-ls`,
+  `smoke-printf` and `smoke-stat`, including the smoke case that could never fail, now fixed.
+  - Each split is pinned on the oracle with GNU's own option where one exists (`--show-control-chars`,
+    `QUOTING_STYLE=shell-escape-always`), and probed with kriya asserted directly where none does.
+  - The four scripts pass on 9.4, 9.7, 9.11 and 9.12. Six mutants, one per rule, die on 9.12 and on 9.7.
+- **`smoke-date.sh` 62 → 86.** The 610-directive sweep asserts both invariants against the local GNU at a
+  fixed instant: nothing GNU renders is echoed, and everything GNU echoes is echoed, bar `E`/`O` on a
+  letter. There are named refusal cases, the five conversions, and the trailing forms with an argument
+  after the format.
+  - ⚠ The trailing cases needed that argument. With nothing behind the format the bytes past the NUL are
+    NUL, and a mutant that restored the overrun passed.
+  - `check_parity` catches kriya's exit status now. A refusal there aborted the whole script under
+    `set -e`, with no summary line.
+- **Unit 852 → 869**: `_date_scan_directive` and `_date_is_conv`.
+- **Five `date` mutants die on 9.12 and on 9.7**: the echo restored, the five conversions dropped, every
+  decorated non-conversion refused, `%_d` dropped, and the overrun restored.
+- **869 unit + 72 syscall + 18 POSIX.** Smoke is **7,961 / 0** in ubuntu:24.04 (GNU 9.4), **7,964 / 0** in
+  26.04 (9.7), and **8,055 / 0** on the dev box against 9.12, the first clean host run since 9.12 arrived.
+  Fuzz is green under poison. `cyrius lint` (all of `src/`), the lints, `check-oracles.sh` and
+  `watchlist-scan.py` are clean, `vet` reports 57 deps, and all three targets build with zero warnings.
+  The `date` cases pass on aarch64 under qemu.
+- Binary 1,333,960 → **1,338,176** bytes host (+4,216), 1,342,584 → **1,346,800** agnos (+4,216).
+
 ## [1.8.4] - 2026-11-03 — raw syscalls to stdlib wrappers, and extended attributes on aarch64
 
 The roadmap's 1.8.4 slot. kriya's numeric `syscall(N, …)` literals went from 44 to four, and each of the

@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.5** — deep trees |
+| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.6** — deep trees |
 | **1.9.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.9.0** — floats |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
@@ -48,6 +48,11 @@ kriya *does*, so expect an ADR and GNU-comparison work per item.
 > and three cyrius pin moves), so every open slot moved up one minor to continue from 1.8.2: the old
 > **1.7.2–1.7.4 are 1.8.2–1.8.4**, the old **1.8.0–1.8.5 are 1.9.0–1.9.5**, and the old **1.9.0–1.9.6
 > are 1.10.0–1.10.6**. A `CHANGELOG.md` entry from before then cites the old number.
+>
+> **And again after 1.8.4, for the 1.8.x arc only.** Version 1.8.5 shipped out of plan: the GNU 9.12
+> parity review and `date`'s refusal of decorated directives. So the open 1.8.x slots moved up one:
+> deep trees **1.8.5 is 1.8.6**. The two slots the review added are **1.8.7** (vanishing entries) and
+> **1.8.8** (9.12's output rules). The 1.9.x and 1.10.x numbers did not move.
 
 ---
 
@@ -57,7 +62,7 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 (`src/lib/argbatch.cyr`), which counts as GNU's `buildcmd` does
 ([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
 
-- **1.8.5 — Deep trees: a bounded descriptor budget for every `*at()` walk.** Each fd-relative walk
+- **1.8.6 — Deep trees: a bounded descriptor budget for every `*at()` walk.** Each fd-relative walk
   holds one open directory per level. Under the default `ulimit -n 1024`, a tree deeper than **1,020**
   levels fails with *too many open files* and exits 1: `find` (since 1.8.2's fd-relative walk), `du` and
   `rm -r` all stop there. `cp -R` holds two descriptors per level (source and destination) and stops at
@@ -76,17 +81,17 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
     and an `-exec` child would inherit the raised limit.
   - The four walks are separate code (`find`'s `_f_walk`, `du`'s `_du_walk`, and `rm`'s and `cp`'s in
     `src/cmd/`), so the answer should be one shared descriptor policy, not four.
-- **1.8.6 — An entry that vanishes mid-walk is not an error.** GNU 9.12's `ls` and `du` skip an
+- **1.8.7 — An entry that vanishes mid-walk is not an error.** GNU 9.12's `ls` and `du` skip an
   entry that a directory read returned and that is gone by the time it is stat'ed (`ENOENT` only,
   and never for a command-line operand). In 300 listings of a directory another process was
   churning, GNU 9.12 exited non-zero 0 times. kriya exited non-zero 19 times in `ls -l` and 19 in
   `du -a`, each time with *cannot access* ([audit § 7b](../audit/2026-11-03-gnu-9.12-parity.md)).
   The `ls` site is `src/cmd/ls.cyr`'s per-entry `fs_stat_entry` failure path.
   - ⚠ **GNU keeps one exception**: a dangling symlink still lists (it `lstat`s before giving up).
-  - It is the same walks as 1.8.5, so one round of test work serves both. ⚠ It cannot be tested
+  - It is the same walks as 1.8.6, so one round of test work serves both. ⚠ It cannot be tested
     deterministically without a hook between `getdents` and `fstatat`. The churn probe is a
     statistical smoke, so it needs a fixed iteration count and a zero-failure assertion.
-- **1.8.7 — GNU 9.12's output rules.** Measured on 9.4, 9.7, 9.11 and 9.12 in
+- **1.8.8 — GNU 9.12's output rules.** Measured on 9.4, 9.7, 9.11 and 9.12 in
   [`docs/audit/2026-11-03-gnu-9.12-parity.md`](../audit/2026-11-03-gnu-9.12-parity.md). Every
   smoke case the split touches is version-gated today, so CI's oracle can move without warning.
   Each item below ships with that gate flipped: compare against a 9.12 oracle, and assert kriya
@@ -157,12 +162,18 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
   parser is notorious, and chrono's `dt_strptime` needs a format string, so it does not substitute.
   Scope it to a documented subset (ISO 8601, `@epoch`, `now`, `HH:MM[:SS]`) rather than chasing GNU.
 - **1.9.4 — `date` output flags and specifiers.** ⚠ Distinct from 1.9.3, which is date *input*.
-  - ⛔ **First, a wrong answer: a FLAGGED specifier prints verbatim, exit 0.** `date '+%-d|%_m|%_D'`
-    prints `%-d|%_m|%_D` where GNU prints `4|11|11/04/26`. The flag byte reads as an unknown
-    specifier and passes through, which `date.cyr`'s own comment calls the wrong answer.
-    `date +%-d` is a common idiom.
-    - Refuse `%<flag>…` by name now, as `%V` is refused. It should not wait for this slot.
-    - Then render GNU's flags `_ - 0 ^ #` and field widths, which this entry did not list.
+  - ⭐ **The refusals are in place (1.8.5); rendering is this slot's.** Until 1.8.5 a decorated
+    directive was echoed at exit 0: `date +%-d` printed `%-d`. Now every flag, width, `E`/`O` and
+    `:` on a GNU conversion is refused by name, the field left out, exit 1. So are `%C %k %l %U %W`,
+    which were echoed bare. `%_d` is the one decorated form rendered.
+    - Render GNU's flags (`_ - 0 ^ # +`), field widths, the `E`/`O` modifiers and `%:z`/`%::z`/
+      `%:::z`, plus `%C %k %l %U %W`. Each is arithmetic, with no locale.
+    - ⚠ Two refusals stand where GNU prints the echo instead. One is an `E`/`O` on a conversion
+      GNU does not take it on (`%Ea`; that set moved between 9.7 and 9.12, `%Oq` and `%OY`). The
+      other is a width no wider than an invalid directive's echo (`%_1|`). Rendering `E`/`O`
+      needs that set measured per version first.
+    - ⛔ The sweep in `smoke-date.sh` (610 directives against the local GNU) is the acceptance
+      test. Every refusal this slot replaces with rendering must start comparing bytes there.
     - ⚠ GNU 9.12 changed one: `%_D` no longer pads the year. On 2001-02-03, 9.4–9.11 print
       `02/03/ 1` and 9.12 prints `02/03/01`. Assert kriya's answer directly
       ([audit § 7c](../audit/2026-11-03-gnu-9.12-parity.md)).
@@ -253,7 +264,7 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
     against GNU's 8.5 MB** (202,664 entries), and at 150.2 MB under `-L` against 8.6 MB (measured at
     1.8.3). `du` had the same defect and 1.8.3 fixed it: a `getdents64` buffer per *depth*, reused by
     every directory at that depth, and one fts-style path buffer. That is the pattern to copy.
-  - **The depth** is now roadmap 1.8.5's. Since 1.8.2's fd-relative walk, `find` stops at the
+  - **The depth** is now roadmap 1.8.6's. Since 1.8.2's fd-relative walk, `find` stops at the
     descriptor limit (1,020 levels under `ulimit -n 1024`) instead of PATH_MAX (2,047 lines at
     1.7.1).
 
