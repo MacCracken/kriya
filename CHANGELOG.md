@@ -6,6 +6,102 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.8.8] - 2026-11-03 — GNU 9.12's output rules
+
+The roadmap's 1.8.8 slot: what the 9.12 review recommended following
+([audit](docs/audit/2026-11-03-gnu-9.12-parity.md) §§ 2, 4–7, 8). Its two decisions, a newline as `?`
+in `ls` and `ls`'s operand exit status, are not made here. They move to the new slot 1.8.10, with
+`ls`'s eight missing POSIX options.
+
+### Changed
+
+- ⛔ **BREAKING: `stat` quotes a name only where it needs it**, as in GNU 9.12 (audit § 5):
+
+  | Command | 9.4–9.11 and 1.8.7 | 9.12 and 1.8.8 |
+  |---|---|---|
+  | `stat -c %N plain` | `'plain'` | `plain` |
+  | `stat -c %N ln` (→ `plain`) | `'ln' -> 'plain'` | `ln -> plain` |
+  | `stat -c '%-8N\|' 'a b'` | `a b     \|` (no `%N` substring, so bare) | `'a b'   \|` |
+  | `stat 'a b'`, first line | `File: a b` | `File: 'a b'` |
+  | `stat -t 'a b'` | `a b 2 …` | `'a b' 2 …` |
+
+  - The old rule quoted `%N` always, and only when the format string held the two bytes `%N`.
+  - **`%Qn` is new**: the name quoted where needed, and no symlink target. `Q` before anything else is an
+    unknown directive (`?N`), as in GNU.
+  - The default format's `File:` line and `-t`'s first field are quoted where needed. So `-t` output
+    no longer splits a name with a space into two fields.
+  - **Migration:** a script that stripped the quotes `%N` always added must accept a bare name now.
+    `QUOTING_STYLE` stays declined ([ADR 0017](docs/adr/0017-environment-variables-configure-features-the-caller-turned-on.md)).
+- **`ls -w` is an inclusive maximum** (audit § 2): *"'ls' -w,--width no longer includes '\n' in the width
+  of a line."*
+  - The fit is `<=`, and the final column is seeded at 1, not 3, since it has no gutter.
+  - Under `-m` an entry's own comma counts toward the width, so only the last entry gains the column.
+  - `ls -C -w 7` over `f1`…`f6` is three lines (`f1  f4` …) where it was six.
+  - 8,400 random layouts (`difffuzz-ls-format.py`, three seeds) and a sweep of every width from 1 to 90
+    on four fixtures: 0 differences from GNU 9.12.
+- **`printf` takes every width and precision up to INT_MAX** (audit § 6). The INT_MAX − 2 ceiling integers
+  and `%c` had was gnulib's bug, fixed in `08c8a9228f`, which 1.6.17 had copied from 9.4–9.11.
+  `%2147483646d` prints its two gigabytes now, as GNU 9.12's does.
+- **`ls -m` quotes a name holding a comma** under `shell` and `shell-escape` (the terminal default),
+  and `escape` writes it `\,` (audit § 4). `c` and the always-quoting styles are unchanged, and so are
+  section headers and diagnostics, as in GNU.
+- **`basename`, `dirname`, `readlink`, `realpath`, `du` and `env` quote what they print on a terminal**
+  (audit § 7a). It is `ls`'s rule: shell-escape where needed, through the new `quote_tty_write`.
+  - `env` quotes each name and each value; an empty name is `''`, an empty value nothing.
+  - **Nothing changes through a pipe**, and `-z` / `-0` output is never quoted.
+
+### Added
+
+- **`ls -q` / `--hide-control-chars`**, POSIX's `-q`: each non-printable byte written `?`, in the styles
+  that would otherwise write it raw.
+- **`--show-control-chars`** turns the mask off, including on a terminal. The last of the two wins, as
+  in GNU.
+
+### Fixed
+
+- ⛔ **`ls --color` padded columns with tabs; GNU never does** (audit § 8.1). GNU zeroes the tab size
+  whenever colour is on, `-T` and `$TABSIZE` included. 84 of 122 colour listings over widths 20–80
+  differed from GNU 9.4 and 9.7; now none differ from 9.12. The 11 that differ from 9.7 are the
+  width-rule boundaries above.
+- ⛔ **`ls` quoted a path operand on a terminal.** `ls src/x.c` printed `'src/x.c'`, and `ls -d /tmp`
+  printed `'/tmp'`; GNU prints both bare. `quote.cyr` quoted `/` for `ls` alone, on the theory that a
+  name read from a directory cannot hold one. An operand is a path.
+- The `printf` comments claimed a `%s` width reached INT_MAX "on both versions". 9.4 refuses one past
+  INT_MAX − 2 there too (audit § 8.4).
+
+### Changed (tests and tools)
+
+- **Every 9.12 version gate flipped**: a 9.12 oracle is compared against, and an older one asserts
+  kriya's (9.12's) answer directly. That covers `smoke-ls`'s width boundaries and colour layout,
+  `smoke-stat`'s `%N`, and `smoke-printf`'s INT_MAX cases.
+  - `smoke-printf`'s INT_MAX cases now stream the exit status, byte count and last four bytes, instead
+    of writing two-gigabyte files.
+  - ⛔ **The 1.8.5 width probe could not tell the rules apart.** Two one-character names at `-w 4` fit
+    under the old rule too: a column that never grows past its seed is never re-tested. It was harmless
+    while both branches asserted the old answer, and once flipped, 9.7 took the 9.12 branch.
+    `aa  bb` at `-w 6` separates the rules, measured on 9.4, 9.7 and 9.12. The audit's claim is
+    corrected in place.
+  - `difffuzz-quote.py` pins GNU's `ls` with `--show-control-chars`. With that, 1,000 names in six
+    renderings show 0 differences from 9.12.
+- **`smoke-ttyquote.sh`, new: 46 cases**, 23 commands each on a terminal and through a pipe, compared
+  against a quoting oracle or asserted against 9.12's answers.
+- **`smoke-ls.sh` 358 → 384**: `-q`, colour without tabs, path operands, `-m` commas and the `-w 6`
+  boundary. **`smoke-stat.sh` 143 → 155**.
+- **Unit 883 → 892**: `/` bare, and `-m`'s comma by style.
+- **Eighteen mutants, one per rule, die on 9.12 and on 9.7**, after four first-run survivors that were all
+  missing cases:
+  - `-m`'s comma, both rules: no fixture had a comma in a name;
+  - `--show-control-chars`: off a terminal there is no mask to take off;
+  - the strict fit: `-w 7` cannot tell `<` from `<=`, and `-w 6` can.
+  - Restored, the build is byte-identical.
+- **892 unit + 72 syscall + 18 POSIX.** Smoke is **8,150 / 0** in ubuntu:24.04 (GNU 9.4), **8,153 / 0** in
+  26.04 (9.7), and **8,245 / 0** on the dev box (9.12), across 44 scripts. On aarch64 under qemu,
+  `smoke-ttyquote`, `-stat`, `-ls` and `-printf` pass. Fuzz is green under poison; the quoting, `ls`
+  layout, `stat` format and `printf` differential fuzzers show 0 differences from 9.12. `cyrius lint`,
+  the lints, `check-oracles.sh` and `watchlist-scan.py` are clean, and all three targets build
+  warning-free.
+- **Sizes:** host 1,359,192 → **1,359,352**, agnos 1,363,712 → **1,363,880**.
+
 ## [1.8.7] - 2026-11-03 — an entry that vanishes mid-walk is not an error
 
 The roadmap's 1.8.7 slot, from the 9.12 review (audit § 7b). GNU 9.12 NEWS: *"'du', 'ls' ... no longer

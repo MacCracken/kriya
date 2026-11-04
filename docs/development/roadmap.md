@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.8** — GNU 9.12's output rules |
+| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.9** — the walks as loops |
 | **1.9.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.9.0** — floats |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
@@ -62,45 +62,6 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 (`src/lib/argbatch.cyr`), which counts as GNU's `buildcmd` does
 ([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
 
-- **1.8.8 — GNU 9.12's output rules.** Measured on 9.4, 9.7, 9.11 and 9.12 in
-  [`docs/audit/2026-11-03-gnu-9.12-parity.md`](../audit/2026-11-03-gnu-9.12-parity.md). Every
-  smoke case the split touches is version-gated today, so CI's oracle can move without warning.
-  Each item below ships with that gate flipped: compare against a 9.12 oracle, and assert kriya
-  directly on the older ones.
-  - **`ls -w` is an inclusive maximum** (§ 2). Three sites in `src/cmd/ls.cyr`:
-    - the column seed: the final column at 1, not 3 (`:2167`);
-    - `line_len < width` becomes `<=` (`:2186`);
-    - the comma wrap counts the comma that follows (`:2258`).
-    - ⚠ The `tiny` fixtures pass on 9.12 unchanged. The rules part only where the old line length
-      lands within two of the width, and `colw` at `-w 6`/`7` is where that happens.
-  - **⛔ BREAKING: `stat %N` quotes only when needed**, and `%Qn` arrives (§ 5). The default
-    `File:` line and `-t` quote the name too. The `strstr (format, "%N")` gate kriya reproduces is
-    gone in 9.12. `QUOTING_STYLE` stays declined (ADR 0017).
-  - **`printf` takes every field up to INT_MAX** (§ 6). The INT_MAX − 2 ceiling kriya copied at
-    1.6.17 was a gnulib bug, fixed in `08c8a9228f`. It is one constant (`src/cmd/printf.cyr:673`).
-    Its comments (`:48–51`, `:668–671`) also say a `%s` width reaches INT_MAX "on both versions".
-    9.4 refuses one past INT_MAX − 2, so correct them in the same change.
-  - **`ls -m` quotes a comma** under `shell`, `shell-escape` and `escape` (§ 4).
-  - **`basename`, `dirname`, `readlink`, `realpath`, `du` and `env` quote on a terminal only**
-    (§ 7a). It is `ls`'s existing tty rule, rendered by `quote_shell`.
-  - **⛔ DECISION FIRST: a newline in an `ls` name becomes `?` off a tty** where newlines separate
-    entries (§ 3). It is a POSIX deviation, so it needs the ADR drafted in the audit's Appendix B,
-    or its "keep raw" alternative. If it ships, it ships with the ways out:
-    - POSIX's `-q`, which kriya does not have;
-    - `--show-control-chars`;
-    - `--zero`.
-  - **Not from 9.12, found by the same review** (§ 8):
-    - **`ls --color` pads columns with tabs**, and GNU never does: 84 of 122 listings differ from 9.4
-      and from 9.7. Zero the tab size when colour is on, `-T` included.
-    - **`ls`'s missing POSIX options**: `-H -L -c -f -k -p -q -s -u`, each refused with exit 2. The
-      2026-05-18 POSIX audit called `-p` and `-q` "deferred, named in CHANGELOG". No roadmap entry
-      carried them until this one. `-q` belongs here; the other eight need a slot.
-  - **Head and tail headers stay POSIX's**, unquoted (§ 1; the draft ADR is in Appendix A). That
-    is no code change. It is listed so the decision is not mistaken for an omission.
-  - **⛔ DECISION FIRST: `ls` exits 1 for an operand it cannot access, where GNU exits 2** (found at
-    1.8.7). GNU's 2 is "serious trouble", a command-line argument it cannot reach, and its 1 is a
-    lesser failure such as a subdirectory. POSIX says only ">0". [ADR 0008](../adr/0008-posix-exit-code-policy.md)'s
-    tiers keep 2 for usage errors, so following GNU is a policy change and needs an amendment.
 - **1.8.9 — `find`, `du`, `cp -R` and `grep -r` walk as loops.** 1.8.6 gave every walk a budget of
   32 open directories ([ADR 0029](../adr/0029-walks-keep-32-directories-open-and-stop-when-the-way-back-moved.md))
   and made `rm -r` a loop, so its depth is bounded by memory alone: 100,000 levels in 20.7 MB. The
@@ -115,6 +76,27 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
     `find` near the guard holds about 250 MB, and `find -depth -delete` 2.1 GB when it reports a
     failure at every level. The loop takes the one path buffer `rm` and `du` use (`wk_path_push`).
     That is the memory half of 1.10.6, which keeps the stat half.
+- **1.8.10 — `ls`'s remaining POSIX options, and what the 9.12 review left to decide.** 1.8.8
+  shipped the rest of the review ([audit](../audit/2026-11-03-gnu-9.12-parity.md)).
+  - **Eight POSIX options are refused, exit 2**: `-H -L -c -f -k -p -s -u`. The 2026-05-18 POSIX
+    audit called `-p` "deferred, named in CHANGELOG", and no roadmap entry carried any of them
+    until the 9.12 review (§ 8.3). `-q` shipped at 1.8.8.
+    - ⚠ `-L` and `-H` are ADR 0003's territory: following is opt-in, and these ARE the opt-in.
+    - ⚠ `-s` needs the blocks unit `du` already renders, and `-k` is its 1024-byte form.
+  - **⛔ DECISION: a newline in a name becomes `?` off a tty**, where newlines separate entries
+    (§ 3). GNU 9.12 does it; it is a POSIX deviation, so it needs the ADR drafted in the audit's
+    Appendix B, or its "keep raw" alternative.
+    - If it ships, the ways out ship with it. `-q` and `--show-control-chars` exist since 1.8.8;
+      `--zero` does not.
+    - Until then every smoke comparison pins GNU with `--show-control-chars`, and
+      `difffuzz-quote.py` does too.
+  - **⛔ DECISION: `ls` exits 1 for an operand it cannot access, where GNU exits 2** (found at
+    1.8.7). GNU's 2 is "serious trouble", a command-line argument it cannot reach, and its 1 is a
+    lesser failure such as a subdirectory. POSIX says only ">0". [ADR 0008](../adr/0008-posix-exit-code-policy.md)'s
+    tiers keep 2 for usage errors, so following GNU is a policy change and needs an amendment.
+  - **Head and tail headers stay POSIX's**, unquoted (§ 1). That is no code change, and the draft
+    ADR in the audit's Appendix A records it once accepted. It is listed so the decision is not
+    mistaken for an omission.
 
 ---
 

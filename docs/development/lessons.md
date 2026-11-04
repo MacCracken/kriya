@@ -210,6 +210,13 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   that a dangling link is still reported. ⚠ Two traps cost an hour: a `/proc/PID/mem` handle opened
   before the child's `exec` reads the old address space, empty; and a read into an unmapped page
   returns EMPTY rather than raising, so a loop waiting for the NUL spins.
+- ⛔ **A version probe must be run on BOTH sides of the split before it is trusted.** 1.8.5's
+  `ls -w` probe, two one-character names at `-w 4`, was meant to say "9.12" and said it on 9.4 and
+  9.7 too: under the old rule a column that never outgrows its seed is never re-tested, so `a  b`
+  fit everywhere. Nothing failed, because both branches of the gate asserted the same old answer.
+  It surfaced at 1.8.8, when kriya followed and the gate flipped, and 9.7 took the 9.12 branch.
+  ⭐ Run the probe against each oracle and check it reports what you think, before writing the cases
+  it gates.
 - ⛔ **A limit test must SET the limit.** CI runners allow far more than 1,024 descriptors, so a
   1,100-level tree passes there against walks that fail at 1,021 on a desktop. `smoke-deep.sh` runs
   every budget case under `ulimit -n 64` (or 8), set by the script.
