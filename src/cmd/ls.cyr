@@ -374,6 +374,22 @@ var _ls_stat_failed = 0;
 # precedent for display state living here.
 var _ls_numeric = 0;
 
+# ⭐ AN ENTRY THAT VANISHES BETWEEN THE DIRECTORY READ AND ITS STAT IS NOT AN ERROR (1.8.7), as
+# in GNU 9.12: "ls ... no longer fail[s] merely because files may be being removed in parallel".
+# kriya listed it with `?` fields, said *cannot access* and exited 1: 17 runs in 200 of `ls -l`
+# over a directory another process was churning, against GNU 9.12's none. GNU's rules, measured
+# by deleting the entry at its first stat under ptrace:
+#   - ENOENT only, and only for an entry a directory read returned; an operand still fails.
+#   - A format that needs the stat (long, `-F`, `-i`, colour, a sort by time or size) leaves the
+#     entry out, from the `total` too. One that does not never looks, so the name is listed, as
+#     the directory read returned it: kriya stats every entry, and keeps the name for those.
+#   - A symlink whose `readlink` then fails with ENOENT is left out of a long listing.
+#   - Under `-R`, a subdirectory gone by the time it is opened has no section and no message.
+# `_ls_vanish_keep` is 1 when the format needs no stat; `cmd_ls` sets it once the format is known.
+var _ls_vanish_keep = 0;
+var _ls_vanish_long = 0;   # long format: a vanished symlink target text is a vanished entry
+var _ls_link_err    = 0;   # the errno of the last `_ls_load_link_target` readlink, 0 if it worked
+
 fn _ls_rec_new(name_cstr): i64 {
     var rec = alloc(200);
     store64(rec, name_cstr);
@@ -893,9 +909,12 @@ fn _ls_load_link_target(parent_dirfd, rec): i64 {
     if (_ls_rec_link_target(rec) == 0) {
         var buf = alloc(4096);
         var n = fs_readlinkat(parent_dirfd, _ls_rec_name(rec), buf, 4095);
+        _ls_link_err = 0;
         if (n >= 0) {
             store8(buf + n, 0);
             _ls_rec_set_link_target(rec, buf);
+        } else {
+            _ls_link_err = 0 - n;
         }
     }
     # ⛔ Stat the TARGET only when something will use it: it costs one syscall
@@ -1839,7 +1858,26 @@ fn _ls_collect(dir_path, all_mode, almost_all): i64 {
                         var rec = _ls_rec_new(name_copy);
                         var ent_fp = path_join(dir_path, name);
                         var sr = fs_stat_entry(dir_fd, ent_fp, name, _ls_rec_st(rec), 0);
-                        if (sr != 0) {
+                        var gone: i64 = 0;
+                        if (sr == (0 - 2)) {
+                            # ⭐ Vanished since the read (see `_ls_vanish_keep`): no message, no
+                            # failure. Left out, unless the format never needed the stat; then the
+                            # directory read's name and type stand, as GNU's listing has them.
+                            gone = 1;
+                            if (_ls_vanish_keep == 1) {
+                                if (fs_dent_type(ent) != FS_DT_UNKNOWN) {
+                                    gone = 2;
+                                    _ls_rec_set_bad(rec);
+                                    store64(_ls_rec_st(rec) + 24, _ls_mode_from_dtype(fs_dent_type(ent)));
+                                }
+                            }
+                            sr = 0 - 1;
+                        }
+                        if (gone == 1) {
+                            include_it = 0;
+                        } elif (gone == 2) {
+                            include_it = 2;
+                        } elif (sr != 0) {
                             # Keep the type from the dirent so the row still says
                             # WHAT it is; everything else becomes `?`.
                             _ls_rec_set_bad(rec);
@@ -1860,10 +1898,14 @@ fn _ls_collect(dir_path, all_mode, almost_all): i64 {
                         if (sr == 0) {
                             if (fs_is_lnk(_ls_rec_st(rec)) == 1) {
                                 _ls_load_link_target(dir_fd, rec);
+                                # A link gone before its readlink, in a listing that shows targets.
+                                if (_ls_vanish_long == 1) {
+                                    if (_ls_link_err == 2) { include_it = 0; }
+                                }
                             }
-                            _ls_probe_cap(rec, ent_fp);
+                            if (include_it == 1) { _ls_probe_cap(rec, ent_fp); }
                         }
-                        vec_push(entries, rec);
+                        if (include_it != 0) { vec_push(entries, rec); }
                     }
                     off = off + reclen;
                 }
@@ -2541,9 +2583,15 @@ fn _ls_emit_header(dir_path): i64 {
 # the blank line after a FILE operand list is the caller's, as it is GNU's.
 var _ls_hdr_first = 1;
 
-fn _ls_list_dir(dir_path, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, header): i64 {
+fn _ls_list_dir(dir_path, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, header,
+  is_child): i64 {
     var entries_or_err = _ls_collect(dir_path, all_mode, almost_all);
     if (entries_or_err < 0) {
+        # ⭐ A subdirectory `-R` found that is gone by the time it is opened: no section, no
+        # message, no failure (GNU 9.12). ⚠ An operand still fails.
+        if (is_child == 1) {
+            if (entries_or_err == (0 - 2)) { return 0; }
+        }
         _ls_report(dir_path, 0 - entries_or_err);
         return entries_or_err;
     }
@@ -2581,7 +2629,7 @@ fn _ls_list_dir(dir_path, all_mode, almost_all, long_mode, human, reverse, F_mod
                 if (fs_is_dir(_ls_rec_st(rec)) == 1) {
                     var child = path_join(dir_path, name);
                     var cr = _ls_list_dir(child, all_mode, almost_all, long_mode, human, reverse,
-                                          F_mode, inode_mode, R_mode, 1);
+                                          F_mode, inode_mode, R_mode, 1, 1);
                     if (cr != 0) { sub_failed = 1; }
                 }
             }
@@ -2766,6 +2814,17 @@ fn cmd_ls(start: i64): i64 {
     }
     var color_req = _ls_color;
     if (_ls_color == 1) { _ls_color_load(); }
+    # Does this listing need each entry's stat? Then an entry that vanished before it is left out;
+    # otherwise its name stands (`_ls_vanish_keep`). ⚠ After `_ls_color_load`, which can turn
+    # colour off again.
+    _ls_vanish_keep = 1;
+    if (long_mode == 1) { _ls_vanish_keep = 0; }
+    if (F_mode == 1) { _ls_vanish_keep = 0; }
+    if (inode_mode == 1) { _ls_vanish_keep = 0; }
+    if (_ls_color == 1) { _ls_vanish_keep = 0; }
+    if (_ls_sortkey == LS_SORT_TIME) { _ls_vanish_keep = 0; }
+    if (_ls_sortkey == LS_SORT_SIZE) { _ls_vanish_keep = 0; }
+    _ls_vanish_long = long_mode;
     # ⚠ GNU quotes on a terminal and not through a pipe — the terminal form is
     # for a human to retype, the piped form is what scripts have always parsed.
     # ⛔ `--quoting-style` also exists so the quoting algorithm is testable on the
@@ -2843,7 +2902,7 @@ fn cmd_ls(start: i64): i64 {
             # ⛔ `-R` HEADS EVEN THE IMPLIED `.` (1.6.12): GNU's listing opens
             # with `.:`, and kriya's began with the first entry.
             var r = _ls_list_dir(dir, all_mode, almost_all, long_mode, human, reverse,
-                                 F_mode, inode_mode, R_mode, R_mode);
+                                 F_mode, inode_mode, R_mode, R_mode, 0);
             if (r != 0) { rc = EXIT_FAILURE; }
         }
         return _ls_finish(rc);
@@ -2919,7 +2978,8 @@ fn cmd_ls(start: i64): i64 {
         if (di == 0) {
             if (any_nondir == 1) { _ls_out("\n", 1); }
         }
-        var r = _ls_list_dir(dp, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, header);
+        var r = _ls_list_dir(dp, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, header,
+          0);
         if (r != 0) { any_failed = 1; }
         di = di + 1;
     }

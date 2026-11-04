@@ -365,6 +365,20 @@ fn _du_seen_skip(st, depth): i64 {
     return fs_inobits_has(_du_seen, fs_dev(st), fs_ino(st));
 }
 
+# ⭐ 1 when a stat that said ENOENT is about an entry that has gone since the directory read
+# (1.8.7). GNU 9.12's `du` skips such an entry in silence, at exit 0 — "no longer fail merely
+# because files may be being removed in parallel" — where kriya said *cannot access* and exited 1
+# (22 runs in 200 of `du -a` over a churned directory; GNU's none). ⚠ Under -L, ENOENT is also a
+# DANGLING SYMLINK, which is still there and still reported, as in GNU: only when the lstat agrees
+# is the entry gone. ⚠ Below the operands only — a missing operand still fails.
+fn _du_vanished(dirfd, fullpath, name, r): i64 {
+    if (r != (0 - 2)) { return 0; }
+    if (_du_follow == 0) { return 1; }
+    var lst[144];
+    if (fs_stat_entry(dirfd, fullpath, name, &lst, 0) == (0 - 2)) { return 1; }
+    return 0;
+}
+
 # Recursively walk `name` rooted at `parent_dirfd`. `depth` is operand-
 # relative (0 for the operand itself). `display` is the user-visible
 # path used in output. Returns total size of this subtree (including
@@ -385,6 +399,10 @@ fn _du_walk(parent_dirfd, name, plen, depth): i64 {
         sr = fs_stat_entry(parent_dirfd, display, name, &st, 0);
     }
     if (sr != 0) {
+        # Gone since the parent's loop stat'd it: nothing to count, nothing to say.
+        if (depth > 0) {
+            if (_du_vanished(parent_dirfd, display, name, sr) == 1) { return 0; }
+        }
         k_write( 2, "kriya du: cannot access '", 25);
         k_write( 2, display, strlen(display));
         k_write( 2, "': ", 3);
@@ -431,6 +449,11 @@ fn _du_walk(parent_dirfd, name, plen, depth): i64 {
         dir_fd = wk_open(_du_wk, depth, parent_dirfd, name, FS_O_DIRECTORY | FS_O_NOFOLLOW);
     }
     if (dir_fd < 0) {
+        # ⭐ A directory gone before it could be opened is left out whole, its own size and its
+        # line too, as GNU 9.12 does.
+        if (depth > 0) {
+            if (dir_fd == (0 - 2)) { return 0; }
+        }
         k_write( 2, "kriya du: cannot access '", 25);
         k_write( 2, display, strlen(display));
         k_write( 2, "': ", 3);
@@ -506,6 +529,12 @@ fn _du_walk(parent_dirfd, name, plen, depth): i64 {
                             if (fs_dev(&cst) != _du_xdev) { skip_child = 1; }
                         }
                     }
+                }
+            }
+            # Vanished since the read: skipped like an excluded entry, in silence.
+            if (skip_child == 0) {
+                if (csr != 0) {
+                    if (_du_vanished(dir_fd, child_disp, ename, csr) == 1) { skip_child = 1; }
                 }
             }
             if (skip_child == 1) { csr = 0 - 1; }
