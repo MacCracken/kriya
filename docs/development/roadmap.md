@@ -76,6 +76,51 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
     and an `-exec` child would inherit the raised limit.
   - The four walks are separate code (`find`'s `_f_walk`, `du`'s `_du_walk`, and `rm`'s and `cp`'s in
     `src/cmd/`), so the answer should be one shared descriptor policy, not four.
+- **1.8.6 — An entry that vanishes mid-walk is not an error.** GNU 9.12's `ls` and `du` skip an
+  entry that a directory read returned and that is gone by the time it is stat'ed (`ENOENT` only,
+  and never for a command-line operand). In 300 listings of a directory another process was
+  churning, GNU 9.12 exited non-zero 0 times. kriya exited non-zero 19 times in `ls -l` and 19 in
+  `du -a`, each time with *cannot access* ([audit § 7b](../audit/2026-11-03-gnu-9.12-parity.md)).
+  The `ls` site is `src/cmd/ls.cyr`'s per-entry `fs_stat_entry` failure path.
+  - ⚠ **GNU keeps one exception**: a dangling symlink still lists (it `lstat`s before giving up).
+  - It is the same walks as 1.8.5, so one round of test work serves both. ⚠ It cannot be tested
+    deterministically without a hook between `getdents` and `fstatat`. The churn probe is a
+    statistical smoke, so it needs a fixed iteration count and a zero-failure assertion.
+- **1.8.7 — GNU 9.12's output rules.** Measured on 9.4, 9.7, 9.11 and 9.12 in
+  [`docs/audit/2026-11-03-gnu-9.12-parity.md`](../audit/2026-11-03-gnu-9.12-parity.md). Every
+  smoke case the split touches is version-gated today, so CI's oracle can move without warning.
+  Each item below ships with that gate flipped: compare against a 9.12 oracle, and assert kriya
+  directly on the older ones.
+  - **`ls -w` is an inclusive maximum** (§ 2). Three sites in `src/cmd/ls.cyr`:
+    - the column seed: the final column at 1, not 3 (`:2167`);
+    - `line_len < width` becomes `<=` (`:2186`);
+    - the comma wrap counts the comma that follows (`:2258`).
+    - ⚠ The `tiny` fixtures pass on 9.12 unchanged. The rules part only where the old line length
+      lands within two of the width, and `colw` at `-w 6`/`7` is where that happens.
+  - **⛔ BREAKING: `stat %N` quotes only when needed**, and `%Qn` arrives (§ 5). The default
+    `File:` line and `-t` quote the name too. The `strstr (format, "%N")` gate kriya reproduces is
+    gone in 9.12. `QUOTING_STYLE` stays declined (ADR 0017).
+  - **`printf` takes every field up to INT_MAX** (§ 6). The INT_MAX − 2 ceiling kriya copied at
+    1.6.17 was a gnulib bug, fixed in `08c8a9228f`. It is one constant (`src/cmd/printf.cyr:673`).
+    Its comments (`:48–51`, `:668–671`) also say a `%s` width reaches INT_MAX "on both versions".
+    9.4 refuses one past INT_MAX − 2, so correct them in the same change.
+  - **`ls -m` quotes a comma** under `shell`, `shell-escape` and `escape` (§ 4).
+  - **`basename`, `dirname`, `readlink`, `realpath`, `du` and `env` quote on a terminal only**
+    (§ 7a). It is `ls`'s existing tty rule, rendered by `quote_shell`.
+  - **⛔ DECISION FIRST: a newline in an `ls` name becomes `?` off a tty** where newlines separate
+    entries (§ 3). It is a POSIX deviation, so it needs the ADR drafted in the audit's Appendix B,
+    or its "keep raw" alternative. If it ships, it ships with the ways out:
+    - POSIX's `-q`, which kriya does not have;
+    - `--show-control-chars`;
+    - `--zero`.
+  - **Not from 9.12, found by the same review** (§ 8):
+    - **`ls --color` pads columns with tabs**, and GNU never does: 84 of 122 listings differ from 9.4
+      and from 9.7. Zero the tab size when colour is on, `-T` included.
+    - **`ls`'s missing POSIX options**: `-H -L -c -f -k -p -q -s -u`, each refused with exit 2. The
+      2026-05-18 POSIX audit called `-p` and `-q` "deferred, named in CHANGELOG". No roadmap entry
+      carried them until this one. `-q` belongs here; the other eight need a slot.
+  - **Head and tail headers stay POSIX's**, unquoted (§ 1; the draft ADR is in Appendix A). That
+    is no code change. It is listed so the decision is not mistaken for an omission.
 
 ---
 
@@ -112,6 +157,15 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
   parser is notorious, and chrono's `dt_strptime` needs a format string, so it does not substitute.
   Scope it to a documented subset (ISO 8601, `@epoch`, `now`, `HH:MM[:SS]`) rather than chasing GNU.
 - **1.9.4 — `date` output flags and specifiers.** ⚠ Distinct from 1.9.3, which is date *input*.
+  - ⛔ **First, a wrong answer: a FLAGGED specifier prints verbatim, exit 0.** `date '+%-d|%_m|%_D'`
+    prints `%-d|%_m|%_D` where GNU prints `4|11|11/04/26`. The flag byte reads as an unknown
+    specifier and passes through, which `date.cyr`'s own comment calls the wrong answer.
+    `date +%-d` is a common idiom.
+    - Refuse `%<flag>…` by name now, as `%V` is refused. It should not wait for this slot.
+    - Then render GNU's flags `_ - 0 ^ #` and field widths, which this entry did not list.
+    - ⚠ GNU 9.12 changed one: `%_D` no longer pads the year. On 2001-02-03, 9.4–9.11 print
+      `02/03/ 1` and 9.12 prints `02/03/01`. Assert kriya's answer directly
+      ([audit § 7c](../audit/2026-11-03-gnu-9.12-parity.md)).
   `-r FILE` (format FILE's mtime rather than now — `touch -r` already ships the reference-stat
   pattern to copy), `-R` (RFC 5322) and `-I[=FMT]` (ISO 8601), plus the strftime specifiers `date`
   refuses by name today: `%V` / `%G` / `%g` (ISO week-date) and the rest of `_date_is_deferred_spec`.

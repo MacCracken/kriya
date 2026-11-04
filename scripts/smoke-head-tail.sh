@@ -256,6 +256,13 @@ qv_case() {   # qv_case <util> <flags...>
     _u=$1; shift
     expect_eq "$_u $* (operands)" "$("$_u" "$@" qv1 qv2 2>&1)" "$("$BIN" "$_u" "$@" qv1 qv2 2>&1)"
 }
+# ⚠ GNU 9.12 QUOTES THE NAME IN A HEADER, and the stdin label with it:
+# `==> 'standard input' <==`. 9.4–9.11 print it bare, as kriya does, which is
+# POSIX's `"\n==> %s <==\n", <pathname>` (docs/audit/2026-11-03-gnu-9.12-parity.md
+# § 1). The label is the ONLY difference in the stdin cases below, so a quoting
+# oracle's label is put back rather than the comparison dropped. On 9.4–9.11
+# this edits nothing.
+_ht_label() { sed "s/^==> 'standard input' <==\$/==> standard input <==/"; }
 for _u in head tail; do
     qv_case "$_u" -q -v
     qv_case "$_u" -v -q
@@ -270,8 +277,17 @@ for _u in head tail; do
     qv_case "$_u" -v
     # ⚠ The stdin path had its own copy of the ladder, with the winner reversed.
     for _fl in "-v -q" "-q -v" "-v" "-q"; do
-        expect_eq "$_u $_fl <stdin" "$("$_u" $_fl < qv1 2>&1)" "$("$BIN" "$_u" $_fl < qv1 2>&1)"
+        expect_eq "$_u $_fl <stdin" "$("$_u" $_fl < qv1 2>&1 | _ht_label)" \
+                                    "$("$BIN" "$_u" $_fl < qv1 2>&1)"
     done
+done
+# ⛔ AN ABSOLUTE, for the decision rather than for parity: a header carries the
+# pathname as POSIX writes it, space and all. GNU 9.12 would print `'qv a b'`.
+printf 'x\n' > 'qv a b'
+for _u in head tail; do
+    expect_eq "$_u: a header prints the pathname bare" \
+        "$(printf '==> qv1 <==\nabcdefghij\nklmnop\n\n==> qv a b <==\nx')" \
+        "$("$BIN" "$_u" qv1 'qv a b' 2>&1)"
 done
 
 # --- an empty count value is an error, not an absent option ------------------

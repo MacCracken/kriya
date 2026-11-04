@@ -196,10 +196,18 @@ expect_eq "%U now exits 0" "0" "$rc"
 # ⭐ These CAN be absolutes, unlike the %U/%G cases above: quoting output is a
 # pure function of the bytes in the name, not of the machine. ⚠ Compared
 # against GNU as well, so a rule change upstream still shows up.
+# ⛔ GNU 9.12 QUOTES `%N` ONLY WHEN NEEDED (shell-escape), where 9.4–9.11 and
+# kriya always quote (shell-escape-always): `plain`, not `'plain'`
+# (docs/audit/2026-11-03-gnu-9.12-parity.md § 5). GNU reads QUOTING_STYLE for
+# `%N` on every version, so setting it to kriya's style gives kriya's rule on all
+# four. ⚠ ONLY for a format that CONTAINS `%N`: before 9.12 the variable is
+# read only then, and on 9.12 it would quote `%-20N|` alone, which no earlier
+# version did. kriya itself never reads it (ADR 0017).
+GNU_QS_N="QUOTING_STYLE=shell-escape-always"
 qn_same() {
     label=$1; name=$2
     : > "$name" 2>/dev/null || return 0
-    g=$(stat -c '%N' "$name" | od -An -c)
+    g=$(env $GNU_QS_N stat -c '%N' "$name" | od -An -c)
     k=$("$BIN" stat -c '%N' "$name" | od -An -c)
     expect_eq "%N $label" "$g" "$k"
     rm -f "$name"
@@ -224,7 +232,8 @@ rm -f plainname
 # Symlink form.
 : > tgt; ln -sf tgt 'link name' 2>/dev/null
 if [ -L 'link name' ]; then
-    expect_eq "%N symlink form" "$(stat -c '%N' 'link name')" "$("$BIN" stat -c '%N' 'link name')"
+    expect_eq "%N symlink form" "$(env $GNU_QS_N stat -c '%N' 'link name')" \
+                                "$("$BIN" stat -c '%N' 'link name')"
     expect_eq "%N symlink absolute" "'link name' -> 'tgt'" "$("$BIN" stat -c '%N' 'link name')"
 fi
 rm -f tgt 'link name'
@@ -262,10 +271,11 @@ expect_eq "%n still works" "$(stat -c %n regfile)" "$("$BIN" stat -c %n regfile)
 mkdir -p d612 && cd d612
 echo "hello!" > f; chmod 0640 f; : > empty; mkdir dd; ln -s f ln
 cd ..
+ST_GNU_ENV=   # words for GNU's side only; see qn_same
 st_same() {   # st_same <format> <operand...>
     _f=$1; shift
     expect_eq "stat -c '$_f' $*" \
-        "$(cd d612 && TZ=UTC LC_ALL=C stat -c "$_f" "$@" 2>&1)" \
+        "$(cd d612 && env TZ=UTC LC_ALL=C $ST_GNU_ENV stat -c "$_f" "$@" 2>&1)" \
         "$(cd d612 && TZ=UTC LC_ALL=C "$BIN" stat -c "$_f" "$@" 2>&1)"
 }
 for _fmt in '%10s|' '%-10s|' '%010s' '%+s' '%#a' '%05a' '%-5a|' '%#f' '%#o' \
@@ -283,9 +293,14 @@ st_same '%m' f
 st_same '%F' empty
 # ⛔ `%N` IS QUOTED ONLY IF THE FORMAT CONTAINS THE BYTES `%N`. GNU decides once,
 # per format, so `%-20N` alone prints the name BARE and `%-20N|%N` quotes both.
+# ⚠ 9.4–9.11's rule, and kriya's. 9.12 dropped the substring test and quotes
+# whenever it prints a name, only when needed — `plain` stays bare either way,
+# which is why `%-20N|` on `f` still compares on every version.
 st_same '%-20N|' f
+ST_GNU_ENV=$GNU_QS_N   # both formats contain `%N`; see qn_same
 st_same '%-20N|%N' f
 st_same '%N' ln
+ST_GNU_ENV=
 # ⛔ `%%` with modifiers, and a directive the format ENDS inside, are fatal: GNU
 # exits 1 before printing anything. A lone trailing `%` is a literal.
 for _fmt in '%5%' '%5' '%-.3'; do

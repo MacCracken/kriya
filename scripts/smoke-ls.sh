@@ -513,9 +513,16 @@ tab_name=$(printf 'tab\there'); : > "$tab_name"
 : > 'a=b'; : > 'mid#hash'; : > 'mid~tilde'; : > 'br]ack'; : > 'cur{ly}'
 cd ..
 
+# ⛔ GNU 9.12 WRITES A NEWLINE IN A NAME AS `?` off a tty too, wherever newlines
+# separate entries, for the styles that do not escape (`literal`, `shell`,
+# `shell-always`). 9.4–9.11 and kriya write the byte. `--show-control-chars`
+# turns off exactly that replacement on 9.12 and does nothing off a tty before
+# it, so GNU's side gets it on every case that lists `nl⏎X`. It is version-
+# independent with no probe (docs/audit/2026-11-03-gnu-9.12-parity.md § 3).
+GNU_RAW=--show-control-chars
 qs_same() {
     label=$1; style=$2
-    g=$(cd qdir && env -u QUOTING_STYLE LC_ALL=C ls -1 "--quoting-style=$style")
+    g=$(cd qdir && env -u QUOTING_STYLE LC_ALL=C ls -1 $GNU_RAW "--quoting-style=$style")
     k=$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1 "--quoting-style=$style")
     expect_eq "quote: $label" "$g" "$k"
 }
@@ -574,7 +581,7 @@ expect_eq "quote: unknown style refused" "2" "$rc"
 
 # The piped DEFAULT must stay RAW — the regression that would break scripts.
 expect_eq "quote: piped default is raw" \
-    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C ls -1)" \
+    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C ls -1 $GNU_RAW)" \
     "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1)"
 # ⚠ Look for a WRAPPED name, not for a quote character: one fixture is literally
 # called `it's`, so raw output contains a `'` legitimately.
@@ -643,9 +650,36 @@ same_ls() {   # same_ls <name> <arg...>
     _k=$(env -u COLUMNS "$BIN" ls "$@" colw 2>&1 | cat -A)
     expect_eq "$_n" "$_g" "$_k"
 }
+# ⛔ GNU 9.12 MADE `-w` AN INCLUSIVE MAXIMUM, and it seeds the final column at
+# width 1 where 9.4–9.11 seed it at 3 (docs/audit/2026-11-03-gnu-9.12-parity.md
+# § 2). kriya keeps a line strictly inside the width. PROBED rather than read
+# from --version: two one-character names make `a  b`, four columns, which fits
+# `-w 4` only under 9.12. On such an oracle a case ON a boundary asserts kriya's
+# answer directly, and every case off a boundary still compares against GNU.
+# ⚠ Rewriting GNU's width (`-w W-1`) does NOT recover the old rule: the seed
+# moved too, commas count the comma, and clear-to-EOL divides by the width.
+mkdir -p wprobe && : > wprobe/a && : > wprobe/b
+GNU_W_INCL=0
+[ "$(env -u COLUMNS ls -C -w 4 wprobe | wc -l)" -eq 1 ] && GNU_W_INCL=1
+w_edge() {  # w_edge <name> <kriya's answer, through cat -A> <dir> <arg...>
+    _n=$1; _x=$2; _d=$3; shift 3
+    if [ "$GNU_W_INCL" = 1 ]; then
+        expect_eq "$_n" "$_x" "$(env -u COLUMNS "$BIN" ls "$@" "$_d" 2>&1 | cat -A)"
+    else
+        expect_eq "$_n" "$(env -u COLUMNS ls "$@" "$_d" 2>&1 | cat -A)" \
+                        "$(env -u COLUMNS "$BIN" ls "$@" "$_d" 2>&1 | cat -A)"
+    fi
+}
 for _w in 5 7 9 13 20 40 80 0; do
-    same_ls "-C at width $_w"  -C -w "$_w"
-    same_ls "-x at width $_w"  -x -w "$_w"
+    if [ "$_w" = 7 ]; then
+        # ⚠ 7 is colw's boundary: two columns of f1–f6 make a 7-column line under
+        # the old seed, so 9.12 packs them and 9.4–9.11 do not.
+        w_edge "-C at width 7" "$(printf 'f1$\nf2$\nf3$\nf4$\nf5$\nf6$')" colw -C -w 7
+        w_edge "-x at width 7" "$(printf 'f1$\nf2$\nf3$\nf4$\nf5$\nf6$')" colw -x -w 7
+    else
+        same_ls "-C at width $_w"  -C -w "$_w"
+        same_ls "-x at width $_w"  -x -w "$_w"
+    fi
     same_ls "-m at width $_w"  -m -w "$_w"
 done
 # ⛔ ONE LAST-WINS GROUP. The flag table keeps a bool per flag with no order, so
@@ -703,8 +737,12 @@ same_lsd() {  # same_lsd <name> <dir> <arg...>
 }
 same_lsd "a pad that straddles a tab stop" gapw  -C -w 20
 same_lsd "...and across"                   gapw  -x -w 20
-same_lsd "commas wrapping exactly at -w"   wrapm -m -w 10
-same_lsd "...and at a narrower one"        wrapm -m -w 6
+# ⚠ Both are boundaries by construction, so on a 9.12 oracle they assert kriya's
+# answer: GNU 9.12 packs the LAST entry one column further (it has no comma).
+w_edge "commas wrapping exactly at -w" \
+    "$(printf '00, 01,$\n02, 03,$\n04, 05,$\n06, 07,$\n08$')" wrapm -m -w 10
+w_edge "...and at a narrower one" \
+    "$(printf '00,$\n01,$\n02,$\n03,$\n04,$\n05,$\n06,$\n07,$\n08$')" wrapm -m -w 6
 same_lsd "no -w and no COLUMNS is 80"      widew -C
 same_lsd "...across too"                   widew -x
 
@@ -876,10 +914,12 @@ expect_eq "...while a space is still quoted" "1" \
 # <message>` (architecture 001) and GNU's is `ls: ...`. The count still catches
 # a warning one side prints and the other does not.
 L612_ENV="-u COLUMNS -u TABSIZE -u TIME_STYLE -u LS_BLOCK_SIZE -u BLOCK_SIZE -u LS_COLORS -u COLORTERM TERM=dumb TZ=UTC LC_ALL=C"
+# L612_GA: words for GNU's side only, word-split; empty unless a block sets it.
+L612_GA=
 l612() {   # l612 <name> <env-words> <ls-arg...>; LS_COLORS comes from LC612 if set
     _n=$1; _e=$2; shift 2
     _grc=0
-    (cd l612 && env $L612_ENV $_e ${LC612+"LS_COLORS=$LC612"} ls "$@" \
+    (cd l612 && env $L612_ENV $_e ${LC612+"LS_COLORS=$LC612"} ls $L612_GA "$@" \
         >"$WORK/g.out" 2>"$WORK/g.err") || _grc=$?
     _krc=0
     (cd l612 && env $L612_ENV $_e ${LC612+"LS_COLORS=$LC612"} "$BIN" ls "$@" \
@@ -999,11 +1039,15 @@ l612 "COLUMNS= empty is ignored quietly"         "COLUMNS=" -C ../gapw
 # columns, GNU indents a name that needed no quotes by one space so it lines up
 # with the quoted ones beside it.
 cd qdir && : > "$(printf 'hi\351x')" && : > "$(printf 'esc\033x')" && : > "$(printf 'del\177x')" && cd ..
+L612_GA=$GNU_RAW   # qdir and h612 hold names with a newline: § 3 of the audit
 for _qs in literal shell shell-always shell-escape shell-escape-always c escape \
            locale clocale; do
     l612 "--quoting-style=$_qs"                  "" -1 "--quoting-style=$_qs" ../qdir
     l612 "--quoting-style=$_qs, -l aligns"       "" -l "--quoting-style=$_qs" ../qdir
-    l612 "--quoting-style=$_qs, -C aligns"       "" -C -w 60 "--quoting-style=$_qs" ../qdir
+    # ⚠ -w 61, not 60: at 60 the `literal` listing lands ON GNU 9.12's inclusive
+    # boundary (§ 2 of the audit) and packs differently. 61 agrees on 9.4, 9.7,
+    # 9.11 and 9.12 for all nine styles, measured, and still pads.
+    l612 "--quoting-style=$_qs, -C aligns"       "" -C -w 61 "--quoting-style=$_qs" ../qdir
 done
 # ⛔ SECTION HEADERS ARE QUOTED TOO, where a `:` forces the quotes and a `/` does
 # not, and an operand header shares the rule.
@@ -1013,6 +1057,7 @@ for _qs in literal shell shell-escape c escape; do
     l612 "headers, $_qs"                         "" -R "--quoting-style=$_qs" ../h612
 done
 l612 "operand headers"                           "" --quoting-style=shell-escape '../h612/a b' ../h612/a:b
+L612_GA=
 
 # ⛔ AN UNREADABLE DIRECTORY LEAVES NO SECTION BEHIND — no blank line, no
 # header. GNU writes both only once the directory has opened; kriya wrote them
@@ -1053,7 +1098,22 @@ l612 "colour: -F outside the escape"             "" --color=always -F c
 l612 "colour: -lF"                               "" --color=always -lF c
 # ⚠ CLEAR-TO-EOL: in a non-long format, a coloured name that may wrap is
 # followed by `cl`, so a background colour does not bleed to the margin.
-l612 "colour: -C emits clear-to-EOL"             "" --color=always -C -w 30 c
+# ⛔ CLEAR-TO-EOL FOLLOWS A COLOURED NAME THAT CROSSES A MULTIPLE OF THE WIDTH —
+# GNU's test is `start_col / line_length != (start_col + len - 1) / line_length` —
+# and no coloured name here is longer than 6. At -w 30 neither side ever emitted
+# one, so the case named for it could not go red (found by the 9.12 review). At
+# -w 5 `dangle` and `sticky` cross it, and 9.4, 9.7 and 9.12 agree byte for byte.
+l612 "colour: -C emits clear-to-EOL"             "" --color=always -C -w 5 c
+expect_eq "...and the escape is really there" "2" \
+    "$(cd l612 && env $L612_ENV "LS_COLORS=$LC612" "$BIN" ls --color=always -C -w 5 c \
+       | grep -c "$(printf '\033')\[K" || true)"
+# The -w 30 layout is compared on a 9.4–9.11 oracle only: 9.12's inclusive width
+# packs it differently (docs/audit/2026-11-03-gnu-9.12-parity.md § 2).
+if [ "$GNU_W_INCL" = 0 ]; then
+    l612 "colour: -C at -w 30"                   "" --color=always -C -w 30 c
+else
+    echo "note: GNU 9.12 packs 'colour: -C at -w 30' to its inclusive width; compared on 9.4-9.11 only"
+fi
 l612 "colour: -x"                                "" --color=always -x -w 30 c
 l612 "colour: -m"                                "" --color=always -m -w 30 c
 LC612='rs=0:mh=44;37:su=0:sg=0'

@@ -233,8 +233,12 @@ aarch64 build too since 6.6.12; `vet` 57 deps. ⚠ The five-matrix-condition ver
 for the per-condition counts. ⭐ The **`ubuntu:24.04` container run is current as of 1.8.4**: the full
 suite as a non-root user in `kriya-u24` (coreutils 9.4), **7,934 cases across all 41 scripts**, zero
 failures, the same total as 1.8.3. ⚠ **The dev box's GNU is coreutils 9.12** (since 1.8.4), and four
-scripts fail against it there: `smoke-head-tail` 4, `smoke-ls` 18, `smoke-printf` 7 and `smoke-stat` 4. They
-fail identically with the 1.8.3 binary, so they are new GNU behaviour, unexamined, and not a kriya change. ⚠ Compare a total
+scripts failed against it there: `smoke-head-tail` 4, `smoke-ls` 18, `smoke-printf` 7 and `smoke-stat` 4.
+⭐ **Examined in [`docs/audit/2026-11-03-gnu-9.12-parity.md`](../audit/2026-11-03-gnu-9.12-parity.md).**
+The 33 come from five GNU changes, none of them a kriya regression. The four scripts now gate each
+split on the oracle: they pin it where an option can, and assert kriya's answer directly where
+nothing can. They pass on 9.4, 9.7, 9.11 and 9.12, and six mutants confirm the gates still bite.
+What kriya should follow is roadmap 1.8.6 and 1.8.7. ⚠ Compare a total
 against the old binary in the same environment, not against an earlier figure: the skip set moves
 with the environment (user namespaces, secondary groups). ⭐ CI's oracle is **GNU coreutils 9.7 on
 Ubuntu 26.04** since 1.7.4 (`ubuntu-latest` defaults to uutils; CI swaps in the GNU provider):

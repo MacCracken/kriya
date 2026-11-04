@@ -331,15 +331,39 @@ expect_eq "%q refused" "1 " "$rc $out"
 # or `%c` field is refused past INT_MAX - 2, `%s` takes a width up to INT_MAX.
 # A refused field prints NOTHING, and the rest of the format goes on, exit 1.
 for f in '%18446744073709551617d' '%9223372036854775807d' '%2147483648d' \
-         '%2147483646d' '%-2147483646d' '%2147483646x' '%.2147483646x' \
-         '%2147483646c' '%.2147483648d' '%.18446744073709551617d' '%2147483648s' \
-         'ab%2147483648dcd' 'ab%.2147483646ucd'; do
+         '%.2147483648d' '%.18446744073709551617d' '%2147483648s' 'ab%2147483648dcd'; do
     same "$f" "$f" 5
 done
+# ⛔ GNU 9.12 TAKES EVERY FIELD UP TO INT_MAX. 9.4–9.11 refuse an integer or `%c`
+# field past INT_MAX - 2, and that ceiling was a gnulib bug: `08c8a9228f`,
+# "vasnprintf: fix ("%*d", INT_MAX, n)", first built into 9.12. kriya copied
+# the ceiling (docs/audit/2026-11-03-gnu-9.12-parity.md § 6). PROBED: on an
+# oracle that accepts, the INT_MAX - 1 cases assert kriya's own answer — the
+# field refused, the rest of the format printed, exit 1 — and GNU is not asked
+# for two gigabytes per case.
+pf_old=1
+"$GNU" '%2147483646c' x > /dev/null 2>&1 && pf_old=0
+pf_edge() {  # pf_edge <name> <kriya's stdout> <format> <arg...>
+    name=$1; kout=$2; shift 2
+    if [ "$pf_old" = 1 ]; then same "$name" "$@"; return 0; fi
+    mrc=0; timeout 10 "$BIN" printf "$@" > "$T/m" 2>/dev/null || mrc=$?
+    printf '%s' "$kout" > "$T/x"
+    if cmp -s "$T/m" "$T/x" && [ "$mrc" = 1 ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        printf "FAIL %s (INT_MAX oracle, kriya alone): exit %s [%s]\n" "$name" "$mrc" \
+            "$(od -An -c "$T/m" | tr -s ' \n' '  ' | cut -c1-60)" >&2
+    fi
+}
+for f in '%2147483646d' '%-2147483646d' '%2147483646x' '%.2147483646x' '%2147483646c'; do
+    pf_edge "$f" "" "$f" 5
+done
+pf_edge 'ab%.2147483646ucd' 'abcd' 'ab%.2147483646ucd' 5
 same "*: INT_MAX + 1 is fatal"     'a%*db' 2147483648 5
 same "*: INT_MIN - 1 is fatal"     'a%*db' -2147483649 5
 same "*: INT_MIN is not printed"   'a%*db' -2147483648 5
-same "*: INT_MAX - 1, an integer"  'a%*db' 2147483646 5
+pf_edge "*: INT_MAX - 1, an integer" 'ab' 'a%*db' 2147483646 5
 same "*: 2^64 + 1"                 'a%*db' 18446744073709551617 5
 same "*: 2^66 is fatal, and ERANGE" 'a%*db' 99999999999999999999 5
 same ".*: INT_MAX + 1 is fatal"    'a%.*db' 2147483648 5

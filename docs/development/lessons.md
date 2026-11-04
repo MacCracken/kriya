@@ -672,9 +672,12 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   two and written down for both. kriya's `stat` prints GNU's bytes and exits 1, by decision.
 - ⛔ **A limit is not INT_MAX until each conversion has been measured at its edge.** GNU `printf`
   refuses an integer or `%c` field past INT_MAX − 2 (`%2147483645d` prints two gigabytes,
-  `%2147483646d` nothing) and takes a `%s` width up to INT_MAX. 9.11 reads a `%s` precision past
-  INT_MAX as no limit where 9.4 refuses the field. GNU `stat` takes every field up to exactly
-  INT_MAX. None of it was among the hand-written cases: the 3,000-case differential fuzz
+  `%2147483646d` nothing). It takes a `%s` width up to INT_MAX from 9.7 on. ⚠ 9.4 refuses `%s`
+  past INT_MAX − 2 too. That was measured at the 9.12 review, and this line had said "both
+  versions". 9.11 reads a `%s` precision past INT_MAX as no limit where 9.4 refuses the field.
+  ⛔ **And 9.12 takes every conversion up to INT_MAX.** The INT_MAX − 2 ceiling was a gnulib bug
+  (`08c8a9228f`), so the limit kriya measured and copied was an accident of the oracle. GNU `stat`
+  takes every field up to exactly INT_MAX. None of it was among the hand-written cases: the 3,000-case differential fuzz
   (`scripts/difffuzz-printf.py`) found the first two in one run. Probe a boundary's neighbours,
   one conversion at a time, on both versions.
 - ⛔ **A terminator is data in a utility that has no options.** The shared parser consumed a `--`
@@ -716,6 +719,35 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   files, the same exit for a `+N` past 2^63, and a negative zero. They were not kriya defects, but
   each needed a decision, and a hand-written case would never have asked. The fuzzer sorts each
   difference into a named class and fails only on the rest (`scripts/difffuzz-head-tail.py`).
+- ⭐ **An option or variable on the ORACLE's side can pin kriya's rule on every version at once.**
+  When a GNU release changes a default and keeps the old behaviour behind an option, give GNU's side
+  that option.
+  - `--show-control-chars` does nothing off a tty before 9.12, and on 9.12 it turns off exactly the
+    new `?`-for-newline rule.
+  - `QUOTING_STYLE=shell-escape-always` is 9.4–9.11's own default for a `%N` format, and 9.12's
+    override.
+  - The 9.12 review used both, and the comparisons stayed byte-for-byte on 9.4, 9.7, 9.11 and 9.12,
+    with no probe.
+  - ⚠ Measure where the pin is NOT neutral. On 9.12 the variable also quotes `%-20N|` on its own,
+    which no earlier version did, so it goes only on formats that contain `%N`.
+- ⛔ **A test named for a property must be shown to contain it.** smoke-ls's "colour: -C emits
+  clear-to-EOL" compared bytes at `-w 30`, where neither GNU nor kriya writes the escape, on any
+  version.
+  - GNU writes it only after a COLOURED name that crosses a multiple of the width, and the
+    fixture's coloured names are at most six long.
+  - It passed from 1.6.12 to 1.8.4 without once testing its name.
+  - Count the property beside the comparison: `grep -c` of the escape, at `-w 5`.
+- ⚠ **Bracket a GNU change between adjacent releases before naming its cause.** 9.12's printf
+  ceiling moved with no NEWS entry, and `printf.c` was unchanged.
+  - A 9.11 build on the same glibc 2.44 still refused, which ruled glibc out.
+  - The cause was gnulib (`08c8a9228f`), built into 9.12.
+  - The `kriya-arch` image, at 9.11, is what made the bracket possible.
+  - ⚠ That image has no `cmp`, and `cmp -s` exiting 127 reads as "differs": 542 false failures
+    whose own messages showed identical bytes. Check an image's tools before reading a red run.
+- ⚠ **When a rule's boundary moves, every fixture sitting on it splits, including ones that were
+  not written as boundary tests.** 9.12's inclusive `-w` caught the cases written for the boundary.
+  It also caught "`--quoting-style=literal`, `-C` aligns" at `-w 60`, which tests a pad and
+  happened to sit on the new boundary for one of the nine styles.
 - **A per-byte table cannot see a whole-name rule.** `{` and `}` are bare anywhere in a word and
   quoted when they ARE the word; a table measured byte by byte at two positions records them as bare.
   One-byte names are a fuzz stratum of their own.
