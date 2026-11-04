@@ -36,17 +36,35 @@ Best of three, wall clock. Corpus: 65,536 lines of 16-byte text scaled to 1, 10 
 | Utility | Workload | kriya | GNU | Ratio | Roadmap |
 |---|---|---|---|---|---|
 | `wc -l` | 100 MiB | 0.391 s | 0.014 s | 27.9× slower | — |
-| `wc -c` | 100 MiB | 0.397 s | 0.002 s | 198× slower | 1.9.0 |
+| `wc -c` | 100 MiB | 0.397 s | 0.002 s | 198× slower | 1.10.0 |
 | `wc -w` | 100 MiB | 0.397 s | 0.099 s | 4.0× slower | — |
-| `grep` literal | 10 MiB | 0.091 s | 0.002 s | 45.5× slower | 1.9.2 |
-| `grep` regex | 10 MiB | 3.051 s | 0.002 s | 1,526× slower | 1.9.2, upstream |
-| `grep -F` | 10 MiB | 0.089 s | 0.002 s | 44.5× slower | 1.9.2 |
-| `grep -A 3` / `-B 3` / `-C 3` | 10 MiB | 0.091–0.112 s | 0.002 s | 46–56× slower | 1.9.2 |
+| `grep` literal | 10 MiB | 0.091 s | 0.002 s | 45.5× slower | 1.10.2 |
+| `grep` regex | 10 MiB | 3.051 s | 0.002 s | 1,526× slower | 1.10.2, upstream |
+| `grep -F` | 10 MiB | 0.089 s | 0.002 s | 44.5× slower | 1.10.2 |
+| `grep -A 3` / `-B 3` / `-C 3` | 10 MiB | 0.091–0.112 s | 0.002 s | 46–56× slower | 1.10.2 |
 | `sort` | 1 MiB | 0.095 s | 0.007 s | 13.6× slower | — |
-| `find` | 10K tree | 0.029 s | 0.006 s | 4.8× slower | 1.9.4 |
-| `cp` | 10 MiB file | 0.002 s | 0.008 s | 4× **faster** | 1.9.3 |
+| `find` | 10K tree | 0.029 s | 0.006 s | 4.8× slower | 1.10.4 |
+| `cp` | 10 MiB file | 0.002 s | 0.008 s | 4× **faster** | 1.10.3 |
 | `head -n 100` | 10 MiB | 0.002 s | 0.002 s | equal | — |
-| `tail -n 100` | 10 MiB | 0.020 s | 0.002 s | 10× slower | 1.9.1 |
+| `tail -n 100` | 10 MiB | 0.020 s | 0.002 s | 10× slower | 1.10.1 |
+
+⚠ The Roadmap column was renumbered after 1.8.1, when the performance arc moved from 1.9.x to
+1.10.x; the slots are the same ones.
+
+## Floating point (1.9.0)
+
+GNU's `long double` emulated in integers (ADR 0032), against GNU 9.12 on the same box:
+
+| What | kriya | GNU |
+|---|---|---|
+| `printf '%.2f\n'` over 100,000 arguments | 302 ms | 125 ms |
+| `printf '%s\n'` over the same, for the per-call cost | 187 ms | — |
+| `printf '%f\n' 1e4932` (4,933 digits) | 3 ms | 5 ms |
+| `printf '%.10000000f\n' 1` | 17 ms | 132 ms |
+| `seq 0 0.001 1000` (a million values) | 1.15 s | 0.19 s |
+| `seq 1000000` (integers, `seq_fast`'s case) | 40 ms | 9 ms |
+
+The `seq` float path is roadmap 1.10.7.
 
 ## Exec and argument handling
 
@@ -69,14 +87,14 @@ Measured at 1.6.17 and 1.7.0, against GNU on the same box:
 - process-heavy work — spawning, batching and argument handling now track GNU closely.
 
 **Measurably slower:**
-- `wc -c` (198×) — GNU answers a regular file from `stat`; kriya reads every byte (roadmap 1.9.0).
+- `wc -c` (198×) — GNU answers a regular file from `stat`; kriya reads every byte (roadmap 1.10.0).
 - `grep` — literal, `-F` and context searches take kriya's own byte scanner (about 45×); regular
   expressions go through niyama's Pike VM, linear-time but without GNU's DFA and Boyer-Moore (about
-  1,500×). The regex speed is upstream Cyrius work (roadmap 1.9.2).
-- `tail -n N` (10×) — kriya reads the input forward, where GNU seeks from the end (roadmap 1.9.1).
+  1,500×). The regex speed is upstream Cyrius work (roadmap 1.10.2).
+- `tail -n N` (10×) — kriya reads the input forward, where GNU seeks from the end (roadmap 1.10.1).
 - `sort` (13.6×) and `find` (4.8×) — per-record overhead in kriya's comparison and predicate code.
 - Line-at-a-time output — `nl`, `printf` and `stat` write each piece in its own system call:
-  `nl` over 500,000 lines takes 776 ms against GNU's 42 ms (roadmap 1.9.5).
+  `nl` over 500,000 lines takes 776 ms against GNU's 42 ms (roadmap 1.10.5).
 
 **Why the design favours correctness:** `grep` uses niyama because regex correctness on adversarial
 input matters more than literal-scan speed, and the alternative is a second, hand-written engine —

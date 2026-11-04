@@ -166,6 +166,15 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   second, built by the same script a moment later, showed differences in `-i` and in `-ft`'s order
   that were the fixtures': other inode numbers, other nanoseconds (1.8.10). Run both over ONE.
 
+- ⛔ *A fast path's assumption ends somewhere: test across the end.* 1.9.0's `%f` fast path
+  stripped trailing zero bits from a significand until it was odd. For an integer value that walked
+  past the binary point: 10.0 is 5 * 2^1, so the shift went to -1. Every hand case and 83,000 fuzz
+  cases had fractions. Only the million-value `seq 0 0.001 1000` comparison reached 10.000.
+- ⛔ *A refusal's test can hang once the refusal is gone.* `smoke-seq.sh` captured the diagnostic
+  of `seq 18446744073709551617`. When kriya started printing GNU's numbers, that line counted
+  toward 1.8e19 and the suite stopped there (1.9.0). Bound anything that may become unbounded,
+  with `timeout` or `| head`, a capture of stderr included.
+
 ### Testing the tests: mutation and adversarial review
 
 - ⛔ **A mutant that widens a rule survives a case whose failure takes another path.** 1.8.7's
@@ -200,6 +209,15 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   Its literal quoting differs from the default only on a terminal, where the default is
   shell-escape, and the mutant that dropped it passed all 515 cases until a pty case ran `--zero`
   (1.8.11).
+- ⛔ **A fuzz result nobody read is no result.** At 1.9.0 the run after a new `%f` fast path printed
+  into the same command as an 868 KB `cmp` diff, and the tool output was cut before its last line.
+  The fast path dropped every digit past the 72nd, and it reached the full-suite stage before the
+  same fuzz, run in a container, said 97 of 10,000. ⭐ Run a fuzz on its own, and read its last line
+  before going on.
+- ⚠ **A mutant can pass on the byte after the string.** At 1.9.0 one read a byte past a `nan(`
+  argument and passed. argv's next string began with a letter, so the "junk after the number" check
+  saw junk where there was none. A case whose stop is inside the string, `nan(ab-`, cannot be
+  answered from memory beyond it.
 - ⛔ **A new block that passes against the OLD binary has proved nothing, and three kinds of block
   do.** 1.6.16's run of every changed script against 1.6.15 found each of them in one pass:
   - a helper that adds its own command word: `compare_sorted` prepends `find`, so passing it
@@ -642,6 +660,11 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   ⚠ No literal reaches native aarch64 `fchdir` at all: 81 passes through as `sync`, and there is no
   1050 alias (filed upstream). `chdir("/proc/self/fd/N")` through `sys_chdir` is the workaround.
 
+- ⛔ **`>>` is Cyrius's LOGICAL shift and `>>>` its arithmetic one**, the reverse of Java's.
+  Measured at 1.9.0: `(0 - 16) >> 2` is 4611686018427387900. Unsigned limb arithmetic wants `>>`;
+  a shift that keeps the sign wants `>>>`. ⭐ And i64 multiplication wraps, which 32-bit limbs can
+  use. (2^32 - 1)^2 + 2(2^32 - 1) is 2^64 - 1, so limb * limb + carry + addend fits a wrapping i64
+  exactly, and `>>` reads its high half.
 - ⛔ **The stdlib's flag table holds 32 flags, and the 33rd is refused with -1 and no message.**
   `ls` reached 36 at 1.8.10. Every flag registered past the cap is unknown to the parser, and the
   ones past it are whichever were added LAST: a mutant that left the table at 32 lost `-w`, `-C`,
@@ -867,6 +890,10 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   there are no escapes at all, but set it to any valid key and GNU loads a compiled-in default table
   and overlays the variable.
 
+- ⭐ **Split the time before optimising it.** `printf` over 100,000 floats at 1.9.0 took 187 ms with
+  `%s`, 651 with `%a` and 618 with `%.2f`. So the time was in reading the argument, about 4.3 µs
+  each, and not in formatting it. The reading's bitwise long division became one division per limb:
+  614 ms → 302. Optimising the formatter, the obvious suspect, would have saved nothing.
 - ⛔ **The oracle can change the fixture it runs over.** Under relatime the first READ of a
   directory and the first FOLLOW of a symlink move its atime. A GNU run that listed `sub`, or
   `ls -l` reading a link's target, hands the kriya run after it a different `-u` listing. 1.8.10's

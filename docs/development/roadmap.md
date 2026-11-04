@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.9.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.9.0** — floats |
+| **1.9.x** | Parsers & numerics | byte-suffix parser | **1.9.1** — sort keys |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
 **1.8.x closed at 1.8.11**, when the 9.12 review's two decisions shipped. No arc depends on
@@ -58,21 +58,10 @@ kriya *does*, so expect an ADR and GNU-comparison work per item.
 
 ## 1.9.x — Parsers & numerics
 
-**Enablers:** a float-formatting story (1.9.0) and a byte-suffix parser in `src/lib/args.cyr`
-(1.9.2).
+**Enabler:** a byte-suffix parser in `src/lib/args.cyr` (1.9.2). The other, float formatting,
+shipped at 1.9.0 as `src/lib/xfloat.cyr` ([ADR 0032](../adr/0032-floats-are-the-x86-extended-format-computed-in-integers.md)).
 
 
-- **1.9.0 — Floats.** `printf %e` / `%E` / `%f` / `%F` / `%g` / `%G` / `%a` / `%A` — refused by name
-  today — plus positional `%N$s`. `seq -f FORMAT` rides directly on it.
-  - ⚠ **`%N$s` is GNU 9.11's, not 9.4's** (measured at 1.6.17: 9.4 says *invalid conversion
-    specification*, as kriya does), so the container's GNU cannot be its oracle.
-  - **GNU's `%q`** — the argument shell-quoted — is refused by name today. GNU uses
-    `shell_escape_quoting_style`, which `src/lib/quote.cyr` already renders for `ls`; ⚠ except
-    that `ls` never quotes an empty name, and `%q ''` is `''`.
-  - **`find -mtime` and `-mmin` take fractions in GNU**, read with `xstrtod`: `-mtime 0.5`,
-    `-mtime -0.5`, `-mmin -1.5` and `-mtime 1e1` all run there, and kriya refuses them as bad
-    arguments. The float READER `printf %f` needs for its arguments is the one to use; measured at
-    1.7.1.
 - **1.9.1 — Sort keys.**
   - ⛔ **First, a wrong answer: a repeated `-k` keeps only the LAST key.** `sort -k2,2 -k1,1` sorts
     exactly as `sort -k1,1` does and exits 0, where GNU sorts by field 2 then field 1 (measured at
@@ -194,6 +183,17 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
   - **The memory half shipped at 1.8.9**, with the loop that needed the same path buffer:
     `find /usr -name none` peaks at 5.2 MB against GNU's 8.2 (202,664 entries), where it was 99.0 MB
     at 1.8.3 and 42.6 at 1.8.8. The time is this slot's: 0.47 s against GNU's 0.26.
+- **1.10.7 — Extended-precision arithmetic.** `src/lib/xfloat.cyr` is exact and slow where it does
+  arithmetic, measured at 1.9.0:
+  - `seq 0 0.001 1000`, a million values, takes **1.15 s against GNU's 0.19 s**. The time is the
+    add and the multiply of `first + i * step` in big integers; `seq -f %a`, which formats almost
+    nothing, takes as long. Two 64-bit significands fit a 128-bit product and sum in four i64
+    halves, rounded in place, with the big-integer path kept for the exponent edges.
+  - `printf '%.2f\n'` over 100,000 arguments takes **302 ms against GNU's 125 ms**. Most of that
+    is 1.10.5's per-call writes (kriya's plain `%s` takes 187 ms); the reading of each argument is
+    about 1.1 µs.
+  - ⚠ The differential fuzz, `scripts/difffuzz-float.py`, is the acceptance test: every fast path
+    must leave it at 0 differences.
 
 ---
 
@@ -386,7 +386,6 @@ What still gates the arcs. Ship the enabler and everything under it becomes smal
 
 | Enabler | Home | Unblocks | Slot |
 |---|---|---|---|
-| Float formatting | `src/cmd/printf.cyr` | `printf %e/%f/%g/%a`, `seq -f` | 1.9.0 |
 | Byte-suffix parser | `src/lib/args.cyr` | `head -c 1K`, `tail -c 1K`, `sort -S` | 1.9.2 |
 | niyama regex speed (quadratic search) | **upstream, filed** | `grep` on metacharacter patterns (~150× GNU) | 1.10.2, gated |
 | niyama GNU BRE operators, leftmost-longest, literal `*`, backreferences | **upstream, filed** | `grep`, `find -regex`, `nl -b p` | M11, gated |

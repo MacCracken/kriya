@@ -6,6 +6,130 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.9.0] - 2026-11-04 — floats
+
+The roadmap's 1.9.0 slot, and the 1.9.x arc's first enabler:
+- `printf`'s floating-point conversions, numbered arguments and `%q`;
+- `seq`'s floating-point operands and `-f`;
+- fractional `find -mtime` and `-mmin`.
+
+Every item was measured against GNU coreutils 9.4, 9.7 and 9.12 and findutils 4.9 to 4.11 first, and
+is compared with them byte for byte
+([ADR 0032](docs/adr/0032-floats-are-the-x86-extended-format-computed-in-integers.md)).
+
+### Added
+
+- ⭐ **`src/lib/xfloat.cyr`: GNU's `long double`, in integers.** GNU's `printf` and `seq` read with
+  `strtold` and print with glibc. On x86_64 that is the 80-bit extended format: a 64-bit significand,
+  exponents to ±16383, subnormals to 2^-16445. kriya emulates it exactly with a small big-integer
+  library, so aarch64 and agnos give the x86_64 digits too.
+  - **Reading** is `strtold` in the C locale, correctly rounded, half to even. It takes blanks, signs,
+    hex significands (`0x1.8p3`), and `inf`, `infinity`, `nan` and `nan(chars)` in any case. ERANGE is
+    set as glibc sets it: on overflow, and on an inexact result still tiny after rounding.
+  - **Writing** is glibc's `%e %E %f %F %g %G %a %A`, exact: `%.30f 0.1` is
+    `0.100000000000000000001355252716`, `%f 1e4932` writes every digit, and `%a 1` is `0x8p-3`.
+  - ⚠ binary64 was measured and set aside: 40 of 3,000 short decimals print differently with
+    `%.2f` (`738.495` is `738.49` in GNU and `738.50` in binary64), and binary64 stops at 1.8e308.
+- **`printf %e %E %f %F %g %G %a %A`**, with GNU's flag table, widths, precisions, `*` and the length
+  modifiers. An argument is GNU's `vstrtold`: a character constant is its byte; otherwise the
+  diagnostics are *expected a numeric value*, *numerical result out of range* and *value not
+  completely converted*, exit 1, with output carrying on.
+  - ⚠ **glibc's `%#g` carry is copied.** A value with exactly P integer digits that rounds into the
+    next decade is written with no fraction digits: `%#.2g 99.96` is `1.e+02`, where C's rule gives
+    `1.0e+02`. glibc chose `%f` with 0 places from the unrounded value and keeps that count when it
+    switches. Without `#` the two are the same. Measured on glibc 2.39 to 2.43.
+- **`printf %N$`, POSIX:2024's numbered arguments**, with `*N$` for a width or precision. These are
+  GNU 9.7's rules:
+  - plain and numbered directives mix;
+  - a pass uses as many arguments as its highest number, and the next pass starts after them.
+  - ⚠ GNU 9.4 has no `%N$`, and `smoke-printf.sh` probes for it.
+- **`printf %q`**, GNU's shell-escape quoting of the argument, and `''` for an empty one.
+- **`seq` floats.** FIRST, INCREMENT and LAST are `long double`s, and GNU's three paths are ported
+  from `seq.c`:
+  - `seq_fast` handles non-negative integers of any size as decimal strings. `seq
+    18446744073709551614 18446744073709551617` is exact.
+  - The general path computes `first + i * step`, rounding twice, and prints the value past LAST when
+    it prints as LAST (`seq 0 0.000001 0.000003` ends at `0.000003`). The default format is `%.Pf`,
+    `%0W.Pf` under `-w` with W from the operands' text, or `%g`.
+  - kriya's i64 loop runs where its output is the general path's.
+- **`seq -f FORMAT`**: one `%e %f %g %a` directive, upper case too, with flags, width, precision, an
+  optional `L` and `%%` around it. It is refused with GNU's four reasons, and alongside `-w`.
+- **`find -mtime` and `-mmin` take any `strtod` number**: `-mtime 0.5`, `-mmin -1.5`, `-mtime 1e1`,
+  `-mtime 0x1p0`.
+- [ADR 0032](docs/adr/0032-floats-are-the-x86-extended-format-computed-in-integers.md): floats are the
+  x86 extended format computed in integers. It is a deviation from POSIX's "as if by `strtod()`", in
+  GNU's direction.
+
+### Changed
+
+- ⛔ **`find -mtime` and `-mmin` are findutils' arithmetic.** kriya compared whole-second ages; GNU
+  computes a reference time in `double` with `modf` and compares nanosecond timestamps against it,
+  within a window for an exact N. A file dated in the future was age 0 to kriya and matched
+  `-mtime 0`, where GNU leaves it out. The second a boundary fell in was decided without its
+  nanoseconds. Both are GNU's now, and so are GNU's refusals: `nan`, junk after the number, and
+  `--1e300`'s overflow.
+- **`seq -w` takes the width from the operands' text**, as GNU does: `seq -w 008 11` is three digits
+  wide, where kriya used the values' widths.
+- ⛔ **`seq` prints numbers past 2^63 - 1** where it refused them (1.6.16's stopgap), as GNU does.
+
+### Fixed
+
+- ⛔ **`seq -s ''` wrote newlines.** An empty separator is empty: `seq -s '' 3` is `123`, in every GNU.
+  kriya substituted `\n`, and its test asserted it.
+
+### Divergences, asserted
+
+- GNU's `%If` prints only the decimal point (glibc's digits flag drops a `long double`'s digits,
+  9.4 to 9.12). kriya prints the number.
+- Bad `seq` operands and formats, and bad `find` time arguments, exit 2 by ADR 0008, where GNU exits 1.
+- GNU 9.4's `seq` refused an operand that underflows to a subnormal and 9.12 reads it; kriya
+  follows 9.12. GNU 9.4's `printf` read an empty argument as 0 at exit 0, and 9.7 on, like kriya,
+  do not.
+
+### Performance
+
+- `printf '%.2f\n'` over 100,000 arguments: **302 ms**, against GNU's 125. kriya's plain `%s` takes
+  187 ms; reading a float costs about 1.1 µs. ⭐ Dividing by 10^n as k + 1 divisions by a single limb,
+  rather than a bitwise long division, took it from 614 ms. Extracting bits by limb took it from 820.
+- `seq 0 0.001 1000`, a million values: **1.15 s**, against GNU's 0.19 s, in the extended add and
+  multiply. Roadmap 1.10.7. ⭐ `%f` with a fraction rounds `SIG * 10^p >> s` directly rather than
+  expanding the exact decimal, which took it from 1.50 s.
+- Unchanged where it was fast: `seq 1000000` takes 40 ms (GNU 9), and `seq -1000000 1000000` takes
+  89 ms (GNU 384).
+
+### Changed (tests)
+
+- **`smoke-printf.sh` 433 → 1,034.** The four refusal cases for the floats and `%q` became comparisons:
+  - 506 float cases: 23 values × 22 formats, plus halfway cases, ties, exact digits, carries, `%a`
+    subnormals, `strtold`'s grammar, ERANGE, and a tie broken past 20,000 digits;
+  - `%q`, and `%N$`, probed;
+  - an empty argument and `%If`, asserted;
+  - and the two defects below that the fuzz found before release.
+- **`smoke-seq.sh` 57 → 127**: float stepping, the fix-up at LAST, `-w` widths, every `-f` form and its
+  refusals, numbers past 2^63, and `-s ''`.
+- **`smoke-find.sh` 499 → 536**: 30 fractional, exponent, hex and signed `-mtime` / `-mmin` cases over
+  files an hour or more from every boundary, a future file among them, and the refusals.
+- **`scripts/difffuzz-float.py`** (new): random formats over values weighted toward what decides a
+  rounding, and `seq` runs, against GNU. On the final build: 180,000 `printf` cases and 18,000 `seq`
+  runs on the host (9.12) and in both containers (9.4, 9.7), 0 differences. Before that, it found
+  two defects, now fixed and pinned in `smoke-printf.sh`:
+  - ⛔ The `%f` fast path dropped every digit past the 72nd: `%.70f 62061.1971` was `62000.000…`.
+    The decimal groups went into a big integer whose limb count stayed 0, so growing it copied
+    nothing. The host fuzz run after the fast path printed into the same command as a large diff,
+    and its result went unread; the containers' run caught it (lessons.md).
+  - The `%#g` carry above, from host seed 10.
+- **34 mutants over `xfloat`, `printf`, `seq` and `find`, all killed.** Five lived on the first run,
+  and each was a missing case, now added: `%g` at an exponent of -5, an `%a` tie with an even
+  digit, a decimal with leading fraction zeros, `nan(ab-`, and `seq -w` with a FIRST wider than
+  LAST.
+- **Unit 890 → 914**: `xfloat`'s reading, ERANGE, writing and arithmetic.
+- **914 unit + 72 syscall + 18 POSIX.** Smoke is **9,055 / 0** in ubuntu:24.04 (GNU 9.4), **9,058 / 0** in
+  26.04 (9.7), and **9,150 / 0** on the dev box (9.12), across 44 scripts. On aarch64 under qemu,
+  `smoke-printf`, `-seq`, `-find` and `-ls` pass against the x86_64 oracle, which is the claim: the
+  same digits on every target. Fuzz is green under poison; `cyrius lint`, the lints, `check-oracles.sh`
+  and `watchlist-scan.py` are clean; all three targets build warning-free; `vet` 59 deps.
+- **Sizes:** host 1,372,432 → **1,430,640**, agnos 1,376,960 → **1,439,264**.
+
 ## [1.8.11] - 2026-11-04 — the 9.12 review's decisions
 
 The roadmap's 1.8.11 slot: the three questions the GNU 9.12 parity review
