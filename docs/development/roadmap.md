@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.9.x** | Parsers & numerics | none (both shipped) | **1.9.3** — date input |
+| **1.9.x** | Parsers & numerics | none (both shipped) | **1.9.4** — `date` output flags |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
 **1.8.x closed at 1.8.11**, when the 9.12 review's two decisions shipped. No arc depends on
@@ -63,14 +63,14 @@ kriya *does*, so expect an ADR and GNU-comparison work per item.
 byte-suffix parser at 1.9.2, as `kriya_xstrtou` in `src/lib/args.cyr`. `sort`'s keys shipped at 1.9.1
 ([ADR 0033](../adr/0033-sort-compares-keys-as-gnus-keycompare-in-the-c-locale.md)), and its
 temporary runs and `tail`'s follow modes at 1.9.2
-([ADR 0034](../adr/0034-tail-follows-by-polling-as-gnus-disable-inotify-loop.md)). The rest of the
+([ADR 0034](../adr/0034-tail-follows-by-polling-as-gnus-disable-inotify-loop.md)). Date input
+shipped at 1.9.3, as GNU's whole `parse_datetime` grammar in UTC, not the subset this slot proposed
+([ADR 0035](../adr/0035-date-strings-are-gnus-parse-datetime-ported-in-utc.md)). The rest of the
 arc is utility work.
 
 
-- **1.9.3 — Date input.** `date -d STR` and `touch -d STR`, free-form. ⚠ Genuinely large — GNU's
-  parser is notorious, and chrono's `dt_strptime` needs a format string, so it does not substitute.
-  Scope it to a documented subset (ISO 8601, `@epoch`, `now`, `HH:MM[:SS]`) rather than chasing GNU.
-- **1.9.4 — `date` output flags and specifiers.** ⚠ Distinct from 1.9.3, which is date *input*.
+- **1.9.4 — `date` output flags and specifiers.** ⚠ Distinct from 1.9.3's date *input*, which
+  shipped.
   - ⭐ **The refusals are in place (1.8.5); rendering is this slot's.** Until 1.8.5 a decorated
     directive was echoed at exit 0: `date +%-d` printed `%-d`. Now every flag, width, `E`/`O` and
     `:` on a GNU conversion is refused by name, the field left out, exit 1. So are `%C %k %l %U %W`,
@@ -87,8 +87,10 @@ arc is utility work.
       `02/03/ 1` and 9.12 prints `02/03/01`. Assert kriya's answer directly
       ([audit § 7c](../audit/2026-11-03-gnu-9.12-parity.md)).
   `-r FILE` (format FILE's mtime rather than now — `touch -r` already ships the reference-stat
-  pattern to copy), `-R` (RFC 5322) and `-I[=FMT]` (ISO 8601), plus the strftime specifiers `date`
-  refuses by name today: `%V` / `%G` / `%g` (ISO week-date) and the rest of `_date_is_deferred_spec`.
+  pattern to copy; `kdt_civil` in `src/lib/datetime.cyr` breaks down any epoch, since 1.9.3),
+  `-R` (RFC 5322), `-I[=FMT]` (ISO 8601) and `-f FILE` / `--file` (one `-d` string per line,
+  through 1.9.3's parser; GNU reports a bad line and goes on, exit 1), plus the strftime
+  specifiers `date` refuses by name today: `%V` / `%G` / `%g` (ISO week-date) and the rest of `_date_is_deferred_spec`.
   ⚠ Most want no locale data and no tzfile — they are arithmetic on a broken-down time — so they do
   **not** belong behind the Gated chrono item the way local time does.
   - **`ls --time-style=+FORMAT` and the `TIME_STYLE` variable ride on the same renderer.** GNU
@@ -314,7 +316,9 @@ against its own `dist/niyama.cyr`.
 **Filed 2026-11-03:** cyrius [`2026-11-03-chrono-has-no-local-time.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-11-03-chrono-has-no-local-time.md).
 
 `date` local time, local time in `ls -l` and `stat`'s dates, and `touch -t`'s local-time input need
-tzfile parsing (`chrono_tz.cyr`). ⚠ What is gated is the VALUE — every kriya time is UTC — not the spelling:
+tzfile parsing (`chrono_tz.cyr`). So do date strings (1.9.3): a string without a zone is read as
+UTC, and a leading `TZ="ZONE"` is refused. Both lift where `src/lib/datetime.cyr` asks for the
+local zone, as GNU's parser does ([ADR 0035](../adr/0035-date-strings-are-gnus-parse-datetime-ported-in-utc.md)). ⚠ What is gated is the VALUE — every kriya time is UTC — not the spelling:
 `ls -l` already prints POSIX's date form
 ([ADR 0020](../adr/0020-ls-long-format-dates-are-posix.md)). ⚠ This is
 the **genuine** chrono gate — re-verified absent at pin 6.7.18 (its only change since 6.7.9 is a cx
@@ -391,7 +395,7 @@ What still gates the arcs. Ship the enabler and everything under it becomes smal
 |---|---|---|---|
 | niyama regex speed (quadratic search) | **upstream, filed** | `grep` on metacharacter patterns (~150× GNU) | 1.10.2, gated |
 | niyama GNU BRE operators, leftmost-longest, literal `*`, backreferences | **upstream, filed** | `grep`, `find -regex`, `nl -b p` | M11, gated |
-| chrono tzfile reader | **upstream, filed** | local time in `date`, `ls -l`, `stat`, `touch -t` | gated |
+| chrono tzfile reader | **upstream, filed** | local time in `date`, `date -d` / `touch -d`, `ls -l`, `stat`, `touch -t` | gated |
 
 ---
 

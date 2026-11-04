@@ -1,6 +1,6 @@
 # 0007 — date defaults to UTC at v0.7.0; local-time tzfile parsing is a named follow-up
 
-**Status**: Accepted
+**Status**: Accepted; amended at 1.9.3 (date strings: `-d` reads in UTC, and a `TZ="…"` in the string is refused)
 **Date**: 2026-05-18
 
 ## Context
@@ -54,3 +54,17 @@ When tzfile parsing lands, `-u` becomes meaningful (UTC vs. local) and the defau
 - **Inline tzfile parser in M6.** Would have added ~400 LOC to M6 and pushed the milestone out by a session or two. Rejected: M6 was scoped for "system info + misc," not for "stdlib chrono extension." The work belongs upstream.
 - **Read `TZ` env, support only UTC + fixed-offset (`UTC+8`).** Bridges the gap for users in fixed-offset zones (no DST). Considered and deferred: the implementation is ~80 LOC and might happen during the boot-burn cycle if a real consumer asks. v0.7.0 ships without it; the hold-open list will pick it up if it surfaces.
 - **Refuse `date` without `-u`.** Forces every invocation to be explicit. Considered and rejected: too restrictive — `date +%s` is common and pure-epoch (timezone-irrelevant); refusing it would break legitimate scripts.
+
+## Amended at 1.9.3: date strings
+
+`date -d STRING` and `touch -d STRING` read GNU's free-form dates
+([ADR 0035](0035-date-strings-are-gnus-parse-datetime-ported-in-utc.md)), and the rule here
+carries over to them: **a string without a zone is read as UTC**, where GNU reads it in local time.
+`TZ=UTC date -d '2024-01-15 10:30'` agrees with GNU; on a host in another zone the two differ by
+the offset, as `date` alone already does.
+
+GNU also takes a zone *inside* the string, `TZ="Europe/Paris" 2024-01-15 10:30`, and loads it from
+tzdata. kriya reads no tzdata, so **that form is refused**, exit 2, with a message naming this ADR,
+rather than skipped, which would print a wrong time at exit 0. It is accepted when local time
+lands (roadmap § Gated, chrono). A zone *name* or offset GNU knows without tzdata (`EST`, `CET`,
+`+0530`, the military letters) is read, since its offset is fixed.

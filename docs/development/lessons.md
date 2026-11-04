@@ -538,6 +538,12 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 
 ### Shape of the code, shape of the bug
 
+- ⚠ *A new input opens a range the old output code never saw.* `date`'s renderer had two bugs from
+  v0.7.0 to 1.9.3 that nothing could reach while its only input was the present: it counted the
+  year up from 1970, and it truncated where the weekday needed a floor, so 1969-12-31 23:59:59 came
+  out on a Thursday. `-d` reached both on its first pre-1970 string. ⭐ When a slot widens an input
+  (any epoch, any year, any size), test the existing output path over the whole new range, as
+  `smoke-date.sh`'s extreme years now do, and not only the new parser.
 - ⛔ *The expanded argv is the one option window, but it had a hole.* A bool long that opts into a
   value (`cp --preserve=LIST`) reached it as a bare `--preserve`: the expander strips the value so
   `flags_parse` accepts the token, and keeps only the LAST value per name. The first order-aware
@@ -730,7 +736,8 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   equivalent (here, the `PATH=` scan and the `has_slash` loop) in the same change.
 - **Cold start: report the release-over-release delta, never an absolute.** The pre-1.3.2 history is
   mismeasured (it timed kriya plus a whole `date` fork). Name any reference binary `kriya` or the
-  dispatcher rejects it on `argv[0]`.
+  dispatcher rejects it on `argv[0]`. (It bit again at 1.9.3: a fuzz run against a copy named
+  `kriya.cur` "differed" on every case.)
 - **A green test is not a finding.** Three of the arc's six bugs hid behind something that looked like
   evidence: a comment naming only the cases where the bug is invisible, a local GNU version, and a
   type list that matched by coincidence.
@@ -883,6 +890,20 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
     fixture's coloured names are at most six long.
   - It passed from 1.6.12 to 1.8.4 without once testing its name.
   - Count the property beside the comparison: `grep -c` of the escape, at `-w 5`.
+- ⛔ **A port's overflow checks are part of the grammar, and a 64-bit value hides them.** GNU's
+  `parse_datetime` adds a weekday's days to `tm_mday`, an `int`, with `ckd_add`, so it refuses
+  `438367852 wed`; kriya's i64 took it (1.9.3).
+  - The fuzz found that one by chance, once in 18,000 cases.
+  - Reading every `ckd_add`, `ckd_sub` and `ckd_mul` in the file then found two more the fuzz had
+    never drawn: the relative nanoseconds are an `int` too, and negating INT64_MIN aborts.
+  - ⭐ When porting C arithmetic, list every overflow check and every field narrower than 64 bits,
+    and port each. Then make the fuzz draw numbers at those edges, and run it against the build
+    BEFORE the fix: it found 8 differences there, so it can find them.
+- ⚠ **Compare stdout on a failure exit, not only the status.** GNU 9.6 began ending the output line
+  when `date`'s time is out of range (its new `show_date_helper`), with no NEWS entry. kriya's case
+  compared only the exit status and could not see it.
+  - Raw source from `raw.githubusercontent.com/coreutils/coreutils/vX.Y/src/date.c` bracketed the
+    change between 9.5 and 9.6 in a minute, where no image of either release exists.
 - ⚠ **Bracket a GNU change between adjacent releases before naming its cause.** 9.12's printf
   ceiling moved with no NEWS entry, and `printf.c` was unchanged.
   - A 9.11 build on the same glibc 2.44 still refused, which ruled glibc out.

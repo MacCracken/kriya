@@ -107,6 +107,24 @@ GNU's key model ported (ADR 0033), against 1.9.0 and GNU 9.12 on the same box, b
   merging the runs is linear. The in-memory path is the one to fix (roadmap 1.10.8).
 - `-S` bounds kriya's memory to within a few MB of it; the rest is sixteen 64 KiB run readers.
 
+## Date strings (1.9.3)
+
+GNU's `parse_datetime` ported (ADR 0035). Per process, best of three batches of 2,000 runs, against
+GNU 9.12 on the same box, `TZ=UTC LC_ALL=C`:
+
+| What | kriya | GNU |
+|---|---|---|
+| `date +%s` (no `-d`) | 0.541 ms | 0.715 ms |
+| `date -d now +%s` | 0.544 ms | 0.723 ms |
+| `date -d '2024-01-15 10:30:45 +0530' +%s` | 0.544 ms | 0.723 ms |
+| `date -d 'next friday 2 hours ago' +%s` | 0.562 ms | 0.728 ms |
+
+In process (`cyrius bench tests/kriya.bcyr`), one parse takes **5.35 µs** for the ISO stamp
+`2024-01-15T10:30:45.123456789+05:30` and **14.7 µs** for `next friday 2 hours ago`. Each word is
+looked up in GNU's tables in order, linearly, as GNU's `lookup_word` does. At one parse per process
+that is under 3% of the run. Nothing reads date strings in bulk yet: `date -f FILE` is roadmap
+1.9.4.
+
 ## Exec and argument handling
 
 Measured at 1.6.17 and 1.7.0, against GNU on the same box:

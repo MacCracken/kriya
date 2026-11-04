@@ -6,6 +6,121 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.9.3] - 2026-11-04 — date input
+
+The roadmap's 1.9.3 slot. `date -d STRING` and `touch -d STRING` read GNU's free-form dates:
+gnulib's `parse_datetime`, ported rule for rule into `src/lib/datetime.cyr`, with UTC as the local
+zone ([ADR 0035](docs/adr/0035-date-strings-are-gnus-parse-datetime-ported-in-utc.md),
+[ADR 0007](docs/adr/0007-date-utc-only-at-v0-7-0.md) amended). It was measured against GNU
+coreutils 9.4, 9.7 and 9.12 first, and is compared with them to the nanosecond.
+
+### Added
+
+- ⭐ **`src/lib/datetime.cyr`: GNU's `parse_datetime`, ported**, in UTC: the lexer, the word
+  tables, every grammar rule and the arithmetic, as coreutils 9.12 builds them. It reads every form
+  GNU reads:
+  - ISO 8601 dates and times, with `T` or a space between, fractions after `.` or `,`, and an
+    offset (`Z`, `+05:30`, `-0800`, `+01`);
+  - `@SECONDS`, signed and fractional;
+  - `MM/DD/YY`, `YYYY/MM/DD`, `YYYYMMDD`, `15 Jan 2024`, `Jan 15, 2024`, `15-Jan-24`, and
+    9.11's `DD.MM.YYYY` and `DD.MM.`;
+  - month and day names in every spelling GNU's tables take (`Sept`, `Tues`, `Wednes`, a three-letter
+    prefix, a trailing period);
+  - relative items: a number and a unit (`year` to `second`, `fortnight`, plurals), `ago`, `hence`,
+    the ordinals `last`, `this`, `next` and `first` to `twelfth`, and `now`, `today`, `yesterday`,
+    `tomorrow`;
+  - weekdays (`next friday`, `2 mon`), `am`/`pm` and `a.m.`, GNU's 47 zone names, `DST`, the
+    military letters, and comments in parentheses.
+
+  GNU's rules come with it, on purpose:
+  - `2024` alone is 20:24 today;
+  - a two-digit year is 1969–2068;
+  - `Feb 30`, a second 60 and an hour 24 are refused;
+  - a weekday moves a time but not a date;
+  - `+90 minutes` straight after a time is read as a zone, and refused;
+  - an overflow anywhere in GNU's integer arithmetic refuses the string where GNU's does.
+- **`date -d STRING`**, also spelled `--date=STRING`, `--date STRING`, `-dSTRING` and `-ud`. The
+  last `-d` wins.
+  - A year past 9999 or before 1 prints as glibc's `%Y` and `%F` do (`+10000-01-01`, `-001`).
+  - A year a `struct tm` cannot hold is *time … is out of range*, exit 1. The output line still
+    ends, as in GNU 9.6 and later.
+- **`touch -d STRING`**: POSIX's `-d date_time`, and GNU's phrases with it.
+  - With `-r FILE`, the string is relative to FILE's access and modification times, each on its own
+    (`touch -r ref -d '-1 day' older`).
+  - `-d now` without `-a` or `-m` asks the kernel for the time, as GNU does.
+- [ADR 0035](docs/adr/0035-date-strings-are-gnus-parse-datetime-ported-in-utc.md): date strings are
+  GNU's `parse_datetime`, ported, in UTC.
+
+### Fixed
+
+- **`date +%N` printed nine zeros.** It prints the current time's nanoseconds. On agnos it still
+  prints zeros, because that clock counts whole seconds.
+- **`touch -r FILE` dropped FILE's nanoseconds.** A reference stamped `.123456789` gave
+  `.000000000`; both times are copied whole now.
+
+### Divergences, asserted
+
+- A string without a zone is read as UTC, where GNU reads local time
+  ([ADR 0007](docs/adr/0007-date-utc-only-at-v0-7-0.md), amended). Under `TZ=UTC` they agree.
+- A leading `TZ="ZONE"` is refused, exit 2, with a message naming ADR 0007. GNU loads the zone from
+  tzdata, which kriya does not read.
+- These exit 2, kriya's usage error, where GNU exits 1 ([ADR 0008](docs/adr/0008-posix-exit-code-policy.md)):
+  - an invalid date;
+  - `touch -t` combined with `-d` or `-r`.
+- `DD.MM.YYYY` is read on every host, as 9.11 and later read it; GNU 9.4 and 9.7 refuse it.
+
+### Performance
+
+- **A date string costs about 0.02 ms a run.** Per process, best of three batches of 2,000:
+  - `date -d '2024-01-15 10:30:45 +0530'` takes 0.544 ms, and `-d 'next friday 2 hours ago'`
+    0.562 ms, against 0.541 ms with no `-d`;
+  - GNU 9.12 takes 0.72 ms in each case.
+
+  In process, one parse takes 5.35 µs for an ISO stamp and 14.7 µs for that relative phrase
+  ([`docs/benchmarks.md`](docs/benchmarks.md)).
+
+### Changed (internal)
+
+- `date`'s renderer takes any epoch. It counted from 1970 and truncated the weekday, which went
+  unnoticed while `date` printed only the present; years before 1970 and past 9999 come out as
+  glibc's do.
+
+### Changed (tests)
+
+- **`smoke-date.sh` 86 → 265**, 135 of which fail against 1.9.2:
+  - about 180 date strings compared with GNU byte for byte, to the nanosecond, including GNU's
+    integer edges;
+  - the strings that depend on now, compared to the day, and the relative ones to the second;
+  - extreme years, and the out-of-range exit and newline;
+  - the option's spellings, and the refusals.
+- **`smoke-touch.sh` 80 → 99**: every `-d` form compared with GNU through `stat`, plus `-r`
+  nanoseconds, `-r -d`, `-a` and `-m` with `-d`, `-d now`, and the refusals; 14 fail against 1.9.2.
+- **`scripts/difffuzz-date.py`** (new) builds random strings from GNU's vocabulary.
+  - GNU runs before and after kriya. When its two answers differ the string depends on now, and
+    kriya must match one of them to the second.
+  - It found one difference: GNU refuses `438367852 wed`, because 438,367,852 weeks overflow its
+    `int` day of the month.
+  - Reading every overflow check in GNU's arithmetic after that found two more:
+    - the relative nanoseconds are an `int` as well, so `1.9 sec` three times is refused;
+    - negating INT64_MIN aborts the parse (`15 Jan -9223372036854775808`).
+  - The fuzz now draws numbers at those edges, and finds all three in the build before the fix.
+  - On the final build: 18,000 cases on 9.12, and 12,000 on each of 9.7 and 9.4, show 0
+    differences. On the two older releases, 286 dotted dates are classed as documented.
+- **40 mutants over the parser, `date` and `touch`: 39 killed, one equivalent** (negating INT64_MIN
+  into a month or day, which the range check refuses anyway). Three were missing smoke cases,
+  now added:
+  - a February 29 in 2000;
+  - a relative item keeping now's time of day;
+  - a subtraction of INT64_MIN that a later item brings back into range.
+- **Unit 1,037 → 1,076**: `kdt_civil` over any epoch, and `kdt_parse` against a fixed now.
+- **1,076 unit + 72 syscall + 18 POSIX.** Smoke is **9,950 / 0** in ubuntu:24.04 (GNU 9.4),
+  **9,954 / 0** in 26.04 (9.7), and **10,046 / 0** on the dev box (9.12), across 45 scripts.
+  - On aarch64 under qemu, `smoke-date` and `smoke-touch` pass against the x86_64 oracle.
+  - Fuzz is green under poison.
+  - `cyrius lint`, the lints, `check-oracles.sh` and `watchlist-scan.py` are clean.
+  - All three targets build warning-free; `vet` 62 deps.
+- **Sizes:** host 1,507,960 → **1,546,968**, agnos 1,512,488 → **1,555,592**.
+
 ## [1.9.2] - 2026-11-04 — size limits and follow modes
 
 The roadmap's 1.9.2 slot, and the 1.9.x arc's second enabler: GNU's byte-suffix parser, serving
