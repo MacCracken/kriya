@@ -66,7 +66,7 @@ try:
         for cmd in RENDER:
             argv = [c.encode() for c in cmd] + [b"--", nm]
             # ⚠ GNU 9.12's `ls` writes a newline in a name as `?` off a tty, which kriya has not
-            # decided to follow (roadmap 1.8.10, audit § 3); its own option turns that off, and it
+            # decided to follow (roadmap 1.8.11, audit § 3); its own option turns that off, and it
             # is a no-op on older versions, so the comparison measures the quoting alone.
             gargv = argv[1:]
             if argv[0] == b"ls":

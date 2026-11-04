@@ -155,6 +155,17 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   `touch -d '2 days ago'`. `touch stamp; make; find . -newer stamp` missed everything written in
   stamp's own second, at exit 0 (1.7.1). `touch -d '… 05.100'` against `… 05.600` sees it.
 
+- ⛔ *A layout rule measured where every row is alike cannot tell left from right.* `ls -l` writes
+  `?` for the owner and group of an entry it could not stat. kriya right-justified them, GNU
+  left-justifies them as it does a name, and the only fixture was a directory where EVERY stat
+  failed, so every column was one wide and both rules printed the same bytes. A listing
+  that mixes one failed row with good ones shows it, as `ls -lL` over a dangling link did at
+  1.8.10. ⭐ Put a failed row beside a wider good one.
+
+- ⚠ *Two fixtures are two answers.* Comparing a GNU run over one fixture with a kriya run over a
+  second, built by the same script a moment later, showed differences in `-i` and in `-ft`'s order
+  that were the fixtures': other inode numbers, other nanoseconds (1.8.10). Run both over ONE.
+
 ### Testing the tests: mutation and adversarial review
 
 - ⛔ **A mutant that widens a rule survives a case whose failure takes another path.** 1.8.7's
@@ -626,6 +637,13 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   ⚠ No literal reaches native aarch64 `fchdir` at all: 81 passes through as `sync`, and there is no
   1050 alias (filed upstream). `chdir("/proc/self/fd/N")` through `sys_chdir` is the workaround.
 
+- ⛔ **The stdlib's flag table holds 32 flags, and the 33rd is refused with -1 and no message.**
+  `ls` reached 36 at 1.8.10. Every flag registered past the cap is unknown to the parser, and the
+  ones past it are whichever were added LAST: a mutant that left the table at 32 lost `-w`, `-C`,
+  `-x` and `-m`, flags from 1.6.8, not the new ones. `FLAGS_MAX` is the stdlib's knob, read by
+  `flags_new` and by every `_flags_add`, so a driver raises it before `flags_new`. ⭐ Count a
+  table's registrations when adding to it.
+
 - ⛔ **An argument you do not pass is still an argument if the kernel reads its register.** A
   three-argument `syscall(1, fd, buf, n)` leaves `r10` as the last code set it, and agnos reads a4
   from `r10` for `write` and `read`: zero blocks, anything else is O_NONBLOCK. So one call site
@@ -843,6 +861,17 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   with as much certainty as the rules that were right, and was half wrong: with `LS_COLORS` unset
   there are no escapes at all, but set it to any valid key and GNU loads a compiled-in default table
   and overlays the variable.
+
+- ⛔ **The oracle can change the fixture it runs over.** Under relatime the first READ of a
+  directory and the first FOLLOW of a symlink move its atime. A GNU run that listed `sub`, or
+  `ls -l` reading a link's target, hands the kriya run after it a different `-u` listing. 1.8.10's
+  atime cases run before anything reads the fixture, and the long ones list files only, whose
+  atime nothing in the suite reads. ⚠ `touch -a` cannot pin it: any atime at or below the ctime is
+  updated on the next read, and setting it moves the ctime.
+- ⚠ **GNU's option semantics move too, not only its output.** GNU 9.6 made `ls -f` plain `-aU`;
+  before it, `-f` also cancelled an EARLIER `-l`, `-s` and `--color`, so 9.4's `ls -lf` is one name
+  per line where 9.6 on is long. kriya follows 9.6, and `smoke-ls.sh` probes the oracle and
+  compares against `-fl`, long on every version, where the oracle is older (1.8.10).
 
 ---
 

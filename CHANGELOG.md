@@ -6,6 +6,92 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.8.10] - 2026-11-03 — `ls`'s POSIX options
+
+The roadmap's 1.8.10 slot: the eight POSIX `ls` options kriya refused with exit 2
+([POSIX `ls`](https://pubs.opengroup.org/onlinepubs/9799919799/utilities/ls.html)), each measured
+against GNU 9.12 first and compared with it byte for byte. The slot's two decisions are still open, and
+move to 1.8.11.
+
+### Breaking
+
+- ⛔ **A symlink operand that names a directory is listed as that directory.** POSIX: "symbolic links
+  named as operands that refer to directories are followed unless -d, -F or -l". kriya listed the link:
+  `ls d/lsub` printed `d/lsub` where GNU lists the directory's entries. **Migration: `ls -d LINK`** lists
+  the link itself, as `-l` and `-F` still do.
+
+### Added
+
+- **`-c` and `-u`**: the status-change or the access time in place of the modification time, for `-t`
+  and for the `-l` date. The last of the two wins. Without `-l`, and with no `-t`, `-S` or `-f`, they
+  also sort by that time, as GNU's do: `ls -c` lists the newest ctime first, and `ls -lc` lists by name
+  and shows the ctime. POSIX leaves the first unspecified.
+- **`-f`**: unsorted, in the order the directory read gives, with `.` and `..`, since it is an `-a`. `-r`
+  does nothing with it, and `-l` still applies (GNU 9.6 on; 9.5 and older cancelled an earlier `-l`).
+  It is last-wins with `-t` and `-S` (`-tf` is unsorted, `-ft` sorted by time), and with `-a` and `-A`.
+- **`-s` / `--size`**: each entry's allocated size in 1 KiB blocks, rounded up as `total` is, or
+  `-h`-scaled. It follows the inode and comes before the name, or before the mode under `-l`. It is
+  right-aligned to the listing's widest, bare under `-m`, and `?` where the stat failed. A directory's
+  listing gets a `total` line without `-l` too; the file operands never do.
+- **`-k` / `--kibibytes`**: the 1 KiB unit for `-s` and `total`, which is the only one kriya has.
+  `BLOCK_SIZE`, `LS_BLOCK_SIZE` and POSIXLY_CORRECT's 512 are not read. `-h` wins over it in either order.
+- **`-p`**: a `/` after a directory and nothing else: not after a symlink to one, nor after a `-l` link's
+  target. It is last-wins with `-F`: `-pF` classifies and `-Fp` writes slashes.
+- **`-H` / `--dereference-command-line` and `-L` / `--dereference`**: follow the symlinks named as
+  operands, or every symlink. The last of the two wins. A followed link is listed with its target's
+  metadata under its own name, with no ` -> `.
+  - Under `-L` a dangling link is *cannot access*, a `l?????????` row and exit 1, where the format
+    needs to look at it. Where GNU never stats an entry (`ls -1L`), it is listed by name with no error.
+    GNU 9.12's vanish rule still holds: a stat that fails is a vanished entry only when the `lstat`
+    fails too.
+  - ⭐ **`-R` refuses a directory it is already listing**, as GNU does: `kriya ls: lp/in/back: not
+    listing already-listed directory`, exit 1. Under `-L` a link back up the tree made the recursion
+    endless. The check is on for every `-R`, which a bind-mount loop needs too, and costs one `fstat` per
+    directory: `ls -R /usr/include` (1,733 directories) took 0.102 s at 1.8.9 and 0.103 s now, best of 7.
+  - ⚠ A dangling `-H` / `-L` operand and the `-R` refusal exit 1 where GNU exits 2. That is roadmap
+    1.8.11's open decision on the operand exit status, and kriya's current rule applies.
+
+### Fixed
+
+- ⛔ **`-a` and `-A` were not last-wins.** `ls -Aa` hid `.` and `..`, which GNU shows: `-A` won in either
+  order.
+- ⛔ **An inode that could not be read was `0`** in every format but `-l`. `ls -i` in a directory without
+  search permission printed `0 a` where GNU prints `? a`.
+- ⛔ **`-l`'s owner and group `?` were right-justified.** GNU left-justifies them, the way it writes a
+  name. The only fixture was a directory where every stat failed, so every column was one wide and the
+  two rules agreed. A listing that mixes a failed row with good ones shows it, as `ls -lL` over a
+  dangling link does.
+
+### Changed
+
+- `ls` registers 36 flags, and the stdlib's table holds 32: a flag past it is refused with -1 and nothing
+  said. `_ls_init_spec` raises `FLAGS_MAX`, the stdlib's knob, to 48 before `flags_new`. A mutant that
+  left it at 32 lost `-w`, `-C`, `-x` and `-m`, the flags registered last.
+
+### Changed (tests)
+
+- **`smoke-ls.sh` 384 → 479.** 95 cases over the eight options and the defects above, on ONE fixture
+  that GNU and kriya both list, since inode numbers and nanoseconds differ between two. Its mtime, atime
+  and ctime orders all differ, so a listing sorted by the wrong field cannot pass.
+  - ⚠ The atime cases run first, and the long ones list files only: under relatime the first read of a
+    directory or symlink moves its atime, so a GNU run that read one would change kriya's fixture.
+  - ⚠ `-lf` is PROBED: on an oracle older than 9.6 it is compared against `-fl`.
+  - The cases GNU exits 2 for compare the listing, and assert kriya's exit 1 and its diagnostic.
+- **`smoke-vanish.sh` 31 → 35.** `-s` and `-c` need the stat, so a vanished entry is left out. `-p` and
+  `-1L` do not, so its name stands, `-p`'s with its slash.
+- **30 mutants over the new code, all killed**, from `-c` reading the mtime to `-R` never popping a
+  directory it left.
+- **890 unit + 72 syscall + 18 POSIX.** Smoke is **8,306 / 0** in ubuntu:24.04 (GNU 9.4), **8,309 / 0** in
+  26.04 (9.7), and **8,401 / 0** on the dev box (9.12), across 44 scripts; `smoke-help-json.sh` grew
+  1,914 → 1,954 with the new flags' schema checks. On aarch64 under qemu, `smoke-ls`, `-vanish`, `-deep`
+  and `-find` pass, and `smoke-du` bar its qemu-only `ulimit -v` case. Fuzz is green under poison.
+  `cyrius lint`, the lints, `check-oracles.sh` and `watchlist-scan.py` are clean, and all three targets
+  build warning-free.
+  - ⚠ One `smoke-find` case failed once, in a run of all three suites at once, and passed in the eleven
+    runs since: six of them in parallel, and three under that same load. Nothing in `find` changed, and
+    the case is not identified.
+- **Sizes:** host 1,363,544 → **1,368,216**, agnos 1,368,072 → **1,376,832**.
+
 ## [1.8.9] - 2026-11-03 — every walk is a loop
 
 The roadmap's 1.8.9 slot. 1.8.6 bounded every walk's open directories and made `rm -r` a loop

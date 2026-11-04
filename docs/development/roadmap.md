@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.10** — `ls`'s POSIX options |
+| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.11** — two decisions, waiting on the maintainer |
 | **1.9.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.9.0** — floats |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
@@ -62,13 +62,9 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 (`src/lib/argbatch.cyr`), which counts as GNU's `buildcmd` does
 ([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
 
-- **1.8.10 — `ls`'s remaining POSIX options, and what the 9.12 review left to decide.** 1.8.8
-  shipped the rest of the review ([audit](../audit/2026-11-03-gnu-9.12-parity.md)).
-  - **Eight POSIX options are refused, exit 2**: `-H -L -c -f -k -p -s -u`. The 2026-05-18 POSIX
-    audit called `-p` "deferred, named in CHANGELOG", and no roadmap entry carried any of them
-    until the 9.12 review (§ 8.3). `-q` shipped at 1.8.8.
-    - ⚠ `-L` and `-H` are ADR 0003's territory: following is opt-in, and these ARE the opt-in.
-    - ⚠ `-s` needs the blocks unit `du` already renders, and `-k` is its 1024-byte form.
+- **1.8.11 — what the 9.12 review left to decide.** ⏸ **Both items wait on the maintainer's
+  decision.** 1.8.10 shipped the rest of the slot they shared, `ls`'s eight POSIX options, and left
+  these as they were ([audit](../audit/2026-11-03-gnu-9.12-parity.md)).
   - **⛔ DECISION: a newline in a name becomes `?` off a tty**, where newlines separate entries
     (§ 3). GNU 9.12 does it; it is a POSIX deviation, so it needs the ADR drafted in the audit's
     Appendix B, or its "keep raw" alternative.
@@ -80,6 +76,10 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
     1.8.7). GNU's 2 is "serious trouble", a command-line argument it cannot reach, and its 1 is a
     lesser failure such as a subdirectory. POSIX says only ">0". [ADR 0008](../adr/0008-posix-exit-code-policy.md)'s
     tiers keep 2 for usage errors, so following GNU is a policy change and needs an amendment.
+    - ⚠ 1.8.10 brought two more of GNU's exit-2 cases, and kriya exits 1 for both under the same
+      rule: an operand `-H` or `-L` cannot follow (a dangling link, *cannot access*), and a
+      directory `-R` refuses because it is already being listed (*not listing already-listed
+      directory*). `smoke-ls.sh` compares the listing with GNU's and asserts kriya's 1.
   - **Head and tail headers stay POSIX's**, unquoted (§ 1). That is no code change, and the draft
     ADR in the audit's Appendix A records it once accepted. It is listed so the decision is not
     mistaken for an omission.
