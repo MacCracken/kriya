@@ -157,6 +157,17 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 
 ### Testing the tests: mutation and adversarial review
 
+- ⛔ **A mutant can be killed by a HANG, and a suite with no timeout reports nothing.** 1.8.6's
+  mutant that stopped saving a closed directory's entries made the walk read that directory again
+  from the start when it came back, so it walked the same subtree for ever. The first mutation run
+  sat on one `find` for sixteen minutes at 1.5 GB. `smoke-deep.sh` now runs every kriya call under
+  `timeout`, and the harness shortens it through `SMOKE_DEEP_TIMEOUT`. ⚠ Read a harness's output
+  unbuffered (`python3 -u`), or a stuck run looks exactly like a slow one.
+- ⛔ **A copy of the tree taken during a mutation run can hold the mutant.** At 1.8.6 the agnos and
+  aarch64 builds came from a snapshot made while the harness ran, and the snapshot held the mutant in
+  progress. ⭐ Build the snapshot for the host first and `cmp` it against the binary saved before the
+  run; only an identical one is the tree you meant.
+
 - ⛔ **A surviving mutant is a question about the TEST, and a mutant the oracle agrees with is a
   question about the CODE.** 1.8.2 wrote 19 mutants for its new cases. Three survived the first run,
   and each was a test defect:
@@ -184,6 +195,14 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   option under test, the capture fails and the WHOLE SCRIPT ends, printing no summary — which the
   mutation run reports as an empty line, not as failures. Write `|| true` inside every capture of
   a command that is allowed to fail.
+- ⛔ **A limit test must SET the limit.** CI runners allow far more than 1,024 descriptors, so a
+  1,100-level tree passes there against walks that fail at 1,021 on a desktop. `smoke-deep.sh` runs
+  every budget case under `ulimit -n 64` (or 8), set by the script.
+- ⛔ **A case with no GNU in it pins kriya's answer, whatever that is.** `smoke-grep.sh` asserted
+  `grep -s foo missing` exits 1, beside a code comment saying `-s` keeps errors from reaching the
+  status. GNU 3.12 exits 2, as POSIX says: `-s` silences the message, not the error. The same review
+  found that `-q` after an error exited 2, where POSIX says 0 once a line is selected, and that
+  errors inside a `grep -r` walk never reached the status at all (1.8.6).
 - ⛔ **A test compared against a DIFFERENT GNU invocation pins a belief, not a behaviour.**
   `smoke-xargs.sh` checked kriya's `xargs echo` on empty input against GNU's `xargs
   --no-run-if-empty echo`, beside a code comment saying modern GNU does not run the command. Both
@@ -311,6 +330,17 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   (2,047 levels) for RLIMIT_NOFILE (1,020 under `ulimit -n 1024`; `cp -R`, at two per level, 509), and
   no release measured it until 1.8.3 checked the roadmap's depth claim. GNU's fts has no such limit.
   **When a design trades one ceiling for another, measure the new ceiling in the same change.**
+  ⛔ *And measure it with the old ceiling lifted out of the way.* 1.8.6 lifted the descriptor limit,
+  and under `ulimit -n 500000` the recursive walks died of SIGSEGV instead: `cp -R` from 8,000
+  levels, `du` from 12,000, `find` and `rm -r` from 20,000. No probe under the default limit could
+  have shown it, because the descriptor limit always came first.
+
+- ⛔ *A cached descriptor is a NUMBER, and numbers are reused.* Once a walk may close a directory
+  and reopen it later (1.8.6), a descriptor a walker held across a descent is not merely invalid. The
+  kernel hands the freed number to the next open, so the stale one can name a DEEPER directory, and
+  an `unlinkat` through it removes a same-named entry somewhere else. Fetch the descriptor again
+  after every call that can descend. Mutation-test each walker's re-fetch on its own: a tree whose
+  levels all hold an `a` makes a wrong directory look right.
 
 - ⛔ *A cold-start number means nothing without the previous binary measured beside it.* One run of
   1.6.1 read 0.599 ms against a recorded 1.6.0 of 0.599 — and building 1.6.0 and re-measuring both
@@ -620,6 +650,13 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 ---
 
 ## Measuring against GNU, and against the environment
+
+- ⛔ **On this box the tool shell's `grep` and `find` are not GNU's.** They are zsh functions that
+  run ugrep and bfs: `find --version` printed `bfs 4.1.1`, and a `grep -r` exit-status table
+  measured ugrep's answers (1.8.6). The smoke scripts run under `sh` and get `/usr/bin`'s GNU tools.
+  Ad-hoc probes must name `/usr/bin/grep` and `/usr/bin/find`, or run under `sh`. ⚠ zsh also leaves
+  an unquoted `$args` unsplit, so a probe loop over argument strings handed kriya ONE argument, and
+  the *bad option* exit 2 was read as a result. Write comparison loops as `sh` scripts.
 
 - **If kriya does not read an environment variable, the ORACLE must not either** — or the test
   measures the shell rather than the code. Cost three separate repairs: `BLOCK_SIZE` for `du`/`df`,

@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.6** — deep trees |
+| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.7** — vanishing entries |
 | **1.9.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.9.0** — floats |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
@@ -62,25 +62,6 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 (`src/lib/argbatch.cyr`), which counts as GNU's `buildcmd` does
 ([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
 
-- **1.8.6 — Deep trees: a bounded descriptor budget for every `*at()` walk.** Each fd-relative walk
-  holds one open directory per level. Under the default `ulimit -n 1024`, a tree deeper than **1,020**
-  levels fails with *too many open files* and exits 1: `find` (since 1.8.2's fd-relative walk), `du` and
-  `rm -r` all stop there. `cp -R` holds two descriptors per level (source and destination) and stops at
-  **509**. GNU's `find`, `du` and `rm -r` (fts) have no depth limit and pass the probe's 2,600-level
-  cap; GNU `cp -R` walks full paths and stops at PATH_MAX, 2,040. Measured at 1.8.3 in ubuntu:26.04,
-  each on a fresh tree of exactly N single-letter levels. `du` at 1.8.2 stops at the same 1,020.
-  - ⛔ **`rm -r` is the one that matters.** Anyone who can make a 1,021-level tree in a shared
-    directory makes it unremovable by kriya's `rm`. `du` also prints a partial total after the error.
-  - **GNU's answer is fts's.** A directory is read whole before its children are entered, so its
-    descriptor is not needed again for reading, and fts keeps a small ring of descriptors. It
-    re-enters a parent through `openat(child, "..")`, checked against the parent's recorded
-    (dev, ino). ⛔ That check is the security half: a `..` that leads elsewhere (a directory moved
-    mid-walk) must stop the walk, never continue it. It is the race the fd-relative walk was
-    adopted to close ([ADR 0027](../adr/0027-find-delete-carries-rms-refusals.md)).
-  - ⚠ **Raising the soft `RLIMIT_NOFILE` is not the fix.** The hard limit can equal the soft one,
-    and an `-exec` child would inherit the raised limit.
-  - The four walks are separate code (`find`'s `_f_walk`, `du`'s `_du_walk`, and `rm`'s and `cp`'s in
-    `src/cmd/`), so the answer should be one shared descriptor policy, not four.
 - **1.8.7 — An entry that vanishes mid-walk is not an error.** GNU 9.12's `ls` and `du` skip an
   entry that a directory read returned and that is gone by the time it is stat'ed (`ENOENT` only,
   and never for a command-line operand). In 300 listings of a directory another process was
@@ -88,9 +69,10 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
   `du -a`, each time with *cannot access* ([audit § 7b](../audit/2026-11-03-gnu-9.12-parity.md)).
   The `ls` site is `src/cmd/ls.cyr`'s per-entry `fs_stat_entry` failure path.
   - ⚠ **GNU keeps one exception**: a dangling symlink still lists (it `lstat`s before giving up).
-  - It is the same walks as 1.8.6, so one round of test work serves both. ⚠ It cannot be tested
-    deterministically without a hook between `getdents` and `fstatat`. The churn probe is a
-    statistical smoke, so it needs a fixed iteration count and a zero-failure assertion.
+  - `du`'s walk is the shared one since 1.8.6 (`src/lib/walk.cyr`), and `ls` is not a walk at all:
+    `ls -R` opens by path and reads each directory whole. ⚠ It cannot be tested deterministically
+    without a hook between `getdents` and `fstatat`. The churn probe is a statistical smoke, so it
+    needs a fixed iteration count and a zero-failure assertion.
 - **1.8.8 — GNU 9.12's output rules.** Measured on 9.4, 9.7, 9.11 and 9.12 in
   [`docs/audit/2026-11-03-gnu-9.12-parity.md`](../audit/2026-11-03-gnu-9.12-parity.md). Every
   smoke case the split touches is version-gated today, so CI's oracle can move without warning.
@@ -126,6 +108,20 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
       carried them until this one. `-q` belongs here; the other eight need a slot.
   - **Head and tail headers stay POSIX's**, unquoted (§ 1; the draft ADR is in Appendix A). That
     is no code change. It is listed so the decision is not mistaken for an omission.
+- **1.8.9 — `find`, `du`, `cp -R` and `grep -r` walk as loops.** 1.8.6 gave every walk a budget of
+  32 open directories ([ADR 0029](../adr/0029-walks-keep-32-directories-open-and-stop-when-the-way-back-moved.md))
+  and made `rm -r` a loop, so its depth is bounded by memory alone: 100,000 levels in 20.7 MB. The
+  other four are still recursions. A stack guard (`wk_stack_room`) stops each one with a
+  diagnostic and exit 1 where it would have died of SIGSEGV. Measured under an 8 MiB stack at
+  1.8.6, the first level each refused: `find` 15,701, `grep -r` 14,494, `du` 10,767 and `cp -R`
+  5,798. GNU's `find`, `du` and `grep` have no limit, and GNU `cp -R` stops at PATH_MAX, 2,040.
+  - The per-level state each keeps in its frame moves into the walk's level slots (`wk_u`), as
+    `rm`'s did. ⚠ The output order is the recursion's: `find`'s pre-order and `-depth`, `-prune`
+    after the visit, and `du`'s line for a directory after its entries.
+  - ⛔ **`find`'s memory goes with it.** Every entry's path is bump-allocated and never freed, so
+    `find` near the guard holds about 250 MB, and `find -depth -delete` 2.1 GB when it reports a
+    failure at every level. The loop takes the one path buffer `rm` and `du` use (`wk_path_push`).
+    That is the memory half of 1.10.6, which keeps the stat half.
 
 ---
 
@@ -251,7 +247,7 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
     `'(stdin)'`, and `sort` says `'(write)'`. GNU says *write error: No space left on device*
     (`sort`: *fflush failed: 'standard output'*). Measured at 1.7.1, and older than it; `cut`,
     `wc` and every utility the dispatcher's write net reports already say *write error*.
-- **1.10.6 — `find` stats only what a test needs, and walks in constant memory.**
+- **1.10.6 — `find` stats only what a test needs.**
   - **The stat.** GNU asks fts for no stat (`FTS_NOSTAT`) and takes an entry's type from
     `d_type`, so a name-only walk stats nothing but directories. kriya stats every entry — the
     4.8× in `docs/benchmarks.md` is partly this — and it is visible as a DIFFERENT ANSWER in a
@@ -259,14 +255,11 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
     on them from `d_type`, and reports only the subdirectory; kriya lists them too since 1.7.1, but
     reports every entry and cannot answer `-type` (`smoke-find.sh` pins the listing). Measured at
     1.7.1 by review.
-  - **The memory.** Every entry's path and stat buffer, and a 4 KiB `getdents64` buffer per
-    directory, are bump-allocated and never freed: `find /usr -name none` peaks at **99.0 MB
-    against GNU's 8.5 MB** (202,664 entries), and at 150.2 MB under `-L` against 8.6 MB (measured at
-    1.8.3). `du` had the same defect and 1.8.3 fixed it: a `getdents64` buffer per *depth*, reused by
-    every directory at that depth, and one fts-style path buffer. That is the pattern to copy.
-  - **The depth** is now roadmap 1.8.6's. Since 1.8.2's fd-relative walk, `find` stops at the
-    descriptor limit (1,020 levels under `ulimit -n 1024`) instead of PATH_MAX (2,047 lines at
-    1.7.1).
+  - **The memory half moved to roadmap 1.8.9** at 1.8.6, with the loop that needs the same path
+    buffer. Every entry's path and stat buffer are bump-allocated and never freed: `find /usr -name
+    none` peaks at **99.0 MB against GNU's 8.5 MB** (202,664 entries), and at 150.2 MB under `-L`
+    against 8.6 MB (measured at 1.8.3). The `getdents64` buffers are the shared walk's since 1.8.6,
+    one per open directory.
 
 ---
 

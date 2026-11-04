@@ -6,6 +6,124 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.8.6] - 2026-11-03 — deep trees: every walk keeps 32 directories open
+
+The roadmap's 1.8.6 slot. Every fd-relative walk held one open directory per level, so a tree deeper
+than the descriptor limit could not be walked, copied or removed. One walk module now holds every
+walk's open directories ([ADR 0029](docs/adr/0029-walks-keep-32-directories-open-and-stop-when-the-way-back-moved.md)).
+
+### Fixed
+
+- ⛔ **Security: `rm -r` could not remove a tree deeper than 1,020 levels** under `ulimit -n 1024`, so
+  anyone who could make one in a shared directory made it unremovable by kriya. With descriptors raised,
+  it died of SIGSEGV between 20,000 and 40,000 levels, and its memory grew with the square of the depth
+  (550 MB at 40,000). `rm -r` is now a loop over the shared walk with one path buffer. It removes a
+  100,000-level tree in **1.26 s and 20.7 MB**, against GNU's 1.40 s and 28.1 MB, under the default
+  limits.
+- ⛔ **`find`, `du` and `grep -r` stopped at 1,020 levels, and `cp -R` at 509**, with *too many open
+  files* and exit 1. Measured on a fresh chain of N single-letter levels, `ulimit -n 1024`:
+
+  | Walk | 1.8.5 | 1.8.6 | GNU |
+  |---|---|---|---|
+  | `rm -r` | 1,020 | no limit but memory | no limit |
+  | `find` | 1,020 | 15,701 (stack guard) | no limit |
+  | `grep -r` | 1,020 | 14,494 (stack guard) | no limit |
+  | `du` | 1,020 | 10,767 (stack guard) | no limit |
+  | `cp -R` | 509 | 5,798 (stack guard) | 2,040 (PATH_MAX) |
+
+  The stack-guard figures are under an 8 MiB stack, the first level each walk refused on one
+  25,000-level chain.
+
+- ⛔ **A deep enough tree crashed the recursive walks.** Past the descriptor limit the next one was the
+  stack, and the kernel's answer was SIGSEGV, exit 139, no message. `find`, `du`, `cp -R` and `grep -r`
+  now stop at a guard computed from RLIMIT_STACK. They report
+  `kriya <util>: '<dir>': directory nested too deeply to walk` and exit 1 (`grep` 2). Making them loops
+  is roadmap 1.8.9.
+- **`find -empty` failed past PATH_MAX** with *file name too long*. It opened each directory by its
+  whole path, the one open of the walk that was not fd-relative. It opens relative to the parent now.
+- ⛔ **BREAKING (exit status): `grep`'s exit status is GNU's and POSIX's.** Measured against GNU grep
+  3.12:
+
+  | Command | GNU | 1.8.5 | 1.8.6 |
+  |---|---|---|---|
+  | `grep -s x one /missing` | 2 | 0 | 2 |
+  | `grep -s x /missing` | 2 | 1 | 2 |
+  | `grep -q x /missing one` | 0 | 2 | 0 |
+  | `grep -r hit d` over an unreadable `d/sub` | 2 | 0 | 2 |
+  | `grep -r nomatch d`, the same `d` | 2 | 1 | 2 |
+
+  - `-s` silences the message, not the error. A code comment said it kept errors from reaching the
+    status, and a smoke case asserted that answer without asking GNU.
+  - `-q` exits 0 once a line is selected, even after an error, as POSIX says.
+  - An error inside a `-r` walk was printed and never reached the status at all.
+  - **Migration:** a script that read `grep -s`'s exit 1 as "no match" should test for 1 and 2
+    separately, as it must with GNU.
+
+### Added
+
+- **`src/lib/walk.cyr`, the shared walk**, used by `find`, `du`, `rm -r`, `cp -R`, `grep -r`, and `mv`'s
+  cross-filesystem move ([ADR 0029](docs/adr/0029-walks-keep-32-directories-open-and-stop-when-the-way-back-moved.md)):
+  - **At most 32 open directories per walk.** Descending past that closes the highest one, after
+    saving what it had left to read. The directory is reopened as `..` of the child the walk leaves.
+  - ⛔ **A directory moved during the walk stops it.** The reopened `..` is checked against the
+    (`st_dev`, `st_ino`) recorded when it closed. A mismatch means carrying on would act on a directory
+    the walk never entered, so it reports `kriya <util>: '<dir>': directory moved during the walk;
+    stopping` and the operand fails. Measured with `rm -ri` driven on a terminal: level 3 of a 45-level
+    chain was moved into `elsewhere/` at the level-40 prompt. kriya stopped, and so did GNU (`rm:
+    fts_read failed: No such file or directory`); both left `elsewhere/` alone.
+  - A directory holding a symlink the walk follows (`-L`) is never closed early, since its `..` is
+    the link target's real parent.
+  - **An open that meets EMFILE asks the walks for a descriptor back**, file opens included. `rm -r`
+    runs in 5 descriptors in all and `cp -R` in 7. `cp -R` under `ulimit -n 64` had failed every file
+    more than about 30 levels down.
+
+### Changed
+
+- Every directory a walk opens is O_CLOEXEC, the reopened `..` included. A `find -exec` child at the
+  bottom of a deep tree sees the same descriptors as GNU's.
+- `du`'s per-depth `getdents64` buffers are the walk's pool: one per open directory, where one per depth
+  was 400 MB at 100,000 levels.
+- **Roadmap:** the 1.8.6 slot is removed. **1.8.9** is new: `find`, `du`, `cp -R` and `grep -r` walk as
+  loops, which takes `find`'s per-entry path memory with it (the memory half of 1.10.6, which keeps
+  its stat half). The next slot is **1.8.7**.
+
+### Tests
+
+- **`smoke-deep.sh`, new: 46 cases.** It sets its own limits, because CI runners allow far more than
+  1,024 descriptors.
+  - Every walk past `ulimit -n 64` on a 300-level chain, and past PATH_MAX on 2,100 levels.
+  - An 80-level tree with something left to read at every level, compared line for line with GNU:
+    `find`, `-depth`, `-empty`, `-execdir`, `-depth -delete`, `du -a`, `grep -r`, `cp -R` and
+    `rm -rv`.
+  - `ulimit -n 8`, a followed symlink under `-L`, and `find -exec`'s descriptors.
+  - Both moved-directory cases, `find -depth -delete` and `rm -ri` on a terminal.
+  - Every walk under a 1 MiB stack: the recursive ones stop with the diagnostic, and `rm -r` still
+    removes the tree.
+  - **43 of the 46 fail against the 1.8.5 binary.** The three that pass are the `elsewhere` checks,
+    which 1.8.5 met by never closing a directory early, and one exit status 1.8.5 got right for
+    another reason.
+  - ⚠ Every kriya call runs under `timeout`. A walk that loses its place when a level is closed reads
+    the level again from the start and loops: the first mutation run sat sixteen minutes on one `find`.
+- **`smoke-grep.sh` 346 → 358**: the exit-status rules against GNU, and the corrected `-s` case.
+- **Unit 869 → 883**: the walk's path buffer, its level chunks either side of a 1,024 boundary, `wk_fd`
+  of a level never opened, and the stack guard in-process.
+- **Eighteen mutants, each reversing one rule, all die:**
+  - **The walk:** no `..` identity check (both moved-directory cases, including `elsewhere/`); no saving
+    on close (31 cases); no pin for a followed link; no EMFILE retry; no budget; a drain that drops the
+    current entry; no stack guard (all four walks crash).
+  - **Each walker's descriptor re-fetch removed on its own:** `du`, `find`, `find -depth`'s parent,
+    `cp`, `grep`.
+  - **Single fixes reverted:** `cp`'s file opens not asking the walks, `-empty` by path, `find` exiting
+    0 after a stopped walk, and the three `grep` exit-status rules.
+  - Restored, the build is byte-identical.
+- **883 unit + 72 syscall + 18 POSIX.** Smoke is **8,019 / 0** in ubuntu:24.04 (GNU 9.4), **8,022 / 0** in
+  26.04 (9.7), and **8,113 / 0** on the dev box (9.12), across 42 scripts. `smoke-deep.sh` also passes on
+  aarch64 under qemu, as do `smoke-rm`, `-find`, `-cp-recursive`, `-grep` and `-mv`. `smoke-du` there fails
+  only its `ulimit -v` case, which limits qemu itself, as 1.8.5's aarch64 build does too. Fuzz is green
+  under poison. `cyrius lint` (every changed file), the lints, `check-oracles.sh` and `watchlist-scan.py`
+  are clean. `vet` reports 58 deps, and all three targets build warning-free.
+- **Sizes:** host 1,338,176 → **1,355,072**, agnos 1,346,800 → **1,359,592**.
+
 ## [1.8.5] - 2026-11-03 — the GNU 9.12 parity review, and `date` stops echoing what it cannot render
 
 Out of plan. The dev box's coreutils moved to 9.12, and the 33 smoke failures that surfaced at 1.8.4 are
