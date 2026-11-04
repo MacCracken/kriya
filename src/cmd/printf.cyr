@@ -44,11 +44,14 @@
 # width left-justifies; a negative `*` precision is no precision.
 # ⛔ A FIELD TOO LARGE FOR GNU IS NOT PRINTED (1.6.17). The digits WRAPPED —
 # `%18446744073709551617d 5` printed `5` — and below the wrap a huge width was
-# a HANG: the padding was one `write(2)` per byte. GNU refuses an integer or `%c`
-# field past INT_MAX - 2 and a `%s` width past INT_MAX, then carries on with the
-# rest of the format and exits 1; so does this, naming the directive. A `*` value
-# outside int is FATAL, as GNU's is: *invalid field width* / *invalid
-# precision*. ⚠ A `%s` precision past INT_MAX is no limit (9.11; 9.4 refuses).
+# a HANG: the padding was one `write(2)` per byte. GNU refuses a width or precision
+# past INT_MAX, then carries on with the rest of the format and exits 1; so does
+# this, naming the directive. A `*` value outside int is FATAL, as GNU's is:
+# *invalid field width* / *invalid precision*. ⚠ A `%s` precision past INT_MAX is no
+# limit (9.7 onward; 9.4 refuses).
+# ⛔ The ceiling was INT_MAX - 2 for integers and `%c` until 1.8.8: kriya copied
+# 9.4–9.11, and that ceiling was a gnulib bug, fixed in `08c8a9228f` ("vasnprintf:
+# fix ("%*d", INT_MAX, n)"). GNU 9.12 is the first coreutils built with it.
 #
 # ⛔ AN ARGUMENT IS READ AS GNU READS IT, AND WHAT IS NOT A NUMBER IS SAID
 # (1.6.17). `strtoimax` for `%d %i` and `*`, `strtoumax` for `%u %o %x %X`: blanks,
@@ -665,14 +668,15 @@ fn _pf_directive(fmt, i): i64 {
     var v: i64 = 0;
     # Read even when the field is not printed: a bad argument is still reported.
     if (numeric == 1) { v = _pf_num(arg, uns); }
-    # ⚠ THE LIMITS ARE GNU printf's, MEASURED, AND NOT INT_MAX FOR EVERY
-    # CONVERSION: an integer or `%c` field is refused past INT_MAX - 2
-    # (`%2147483645d` prints two gigabytes, `%2147483646d` nothing), while `%s`
-    # takes a width up to INT_MAX, and a precision past it means no limit at all.
-    # ⚠ That last one is 9.11's; 9.4 refuses it. GNU `stat` differs again.
-    var lim: i64 = 2147483645;
+    # ⚠ THE LIMIT IS INT_MAX, FOR EVERY CONVERSION (1.8.8, GNU 9.12): `%2147483647d`
+    # prints two gigabytes and `%2147483648d` nothing, and so for `%c`, `%x` and `%s`.
+    # A `%s` PRECISION past INT_MAX means no limit at all. ⛔ The INT_MAX - 2 that
+    # integers and `%c` had until 1.8.8 was gnulib's bug (`08c8a9228f`), copied from
+    # 9.4–9.11 along with its numbers. ⚠ And the `%s` width claim this comment used to
+    # make, "INT_MAX on both versions", was wrong for 9.4, which refuses one past
+    # INT_MAX - 2 there too. GNU `stat` differs again.
+    var lim: i64 = 2147483647;
     if (conv == 115) {
-        lim = 2147483647;
         if (prec > 2147483647) { prec = 0 - 1; }
     }
     if (width > lim) {

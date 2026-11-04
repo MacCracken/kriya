@@ -505,7 +505,10 @@ fn cmd_realpath(start: i64): i64 {
                 if (have_to == 1) { emit = path_relative(to_buf, out_buf); }
                 else              { emit = path_relative(base_buf, out_buf); }
             }
-            k_write( 1, emit, strlen(emit));
+            # ⭐ Quoted on a terminal (GNU 9.12), never under -z.
+            var rp_raw: i64 = 0;
+            if (load8(&term_buf) == 0) { rp_raw = 1; }
+            quote_tty_write(emit, strlen(emit), rp_raw);
             k_write( 1, &term_buf, 1);
         }
         i = i + 1;

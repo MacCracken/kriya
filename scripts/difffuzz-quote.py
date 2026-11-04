@@ -65,7 +65,13 @@ try:
         bad = []
         for cmd in RENDER:
             argv = [c.encode() for c in cmd] + [b"--", nm]
-            g = subprocess.run([b"/usr/bin/" + argv[0]] + argv[1:], cwd=d, env=ENV,
+            # ⚠ GNU 9.12's `ls` writes a newline in a name as `?` off a tty, which kriya has not
+            # decided to follow (roadmap 1.8.10, audit § 3); its own option turns that off, and it
+            # is a no-op on older versions, so the comparison measures the quoting alone.
+            gargv = argv[1:]
+            if argv[0] == b"ls":
+                gargv = [b"--show-control-chars"] + gargv
+            g = subprocess.run([b"/usr/bin/" + argv[0]] + gargv, cwd=d, env=ENV,
                                capture_output=True, timeout=20).stdout
             k = subprocess.run([KRIYA.encode()] + argv, cwd=d, env=ENV,
                                capture_output=True, timeout=20).stdout

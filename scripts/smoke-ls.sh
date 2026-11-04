@@ -652,30 +652,39 @@ same_ls() {   # same_ls <name> <arg...>
 }
 # ⛔ GNU 9.12 MADE `-w` AN INCLUSIVE MAXIMUM, and it seeds the final column at
 # width 1 where 9.4–9.11 seed it at 3 (docs/audit/2026-11-03-gnu-9.12-parity.md
-# § 2). kriya keeps a line strictly inside the width. PROBED rather than read
-# from --version: two one-character names make `a  b`, four columns, which fits
-# `-w 4` only under 9.12. On such an oracle a case ON a boundary asserts kriya's
-# answer directly, and every case off a boundary still compares against GNU.
+# § 2). kriya follows since 1.8.8. PROBED rather than read from --version: `aa  bb`
+# is one line at `-w 6` only under 9.12 (9.4 and 9.7 give two, measured). On such an
+# oracle a case ON a boundary compares against GNU; on an older one it asserts kriya's
+# (9.12's) answer directly. Every case off a boundary compares against GNU on every
+# version.
+# ⛔ THE 1.8.5 PROBE COULD NOT TELL THE RULES APART. It used two ONE-character names
+# at `-w 4`, and under the old rule a column that never grows past its seed of 3 is
+# never re-tested, so `a  b` fit there on every version. It was harmless while both
+# branches asserted the old answer; flipped, 9.7 took the 9.12 branch.
 # ⚠ Rewriting GNU's width (`-w W-1`) does NOT recover the old rule: the seed
 # moved too, commas count the comma, and clear-to-EOL divides by the width.
-mkdir -p wprobe && : > wprobe/a && : > wprobe/b
+mkdir -p wprobe && : > wprobe/aa && : > wprobe/bb
 GNU_W_INCL=0
-[ "$(env -u COLUMNS ls -C -w 4 wprobe | wc -l)" -eq 1 ] && GNU_W_INCL=1
-w_edge() {  # w_edge <name> <kriya's answer, through cat -A> <dir> <arg...>
+[ "$(env -u COLUMNS ls -C -w 6 wprobe | wc -l)" -eq 1 ] && GNU_W_INCL=1
+w_edge() {  # w_edge <name> <9.12's answer, through cat -A> <dir> <arg...>
     _n=$1; _x=$2; _d=$3; shift 3
-    if [ "$GNU_W_INCL" = 1 ]; then
+    if [ "$GNU_W_INCL" = 0 ]; then
         expect_eq "$_n" "$_x" "$(env -u COLUMNS "$BIN" ls "$@" "$_d" 2>&1 | cat -A)"
     else
         expect_eq "$_n" "$(env -u COLUMNS ls "$@" "$_d" 2>&1 | cat -A)" \
                         "$(env -u COLUMNS "$BIN" ls "$@" "$_d" 2>&1 | cat -A)"
     fi
 }
+# ⭐ 6 is the boundary that separates `<=` from `<` (1.8.8): two columns of f1–f6 make a
+# 6-column line under 9.12's seed. A mutant with the old strict fit passed every case at 7.
+w_edge "-C at width 6" "$(printf 'f1  f4$\nf2  f5$\nf3  f6$')" colw -C -w 6
+w_edge "-x at width 6" "$(printf 'f1  f2$\nf3  f4$\nf5  f6$')" colw -x -w 6
 for _w in 5 7 9 13 20 40 80 0; do
     if [ "$_w" = 7 ]; then
         # ⚠ 7 is colw's boundary: two columns of f1–f6 make a 7-column line under
         # the old seed, so 9.12 packs them and 9.4–9.11 do not.
-        w_edge "-C at width 7" "$(printf 'f1$\nf2$\nf3$\nf4$\nf5$\nf6$')" colw -C -w 7
-        w_edge "-x at width 7" "$(printf 'f1$\nf2$\nf3$\nf4$\nf5$\nf6$')" colw -x -w 7
+        w_edge "-C at width 7" "$(printf 'f1  f4$\nf2  f5$\nf3  f6$')" colw -C -w 7
+        w_edge "-x at width 7" "$(printf 'f1  f2$\nf3  f4$\nf5  f6$')" colw -x -w 7
     else
         same_ls "-C at width $_w"  -C -w "$_w"
         same_ls "-x at width $_w"  -x -w "$_w"
@@ -737,12 +746,37 @@ same_lsd() {  # same_lsd <name> <dir> <arg...>
 }
 same_lsd "a pad that straddles a tab stop" gapw  -C -w 20
 same_lsd "...and across"                   gapw  -x -w 20
-# ⚠ Both are boundaries by construction, so on a 9.12 oracle they assert kriya's
-# answer: GNU 9.12 packs the LAST entry one column further (it has no comma).
+# ⚠ Both are boundaries by construction: GNU 9.12, and kriya since 1.8.8, pack the
+# LAST entry one column further, because it has no comma after it.
 w_edge "commas wrapping exactly at -w" \
-    "$(printf '00, 01,$\n02, 03,$\n04, 05,$\n06, 07,$\n08$')" wrapm -m -w 10
+    "$(printf '00, 01,$\n02, 03,$\n04, 05,$\n06, 07, 08$')" wrapm -m -w 10
 w_edge "...and at a narrower one" \
-    "$(printf '00,$\n01,$\n02,$\n03,$\n04,$\n05,$\n06,$\n07,$\n08$')" wrapm -m -w 6
+    "$(printf '00,$\n01,$\n02,$\n03,$\n04,$\n05,$\n06,$\n07, 08$')" wrapm -m -w 6
+# ⭐ `-m` QUOTES A NAME HOLDING ITS SEPARATOR (1.8.8, GNU 9.12, audit § 4): shell and
+# shell-escape quote it, escape writes `\,`; `c` and literal are unchanged, and so are `-1`
+# and a section header. PROBED: an oracle that quotes `a,b` under -m is compared against;
+# on an older one kriya's (9.12's) answer is asserted.
+mkdir -p mq; : > 'mq/a,b'; : > 'mq/a b'; : > mq/plain; : > 'mq/,lead'; : > 'mq/trail,'
+mkdir -p 'mq/c,d'; : > 'mq/c,d/x'
+GNU_M_COMMA=0
+[ "$(env -u COLUMNS LC_ALL=C ls -m --quoting-style=shell-escape mq | grep -c "'a,b'" || true)" = 1 ] && GNU_M_COMMA=1
+m_comma() {  # m_comma <name> <9.12's answer, through cat -A> <arg...>
+    _n=$1; _x=$2; shift 2
+    _k=$(env -u COLUMNS LC_ALL=C "$BIN" ls "$@" mq 2>&1 | cat -A)
+    if [ "$GNU_M_COMMA" = 1 ]; then
+        expect_eq "$_n" "$(env -u COLUMNS LC_ALL=C ls "$@" mq 2>&1 | cat -A)" "$_k"
+    else
+        expect_eq "$_n" "$_x" "$_k"
+    fi
+}
+m_comma "-m quotes a comma, shell-escape" "',lead', 'a b', 'a,b', 'c,d', plain, 'trail,'\$" -m -w 200 --quoting-style=shell-escape
+m_comma "-m quotes a comma, shell"        "',lead', 'a b', 'a,b', 'c,d', plain, 'trail,'\$" -m -w 200 --quoting-style=shell
+m_comma "-m escapes a comma, escape"      '\,lead, a\ b, a\,b, c\,d, plain, trail\,$' -m -w 200 --quoting-style=escape
+m_comma "-m, c is unchanged"              '",lead", "a b", "a,b", "c,d", "plain", "trail,"$' -m -w 200 --quoting-style=c
+m_comma "-m, literal is unchanged"        ',lead, a b, a,b, c,d, plain, trail,$' -m -w 200 --quoting-style=literal
+m_comma "-1 leaves a comma bare"          "$(printf ',lead$\n'"'"'a b'"'"'$\na,b$\nc,d$\nplain$\ntrail,$')" -1 --quoting-style=shell-escape
+m_comma "-mR: the header keeps its own rule" \
+    "$(printf 'mq:$\n'"',lead', 'a b', 'a,b', 'c,d', plain, 'trail,'"'$\n$\nmq/c,d:$\nx$')" -mR -w 200 --quoting-style=shell-escape
 same_lsd "no -w and no COLUMNS is 80"      widew -C
 same_lsd "...across too"                   widew -x
 
@@ -1049,6 +1083,23 @@ for _qs in literal shell shell-always shell-escape shell-escape-always c escape 
     # 9.11 and 9.12 for all nine styles, measured, and still pads.
     l612 "--quoting-style=$_qs, -C aligns"       "" -C -w 61 "--quoting-style=$_qs" ../qdir
 done
+# ⭐ POSIX's `-q` (1.8.8): each non-printable byte, the newline among them, written `?`, in the
+# styles that leave such bytes raw; the escaping styles have none left to mask. Last-wins with
+# `--show-control-chars`, as in GNU. The same on 9.4, 9.7 and 9.12: none of these is 9.12's
+# newline rule, which `-q` and `--show-control-chars` override either way.
+for _qs in literal shell shell-always shell-escape c escape; do
+    l612 "-q, $_qs"                              "" -1 -q "--quoting-style=$_qs" ../qdir
+done
+l612 "--hide-control-chars is -q"                "" -1 --hide-control-chars ../qdir
+l612 "-q then --show-control-chars"              "" -1 -q --show-control-chars ../qdir
+l612 "--show-control-chars then -q"              "" -1 --show-control-chars -q ../qdir
+l612 "-lq"                                       "" -lq --time-style=long-iso ../qdir
+l612 "-Cq aligns"                                "" -Cq -w 40 ../qdir
+# ⛔ A `/` IN AN OPERAND IS BARE (1.8.8). kriya quoted it for `ls` alone, so on a terminal
+# `ls src/x.c` printed `'src/x.c'` and `ls -d /tmp` printed `'/tmp'`; GNU prints both bare.
+for _qs in shell shell-escape escape; do
+    l612 "a path operand is bare, $_qs"          "" -d "--quoting-style=$_qs" ../qdir /
+done
 # ⛔ SECTION HEADERS ARE QUOTED TOO, where a `:` forces the quotes and a `/` does
 # not, and an operand header shares the rule.
 mkdir -p 'h612/a b' 'h612/a:b' h612/plain "h612/$(printf 'n\nl')"
@@ -1107,15 +1158,25 @@ l612 "colour: -C emits clear-to-EOL"             "" --color=always -C -w 5 c
 expect_eq "...and the escape is really there" "2" \
     "$(cd l612 && env $L612_ENV "LS_COLORS=$LC612" "$BIN" ls --color=always -C -w 5 c \
        | grep -c "$(printf '\033')\[K" || true)"
-# The -w 30 layout is compared on a 9.4–9.11 oracle only: 9.12's inclusive width
-# packs it differently (docs/audit/2026-11-03-gnu-9.12-parity.md § 2).
-if [ "$GNU_W_INCL" = 0 ]; then
+# The -w 30 layout is compared on an inclusive (9.12) oracle only: the older ones pack it
+# by the old width rule, which kriya left at 1.8.8 (docs/audit/2026-11-03-gnu-9.12-parity.md
+# § 2). The colour-without-tabs cases below run on every version.
+if [ "$GNU_W_INCL" = 1 ]; then
     l612 "colour: -C at -w 30"                   "" --color=always -C -w 30 c
 else
-    echo "note: GNU 9.12 packs 'colour: -C at -w 30' to its inclusive width; compared on 9.4-9.11 only"
+    echo "note: 'colour: -C at -w 30' is compared on an inclusive-width (9.12) oracle only"
 fi
 l612 "colour: -x"                                "" --color=always -x -w 30 c
 l612 "colour: -m"                                "" --color=always -m -w 30 c
+# ⛔ COLOUR PADS WITH SPACES (1.8.8): GNU zeroes the tab size whenever colour is on, `-T`
+# included, and kriya padded with tabs: 84 of 122 colour listings over widths 20–80 differed
+# (audit § 8.1). The case at -w 30 above never crossed a tab stop, so it could not show it. Each
+# width here differed from GNU 9.4, 9.7 and 9.12 under 1.8.6, and none is on a -w boundary, so
+# every version agrees on the layout.
+for _fw in -C:40 -C:50 -C:64 -C:72 -x:50 -x:64 -x:72; do
+    l612 "colour pads with spaces: ${_fw%:*} -w ${_fw#*:}" "" --color=always "${_fw%:*}" -w "${_fw#*:}" c
+done
+l612 "colour pads with spaces under -T 8 too"    "" --color=always -C -w 64 -T 8 c
 LC612='rs=0:mh=44;37:su=0:sg=0'
 l612 "colour: mh, once su and sg step aside"     "" --color=always -1 c
 LC612='ln=target:di=01;34:ex=01;32:or=01;31:mi=05;37'
@@ -1157,6 +1218,11 @@ if script -qec true /dev/null >/dev/null 2>&1; then
     pty612 "tty: the default style escapes them"     "-1"
     pty612 "tty: -l masks too"                       "-l --quoting-style=literal"
     pty612 "tty: columns, literal"                   "--quoting-style=literal"
+    # ⭐ 1.8.8: the terminal's `?` comes off with `--show-control-chars`, last-wins with `-q`.
+    # Only a terminal shows it: off one there is no mask to take off.
+    pty612 "tty: --show-control-chars, literal"      "-1 --quoting-style=literal --show-control-chars"
+    pty612 "tty: -q then --show-control-chars"       "-1 --quoting-style=literal -q --show-control-chars"
+    pty612 "tty: --show-control-chars then -q"       "-1 --quoting-style=literal --show-control-chars -q"
 else
     echo "note: no util-linux script(1) — the tty's ? masking is unverified here"
 fi

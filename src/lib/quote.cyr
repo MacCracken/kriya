@@ -80,6 +80,14 @@ enum QuoteStyle {
 # neighbours; the two bytes it changes do not earn that.
 var _q_colon_style = 0;
 
+# ⚠ 1 while `ls` writes a `-m` listing: GNU 9.12 quotes a name holding a COMMA there, because
+# the comma is `-m`'s separator ("'ls -m' now quotes files names containing commas when
+# appropriate"). Only in the shell styles (`shell`, `shell-escape`) and `escape` (`\,`), and only
+# for names: not a section header, not a diagnostic. `ls` sets it; `_q_comma_now` is its value for
+# the call under way.
+var _q_comma = 0;
+var _q_comma_now = 0;
+
 # ⚠ 1 while rendering `shell` / `shell-always`: control and high bytes are
 # copied raw instead of opening a `$'…'` run. Same reason as `_q_colon_style`.
 var _q_raw = 0;
@@ -136,7 +144,7 @@ fn _q_needs_quote(c, at_start): i64 {
     if (c >= 97) { if (c <= 122) { return 0; } }     # a-z
     if (c == 37) { return 0; }    # %
     if (c == 43) { return 0; }    # +
-    if (c == 44) { return 0; }    # ,
+    if (c == 44) { return _q_comma_now; }    # , (`ls -m` only, see `_q_comma`)
     if (c == 46) { return 0; }    # .
     # ⚠ `:` is bare for `ls` and QUOTED for a diagnostic — see QUOTE_DIAGNOSTIC.
     if (c == 58) { return _q_colon_style; }    # :
@@ -145,9 +153,11 @@ fn _q_needs_quote(c, at_start): i64 {
     if (c == 95) { return 0; }    # _
     if (c == 123) { return 0; }   # {
     if (c == 125) { return 0; }   # }
-    # ⚠ `/` cannot occur in an `ls` name, so it was never in the measured set.
-    # It is bare in a diagnostic, where operands are whole paths.
-    if (c == 47) { return 1 - _q_colon_style; }   # /
+    # ⛔ `/` IS BARE EVERYWHERE (1.8.8). It cannot occur in a name `ls` reads from a
+    # directory, so it was never in the measured set, and it was quoted for `ls` alone. But an
+    # OPERAND is a path: on a terminal `ls q/plain` printed `'q/plain'` and `ls -d /tmp` printed
+    # `'/tmp'`, where GNU prints both bare. quotearg never treats `/` as special.
+    if (c == 47) { return 0; }   # /
     if (c == 45) { return 0; }    # -
     # Safe only away from the start.
     if (c == 35) { return at_start; }    # #
@@ -209,6 +219,12 @@ fn _q_puts(out, n, s): i64 {
 # Render `src` (len bytes) into `out`; returns the byte count written.
 # ⚠ `out` must hold at least `quote_bufsz(len)` bytes.
 fn quote_shell(src, len, style, out): i64 {
+    _q_comma_now = 0;
+    if (_q_comma == 1) {
+        if (style != QUOTE_DIAGNOSTIC) {
+            if (_q_hdr == 0) { _q_comma_now = 1; }
+        }
+    }
     if (style >= QUOTE_C) { return _quote_c(src, len, style, out); }
     # ⚠ QUOTE_DIAGNOSTIC is QUOTE_IF_NEEDED with two bytes reclassified, so it
     # sets the flag and then behaves as IF_NEEDED everywhere below.
@@ -456,6 +472,18 @@ fn _quote_c(src, len, style, out): i64 {
             }
         }
         if (done == 0) {
+            if (c == 44) {
+                # `ls -m`'s separator, under `escape` alone (`c` and `locale` already quote).
+                if (style == QUOTE_ESCAPE) {
+                    if (_q_comma_now == 1) {
+                        n = _q_put(out, n, 92);
+                        n = _q_put(out, n, 44);
+                        done = 1;
+                    }
+                }
+            }
+        }
+        if (done == 0) {
             if (c == 32) {
                 if (style == QUOTE_ESCAPE) {
                     # ⚠ Not in a HEADER: `ls` adds space to its filename
@@ -473,6 +501,51 @@ fn _quote_c(src, len, style, out): i64 {
     }
     if (q != 0) { n = _q_put(out, n, q); }
     return n;
+}
+
+# --- quoting what a utility PRINTS, on a terminal only (1.8.8) ----------------
+# ⭐ GNU 9.12: `basename`, `dirname`, `readlink`, `realpath` and `du` "now quote output in
+# shell-escape style when standard output is a terminal", and `env` quotes each name and value.
+# Through a pipe nothing changes, and `-z` / `-0` output is never quoted, so no script sees it:
+# it is `ls`'s terminal rule. `QUOTING_STYLE` stays declined (ADR 0017).
+var _q_tty = 0 - 1;    # stdout a terminal: -1 until asked, then 0 or 1
+var _q_tbuf = 0;       # one buffer for every quoted write, grown as needed
+var _q_tcap = 0;
+
+fn quote_tty(): i64 {
+    if (_q_tty < 0) {
+        _q_tty = 0;
+        if (k_isatty(1) == 1) { _q_tty = 1; }
+    }
+    return _q_tty;
+}
+
+# `len` bytes of `src` quoted where needed into the shared buffer; the count. ⚠ The buffer is
+# reused: write it before the next call.
+fn _q_tty_render(src, len): i64 {
+    var need = quote_bufsz(len);
+    if (need > _q_tcap) {
+        var ncap = _q_tcap * 2;
+        if (ncap < 256) { ncap = 256; }
+        while (ncap < need) { ncap = ncap * 2; }
+        _q_tbuf = alloc(ncap);
+        _q_tcap = ncap;
+    }
+    return quote_shell(src, len, QUOTE_IF_NEEDED, _q_tbuf);
+}
+
+# Write `len` bytes of `src` to stdout: quoted where needed when stdout is a terminal and `raw`
+# is 0 (`raw` is the `-z` / `-0` case), as they are otherwise.
+fn quote_tty_write(src, len, raw): i64 {
+    if (raw == 0) {
+        if (quote_tty() == 1) {
+            var qn = _q_tty_render(src, len);
+            k_write( 1, _q_tbuf, qn);
+            return 0;
+        }
+    }
+    k_write( 1, src, len);
+    return 0;
 }
 
 # Worst case per input byte: `'` closing + `$'` + `\377` + `'` reopening.

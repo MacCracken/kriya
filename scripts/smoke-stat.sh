@@ -196,14 +196,15 @@ expect_eq "%U now exits 0" "0" "$rc"
 # ⭐ These CAN be absolutes, unlike the %U/%G cases above: quoting output is a
 # pure function of the bytes in the name, not of the machine. ⚠ Compared
 # against GNU as well, so a rule change upstream still shows up.
-# ⛔ GNU 9.12 QUOTES `%N` ONLY WHEN NEEDED (shell-escape), where 9.4–9.11 and
-# kriya always quote (shell-escape-always): `plain`, not `'plain'`
-# (docs/audit/2026-11-03-gnu-9.12-parity.md § 5). GNU reads QUOTING_STYLE for
-# `%N` on every version, so setting it to kriya's style gives kriya's rule on all
-# four. ⚠ ONLY for a format that CONTAINS `%N`: before 9.12 the variable is
-# read only then, and on 9.12 it would quote `%-20N|` alone, which no earlier
-# version did. kriya itself never reads it (ADR 0017).
-GNU_QS_N="QUOTING_STYLE=shell-escape-always"
+# ⛔ GNU 9.12 QUOTES `%N` ONLY WHEN NEEDED (shell-escape), where 9.4–9.11 always
+# quoted (shell-escape-always), and kriya follows since 1.8.8: `plain`, not
+# `'plain'` (docs/audit/2026-11-03-gnu-9.12-parity.md § 5). GNU reads QUOTING_STYLE
+# for `%N` on every version, so `shell-escape` gives 9.12's rule on all four: it is
+# 9.12's default, and 9.4–9.11 read it for a format that CONTAINS `%N`. ⚠ Only
+# there: before 9.12 the variable is read only then, so `%-8N|` alone, `%Qn`, the
+# default format and `-t` are probed below instead. kriya itself never reads it
+# (ADR 0017).
+GNU_QS_N="QUOTING_STYLE=shell-escape"
 qn_same() {
     label=$1; name=$2
     : > "$name" 2>/dev/null || return 0
@@ -212,7 +213,7 @@ qn_same() {
     expect_eq "%N $label" "$g" "$k"
     rm -f "$name"
 }
-qn_same "plain is still quoted"  'plain'
+qn_same "plain stays bare"       'plain'
 qn_same "space"                  'a b'
 qn_same "single quote"           "it's"
 qn_same "double quote"           'has"quote'
@@ -222,19 +223,19 @@ qn_same "newline"                "$(printf 'new\nline')"
 qn_same "leading tab"            "$(printf '\tlead')"
 qn_same "shell metachars"        'a$b`c;d&e'
 qn_same "tilde and dash"         '~x-y'
-# ⛔ An ABSOLUTE: `plain` must come out QUOTED, which is what separates %N from
-# `ls`'s if-needed quoting. A test comparing only against GNU would pass for an
-# implementation that never quoted anything, if GNU were also broken.
-: > plainname
-expect_eq "%N always quotes" "'plainname'" "$("$BIN" stat -c '%N' plainname)"
-expect_eq "%n never quotes"  "plainname"   "$("$BIN" stat -c '%n' plainname)"
-rm -f plainname
+# ⛔ ABSOLUTES, both ways: a plain name bare and a spaced one quoted. Comparing only
+# against GNU would pass an implementation that quoted nothing, or everything.
+: > plainname; : > 'spaced name'
+expect_eq "%N quotes only where needed: plain" "plainname"     "$("$BIN" stat -c '%N' plainname)"
+expect_eq "%N quotes only where needed: space" "'spaced name'" "$("$BIN" stat -c '%N' 'spaced name')"
+expect_eq "%n never quotes"  "spaced name"   "$("$BIN" stat -c '%n' 'spaced name')"
+rm -f plainname 'spaced name'
 # Symlink form.
 : > tgt; ln -sf tgt 'link name' 2>/dev/null
 if [ -L 'link name' ]; then
     expect_eq "%N symlink form" "$(env $GNU_QS_N stat -c '%N' 'link name')" \
                                 "$("$BIN" stat -c '%N' 'link name')"
-    expect_eq "%N symlink absolute" "'link name' -> 'tgt'" "$("$BIN" stat -c '%N' 'link name')"
+    expect_eq "%N symlink absolute" "'link name' -> tgt" "$("$BIN" stat -c '%N' 'link name')"
 fi
 rm -f tgt 'link name'
 # --- %x / %y / %z render (v1.2.5) ---
@@ -291,16 +292,52 @@ st_same '%Hd,%Ld' f
 st_same '%Hr,%Lr|%r|%R|%t|%T' /dev/null
 st_same '%m' f
 st_same '%F' empty
-# ⛔ `%N` IS QUOTED ONLY IF THE FORMAT CONTAINS THE BYTES `%N`. GNU decides once,
-# per format, so `%-20N` alone prints the name BARE and `%-20N|%N` quotes both.
-# ⚠ 9.4–9.11's rule, and kriya's. 9.12 dropped the substring test and quotes
-# whenever it prints a name, only when needed — `plain` stays bare either way,
-# which is why `%-20N|` on `f` still compares on every version.
+# ⛔ BEFORE 9.12, `%N` WAS QUOTED ONLY IF THE FORMAT CONTAINED THE BYTES `%N`, so
+# `%-20N` alone printed the name BARE. 9.12, and kriya since 1.8.8, quote it where
+# needed whatever the format. `f` needs nothing, so `%-20N|` compares on every version.
 st_same '%-20N|' f
 ST_GNU_ENV=$GNU_QS_N   # both formats contain `%N`; see qn_same
 st_same '%-20N|%N' f
 st_same '%N' ln
 ST_GNU_ENV=
+# ⭐ 9.12's other quoting (1.8.8): `%N` with a modifier and nothing else, `%Qn`, the
+# default format's `File:` line and `-t`'s first field. No variable makes 9.4–9.11
+# do these, so PROBE: an oracle that knows `%Qn` is 9.12-style, and is compared
+# against; on an older one kriya's answer is asserted directly.
+: > 'd612/a b'; ln -s 'a b' 'd612/l b'
+GNU_STQ=0
+[ "$(cd d612 && LC_ALL=C stat -c '%Qn' 'a b' 2>/dev/null)" = "'a b'" ] && GNU_STQ=1
+# What of the output is asked: all of it, the default format's first line, or -t's first field.
+# ⚠ Named functions, not "cut -d' ' -f1" in a variable: splitting that mangles the quoted space.
+_st_all() { cat; }
+_st_line1() { head -n 1; }
+# ⚠ Not `cut -f1`: a quoted name can hold a space. Fifteen fields follow the name.
+_st_field1() { awk '{ s = $1; for (i = 2; i <= NF - 15; i++) s = s " " $i; print s }'; }
+ST_Q_CUT=_st_all
+st_q() {   # st_q <name> <kriya's answer> <stat-args...>
+    _n=$1; _x=$2; shift 2
+    _k=$(cd d612 && TZ=UTC LC_ALL=C "$BIN" stat "$@" 2>&1 | $ST_Q_CUT)
+    if [ "$GNU_STQ" = 1 ]; then
+        expect_eq "$_n" "$(cd d612 && env -u QUOTING_STYLE TZ=UTC LC_ALL=C stat "$@" 2>&1 | $ST_Q_CUT)" "$_k"
+    else
+        expect_eq "$_n" "$_x" "$_k"
+    fi
+}
+st_q "%-8N| quotes a name with a space"       "'a b'   |"               -c '%-8N|' 'a b'
+st_q "%-12N| pads name and target apart"      "'l b'        -> 'a b'       |" -c '%-12N|' 'l b'
+st_q "%Qn quotes where needed"                "'a b'"                   -c '%Qn' 'a b'
+st_q "%Qn leaves a plain name bare"           "f"                       -c '%Qn' f
+st_q "%Qn has no target"                      "ln"                      -c '%Qn' ln
+st_q "%-8Qn| pads the quoted name"            "'a b'   |"               -c '%-8Qn|' 'a b'
+st_q "%n beside %Qn"                          "a b|'a b'"               -c '%n|%Qn' 'a b'
+st_q "%QN is an unknown directive"            "?N"                      -c '%QN' 'a b'
+ST_Q_CUT=_st_line1   # the other lines are compared above, on plain names
+st_q "the default format quotes File:"        "  File: 'a b'"           'a b'
+st_q "...and a symlink's target"              "  File: 'l b' -> 'a b'"  'l b'
+ST_Q_CUT=_st_field1
+st_q "-t quotes its first field"              "'a b'"                   -t 'a b'
+ST_Q_CUT=_st_all
+rm -f 'd612/a b' 'd612/l b'
 # ⛔ `%%` with modifiers, and a directive the format ENDS inside, are fatal: GNU
 # exits 1 before printing anything. A lone trailing `%` is a literal.
 for _fmt in '%5%' '%5' '%-.3'; do

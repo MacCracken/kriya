@@ -227,6 +227,15 @@ fn _t_qh(src, style, want): i64 {
     return streq(out, want);
 }
 
+# `quote_shell`, as a name (not a header): 1 when `src` renders as `want`.
+fn _t_qn(src, style, want): i64 {
+    var n = strlen(src);
+    var out = alloc(quote_bufsz(n) + 1);
+    var k = quote_shell(src, n, style, out);
+    store8(out + k, 0);
+    return streq(out, want);
+}
+
 # The stack guard, in-process: recurse until it says stop, and count the levels it allowed. A
 # frame that comes back with its own byte changed means the guard let the stack run over.
 fn _t_wk_deep(n): i64 {
@@ -1702,6 +1711,20 @@ fn main() {
     assert_eq(_date_is_conv(67), 1, "C is a GNU conversion");
     assert_eq(_date_is_conv(102), 0, "f is not");
     assert_eq(_date_is_conv(37), 0, "% is not, for this purpose: decorated, GNU echoes it");
+
+    test_group("quote — `/` bare, and `ls -m`'s comma (1.8.8)");
+    # ⛔ `/` was quoted for `ls` alone, so a path OPERAND came out `'src/x.c'` on a terminal.
+    assert_eq(_t_qn("src/x.c", QUOTE_IF_NEEDED, "src/x.c"), 1, "a / is bare in a name");
+    assert_eq(_t_qn("/tmp", QUOTE_SHELL, "/tmp"), 1, "...under shell too");
+    assert_eq(_t_qn("a,b", QUOTE_IF_NEEDED, "a,b"), 1, "a comma is bare outside -m");
+    _q_comma = 1;
+    assert_eq(_t_qn("a,b", QUOTE_IF_NEEDED, "'a,b'"), 1, "-m: shell-escape quotes a comma");
+    assert_eq(_t_qn("a,b", QUOTE_SHELL, "'a,b'"), 1, "-m: ...and shell");
+    assert_eq(_t_qn("a,b", QUOTE_ESCAPE, "a\\,b"), 1, "-m: escape writes \\,");
+    assert_eq(_t_qn("a,b", QUOTE_C, "\"a,b\""), 1, "-m: c already quotes, and adds nothing");
+    assert_eq(_t_qn("a,b", QUOTE_DIAGNOSTIC, "a,b"), 1, "-m: a diagnostic is not a name");
+    assert_eq(_t_qh("c,d", QUOTE_IF_NEEDED, "c,d"), 1, "-m: nor is a section header");
+    _q_comma = 0;
 
     test_group("walk — the path buffer, the level chunks, the stack guard (1.8.6)");
     var tw = wk_new(WK_READ, "test");

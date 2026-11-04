@@ -27,8 +27,12 @@
 #     dropped, not refused;
 #   - precision on `%X %Y %Z %W` is FRACTIONAL SECONDS (`%.3Y`), not digits;
 #   - `H` / `L` before `d` or `r` select the major / minor number;
-#   - `%N` is quoted only if the format contains the two bytes `%N`, so
-#     `%-20N` alone prints the name bare — GNU decides once, per format;
+#   - ⛔ BREAKING at 1.8.8, as in GNU 9.12: `%N` quotes the name and a symlink's target only
+#     where they NEED it (shell-escape), and so do the default format's `File:` line and
+#     `-t`'s first field. Until 9.12 GNU quoted `%N` ALWAYS, and only when the format held the
+#     two bytes `%N`, so `%-20N` alone printed the name bare; kriya reproduced that gate.
+#   - `%Qn` (9.12) is `%n` quoted where it needs it, without the target; `Q` before anything
+#     but `n` is an unknown directive, `?` and the byte, as GNU prints it;
 #   - `%%` with modifiers, or a format that ends inside a directive, is fatal:
 #     `invalid directive`, exit 1.
 #
@@ -250,21 +254,11 @@ var _st_tbuf = 0;      # ST_K_NPAIR: the symlink target, or 0
 var _st_tlen = 0;
 # 1 when the directive being rendered carries any flag, width or precision.
 var _st_nmod = 0;
-# ⚠ GNU quotes `%N` only when the FORMAT STRING CONTAINS THE SUBSTRING `%N` —
-# its `main` runs `if (strstr (format, "%N")) getenv_quoting_style ();`, and until
-# then the style is literal. Every observation fits: `-c %N` quotes; `-c %5N`
-# alone does not (no `%N` substring); `-c '%5N|%N'` quotes BOTH; and the DEFAULT
-# format, which is never checked, prints `  File: sp ace` bare.
-var _st_nq_armed = 0;
-
-fn _st_has_pctN(f): i64 {
-    var i: i64 = 0;
-    while (load8(f + i) != 0) {
-        if (load8(f + i) == 37) { if (load8(f + i + 1) == 78) { return 1; } }
-        i = i + 1;
-    }
-    return 0;
-}
+# ⛔ THE `%N` GATE IS GONE (1.8.8). GNU before 9.12 quoted `%N` only when the format string held
+# the substring `%N` (`main` ran `if (strstr (format, "%N")) getenv_quoting_style ();`), always
+# then, and never in the default format. 9.12 quotes where needed, every time: `-c %N plain` is
+# `plain`, `'a b'` stays `'a b'`, `ln -> plain`, and `%-8N|` alone is `'a b'   |`. Measured on 9.12
+# against 9.4, 9.7 and 9.11. `QUOTING_STYLE` stays declined (ADR 0017).
 
 # `-L` and the birth time, set per file before its format runs.
 var _st_deref    = 0;
@@ -342,7 +336,15 @@ fn _st_set_num(kind, v): i64 {
 # Render conversion `c` (with `dmod` = 'H', 'L' or 0) into the kind registers.
 fn _st_render(c, dmod, st, name): i64 {
     var buf = alloc(64);
-    if (c == 110) { return _st_set_str(name, strlen(name)); }             # n
+    if (c == 110) {                                                       # n
+        # ⭐ `%Qn` (GNU 9.12): the name quoted where it needs it, and no target.
+        if (dmod == 81) {
+            var qnl = strlen(name);
+            var qn = alloc(quote_bufsz(qnl));
+            return _st_set_str(qn, quote_shell(name, qnl, QUOTE_IF_NEEDED, qn));
+        }
+        return _st_set_str(name, strlen(name));
+    }
     if (c == 85) {                                                        # U
         var un = userdb_user_name(load64(st + 28) & 4294967295);
         if (un == 0) { return _st_set_str("UNKNOWN", 7); }
@@ -354,10 +356,9 @@ fn _st_render(c, dmod, st, name): i64 {
         return _st_set_str(gn, strlen(gn));
     }
     if (c == 78) {                                                        # N
-        # ⚠ ALWAYS quotes under `-c`, unlike `ls`; the DEFAULT format does not.
-        # ⛔ And NOTHING is quoted once the directive has a modifier: measured on
-        # 9.11, `%14N` is `     /dev/null` and `%-20N` pads the NAME and the
-        # TARGET separately — `sl/l2dir             -> dir                 `.
+        # ⚠ Quoted where needed, as `ls` quotes (1.8.8, GNU 9.12). A directive with a
+        # modifier pads the NAME and the TARGET separately: `%-12N` is
+        # `'l b'        -> 'a b'       `, measured on 9.12.
         # ⚠ One byte of GNU is not reproduced: with `0`, `#`, `+` or space on a
         # symlink, GNU appends a stray `s` to the target (`%0N` gives
         # `sl/l2dir -> dirs`) — its format buffer re-suffixed. A corruption, not
@@ -365,49 +366,30 @@ fn _st_render(c, dmod, st, name): i64 {
         if (_st_nmod == 1) {
             _st_kind = ST_K_NPAIR;
             var nl0 = strlen(name);
-            _st_sbuf = name;
-            _st_slen = nl0;
-            if (_st_nq_armed == 1) {
-                _st_sbuf = alloc(quote_bufsz(nl0));
-                _st_slen = quote_shell(name, nl0, QUOTE_ALWAYS, _st_sbuf);
-            }
+            _st_sbuf = alloc(quote_bufsz(nl0));
+            _st_slen = quote_shell(name, nl0, QUOTE_IF_NEEDED, _st_sbuf);
             _st_tbuf = 0;
             _st_tlen = 0;
             if (fs_is_lnk(st) == 1) {
                 var lb = alloc(4096);
                 var ln = k_readlink(name, lb, 4095);
                 if (ln > 0) {
-                    _st_tbuf = lb;
-                    _st_tlen = ln;
-                    if (_st_nq_armed == 1) {
-                        _st_tbuf = alloc(quote_bufsz(ln));
-                        _st_tlen = quote_shell(lb, ln, QUOTE_ALWAYS, _st_tbuf);
-                    }
+                    _st_tbuf = alloc(quote_bufsz(ln));
+                    _st_tlen = quote_shell(lb, ln, QUOTE_IF_NEEDED, _st_tbuf);
                 }
             }
             return 0;
         }
         var nlen = strlen(name);
         var out = alloc(quote_bufsz(nlen) + 4 + quote_bufsz(4096));
-        var k: i64 = 0;
-        if (_st_nq_armed == 0) {
-            memcpy(out, name, nlen);
-            k = nlen;
-        } else {
-            k = quote_shell(name, nlen, QUOTE_ALWAYS, out);
-        }
+        var k = quote_shell(name, nlen, QUOTE_IF_NEEDED, out);
         if (fs_is_lnk(st) == 1) {
             var tbuf = alloc(4096);
             var tn = k_readlink(name, tbuf, 4095);
             if (tn > 0) {
                 memcpy(out + k, " -> ", 4);
                 k = k + 4;
-                if (_st_nq_armed == 0) {
-                    memcpy(out + k, tbuf, tn);
-                    k = k + tn;
-                } else {
-                    k = k + quote_shell(tbuf, tn, QUOTE_ALWAYS, out + k);
-                }
+                k = k + quote_shell(tbuf, tn, QUOTE_IF_NEEDED, out + k);
             }
         }
         return _st_set_str(out, k);
@@ -741,7 +723,17 @@ fn _st_emit_format(fmt, st, name, interpret_escapes, auto_newline): i64 {
             var mc = load8(fmt + i);
             if (mc == 72) { dmod = 72; }
             if (mc == 76) { dmod = 76; }
-            if (dmod != 0) {
+            # ⭐ `Q` before `n` (GNU 9.12's `%Qn`); before anything else it is the conversion,
+            # an unknown one.
+            if (mc == 81) {
+                if (load8(fmt + i + 1) == 110) {
+                    dmod = 81;
+                    i = i + 1;
+                }
+            }
+            if (dmod == 81) {
+                # (taken: `n` follows)
+            } elif (dmod != 0) {
                 var nx = load8(fmt + i + 1);
                 var dr: i64 = 0;
                 if (nx == 100) { dr = 1; }
@@ -882,7 +874,9 @@ fn _st_default_format(st): i64 {
 # Terse format (GNU stat -t style — single line, space-separated).
 # Column order matches GNU exactly: %W (birth) is between %Z and %o.
 fn _st_terse_format(): i64 {
-    return "%n %s %b %f %u %g %D %i %h %t %T %X %Y %Z %W %o";
+    # ⚠ `%Qn` since 1.8.8, as GNU 9.12's terse formats begin: the name quoted where needed, so
+    # a name with a space no longer splits the line's first field.
+    return "%Qn %s %b %f %u %g %D %i %h %t %T %X %Y %Z %W %o";
 }
 
 fn cmd_stat(start: i64): i64 {
@@ -926,7 +920,6 @@ fn cmd_stat(start: i64): i64 {
         }
     }
     var dflt: i64 = 0;
-    if (fmt != 0) { _st_nq_armed = _st_has_pctN(fmt); }
     if (fmt == 0) {
         if (terse == 1) { fmt = _st_terse_format(); }
         else {

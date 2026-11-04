@@ -327,43 +327,39 @@ expect_eq "%q refused" "1 " "$rc $out"
 # --- widths and precisions (1.6.17) ---
 # ⛔ They WRAPPED — `%18446744073709551617d 5` printed `5` — and below the wrap a
 # large one HUNG: the padding was one `write(2)` per byte, 50 s for 100,000,000
-# columns. ⚠ The limits are GNU printf's, measured on both versions: an integer
-# or `%c` field is refused past INT_MAX - 2, `%s` takes a width up to INT_MAX.
-# A refused field prints NOTHING, and the rest of the format goes on, exit 1.
+# columns. ⚠ The limit is INT_MAX for every conversion, as in GNU 9.12 (1.8.8; see
+# below). A refused field prints NOTHING, and the rest of the format goes on, exit 1.
 for f in '%18446744073709551617d' '%9223372036854775807d' '%2147483648d' \
          '%.2147483648d' '%.18446744073709551617d' '%2147483648s' 'ab%2147483648dcd'; do
     same "$f" "$f" 5
 done
-# ⛔ GNU 9.12 TAKES EVERY FIELD UP TO INT_MAX. 9.4–9.11 refuse an integer or `%c`
-# field past INT_MAX - 2, and that ceiling was a gnulib bug: `08c8a9228f`,
-# "vasnprintf: fix ("%*d", INT_MAX, n)", first built into 9.12. kriya copied
-# the ceiling (docs/audit/2026-11-03-gnu-9.12-parity.md § 6). PROBED: on an
-# oracle that accepts, the INT_MAX - 1 cases assert kriya's own answer — the
-# field refused, the rest of the format printed, exit 1 — and GNU is not asked
-# for two gigabytes per case.
-pf_old=1
-"$GNU" '%2147483646c' x > /dev/null 2>&1 && pf_old=0
-pf_edge() {  # pf_edge <name> <kriya's stdout> <format> <arg...>
-    name=$1; kout=$2; shift 2
-    if [ "$pf_old" = 1 ]; then same "$name" "$@"; return 0; fi
-    mrc=0; timeout 10 "$BIN" printf "$@" > "$T/m" 2>/dev/null || mrc=$?
-    printf '%s' "$kout" > "$T/x"
-    if cmp -s "$T/m" "$T/x" && [ "$mrc" = 1 ]; then
-        PASS=$((PASS + 1))
-    else
-        FAIL=$((FAIL + 1))
-        printf "FAIL %s (INT_MAX oracle, kriya alone): exit %s [%s]\n" "$name" "$mrc" \
-            "$(od -An -c "$T/m" | tr -s ' \n' '  ' | cut -c1-60)" >&2
-    fi
+# ⛔ GNU 9.12 TAKES EVERY FIELD UP TO INT_MAX, and kriya since 1.8.8. 9.4–9.11
+# refuse an integer or `%c` field past INT_MAX - 2, and that ceiling was a gnulib
+# bug: `08c8a9228f`, "vasnprintf: fix ("%*d", INT_MAX, n)", first built into 9.12
+# (docs/audit/2026-11-03-gnu-9.12-parity.md § 6). kriya had copied it.
+# ⭐ ASSERTED ON EVERY VERSION, from 9.12's answers measured: the exit status, the
+# byte count and the last four bytes, in one streaming pass. A comparison would have
+# GNU write two gigabytes per case, and on 9.4–9.11 GNU's answer is the old bug.
+pf_big() {  # pf_big <name> <bytes> <last four bytes, hex> <format> <arg...>
+    name=$1; wb=$2; wt=$3; shift 3
+    rm -f "$T/pff"; mkfifo "$T/pff"
+    wc -c < "$T/pff" > "$T/pfc" &
+    wpid=$!
+    { timeout 60 "$BIN" printf "$@" 2>/dev/null; echo $? > "$T/pfr"; } | tee "$T/pff" | tail -c 4 > "$T/pft"
+    wait "$wpid"
+    expect_eq "$name" "0 $wb $wt" \
+        "$(cat "$T/pfr") $(tr -d ' ' < "$T/pfc") $(od -An -tx1 "$T/pft" | tr -d ' \n')"
 }
-for f in '%2147483646d' '%-2147483646d' '%2147483646x' '%.2147483646x' '%2147483646c'; do
-    pf_edge "$f" "" "$f" 5
-done
-pf_edge 'ab%.2147483646ucd' 'abcd' 'ab%.2147483646ucd' 5
+pf_big '%2147483646d'      2147483646 20202035 '%2147483646d' 5
+pf_big '%-2147483646d'     2147483646 20202020 '%-2147483646d' 5
+pf_big '%2147483646x'      2147483646 20202035 '%2147483646x' 5
+pf_big '%.2147483646x'     2147483646 30303035 '%.2147483646x' 5
+pf_big '%2147483646c'      2147483646 20202078 '%2147483646c' x
+pf_big 'ab%.2147483646ucd' 2147483650 30356364 'ab%.2147483646ucd' 5
 same "*: INT_MAX + 1 is fatal"     'a%*db' 2147483648 5
 same "*: INT_MIN - 1 is fatal"     'a%*db' -2147483649 5
 same "*: INT_MIN is not printed"   'a%*db' -2147483648 5
-pf_edge "*: INT_MAX - 1, an integer" 'ab' 'a%*db' 2147483646 5
+pf_big "*: INT_MAX - 1, an integer" 2147483648 20203562 'a%*db' 2147483646 5
 same "*: 2^64 + 1"                 'a%*db' 18446744073709551617 5
 same "*: 2^66 is fatal, and ERANGE" 'a%*db' 99999999999999999999 5
 same ".*: INT_MAX + 1 is fatal"    'a%.*db' 2147483648 5
@@ -374,8 +370,8 @@ same "*: 5x is 5, exit 1"          '%*d|' 5x 5
 same "*: ' 3' is 3"                '%*d|' ' 3' 5
 same "*: a character constant"     '%*s|' "'A" x
 same "*: negative left-justifies"  '%*d|' -5 5
-# ⚠ Version split: 9.11 reads a `%s` precision past INT_MAX as no limit; 9.4
-# refuses the field. kriya's is 9.11's, asserted directly.
+# ⚠ Version split: 9.7 onward read a `%s` precision past INT_MAX as no limit; 9.4
+# refuses the field. kriya's is 9.12's, asserted directly.
 rc=0; out=$(timeout 10 "$BIN" printf '%.2147483648s|%5.18446744073709551617s|' abc de 2>/dev/null) || rc=$?
 expect_eq "%s precision past INT_MAX is no limit (9.11)" "0 abc|   de|" "$rc $out"
 # A wide field is written a buffer at a time, and the byte count is GNU's.

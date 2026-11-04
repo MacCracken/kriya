@@ -190,7 +190,10 @@ fn cmd_readlink(start: i64): i64 {
             if (quiet == 0) { _rl_report(p, 0 - n); }
             any_failed = 1;
         } else {
-            k_write( 1, out_buf, n);
+            # ⭐ Quoted on a terminal (GNU 9.12), `-n` or not, never under -z.
+            var rl_raw: i64 = 0;
+            if (load8(&term_buf) == 0) { rl_raw = 1; }
+            quote_tty_write(out_buf, n, rl_raw);
             # ⛔ `-n` IS IGNORED WITH MORE THAN ONE OPERAND, and honouring it
             # dropped the final newline from a multi-line stream at exit 0 —
             # `readlink -n a b` handed a reader `targetA\ntargetB` with no

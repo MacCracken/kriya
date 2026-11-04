@@ -230,7 +230,11 @@ fn _du_fmt_size(buf, pos, size): i64 {
 # space after it yet). The buffer grows to the longest line instead.
 fn _du_emit(size, path): i64 {
     var plen = strlen(path);
+    # ⭐ The path is quoted on a terminal (GNU 9.12), never under -0.
+    var quoted: i64 = 0;
+    if (_du_null == 0) { quoted = quote_tty(); }
     var need = plen + 64;                          # the size field needs under 32
+    if (quoted == 1) { need = quote_bufsz(plen) + 64; }
     if (need > _du_ocap) {
         var ncap = _du_ocap * 2;
         if (ncap < 4096) { ncap = 4096; }
@@ -242,8 +246,12 @@ fn _du_emit(size, path): i64 {
     var p = _du_fmt_size(buf, 0, size);
     store8(buf + p, 9);
     p = p + 1;
-    memcpy(buf + p, path, plen);
-    p = p + plen;
+    if (quoted == 1) {
+        p = p + quote_shell(path, plen, QUOTE_IF_NEEDED, buf + p);
+    } else {
+        memcpy(buf + p, path, plen);
+        p = p + plen;
+    }
     if (_du_null == 1) { store8(buf + p, 0); } else { store8(buf + p, 10); }
     p = p + 1;
     k_write( 1, buf, p);

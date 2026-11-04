@@ -122,6 +122,13 @@ var _ls_qstyle = 99;
 # injection surface, not a cosmetic difference. Styles that escape leave nothing
 # for it to replace.
 var _ls_qmark = 0;
+# ⭐ `-q` / `--hide-control-chars` turn it on off a terminal too, POSIX's `-q`: "each instance of
+# non-printable filename characters and <tab> characters ... written as the <question-mark>".
+# `--show-control-chars` turns it off on a terminal. The LAST of them wins, as in GNU (1.8.8).
+# ⚠ It masks what the style left raw, after quoting: under `shell`, `t<TAB>b` is `'t?b'`, quoted
+# because of the tab, and `shell-escape`, `c` and `escape` have nothing raw to mask.
+var _ls_q_idx = 0;
+var _ls_sc_idx = 0;
 
 # ⛔ `--dired`: two-space indent on long-format lines and a trailing byte-offset
 # index for Emacs. ⚠ The offsets EXCLUDE colour escapes — GNU counts only what
@@ -312,6 +319,9 @@ fn _ls_init_spec(): i64 {
     _ls_T_idx = flags_add_int(s, 84, "tabsize",           0, "tab stops every COLS (0 = spaces only)");
     _ls_d_idx = flags_add_bool(s, 100, "directory",       0, "list dir operands as entries, not contents");
     _ls_R_idx = flags_add_bool(s, 82,  "recursive",       0, "descend into subdirectories");
+    # ⭐ POSIX's `-q` (1.8.8), and GNU's way back out: last one wins (see `_ls_qmark`).
+    _ls_q_idx = flags_add_bool(s, 113, "hide-control-chars", 0, "write ? for each non-printable byte");
+    _ls_sc_idx = flags_add_bool(s, 0, "show-control-chars", 0, "write non-printable bytes as they are");
     # ⚠ `-w 0` MEANS UNLIMITED, NOT "auto". Measured: `ls -C -w 0` puts every
     # entry on ONE line. kriya's help said "0 = auto" and it did the opposite —
     # one entry per line.
@@ -2206,7 +2216,12 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width, across): i64 {
             # grows past that seed, so a layout whose columns all fit in 3 stays
             # valid though `3c` may exceed the width: 52 one-character names at
             # `-x -w 80` are 27 columns, not 26.
-            var line_len = 3 * c;
+            # ⛔ GNU 9.12 (1.8.8): the width is an INCLUSIVE maximum, "no longer includes
+            # '\n' in the width of a line". Two changes, one more than its NEWS says: the
+            # FINAL column is seeded at 1, not 3 ("the final column is not padded"), and the
+            # fit is `<=`. So `f1  f4` over six two-letter names fits at `-w 6`, and was six
+            # lines at 6 and 7 before.
+            var line_len = 3 * (c - 1) + 1;
             var valid: i64 = 1;
             var k: i64 = 0;
             while (k < c) {
@@ -2221,11 +2236,15 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width, across): i64 {
                     r = r + 1;
                 }
                 var field = colmax;
-                if (k < c - 1) { field = colmax + gutter; }
-                if (field > 3) {
-                    line_len = line_len + field - 3;
+                var seed: i64 = 1;
+                if (k < c - 1) {
+                    field = colmax + gutter;
+                    seed = 3;
+                }
+                if (field > seed) {
+                    line_len = line_len + field - seed;
                     valid = 0;
-                    if (line_len < width) { valid = 1; }
+                    if (line_len <= width) { valid = 1; }
                 }
                 k = k + 1;
             }
@@ -2296,8 +2315,14 @@ fn _ls_print_commas(entries, F_mode, inode_mode, width): i64 {
         var ew = _ls_entry_width(rec, F_mode, inode_mode, 0 - 1);
         # ⚠ The separator counts toward the line, and it is written BEFORE the
         # wrap decision — which is why a wrapped line ends in `,`.
+        # ⛔ GNU 9.12 (1.8.8): the width is an inclusive maximum, and the entry's OWN
+        # comma counts toward it, so only the last entry, with none after it, gains the
+        # column: `pos + 2 + ew + (a comma follows) <= width` fits. It was
+        # `pos + 2 + ew < width` for every entry.
         if (i > 0) {
-            if (pos + 2 + ew >= width) {
+            var follows: i64 = 0;
+            if (i < n - 1) { follows = 1; }
+            if (pos + 2 + ew + follows > width) {
                 _ls_out(",\n", 2);
                 pos = 0;
             } else {
@@ -2835,6 +2860,10 @@ fn cmd_ls(start: i64): i64 {
         _ls_qs_name = "shell-escape";
         _ls_qmark = 1;
     }
+    var hq = kriya_opt_seq(_ls_spec, 113, "hide-control-chars");
+    var sq = kriya_opt_seq(_ls_spec, 0, "show-control-chars");
+    if (hq > sq) { _ls_qmark = 1; }
+    if (sq > hq) { _ls_qmark = 0; }
     var qs = flags_get_str(_ls_spec, _ls_qs_idx);
     if (qs != 0) {
         if (load8(qs) != 0) {
@@ -2851,12 +2880,21 @@ fn cmd_ls(start: i64): i64 {
     # Width and tab size, once — each can warn, and a warning is not per directory.
     var fmt_now = _ls_format;
     if (fmt_now == LS_FMT_AUTO) { fmt_now = _ls_auto_format(); }
+    # ⭐ GNU 9.12 (1.8.8): a name holding the `-m` separator is quoted in a `-m` listing
+    # (`src/lib/quote.cyr`'s `_q_comma`). Set before any width is measured.
+    if (fmt_now == LS_FMT_COMMAS) { _q_comma = 1; }
     var columnar: i64 = 0;
     if (fmt_now == LS_FMT_COLUMNS) { columnar = 1; }
     if (fmt_now == LS_FMT_ACROSS) { columnar = 1; }
     if (fmt_now == LS_FMT_COMMAS) { columnar = 1; }
     _ls_resolve_width(columnar, color_req);
     if (columnar == 1) { _ls_resolve_tabsize(); }
+    # ⛔ COLOUR PADS WITH SPACES ONLY (1.8.8): GNU zeroes the tab size whenever colour is on,
+    # `-T` and $TABSIZE included ("some terminal emulators can't handle the combination of tabs
+    # and color codes on the same line"). kriya padded with tabs, and 84 of 122 colour listings
+    # over widths 20–80 differed from GNU 9.4 and 9.7. ⚠ After the resolve, so a bad $TABSIZE
+    # still warns, as in GNU.
+    if (_ls_color == 1) { _ls_tabsize = 0; }
     # ⚠ Clear-to-EOL is a non-long, coloured-output concern.
     if (_ls_color == 1) {
         if (long_mode == 0) { _ls_cl_width = _ls_line_length; }

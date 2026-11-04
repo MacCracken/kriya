@@ -44,7 +44,10 @@ fn dirname_help_declare(): i64 {
 
 fn _dn_emit(path, term_byte): i64 {
     var d = path_dirname(path);
-    k_write( 1, d, strlen(d));
+    # ⭐ Quoted on a terminal (GNU 9.12), never under -z.
+    var d_raw: i64 = 0;
+    if (term_byte == 0) { d_raw = 1; }
+    quote_tty_write(d, strlen(d), d_raw);
     var term_buf[2];
     store8(&term_buf, term_byte);
     k_write( 1, &term_buf, 1);
