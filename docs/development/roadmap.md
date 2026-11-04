@@ -13,7 +13,7 @@
 
 | Section | Answers | Use it when |
 |---|---|---|
-| **Arcs** (1.8.x → 1.10.x) | *What ships next?* | Picking up work |
+| **Arcs** (1.9.x → 1.10.x) | *What ships next?* | Picking up work |
 | **Non-goals** | *Why will this never ship?* | Before re-adding something that looks missing |
 | **Gated** | *Why isn't this moving?* | Asking why an item is not in an arc |
 | **Standing** | *What must I re-check every time?* | Bumping the toolchain pin |
@@ -36,11 +36,11 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.11** — two decisions, waiting on the maintainer |
 | **1.9.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.9.0** — floats |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
-No arc depends on another; they can be resequenced by consumer demand, and the M10 boot-burn
+**1.8.x closed at 1.8.11**, when the 9.12 review's two decisions shipped. No arc depends on
+another; they can be resequenced by consumer demand, and the M10 boot-burn
 (§ Gated) is the signal most likely to do it. ⚠ Every arc is **new capability**: it changes what
 kriya *does*, so expect an ADR and GNU-comparison work per item.
 
@@ -53,36 +53,6 @@ kriya *does*, so expect an ADR and GNU-comparison work per item.
 > parity review and `date`'s refusal of decorated directives. So the open 1.8.x slots moved up one:
 > deep trees **1.8.5 is 1.8.6**. The two slots the review added are **1.8.7** (vanishing entries) and
 > **1.8.8** (9.12's output rules). The 1.9.x and 1.10.x numbers did not move.
-
----
-
-## 1.8.x — Traversal, exec, filesystem reporting & syscall portability
-
-Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command-line builder
-(`src/lib/argbatch.cyr`), which counts as GNU's `buildcmd` does
-([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
-
-- **1.8.11 — what the 9.12 review left to decide.** ⏸ **Both items wait on the maintainer's
-  decision.** 1.8.10 shipped the rest of the slot they shared, `ls`'s eight POSIX options, and left
-  these as they were ([audit](../audit/2026-11-03-gnu-9.12-parity.md)).
-  - **⛔ DECISION: a newline in a name becomes `?` off a tty**, where newlines separate entries
-    (§ 3). GNU 9.12 does it; it is a POSIX deviation, so it needs the ADR drafted in the audit's
-    Appendix B, or its "keep raw" alternative.
-    - If it ships, the ways out ship with it. `-q` and `--show-control-chars` exist since 1.8.8;
-      `--zero` does not.
-    - Until then every smoke comparison pins GNU with `--show-control-chars`, and
-      `difffuzz-quote.py` does too.
-  - **⛔ DECISION: `ls` exits 1 for an operand it cannot access, where GNU exits 2** (found at
-    1.8.7). GNU's 2 is "serious trouble", a command-line argument it cannot reach, and its 1 is a
-    lesser failure such as a subdirectory. POSIX says only ">0". [ADR 0008](../adr/0008-posix-exit-code-policy.md)'s
-    tiers keep 2 for usage errors, so following GNU is a policy change and needs an amendment.
-    - ⚠ 1.8.10 brought two more of GNU's exit-2 cases, and kriya exits 1 for both under the same
-      rule: an operand `-H` or `-L` cannot follow (a dangling link, *cannot access*), and a
-      directory `-R` refuses because it is already being listed (*not listing already-listed
-      directory*). `smoke-ls.sh` compares the listing with GNU's and asserts kriya's 1.
-  - **Head and tail headers stay POSIX's**, unquoted (§ 1). That is no code change, and the draft
-    ADR in the audit's Appendix A records it once accepted. It is listed so the decision is not
-    mistaken for an omission.
 
 ---
 

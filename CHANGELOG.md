@@ -6,6 +6,70 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.8.11] - 2026-11-04 — the 9.12 review's decisions
+
+The roadmap's 1.8.11 slot: the three questions the GNU 9.12 parity review
+([audit](docs/audit/2026-11-03-gnu-9.12-parity.md)) left to the maintainer, now decided. Every item in
+the review is settled, and the 1.8.x arc closes.
+
+### Breaking
+
+- ⛔ **A newline in a name is `?` off a terminal too, wherever a newline separates entries**
+  ([ADR 0031](docs/adr/0031-ls-writes-a-newline-in-a-name-as-a-question-mark-where-newlines-separate-entries.md)),
+  as GNU 9.12 does. kriya wrote the byte, so `nl⏎X` listed as two entries, and
+  `ls | while read -r f; do rm -- "$f"; done` removed `nl` and `X`, which nobody named. The rule is GNU
+  9.12's, compared byte for byte:
+  - in `-1` and `-l`, and in `-C`, `-x` and `-m` when the width is not 0;
+  - for the styles that write a control byte raw, `literal`, `shell` and `shell-always`;
+  - in names, `-l` link targets and `-R` headers alike;
+  - not under `--show-control-chars` or `--zero` (when given after `-q`), and not under `--dired`.
+
+  A recorded deviation from POSIX's `-q`, which allows `?` by default only on a terminal; its Issue 8
+  FUTURE DIRECTIONS (Defect 251) move away from the raw byte. **Migration: `--show-control-chars`**
+  writes the bytes as they are, and **`--zero`** is the lossless form for a program.
+
+### Added
+
+- **`ls --zero`**: each entry, and `total`, ends with a NUL. A section header and the blank line before
+  it keep their newlines. At its place in the command line it also sets one entry per line unless the
+  format is long, colour off, literal quoting and raw control bytes, as GNU's does; a later option
+  sets each again (`--zero --color=always` colours, `--color=always --zero` does not). With `--dired`
+  it is a usage error, exit 2, in either order.
+- **[ADR 0030](docs/adr/0030-head-and-tail-headers-print-the-pathname.md): `head` and `tail` headers
+  print the pathname**, unquoted, as POSIX specifies, where GNU 9.12 quotes it. No code changed: kriya
+  already did this, and `smoke-head-tail.sh` has asserted it since 1.8.5. The draft was the audit's
+  Appendix A.
+
+### Changed
+
+- **[ADR 0008](docs/adr/0008-posix-exit-code-policy.md) is amended: `ls` keeps exit 1 for an operand it
+  cannot reach**, where GNU's `ls` exits 2 ("serious trouble"): a missing operand, an operand directory
+  it cannot open, a dangling operand under `-H` or `-L`, and a directory `-R` refuses as already
+  listed. No code changed. 2 keeps meaning a usage error in every utility.
+
+### Changed (tests)
+
+- **`smoke-ls.sh` 479 → 517.**
+  - Its quoting comparisons are PROBED for the newline rule. On a 9.12 oracle both sides run as they
+    are; on an older one, which writes the byte, kriya's side gets `--show-control-chars`, so the case
+    still measures the quoting. Until now GNU's side was pinned instead.
+  - 17 cases for the rule: on a 9.12 oracle against GNU, and on an older one against 9.12's answer,
+    written out in the script. The fixture's dates are set under `TZ=UTC`, so the answers hold on any
+    runner. One more asserts the piped default writes `?` on any oracle.
+  - 19 `--zero` cases, against GNU on 9.4, 9.7 and 9.12, which agree on all of them, and two through a
+    pty: `--zero` quotes literally where a terminal's default is shell-escape.
+- `difffuzz-quote.py` gives both sides `--show-control-chars`, so it measures the quoting alone on every
+  version: 2,000 names × 6 renderings, 0 differences.
+- **17 mutants over the rule and `--zero`, all killed.** One lived until the pty cases were added.
+  Two more are equivalent and were not run: the rule's style check (the escaping styles never write a
+  raw newline) and its `-q` short-circuit (`-q` has already masked it).
+- **890 unit + 72 syscall + 18 POSIX.** Smoke is **8,347 / 0** in ubuntu:24.04 (GNU 9.4), **8,350 / 0** in
+  26.04 (9.7), and **8,442 / 0** on the dev box (9.12), across 44 scripts; `smoke-help-json.sh` grew
+  1,954 → 1,957 with the new flag's schema checks. On aarch64 under qemu, `smoke-ls`, `-head-tail` and `-vanish` pass.
+  Fuzz is green under poison. `cyrius lint`, the lints, `check-oracles.sh` and `watchlist-scan.py` are
+  clean, and all three targets build warning-free.
+- **Sizes:** host 1,368,216 → **1,372,432**, agnos 1,376,832 → **1,376,960**.
+
 ## [1.8.10] - 2026-11-03 — `ls`'s POSIX options
 
 The roadmap's 1.8.10 slot: the eight POSIX `ls` options kriya refused with exit 2

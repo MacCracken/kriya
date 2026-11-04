@@ -195,6 +195,11 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   ⭐ A fourth "mutant", counting a declined `-p` command as run, was GNU's behaviour exactly, and the
   code was the divergence. Running the mutant beside the oracle is what told them apart. Two more
   cases were flaky in a way a single pass hides: run a new case five times before trusting it.
+- ⚠ **An option that sets several things needs a case for each, on the path where each shows.**
+  `ls --zero` sets the terminator, the format, colour, quoting and the control-byte mode at once.
+  Its literal quoting differs from the default only on a terminal, where the default is
+  shell-escape, and the mutant that dropped it passed all 515 cases until a pty case ran `--zero`
+  (1.8.11).
 - ⛔ **A new block that passes against the OLD binary has proved nothing, and three kinds of block
   do.** 1.6.16's run of every changed script against 1.6.15 found each of them in one pass:
   - a helper that adds its own command word: `compare_sorted` prepends `find`, so passing it
@@ -868,6 +873,10 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   atime cases run before anything reads the fixture, and the long ones list files only, whose
   atime nothing in the suite reads. ⚠ `touch -a` cannot pin it: any atime at or below the ctime is
   updated on the next read, and setting it moves the ctime.
+- ⛔ **`docker run` without `-i` gives the container no stdin.** A probe that fed its cases on stdin
+  printed nothing in either container, and the script compared 9.12's twenty lines against an empty
+  file (1.8.11). Redirect inside the container, `sh -c '… < /sp/cases'`, and check the line count
+  before reading a diff.
 - ⚠ **GNU's option semantics move too, not only its output.** GNU 9.6 made `ls -f` plain `-aU`;
   before it, `-f` also cancelled an EARLIER `-l`, `-s` and `--color`, so 9.4's `ls -lf` is one name
   per line where 9.6 on is long. kriya follows 9.6, and `smoke-ls.sh` probes the oracle and
