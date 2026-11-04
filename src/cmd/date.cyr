@@ -42,9 +42,19 @@
 #   %D  same as %m/%d/%y         %F  same as %Y-%m-%d
 #   %%  literal %                %n  newline           %t  tab
 #
-# Anything else (`%c`, `%x`, `%X`, locale-aware specifiers, etc.)
-# emits the `%X` source bytes verbatim — matches GNU's "unknown
-# specifier" forgiveness rather than erroring.
+# A specifier GNU defines and kriya does not render (`%V`, `%c`, `%C`, …) is
+# REFUSED by name: the field is left out, the rest prints, exit 1. A byte that
+# is not a specifier at all (`%@`) is echoed verbatim, as GNU does.
+#
+# ⛔ A DIRECTIVE IS `%` [flags `_-0^#+`] [width] [`E`|`O`] [`:`…] CONVERSION, and
+# kriya renders only the bare form, plus `%_d`. GNU renders every decorated form
+# of a conversion it defines, so until 1.8.5 `date +%-d` printed the three bytes
+# `%-d` at exit 0. A decorated conversion is refused now, and a decorated
+# NON-conversion is echoed — except where GNU's echo is not the bytes (it pads
+# to a width and uppercases under `^`), which is refused too. ⚠ Two refusals
+# where GNU prints the echo, both deliberate until roadmap 1.9.4 renders the
+# forms: an `E`/`O` on a conversion GNU does not take it on (`%Ea`; the set moved
+# between 9.7 and 9.12), and a width no wider than an invalid directive's echo.
 
 var _date_weekday_short: i64 = 0;   # lazy-init 7×4-byte cstrs ("Mon"...)
 var _date_weekday_full:  i64 = 0;
@@ -204,10 +214,11 @@ fn _date_wint(buf, pos, v): i64 {
 # Set when the format asked for a specifier kriya cannot render.
 var _date_bad: i64 = 0;
 
-# strftime specifiers GNU defines that kriya does not render yet. All of them
-# want either locale data or ISO-week arithmetic. ⚠ The ISO-week ones are pure
-# arithmetic on a broken-down time and need no tzfile, so they are roadmap
-# 1.9.4 rather than the Gated chrono item local time waits on.
+# strftime specifiers GNU defines that kriya does not render yet. ⚠ All but the
+# locale four are pure arithmetic on a broken-down time and need no tzfile, so
+# they are roadmap 1.9.4 rather than the Gated chrono item local time waits on.
+# ⛔ `%C %k %l %U %W` were missing from this list until 1.8.5 and echoed at
+# exit 0, found by sweeping every byte after `%` against GNU.
 fn _date_is_deferred_spec(c): i64 {  #skip-lint
     if (c == 86) { return 1; }   # V  ISO week number
     if (c == 71) { return 1; }   # G  ISO week-based year
@@ -217,6 +228,114 @@ fn _date_is_deferred_spec(c): i64 {  #skip-lint
     if (c == 88) { return 1; }   # X  locale time
     if (c == 114) { return 1; }  # r  locale 12-hour time
     if (c == 113) { return 1; }  # q  quarter
+    if (c == 67) { return 1; }   # C  century
+    if (c == 107) { return 1; }  # k  hour, space-padded
+    if (c == 108) { return 1; }  # l  12-hour hour, space-padded
+    if (c == 85) { return 1; }   # U  week number, Sunday first
+    if (c == 87) { return 1; }   # W  week number, Monday first
+    return 0;
+}
+
+# Every conversion letter GNU `date` renders — the same on 9.4, 9.7 and 9.12,
+# measured by sweeping every byte after `%`.
+fn _date_is_conv(c): i64 {
+    var s = "abcdeghjklmnpqrstuwxyzABCDFGHIMNPRSTUVWXYZ";
+    var j: i64 = 0;
+    var hit: i64 = 0;
+    while (load8(s + j) != 0) {
+        if (load8(s + j) == c) { hit = 1; }
+        j = j + 1;
+    }
+    return hit;
+}
+
+# The directive scanned last by `_date_scan_directive`.
+var _dd_caret = 0;    # a `^` among the flags
+var _dd_width = 0;    # width digits present
+var _dd_colons = 0;   # `:` count before the conversion
+
+# Scan the directive whose `%` is at `src + i`: flags, width, one `E`/`O`, then
+# colons. Returns the index of the conversion byte, which may be the NUL.
+fn _date_scan_directive(src, i): i64 {
+    _dd_caret = 0;
+    _dd_width = 0;
+    _dd_colons = 0;
+    var j = i + 1;
+    var more: i64 = 1;
+    while (more == 1) {
+        var fc = load8(src + j);
+        more = 0;
+        if (fc == 95) { more = 1; }   # _
+        if (fc == 45) { more = 1; }   # -
+        if (fc == 48) { more = 1; }   # 0
+        if (fc == 94) { more = 1; _dd_caret = 1; }   # ^
+        if (fc == 35) { more = 1; }   # #
+        if (fc == 43) { more = 1; }   # +
+        if (more == 1) { j = j + 1; }
+    }
+    var digit: i64 = 1;
+    while (digit == 1) {
+        var dc = load8(src + j);
+        digit = 0;
+        if (dc >= 48) { if (dc <= 57) { digit = 1; } }
+        if (digit == 1) {
+            _dd_width = 1;
+            j = j + 1;
+        }
+    }
+    return _date_scan_tail(src, j);
+}
+
+fn _date_scan_tail(src, j): i64 {
+    var k = j;
+    if (load8(src + k) == 69) { k = k + 1; }        # E
+    elif (load8(src + k) == 79) { k = k + 1; }      # O
+    while (load8(src + k) == 58) {                  # :
+        _dd_colons = _dd_colons + 1;
+        k = k + 1;
+    }
+    return k;
+}
+
+# Refuse a directive by name: the field is left out, and the run exits 1.
+fn _date_refuse(src, i, n, message): i64 {
+    var d = alloc(n + 1);
+    memcpy(d, src + i, n);
+    store8(d + n, 0);
+    report_note("date", d, message);
+    _date_bad = 1;
+    return 0;
+}
+
+# A decorated directive: `%` at `src + i`, its conversion byte at `src + cv`.
+# Returns the new buf offset. ⚠ An echo can be longer than the buffer's safety
+# margin, so it flushes what is pending and writes the directive itself.
+fn _date_decorated(buf, pos, src, i, cv, parts): i64 {
+    var c = load8(src + cv);
+    var n = cv - i + 1;
+    if (c == 0) { n = cv - i; }
+    if (n == 3) {
+        if (load8(src + i + 1) == 95) {
+            if (c == 100) { return _date_w2_sp(buf, pos, load64(parts + 16)); }   # %_d is %e
+        }
+    }
+    var conv: i64 = 0;
+    if (_dd_colons == 0) { conv = _date_is_conv(c); }
+    elif (c == 122) { if (_dd_colons <= 3) { conv = 1; } }   # %:z %::z %:::z
+    if (conv == 1) {
+        _date_refuse(src, i, n, "flags, widths and modifiers are not implemented (see roadmap 1.9.4)");
+        return pos;
+    }
+    # Not a conversion: GNU echoes the directive — but pads that echo to a width
+    # and uppercases it under `^`, and a lowercase byte is the only one `^` moves.
+    var reshaped = _dd_width;
+    if (_dd_caret == 1) { if (c >= 97) { if (c <= 122) { reshaped = 1; } } }
+    if (reshaped == 1) {
+        _date_refuse(src, i, n, "flags, widths and modifiers are not implemented (see roadmap 1.9.4)");
+        return pos;
+    }
+    k_write( 1, buf, pos);
+    k_write( 1, src + i, n);
     return 0;
 }
 
@@ -322,11 +441,11 @@ fn _date_render_spec(buf, pos, c, parts, wkday, epoch): i64 {
     # specifier at all is passed through verbatim, which IS what GNU does
     # (verified: `date +%@` prints `%@` on both).
     if (_date_is_deferred_spec(c) == 1) {  #skip-lint
-        k_write( 2, "kriya date: %", 13);
         var eb[8];
-        store8(&eb, c);
-        k_write( 2, &eb, 1);
-        k_write( 2, ": specifier not implemented (see roadmap 1.9.4)\n", 48);
+        store8(&eb, 37);
+        store8(&eb + 1, c);
+        store8(&eb + 2, 0);
+        report_note("date", &eb, "specifier not implemented (see roadmap 1.9.4)");
         _date_bad = 1;
         return pos;
     }
@@ -359,23 +478,16 @@ fn _date_format(fmt, epoch, buf, bufsz): i64 {
                 pos = pos + 1;
                 i = i + 1;
             } else {
-                # GNU pad-modifier `%_d` / `%-d` / `%0X`: pass through for
-                # the one specifier we explicitly handle (`%_d` -> %e).
-                if (next == 95) {
-                    var nn = load8(src + i + 2);
-                    if (nn == 100) {
-                        pos = _date_w2_sp(buf, pos, load64(parts + 16));
-                        i = i + 3;
-                    } else {
-                        store8(buf + pos, 37);
-                        store8(buf + pos + 1, next);
-                        store8(buf + pos + 2, nn);
-                        pos = pos + 3;
-                        i = i + 3;
-                    }
-                } else {
+                # ⛔ `%_` at the very end used to skip the NUL (`i + 3`) and read
+                # past the format. The scan stops at it instead.
+                var cv = _date_scan_directive(src, i);
+                if (cv == i + 1) {
                     pos = _date_render_spec(buf, pos, next, parts, wkday, epoch);
                     i = i + 2;
+                } else {
+                    pos = _date_decorated(buf, pos, src, i, cv, parts);
+                    i = cv + 1;
+                    if (load8(src + cv) == 0) { i = cv; }
                 }
             }
         } else {

@@ -57,8 +57,10 @@ check_parity() {
     # two GNU readings is the mitigation that actually works: if the second
     # ticks during the run, kriya's value matches whichever side of the
     # boundary it landed on.
+    # ⚠ kriya's status is CAUGHT: under `set -e` a refusal (exit 1) here
+    # aborted the whole script with no summary line, which a mutant found.
     g1=$(date "+$fmt")
-    k1=$("$BIN" date "+$fmt")
+    k1=$("$BIN" date "+$fmt" 2>/dev/null) || k1="(kriya exit $?)"
     g2=$(date "+$fmt")
     if [ "$k1" = "$g1" ]; then
         PASS=$((PASS + 1))
@@ -168,7 +170,9 @@ expect_exit "lone dash"             2 "$BIN" date -
 # ⛔ `date +%V` used to print the two bytes "%V" and exit 0. A specifier GNU
 # defines is a wrong answer when echoed back; one that is not a specifier at all
 # is passed through, which is exactly what GNU does (`date +%@` -> `%@` on both).
-for spec in %V %G %g %c %x %X %r %q; do
+# ⛔ `%C %k %l %U %W` joined at 1.8.5: GNU renders all five, and kriya echoed
+# them at exit 0 — found by the directive sweep below, not by any case here.
+for spec in %V %G %g %c %x %X %r %q %C %k %l %U %W; do
     rc=0
     out=$("$BIN" date -u "+$spec" 2>/dev/null) || rc=$?
     expect_eq "deferred $spec exits 1"     "1" "$rc"
@@ -176,6 +180,66 @@ for spec in %V %G %g %c %x %X %r %q; do
 done
 expect_eq "unknown %@ passes through (as GNU)" "$(date -u '+%@')" "$("$BIN" date -u '+%@')"
 expect_eq "%Y still works" "$(date -u +%Y)" "$("$BIN" date -u +%Y)"
+
+# --- decorated directives: flags, widths, E/O, colons (1.8.5) ---
+# ⛔ `date +%-d` PRINTED THE THREE BYTES `%-d` AT EXIT 0. The walker read one
+# byte after `%`, took the flag for an unknown specifier and echoed it, so every
+# flag, width and modifier GNU renders came back as text: 386 of the directives
+# below. kriya renders the bare forms and `%_d`; the rest are REFUSED by name,
+# the field left out and the rest printed, exit 1, until roadmap 1.9.4.
+rc=0; out=$("$BIN" date -u '+a%-db' 2>/dev/null) || rc=$?
+expect_eq "%-d is refused, exit 1"         "1"  "$rc"
+expect_eq "...the rest of the format prints" "ab" "$out"
+expect_eq "...and the diagnostic names it" \
+    "kriya date: %-d: flags, widths and modifiers are not implemented (see roadmap 1.9.4)" \
+    "$("$BIN" date -u '+a%-db' 2>&1 >/dev/null)"
+check_parity "%_d is still rendered (it is %e)" "%_d"
+# ⚠ GNU 9.12 CHANGED `%_D`: 9.4–9.11 pad the year too (`02/03/ 1` on 2001-02-03),
+# 9.12 does not (`02/03/01`). kriya refuses it on every version, so it is
+# asserted directly rather than against the local GNU.
+expect_exit "%_D is refused on every GNU version" 1 "$BIN" date -u '+%_D'
+# ⛔ `%_` AT THE END READ PAST THE FORMAT: the walker skipped three bytes, NUL
+# included, wrote the NUL into the output and went on into the NEXT ARGUMENT —
+# `date '+a%_' -u` printed `a%_`, a NUL, then `-u`. So the `-u` goes AFTER the
+# format here: with nothing behind it the bytes past the NUL were NUL too, and a
+# mutant that restored the overrun passed. A trailing directive is echoed, as
+# GNU does; a trailing width is refused, because GNU pads its echo.
+for _f in 'a%-' 'a%_' 'a%E' 'a%:' 'a%^'; do
+    expect_eq "trailing '$_f' echoes as GNU" "$(date "+$_f" -u | od -An -c)" \
+                                             "$("$BIN" date "+$_f" -u | od -An -c)"
+done
+expect_exit "trailing 'a%10' is refused (GNU pads it)" 1 "$BIN" date -u '+a%10'
+
+# ⭐ THE SWEEP: every byte after `%`, bare and under each flag, a width, E and O.
+# Two invariants, against whatever GNU is local, at a fixed instant:
+#   (1) where GNU RENDERS a directive, kriya renders or refuses it — never echoes;
+#   (2) where GNU ECHOES one, kriya echoes it too — except an E/O on a conversion
+#       letter, which kriya refuses on every version (the set GNU takes moved
+#       between 9.7 and 9.12: `%Oq` and `%OY`).
+# The `|` sentinel keeps a trailing space visible through `$(...)`.
+_echoed=""; _overref=""; _swept=0
+_convs='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ%+@!:;,.?'
+for _pre in '' _ - 0 '^' '#' + 10 E O; do
+    _s=$_convs
+    while [ -n "$_s" ]; do
+        _c=${_s%"${_s#?}"}; _s=${_s#?}
+        _d="%$_pre$_c"
+        _g=$(date -u -d @981173106 "+$_d|" 2>/dev/null)
+        _krc=0; _k=$("$BIN" date -u "+$_d|" 2>/dev/null) || _krc=$?
+        _swept=$((_swept + 1))
+        if [ "$_g" != "$_d|" ]; then
+            if [ "$_krc" = 0 ] && [ "$_k" = "$_d|" ]; then _echoed="$_echoed $_d"; fi
+        elif [ "$_k" != "$_d|" ]; then
+            case "$_pre$_c" in
+                [EO][a-zA-Z]) ;;
+                *) _overref="$_overref $_d" ;;
+            esac
+        fi
+    done
+done
+expect_eq "sweep: $_swept directives, none GNU renders is echoed" "" "$_echoed"
+expect_eq "sweep: every one GNU echoes is echoed (bar E/O on a letter)" "" "$_overref"
+expect_eq "sweep: it covered what it claims (61 bytes x 10)" "610" "$_swept"
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))
