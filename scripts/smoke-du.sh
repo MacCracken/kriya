@@ -247,6 +247,23 @@ _rc=0; ( ulimit -v 32768 2>/dev/null; "$BIN" du -s many >/dev/null 2>&1 ) || _rc
 expect_eq "du -s over 6,000 directories fits in 32 MB of address space" "0" "$_rc"
 expect_eq "...and its total is GNU's" "$(du -s many | cut -f1)" "$("$BIN" du -s many | cut -f1)"
 
+# --- 1.8.9: a directory that cannot be read still has its line -------------------
+# ⛔ GNU's FTS_DNR: *cannot read directory*, the directory's own blocks on its line (0 under -b,
+# where a directory counts nothing), exit 1, and the walk goes on. kriya said *cannot access*,
+# printed no line, and under -b added the directory's st_size to its parent: `du -ba x` said 65
+# where GNU says 5. ⚠ Only as a regular user: root reads a 000 directory.
+if [ "$(id -u)" != 0 ]; then
+    rm -rf dnr; mkdir -p dnr/u dnr/r; echo data > dnr/r/f; echo zz > dnr/u/g; chmod 000 dnr/u
+    for _a in "-a" "-b -a" "-s" "-d 0" "-S" "-c"; do
+        _rc=0; _k=$("$BIN" du $_a dnr 2>/dev/null) || _rc=$?
+        _grc=0; _g=$(du $_a dnr 2>/dev/null) || _grc=$?
+        expect_eq "unreadable directory: du $_a" "$_g rc=$_grc" "$_k rc=$_rc"
+    done
+    expect_eq "...says it cannot READ it" "1" \
+        "$("$BIN" du dnr 2>&1 >/dev/null | grep -c "cannot read directory 'dnr/u'" || true)"
+    chmod 755 dnr/u
+fi
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

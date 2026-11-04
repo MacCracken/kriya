@@ -1018,7 +1018,7 @@ fn _f_eval_empty_predicate(ctx, stat_buf, depth): i64 {
         # this, a swapped-in symlink between classifying lstat and this
         # open would be silently followed even under default `-P`.
         # Mirrors the conditional NOFOLLOW pattern used at the main
-        # descent site (_f_descend / line ~918).
+        # descent site (`_f_open_level`).
         # ⛔ Relative to the parent's open directory since 1.8.6, as every other open of the walk
         # is (ADR 0027). By PATH it re-resolved every ancestor, and past PATH_MAX it failed:
         # `find` on a 2,100-level tree said "file name too long" for each directory -empty tested.
@@ -1779,15 +1779,6 @@ fn _f_name_of(path): i64 {
     return b;
 }
 
-# 1 when the walk may enter `path`. ⛔ Otherwise one level deeper would exhaust the stack
-# (src/lib/walk.cyr): reported, exit 1. The entry itself is still evaluated.
-fn _f_stack_room(path): i64 {
-    if (wk_stack_room() == 1) { return 1; }
-    wk_report_deep(_f_wk, path);
-    _f_any_failed = 1;
-    return 0;
-}
-
 # Evaluate the expression for one entry, when it is deep enough to be looked at.
 # ⛔ THE PRUNE FLAG IS CLEARED FIRST, EVEN FOR AN ENTRY ABOVE -mindepth. Cleared
 # only on the way to `_f_eval`, it survived from the last entry evaluated to the
@@ -1804,7 +1795,102 @@ fn _f_visit(ctx, depth): i64 {
 # points relative to AT_FDCWD. Every stat and open of the walk goes through them, so an entry is
 # always the one inside the directory the walk actually opened. `path` is for printing and the tests.
 # ⚠ agnos has no open-relative-to-fd and no symlinks to race, so there it is AT_FDCWD and the path.
-fn _f_walk(pdfd, rel, path, depth): i64 {
+#
+# ⭐ THE WALK IS A LOOP SINCE 1.8.9, and its paths are ONE buffer. It was a recursion, and with
+# descriptors no longer the limit (1.8.6) the stack was: a guard stopped it at 15,701 levels under
+# 8 MiB, where GNU's has no limit. ⛔ And every entry's path and stat buffer were allocated and
+# never freed, so memory was the entry count times the depth: about 250 MB near the guard, 2.1 GB
+# for `find -depth -delete` reporting a failure at every level, and `find /usr -name none` 99 MB
+# against GNU's 8.5 (roadmap 1.10.6's memory half, moved here). Now the path is the walk's one
+# buffer (`wk_path_push`), and an entry's stat and context record are one buffer per DEPTH: an
+# entry at depth d+1 is looked at only while no level d+1 is open, so they never collide.
+# A directory being read is a level of the shared walk (src/lib/walk.cyr), its slots:
+#   U0  its path's length in the walk's path buffer
+#   U1  1 when it was pushed on the `-L` ancestor stack
+# `_f_entry` is the old `_f_walk`, `_f_open_level` the top of `_f_descend` and `_f_leave` its
+# bottom; the loop in `_f_tree` is the recursion between them.
+
+# Buffer `kind` (0: the 144-byte stat, 1: the 48-byte context record) for `depth`, made the first
+# time a walk reaches that depth and reused by every entry there.
+var _f_lvbuf = 0;
+var _f_lvcap = 0;
+fn _f_lv_buf(depth, kind): i64 {
+    if (depth >= _f_lvcap) {
+        var ncap = _f_lvcap * 2;
+        if (ncap < 64) { ncap = 64; }
+        while (ncap <= depth) { ncap = ncap * 2; }
+        var nb = alloc(ncap * 16);
+        var i: i64 = 0;
+        while (i < ncap * 2) {
+            if (i < _f_lvcap * 2) { store64(nb + i * 8, load64(_f_lvbuf + i * 8)); }
+            else { store64(nb + i * 8, 0); }
+            i = i + 1;
+        }
+        _f_lvbuf = nb;
+        _f_lvcap = ncap;
+    }
+    var slot = _f_lvbuf + (depth * 2 + kind) * 8;
+    var b = load64(slot);
+    if (b == 0) {
+        # ⚠ 48 for the record: six fields, each 8 bytes (M15a: a buffer's size is BYTES).
+        if (kind == 0) { b = alloc(144); } else { b = alloc(48); }
+        store64(slot, b);
+    }
+    return b;
+}
+
+# The name `-name` tests. ⛔ Below a starting point it is the directory entry the walk read, not a
+# scan of the path: `_f_name_of` walks the whole path for its last `/`, so every entry cost its
+# depth, and `find -name f` over 100,000 levels took 21 s against GNU's 5 (1.8.9). Only a starting
+# point needs `_f_name_of`'s trailing-slash rule. ⚠ On agnos `rel` is the whole path.
+fn _f_entry_name(path, rel, depth): i64 {
+    if (depth == 0) { return _f_name_of(path); }
+    #ifdef CYRIUS_TARGET_AGNOS
+    return path_basename_ptr(path);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return rel;
+    #endif
+}
+
+# Open the directory `rel` in `pdfd`, whose path is the walk's (`plen` long) and whose stat is
+# `st_buf`, as level `depth`. 1 when it was entered; 0 when it could not be, already reported.
+fn _f_open_level(pdfd, rel, depth, st_buf, plen): i64 {
+    var path = wk_path(_f_wk);
+    # ⛔ FS_O_CLOEXEC since 1.8.2: without it every -exec child received one open descriptor
+    # per directory level (`ls /proc/$$/fd` in the child: `0 1 2 3 4 5`; GNU's: `0 1 2`).
+    var open_flags: i64 = FS_O_DIRECTORY | FS_O_CLOEXEC;  # | O_RDONLY
+    if (_f_follows(depth) == 0) { open_flags = open_flags | FS_O_NOFOLLOW; }
+    # ⭐ A level of the shared walk (src/lib/walk.cyr), which keeps at most 32 directories open
+    # however deep the tree is.
+    var dfd = wk_open(_f_wk, depth, pdfd, rel, open_flags);
+    if (dfd < 0) {
+        _f_report_path(path, 0 - dfd);
+        _f_any_failed = 1;
+        return 0;
+    }
+    # ⛔ A push that fails leaves the ancestor unrecorded, which is exactly what a
+    # loop needs to go unnoticed — so do not descend (`fs_dirstack_push`).
+    var pushed: i64 = 0;
+    if (_f_follow_mode == 1) {
+        if (fs_dirstack_push(_f_walk_path, fs_dev(st_buf), fs_ino(st_buf)) != 0) {
+            report_note("find", path, "cannot track directory depth: out of memory");
+            _f_any_failed = 1;
+            wk_close(_f_wk, depth, path);
+            return 0;
+        }
+        pushed = 1;
+    }
+    wk_set_u(_f_wk, depth, 0, plen);
+    wk_set_u(_f_wk, depth, 1, pushed);
+    return 1;
+}
+
+# Look at the entry `rel` in `pdfd` at `depth`, its path the walk's (`plen` long): stat it,
+# evaluate the expression (before its entries, or after them under -depth), and open it as a
+# level when the walk goes into it. 1 when it did; then `_f_leave` finishes it.
+fn _f_entry(pdfd, rel, depth, plen): i64 {
+    var path = wk_path(_f_wk);
     # The WALK's stat, which is fts's rather than the tests': a dangling link
     # (ENOENT) is the link itself, silently, and any other failure is reported.
     # ⛔ BELOW A STARTING POINT, AN ENTRY THAT CANNOT BE STAT'D IS STILL EVALUATED,
@@ -1814,7 +1900,7 @@ fn _f_walk(pdfd, rel, path, depth): i64 {
     # the link's own stat, so `-type l` is true of it. ELOOP is a loop and is not
     # evaluated; neither is a starting point. kriya skipped every such entry, so
     # `find -L t` did not list a link into an unsearchable directory (1.7.1).
-    var st_buf = alloc(144);
+    var st_buf = _f_lv_buf(depth, 0);
     var r: i64 = 0;
     var follows = _f_follows(depth);
     if (follows == 1) {
@@ -1838,22 +1924,13 @@ fn _f_walk(pdfd, rel, path, depth): i64 {
             while (z < 144) { store8(st_buf + z, 0); z = z + 1; }
         }
     }
-    # ⛔ 32, NOT 4. A FUNCTION-LOCAL `var X[N]` IS N BYTES — the ×8 u64 unit applies only at module
-    # scope. This held four i64 fields in a 4-byte slot and smashed 24 bytes of neighbouring stack.
-    # It was SILENT for a year: the old register allocator happened to leave dead space there. The
-    # cyrius 6.5.x codegen-quality work repacked the frame, the overflow started landing on live
-    # state, and `find` regressed from 40/40 to 8/40 — it printed the root and never descended,
-    # because the clobber reached the very `st_buf` the is-a-directory test reads.
-    # ⚠ The unit rule is non-uniform enough to be worth MEASURING rather than assuming; measured
-    # here at 6.5.18 with a two-local probe (`&b - &a` = 8 for `var x[4]`).
-    # ⚠ 48: two more fields since 1.8.2, the parent descriptor and the name relative to it.
-    var ctx[48];
-    store64(&ctx + 0,  path);
-    store64(&ctx + 8,  _f_name_of(path));
-    store64(&ctx + 16, st_buf);
-    store64(&ctx + 24, depth);
-    store64(&ctx + 32, pdfd);
-    store64(&ctx + 40, rel);
+    var ctx = _f_lv_buf(depth, 1);
+    store64(ctx + 0,  path);
+    store64(ctx + 8,  _f_entry_name(path, rel, depth));
+    store64(ctx + 16, st_buf);
+    store64(ctx + 24, depth);
+    store64(ctx + 32, pdfd);
+    store64(ctx + 40, rel);
 
     var descend: i64 = 0;
     if ((load64(st_buf + 24) & FS_S_IFMT) == FS_S_IFDIR) { descend = 1; }
@@ -1881,101 +1958,99 @@ fn _f_walk(pdfd, rel, path, depth): i64 {
     if (nostat == 1) {
         # Its type is unknown, so it is not entered — GNU's `state.type` of 0.
         _f_nostat = 1;
-        _f_visit(&ctx, depth);
+        _f_visit(ctx, depth);
         _f_nostat = 0;
         return 0;
     }
     if (_f_depth_first == 0) {
-        _f_visit(&ctx, depth);
+        _f_visit(ctx, depth);
         if (_f_prune_hit == 1) { descend = 0; }
-        if (descend == 1) {
-            if (_f_stack_room(path) == 1) { _f_descend(pdfd, rel, path, depth, st_buf); }
-        }
+        if (descend == 1) { return _f_open_level(pdfd, rel, depth, st_buf, plen); }
         return 0;
     }
-    # -depth: the entries first. ⚠ An unreadable directory is still evaluated
-    # after its error, as GNU's -depth does; without -depth it already was.
+    # -depth: the entries first, and the directory itself in `_f_leave`. ⚠ An unreadable
+    # directory is still evaluated after its error, as GNU's -depth does; without -depth it
+    # already was.
     if (descend == 1) {
-        if (_f_stack_room(path) == 1) { _f_descend(pdfd, rel, path, depth, st_buf); }
-        # ⛔ The walk may have closed the parent while it was below, and reopened it under
-        # another descriptor number: `-delete` and `-execdir` must use the new one, and the
-        # entry's name as the parent level now holds it (src/lib/walk.cyr).
-        if (wk_broken(_f_wk) == 1) { return 0; }
-        #ifndef CYRIUS_TARGET_AGNOS
-        if (depth > 0) {
-            store64(&ctx + 32, wk_fd(_f_wk, depth - 1));
-            store64(&ctx + 40, wk_cur_name(_f_wk, depth - 1));
-        }
-        #endif
+        if (_f_open_level(pdfd, rel, depth, st_buf, plen) == 1) { return 1; }
     }
-    _f_visit(&ctx, depth);
+    _f_visit(ctx, depth);
     return 0;
 }
 
-# Walk the entries of the directory `path` (`rel` in `pdfd`), whose stat is `st_buf`.
-fn _f_descend(pdfd, rel, path, depth, st_buf): i64 {
-    # ⛔ FS_O_CLOEXEC since 1.8.2: without it every -exec child received one open descriptor
-    # per directory level (`ls /proc/$$/fd` in the child: `0 1 2 3 4 5`; GNU's: `0 1 2`).
-    var open_flags: i64 = FS_O_DIRECTORY | FS_O_CLOEXEC;  # | O_RDONLY
-    if (_f_follows(depth) == 0) { open_flags = open_flags | FS_O_NOFOLLOW; }
-    # ⭐ A level of the shared walk (src/lib/walk.cyr), which keeps at most 32 directories open
-    # however deep the tree is.
-    var dfd = wk_open(_f_wk, depth, pdfd, rel, open_flags);
-    if (dfd < 0) {
-        _f_report_path(path, 0 - dfd);
-        _f_any_failed = 1;
-        return 0;
+# Leave level `depth`, read to its end; under -depth, evaluate the directory itself now.
+fn _f_leave(depth): i64 {
+    wk_path_cut(_f_wk, wk_u(_f_wk, depth, 0));
+    var path = wk_path(_f_wk);
+    if (wk_u(_f_wk, depth, 1) == 1) { fs_dirstack_pop(_f_walk_path); }
+    wk_close(_f_wk, depth, path);
+    if (_f_depth_first == 0) { return 0; }
+    # ⛔ The way back up was not the way down: evaluate nothing more (`-delete` above all).
+    if (wk_broken(_f_wk) == 1) { return 0; }
+    # ⛔ The record was written before the walk went down, and since then the path buffer can
+    # have moved, and the walk may have closed the parent and reopened it under another
+    # descriptor number: `-delete` and `-execdir` must use the new one, and the entry's name as
+    # the parent level now holds it (src/lib/walk.cyr).
+    var ctx = _f_lv_buf(depth, 1);
+    store64(ctx + 0, path);
+    if (depth == 0) { store64(ctx + 8, _f_name_of(path)); }
+    if (depth > 0) {
+        store64(ctx + 8, _f_entry_name(path, wk_cur_name(_f_wk, depth - 1), depth));
+        #ifndef CYRIUS_TARGET_AGNOS
+        store64(ctx + 32, wk_fd(_f_wk, depth - 1));
+        store64(ctx + 40, wk_cur_name(_f_wk, depth - 1));
+        #endif
+        #ifdef CYRIUS_TARGET_AGNOS
+        store64(ctx + 40, path);
+        #endif
     }
-    # ⛔ A push that fails leaves the ancestor unrecorded, which is exactly what a
-    # loop needs to go unnoticed — so do not descend (`fs_dirstack_push`).
-    var pushed: i64 = 0;
-    if (_f_follow_mode == 1) {
-        if (fs_dirstack_push(_f_walk_path, fs_dev(st_buf), fs_ino(st_buf)) != 0) {
-            report_note("find", path, "cannot track directory depth: out of memory");
-            _f_any_failed = 1;
-            wk_close(_f_wk, depth, path);
-            return 0;
-        }
-        pushed = 1;
-    }
-    # ⛔ `dfd` IS FETCHED AGAIN FOR EVERY ENTRY: a child deeper than the walk's budget closes
-    # this directory and reopens it under another descriptor number.
-    var loop: i64 = 1;
-    while (loop == 1) {
+    _f_visit(ctx, depth);
+    return 0;
+}
+
+# One starting point `p`.
+fn _f_tree(p): i64 {
+    var l0 = wk_path_set(_f_wk, p);
+    if (_f_entry(0 - 100, p, 0, l0) == 0) { return 0; }
+    var depth: i64 = 0;
+    var running: i64 = 1;
+    while (running == 1) {
+        var plen = wk_u(_f_wk, depth, 0);
         var ent = wk_next(_f_wk, depth);
         if (ent < 0) {
-            _f_report_path(path, 0 - ent);
+            wk_path_cut(_f_wk, plen);
+            _f_report_path(wk_path(_f_wk), 0 - ent);
             _f_any_failed = 1;
-            loop = 0;
-        } elif (ent == 0) {
-            loop = 0;
-        } else {
-            dfd = wk_fd(_f_wk, depth);
-            var ename = fs_dent_name(ent);
-            var elen = strlen(ename);
-            var plen = strlen(path);
-            var sep: i64 = 1;
-            if (plen > 0) {
-                if (load8(path + plen - 1) == 47) { sep = 0; }
+        }
+        if (ent <= 0) {
+            _f_leave(depth);
+            if (depth == 0) {
+                running = 0;
+            } else {
+                depth = depth - 1;
+                wk_path_cut(_f_wk, wk_u(_f_wk, depth, 0));
             }
-            var sub = alloc(plen + sep + elen + 1);
-            memcpy(sub, path, plen);
-            if (sep == 1) { store8(sub + plen, 47); }
-            memcpy(sub + plen + sep, ename, elen);
-            store8(sub + plen + sep + elen, 0);
-            # ⚠ `ename` is good until the next `wk_next` of this level; the child's walk
-            # takes it again from the walk where it needs it after a descent.
-            var cdfd = dfd;
-            var crel = ename;
-            #ifdef CYRIUS_TARGET_AGNOS
-            cdfd = 0 - 100;
-            crel = sub;
-            #endif
-            _f_walk(cdfd, crel, sub, depth + 1);
+            continue;
+        }
+        # ⛔ The descriptor IS FETCHED AGAIN FOR EVERY ENTRY: a child deeper than the walk's
+        # budget closes this directory and reopens it under another descriptor number.
+        var dfd = wk_fd(_f_wk, depth);
+        var ename = fs_dent_name(ent);
+        var clen = wk_path_push(_f_wk, plen, ename);
+        # ⚠ `ename` is good until the next `wk_next` of this level, which is after this entry
+        # and its whole subtree; `_f_leave` takes it again from the walk.
+        var cdfd = dfd;
+        var crel = ename;
+        #ifdef CYRIUS_TARGET_AGNOS
+        cdfd = 0 - 100;
+        crel = wk_path(_f_wk);
+        #endif
+        if (_f_entry(cdfd, crel, depth + 1, clen) == 1) {
+            depth = depth + 1;
+        } else {
+            wk_path_cut(_f_wk, plen);
         }
     }
-    if (pushed == 1) { fs_dirstack_pop(_f_walk_path); }
-    wk_close(_f_wk, depth, path);
     return 0;
 }
 
@@ -2189,7 +2264,7 @@ fn cmd_find(start: i64): i64 {
         }
         if (walk_it == 1) {
             wk_reset(_f_wk);
-            _f_walk(0 - 100, p, p, 0);
+            _f_tree(p);
             # ⛔ A walk stopped because its way back up had moved (src/lib/walk.cyr) reported it,
             # and is a failure: the first cut exited 0 here.
             if (wk_broken(_f_wk) == 1) { _f_any_failed = 1; }

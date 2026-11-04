@@ -387,14 +387,39 @@ fn _du_vanished(dirfd, fullpath, name, r): i64 {
     return 0;
 }
 
-# Recursively walk `name` rooted at `parent_dirfd`. `depth` is operand-
-# relative (0 for the operand itself). `display` is the user-visible
-# path used in output. Returns total size of this subtree (including
-# the dir's own block usage; -S removes children before reporting).
-fn _du_walk(parent_dirfd, name, plen, depth): i64 {
+# Write `kriya du: cannot access 'PATH': MESSAGE`, and fail the run.
+fn _du_cannot(path, errno): i64 {
+    k_write( 2, "kriya du: cannot access '", 25);
+    k_write( 2, path, strlen(path));
+    k_write( 2, "': ", 3);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        k_write( 2, m, strlen(m));
+    }
+    k_write( 2, "\n", 1);
+    _du_any_failed = 1;
+    return 0;
+}
+
+# ⭐ THE WALK IS A LOOP SINCE 1.8.9. It was a recursion, and with descriptors no longer the limit
+# (1.8.6) the stack was: a stack guard stopped it at 10,767 levels under 8 MiB, where GNU's has no
+# limit. Each directory is now a level of the shared walk (src/lib/walk.cyr), its state in the
+# level's slots:
+#   U0  its path's length in `_du_pb`
+#   U1  `printed`, the total its own line shows (`-S` leaves subdirectories out of it)
+#   U2  `full`, the true subtree total its parent and `-c` need
+#   U3  1 when it was pushed on the `-L` ancestor stack
+# `_du_enter` is the old function's top half and `_du_leave` its bottom half; the loop in
+# `_du_tree` is the recursion between them.
+enum DuSlot { DU_U_PLEN = 0, DU_U_PRINTED = 1, DU_U_FULL = 2, DU_U_PUSHED = 3, }
+
+# Look at `name` in `parent_dirfd` (its path `_du_pb`, `plen` long) at `depth`. A directory is
+# opened as level `depth` and the result is -1; anything else is accounted for here and the
+# result is its size (0 when it is skipped, vanished or could not be read).
+fn _du_enter(parent_dirfd, name, plen, depth): i64 {
     var display = _du_pb;
     # A pattern can name an operand: GNU then prints nothing for it, at exit 0. (Children are
-    # tested by the loop below, before their stat.)
+    # tested by the loop, before their stat.)
     if (depth == 0) {
         if (_du_excluded(display) == 1) { return 0; }
     }
@@ -411,15 +436,7 @@ fn _du_walk(parent_dirfd, name, plen, depth): i64 {
         if (depth > 0) {
             if (_du_vanished(parent_dirfd, display, name, sr) == 1) { return 0; }
         }
-        k_write( 2, "kriya du: cannot access '", 25);
-        k_write( 2, display, strlen(display));
-        k_write( 2, "': ", 3);
-        if (errmsg_is_known(0 - sr) == 1) {
-            var m = errmsg_for(0 - sr);
-            k_write( 2, m, strlen(m));
-        }
-        k_write( 2, "\n", 1);
-        _du_any_failed = 1;
+        _du_cannot(display, 0 - sr);
         return 0;
     }
     # -x: the operand's device is the file system this walk stays on.
@@ -447,8 +464,8 @@ fn _du_walk(parent_dirfd, name, plen, depth): i64 {
         return self_size;
     }
 
-    # Directory. Open and walk — as a level of the shared walk (src/lib/walk.cyr), which keeps at
-    # most 32 directories open however deep the tree is.
+    # Directory: a level of the shared walk, which keeps at most 32 directories open however
+    # deep the tree is.
     var dir_fd: i64 = 0;
     if (_du_follow == 1) {
         # O_RDONLY | O_DIRECTORY (per-arch value, see fs.cyr).
@@ -462,22 +479,38 @@ fn _du_walk(parent_dirfd, name, plen, depth): i64 {
         if (depth > 0) {
             if (dir_fd == (0 - 2)) { return 0; }
         }
-        k_write( 2, "kriya du: cannot access '", 25);
+        # ⛔ A DIRECTORY THAT CANNOT BE READ STILL HAS ITS LINE (1.8.9), as GNU's FTS_DNR does:
+        # *cannot read directory*, then the directory's own blocks on their line, then the walk
+        # goes on. kriya said *cannot access* and printed no line, and under `-b` it added the
+        # directory's st_size to its parent, where a directory counts nothing: `du -ba x` over an
+        # unreadable `x/u` said 65 where GNU says 5. Pre-existing; found by comparing /etc.
+        k_write( 2, "kriya du: cannot read directory '", 33);
         k_write( 2, display, strlen(display));
         k_write( 2, "': ", 3);
         if (errmsg_is_known(0 - dir_fd) == 1) {
-            var m = errmsg_for(0 - dir_fd);
-            k_write( 2, m, strlen(m));
+            var rm = errmsg_for(0 - dir_fd);
+            k_write( 2, rm, strlen(rm));
         }
         k_write( 2, "\n", 1);
         _du_any_failed = 1;
-        return self_size;
+        var own: i64 = self_size;
+        if (_du_bytes == 1) { own = 0; }
+        var show: i64 = 1;
+        if (_du_summarize == 1) {
+            if (depth != 0) { show = 0; }
+        }
+        if (_du_have_depth == 1) {
+            if (depth > _du_max_depth) { show = 0; }
+        }
+        if (show == 1) { _du_emit(own, display); }
+        if (depth == 0) { _du_grand = _du_grand + own; }
+        return own;
     }
 
     # ⚠ Ancestor bookkeeping, and ONLY under -L: without a symlink there is no
     # way back up, so a -P walk cannot cycle and need not pay the scan.
     # ⛔ A push that FAILS means the ancestor is unrecorded, which is exactly the
-    # state the unbounded recursion needs — so refuse to descend instead.
+    # state the unbounded descent needs — so refuse to descend instead.
     var pushed: i64 = 0;
     if (_du_follow == 1) {
         if (fs_dirstack_push(_du_path, fs_dev(&st), fs_ino(&st)) != 0) {
@@ -501,114 +534,22 @@ fn _du_walk(parent_dirfd, name, plen, depth): i64 {
     # own st_size — only file content bytes count toward apparent size.
     # (Matches GNU's --apparent-size dir handling.)
     if (_du_bytes == 1) { self_blocks = 0; }
-    var printed: i64 = self_blocks;
-    var full:    i64 = self_blocks;
-    # ⛔ `dir_fd` IS FETCHED AGAIN FOR EVERY ENTRY: a child deeper than the walk's budget closes
-    # this directory and reopens it under another descriptor number (src/lib/walk.cyr).
-    var loop: i64 = 1;
-    while (loop == 1) {
-        var ent = wk_next(_du_wk, depth);
-        if (ent <= 0) {
-            # ⚠ A read error ends the directory silently, as it always has here.
-            loop = 0;
-        } else {
-            dir_fd = wk_fd(_du_wk, depth);
-            var ename = fs_dent_name(ent);
-            var clen = _du_path_push(plen, ename);
-            var child_disp = _du_pb;
-            var skip_child: i64 = 0;
-            if (_du_excluded(child_disp) == 1) { skip_child = 1; }
-            # Classify via lstat (or stat with -L).
-            var cst[144];
-            var csr: i64 = 0;
-            if (skip_child == 0) {
-                if (_du_follow == 1) {
-                    csr = fs_stat_entry(dir_fd, child_disp, ename, &cst, 1);
-                } else {
-                    csr = fs_stat_entry(dir_fd, child_disp, ename, &cst, 0);
-                }
-            }
-            # -x: a directory on another file system is not entered, counted or
-            # listed, as GNU's FTS_XDEV skip. A non-directory there still counts.
-            if (skip_child == 0) {
-                if (csr == 0) {
-                    if (_du_xdev_on == 1) {
-                        if (fs_is_dir(&cst) == 1) {
-                            if (fs_dev(&cst) != _du_xdev) { skip_child = 1; }
-                        }
-                    }
-                }
-            }
-            # Vanished since the read: skipped like an excluded entry, in silence.
-            if (skip_child == 0) {
-                if (csr != 0) {
-                    if (_du_vanished(dir_fd, child_disp, ename, csr) == 1) { skip_child = 1; }
-                }
-            }
-            if (skip_child == 1) { csr = 0 - 1; }
-            elif (csr != 0) {
-                # ⛔ THIS ARM DID NOT EXIST. A child whose stat failed
-                # was dropped in silence and `du` exited 0 over a tree
-                # it could not fully read — and `-L` makes it easy to
-                # reach, since a broken symlink answers ENOENT and a
-                # self-referential one answers ELOOP where the default
-                # `-P` lstat succeeds on both. GNU diagnoses and exits 1.
-                k_write( 2, "kriya du: cannot access '", 25);
-                k_write( 2, child_disp, strlen(child_disp));
-                k_write( 2, "': ", 3);
-                if (errmsg_is_known(0 - csr) == 1) {
-                    var cm = errmsg_for(0 - csr);
-                    k_write( 2, cm, strlen(cm));
-                }
-                k_write( 2, "\n", 1);
-                _du_any_failed = 1;
-            }
-            if (skip_child == 0) { if (csr == 0) {
-                if (fs_is_dir(&cst) == 1) {
-                    if (wk_stack_room() == 0) {
-                        # ⛔ One level deeper would exhaust the stack (src/lib/walk.cyr).
-                        wk_report_deep(_du_wk, child_disp);
-                        _du_any_failed = 1;
-                    } else {
-                        # ⚠ `_du_walk` returns the FULL subtree total, never
-                        # the `-S`-stripped one — that distinction is the
-                        # whole reason the two totals are separate.
-                        var child_full = _du_walk(dir_fd, ename, clen, depth + 1);
-                        full = full + child_full;
-                        if (_du_sep_dirs == 0) {
-                            printed = printed + child_full;
-                        }
-                    }
-                } else {
-                    # ⚠ The dedup gates the BYTES and the `-a` LINE
-                    # together. A second hardlink name printing `0`
-                    # would be a different output from GNU's, which
-                    # omits the line entirely.
-                    if (_du_seen_skip(&cst, depth + 1) == 0) {
-                        var sz = _du_size(&cst);
-                        printed = printed + sz;
-                        full    = full + sz;
-                        # Emit per-file lines under -a.
-                        var depth_ok: i64 = 1;
-                        if (_du_have_depth == 1) {
-                            if (depth + 1 > _du_max_depth) { depth_ok = 0; }
-                        }
-                        if (_du_summarize == 1) { depth_ok = 0; }
-                        if (_du_all == 1) {
-                            if (depth_ok == 1) { _du_emit(sz, child_disp); }
-                        }
-                        # _du_grand is operand-level only — children
-                        # fold into the top-level subtree below.
-                    }
-                }
-            } }
-            # Back to this level's path; the buffer may have moved under a child.
-            store8(_du_pb + plen, 0);
-            display = _du_pb;
-        }
-    }
+    wk_set_u(_du_wk, depth, DU_U_PLEN, plen);
+    wk_set_u(_du_wk, depth, DU_U_PRINTED, self_blocks);
+    wk_set_u(_du_wk, depth, DU_U_FULL, self_blocks);
+    wk_set_u(_du_wk, depth, DU_U_PUSHED, pushed);
+    return 0 - 1;
+}
+
+# Leave level `depth`, read to its end: its line, and its full total.
+fn _du_leave(depth): i64 {
+    var plen = wk_u(_du_wk, depth, DU_U_PLEN);
+    store8(_du_pb + plen, 0);
+    var display = _du_pb;
+    var printed = wk_u(_du_wk, depth, DU_U_PRINTED);
+    var full = wk_u(_du_wk, depth, DU_U_FULL);
     wk_close(_du_wk, depth, display);
-    if (pushed == 1) { fs_dirstack_pop(_du_path); }
+    if (wk_u(_du_wk, depth, DU_U_PUSHED) == 1) { fs_dirstack_pop(_du_path); }
     # ⛔ The way back up was not the way down: the walk is over, and this line is not printed.
     if (wk_broken(_du_wk) == 1) {
         _du_any_failed = 1;
@@ -632,6 +573,121 @@ fn _du_walk(parent_dirfd, name, plen, depth): i64 {
         _du_grand = _du_grand + full;
     }
     return full;
+}
+
+# Add `sz` to level `depth`'s totals: both, or only `full` for a subdirectory under -S.
+fn _du_add(depth, sz, subdir): i64 {
+    wk_set_u(_du_wk, depth, DU_U_FULL, wk_u(_du_wk, depth, DU_U_FULL) + sz);
+    var to_line: i64 = 1;
+    if (subdir == 1) {
+        if (_du_sep_dirs == 1) { to_line = 0; }
+    }
+    if (to_line == 1) {
+        wk_set_u(_du_wk, depth, DU_U_PRINTED, wk_u(_du_wk, depth, DU_U_PRINTED) + sz);
+    }
+    return 0;
+}
+
+# One operand, whose path is already in `_du_pb`.
+fn _du_tree(op, plen0): i64 {
+    if (_du_enter(0 - 100, op, plen0, 0) != (0 - 1)) { return 0; }
+    var depth: i64 = 0;
+    var running: i64 = 1;
+    while (running == 1) {
+        var ent = wk_next(_du_wk, depth);
+        if (ent <= 0) {
+            # ⚠ A read error ends the directory silently, as it always has here.
+            var full = _du_leave(depth);
+            if (depth == 0) {
+                running = 0;
+            } else {
+                depth = depth - 1;
+                # ⚠ `_du_leave` returns the FULL subtree total, never the `-S`-stripped
+                # one — that distinction is the whole reason the two totals are separate.
+                _du_add(depth, full, 1);
+            }
+            continue;
+        }
+        # ⛔ `dir_fd` IS FETCHED AGAIN FOR EVERY ENTRY: a child deeper than the walk's budget
+        # closes this directory and reopens it under another descriptor number.
+        var dir_fd = wk_fd(_du_wk, depth);
+        var plen = wk_u(_du_wk, depth, DU_U_PLEN);
+        var ename = fs_dent_name(ent);
+        var clen = _du_path_push(plen, ename);
+        var child_disp = _du_pb;
+        var skip_child: i64 = 0;
+        if (_du_excluded(child_disp) == 1) { skip_child = 1; }
+        # Classify via lstat (or stat with -L).
+        var cst[144];
+        var csr: i64 = 0;
+        if (skip_child == 0) {
+            if (_du_follow == 1) {
+                csr = fs_stat_entry(dir_fd, child_disp, ename, &cst, 1);
+            } else {
+                csr = fs_stat_entry(dir_fd, child_disp, ename, &cst, 0);
+            }
+        }
+        # -x: a directory on another file system is not entered, counted or
+        # listed, as GNU's FTS_XDEV skip. A non-directory there still counts.
+        if (skip_child == 0) {
+            if (csr == 0) {
+                if (_du_xdev_on == 1) {
+                    if (fs_is_dir(&cst) == 1) {
+                        if (fs_dev(&cst) != _du_xdev) { skip_child = 1; }
+                    }
+                }
+            }
+        }
+        # Vanished since the read: skipped like an excluded entry, in silence.
+        if (skip_child == 0) {
+            if (csr != 0) {
+                if (_du_vanished(dir_fd, child_disp, ename, csr) == 1) { skip_child = 1; }
+            }
+        }
+        var entered: i64 = 0;
+        if (skip_child == 1) {
+            csr = 0 - 1;
+        } elif (csr != 0) {
+            # ⛔ THIS ARM DID NOT EXIST. A child whose stat failed
+            # was dropped in silence and `du` exited 0 over a tree
+            # it could not fully read — and `-L` makes it easy to
+            # reach, since a broken symlink answers ENOENT and a
+            # self-referential one answers ELOOP where the default
+            # `-P` lstat succeeds on both. GNU diagnoses and exits 1.
+            _du_cannot(child_disp, 0 - csr);
+        } elif (fs_is_dir(&cst) == 1) {
+            var r = _du_enter(dir_fd, ename, clen, depth + 1);
+            if (r == (0 - 1)) {
+                entered = 1;
+                depth = depth + 1;
+            } else {
+                _du_add(depth, r, 1);
+            }
+        } else {
+            # ⚠ The dedup gates the BYTES and the `-a` LINE
+            # together. A second hardlink name printing `0`
+            # would be a different output from GNU's, which
+            # omits the line entirely.
+            if (_du_seen_skip(&cst, depth + 1) == 0) {
+                var sz = _du_size(&cst);
+                _du_add(depth, sz, 0);
+                # Emit per-file lines under -a.
+                var depth_ok: i64 = 1;
+                if (_du_have_depth == 1) {
+                    if (depth + 1 > _du_max_depth) { depth_ok = 0; }
+                }
+                if (_du_summarize == 1) { depth_ok = 0; }
+                if (_du_all == 1) {
+                    if (depth_ok == 1) { _du_emit(sz, child_disp); }
+                }
+                # _du_grand is operand-level only — children
+                # fold into the top-level subtree below.
+            }
+        }
+        # Back to this level's path, unless the walk went down into the child.
+        if (entered == 0) { store8(_du_pb + plen, 0); }
+    }
+    return 0;
 }
 
 var _du_any_failed: i64 = 0;
@@ -968,7 +1024,7 @@ fn cmd_du(start: i64): i64 {
     while (oi < n_operands) {
         var op = load64(operands_buf + oi * 8);
         wk_reset(_du_wk);
-        _du_walk(0 - 100, op, _du_path_push(0, op), 0);
+        _du_tree(op, _du_path_push(0, op));
         oi = oi + 1;
     }
 

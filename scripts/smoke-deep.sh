@@ -259,25 +259,45 @@ else
 fi
 rm -rf t elsewhere err
 
-# --- 8. the stack guard (ulimit -s 1024) -----------------------------------------
+# --- 8. every walk is a loop (1.8.9) ------------------------------------------------
 # ⛔ A recursive walk that no longer runs out of descriptors runs out of stack, and the kernel's
-# answer is SIGSEGV: exit 139, no message. Under a 1 MiB stack a 3,000-level tree is far past
-# what `du`, `find`, `cp` and `grep` can hold; each must say so and exit 1 (`grep` 2). `rm -r`
-# is a loop and must remove the tree all the same.
+# answer is SIGSEGV: exit 139, no message. 1.8.6 stopped the recursive ones with a stack guard,
+# at 15,701 levels for `find` under 8 MiB and 5,798 for `cp -R`; 1.8.9 made them loops. So:
+#   - under a 1 MiB stack, where a recursion could not have held a thousand levels, every walk
+#     over 3,000 levels gives GNU's answer;
+#   - and past every old guard, 30,000 levels under the default stack, each walk finishes.
+# ⚠ The 30,000-level checks print little: `find t` over that chain is 15 GB of paths.
+ss() {   # ss <cmd...>: under a 1 MiB stack
+    sh -c 'ulimit -s 1024; exec timeout "$0" "$@"' "$T" "$@"
+}
 if [ "$HAVE_PY" = 1 ]; then
     chain t 3000
-    for u in "du -s t" "find t" "cp -R t c" "grep -r hit t"; do
-        rc=0
-        # shellcheck disable=SC2086
-        sh -c 'ulimit -s 1024; exec timeout "$0" "$@"' "$T" "$BIN" $u >/dev/null 2>err || rc=$?
-        want=1; [ "${u%% *}" = grep ] && want=2
-        expect_eq "stack guard: $u" "$want 1" "$rc $(grep -c 'directory nested too deeply to walk' err || true)"
-    done
-    rm -rf c
-    rc=0; sh -c 'ulimit -s 1024; exec timeout "$0" "$@"' "$T" "$BIN" rm -r t 2>/dev/null || rc=$?
-    expect_eq "rm -r under a 1 MiB stack" "0 no" "$rc $([ -e t ] && echo yes || echo no)"
+    expect_eq "find under a 1 MiB stack"     "$(find t | cksum)"        "$(ss "$BIN" find t | cksum)"
+    expect_eq "find -depth under a 1 MiB stack" "$(find t -depth | cksum)" "$(ss "$BIN" find t -depth | cksum)"
+    expect_eq "du -a under a 1 MiB stack"    "$(du -a t | cksum)"       "$(ss "$BIN" du -a t | cksum)"
+    expect_eq "grep -r under a 1 MiB stack"  "$(grep -r hit t | cksum)" "$(ss "$BIN" grep -r hit t | cksum)"
+    rc=0; ss "$BIN" cp -R t c 2>/dev/null || rc=$?
+    expect_eq "cp -R under a 1 MiB stack" "0 $(find t | sed 's|^t|c|' | cksum)" "$rc $(find c | cksum)"
+    rc=0; ss "$BIN" rm -r t c 2>/dev/null || rc=$?
+    expect_eq "rm -r under a 1 MiB stack" "0 no" "$rc $([ -e t ] || [ -e c ] && echo yes || echo no)"
+    # ⛔ `find -depth` past PATH_MAX, where the one path buffer has GROWN under the walk: a
+    # directory's record, written before the walk went down, must not keep the old address.
+    chain t 2500
+    expect_eq "find -depth past PATH_MAX"    "$(find t -depth | cksum)" "$(lim 64 "$BIN" find t -depth | cksum)"
+    expect_eq "find -depth -name past PATH_MAX" "$(find t -depth -name a | tail -1 | cksum)" \
+        "$(lim 64 "$BIN" find t -depth -name a | tail -1 | cksum)"
+    rm -rf t
+    chain t 30000
+    expect_eq "find over 30,000 levels"      "$(find t -name f | cksum)" "$(lim 64 "$BIN" find t -name f | cksum)"
+    expect_eq "du -s over 30,000 levels"     "$(du -s t)"                "$(lim 64 "$BIN" du -s t)"
+    expect_eq "grep -rl over 30,000 levels"  "$(grep -rl hit t | cksum)" "$(lim 64 "$BIN" grep -rl hit t | cksum)"
+    rc=0; lim 64 "$BIN" cp -R t c 2>/dev/null || rc=$?
+    expect_eq "cp -R over 30,000 levels" "0 1 $(du -s t | cut -f1)" \
+        "$rc $(find c -name f | wc -l) $(du -s c | cut -f1)"
+    rc=0; lim 64 "$BIN" rm -r t c 2>/dev/null || rc=$?
+    expect_eq "rm -r over 30,000 levels" "0 no" "$rc $([ -e t ] || [ -e c ] && echo yes || echo no)"
 else
-    SKIP=$((SKIP + 5))
+    SKIP=$((SKIP + 13))
 fi
 
 # --- summary ---

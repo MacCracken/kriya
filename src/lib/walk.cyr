@@ -29,11 +29,13 @@
 # ⚠ agnos has no open-relative-to-a-descriptor, so its walks open by path and nothing is closed
 # early there.
 #
-# The stack half (`wk_stack_mark` / `wk_stack_room`): a recursive walk that no longer runs out of
-# descriptors runs out of STACK instead, and the kernel's answer to that is SIGSEGV. Measured at
-# 1.8.5 under an 8 MiB stack with descriptors raised: `cp -R` died between 8,000 and 12,000 levels,
-# `du` between 12,000 and 16,000, `find` and `rm -r` between 20,000 and 40,000. The guard turns
-# that into a diagnostic and exit 1. `rm -r` is iterative and does not need it.
+# ⭐ EVERY WALKER IS A LOOP, not a recursion: `rm -r` since 1.8.6, `find`, `du`, `cp -R` and
+# `grep -r` since 1.8.9. A recursive walk that no longer runs out of descriptors runs out of STACK
+# instead, and the kernel's answer is SIGSEGV: measured at 1.8.5 under an 8 MiB stack with
+# descriptors raised, `cp -R` died between 8,000 and 12,000 levels, `du` between 12,000 and 16,000,
+# `find` and `rm -r` between 20,000 and 40,000. 1.8.6 stopped them with a stack guard; 1.8.9
+# removed the recursion and the guard with it. A walker's per-directory state is the level's four
+# slots (`wk_u`), and its paths the walk's one buffer (`wk_path_push`).
 
 enum WkLayout {
     WK_BUDGET    = 32;     # directories one walk keeps open
@@ -83,8 +85,6 @@ var _wk_nwalks: i64 = 0;
 var _wk_pool = 0;
 var _wk_npool: i64 = 0;
 var _wk_scratch = 0;
-var _wk_sbase: i64 = 0;
-var _wk_sroom: i64 = 0;
 
 # Level records live in chunks of WK_CHUNK, so a deeper walk adds a chunk and copies nothing:
 # 100,000 levels are 15 MB of records, where doubling one array spent twice that.
@@ -92,8 +92,7 @@ fn _wk_lv(w, depth): i64 {
     return load64(load64(w + WK_H_LV) + (depth >> 10) * 8) + (depth & 1023) * WK_L_SZ;
 }
 
-# A walk. `util` names it in its diagnostics. ⭐ Also marks the stack base: walks are made at a
-# utility's top level, before any descent.
+# A walk. `util` names it in its diagnostics.
 fn wk_new(kind, util): i64 {
     var w = alloc(WK_H_SZ);
     store64(w + WK_H_LV, 0);
@@ -112,7 +111,6 @@ fn wk_new(kind, util): i64 {
         store64(_wk_walks + _wk_nwalks * 8, w);
         _wk_nwalks = _wk_nwalks + 1;
     }
-    if (_wk_sbase == 0) { wk_stack_mark(); }
     return w;
 }
 
@@ -646,44 +644,5 @@ fn wk_path_push(w, plen, name): i64 {
 
 fn wk_path_cut(w, plen): i64 {
     store8(load64(w + WK_H_PB) + plen, 0);
-    return 0;
-}
-
-# --- the stack guard ---------------------------------------------------
-
-# The diagnostic for a directory the guard does not enter: `kriya <util>: <path>: …`, exit 1.
-fn wk_report_deep(w, display): i64 {
-    report_note(load64(w + WK_H_UTIL), display, "directory nested too deeply to walk");
-    return 0;
-}
-
-# Record where the stack is now, and how far a walk may take it: the soft RLIMIT_STACK, less a
-# quarter (argv and the environment count against it, up to a quarter by ARG_MAX's rule) and
-# 256 KiB for the deepest call's own frames. ⚠ An unlimited or unreadable limit is taken as
-# 8 MiB, the usual default: the guard is then a guess, and a conservative one.
-fn wk_stack_mark(): i64 {
-    var here: i64 = 0;
-    _wk_sbase = &here;
-    var room: i64 = 8388608;
-    #ifndef CYRIUS_TARGET_AGNOS
-    var rl[16];
-    if (sys_getrlimit(3, &rl) == 0) {                              # RLIMIT_STACK
-        var lim = load64(&rl);
-        if (lim > 0) {
-            room = lim;
-            if (room > 268435456) { room = 268435456; }
-        }
-    }
-    #endif
-    _wk_sroom = room - room / 4 - 262144;
-    if (_wk_sroom < 65536) { _wk_sroom = 65536; }
-    return 0;
-}
-
-# 1 while a walk may go one level deeper without exhausting the stack.
-fn wk_stack_room(): i64 {
-    if (_wk_sbase == 0) { return 1; }
-    var here: i64 = 0;
-    if (_wk_sbase - &here < _wk_sroom) { return 1; }
     return 0;
 }

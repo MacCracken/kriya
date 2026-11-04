@@ -1417,99 +1417,114 @@ fn _gr_process_fd(fd, name, handles, n_handles, opts, term_byte): i64 {
 #
 # ⭐ Since 1.8.6 each directory is a level of the shared walk (src/lib/walk.cyr), which keeps at
 # most 32 open however deep the tree is; one per level stopped `grep -r` at 1,020 levels.
+# ⭐ AND A LOOP SINCE 1.8.9, not a recursion, so the stack is no limit either: a guard stopped it
+# at 14,494 levels under 8 MiB. The path is the walk's one buffer (`wk_path_push`), where each
+# entry's path used to be allocated and kept. A level's slot U0 is its path's length.
 fn _gr_walk_dir(parent_dirfd, dir_name, dir_path, handles, n_handles, opts, term_byte, suppress): i64 {
+    var w = _gr_wk;
+    var found_any: i64 = 0;
+    var p0 = wk_path_set(w, dir_path);
     var open_path = dir_path;
-    if (load8(dir_path) == 0) { open_path = "."; }
-    var depth = wk_top(_gr_wk) + 1;
+    if (p0 == 0) { open_path = "."; }
     var odfd = parent_dirfd;
     var oname = dir_name;
     #ifdef CYRIUS_TARGET_AGNOS
     odfd = 0 - 100;
     oname = open_path;
     #endif
-    var dir_fd = wk_open(_gr_wk, depth, odfd, oname, FS_O_DIRECTORY | FS_O_NOFOLLOW);
-    if (dir_fd < 0) {
-        _gr_report(open_path, 0 - dir_fd, suppress);
+    var top_fd = wk_open(w, 0, odfd, oname, FS_O_DIRECTORY | FS_O_NOFOLLOW);
+    if (top_fd < 0) {
+        _gr_report(open_path, 0 - top_fd, suppress);
         return 0;
     }
-    var found_any: i64 = 0;
-    # ⛔ `dir_fd` IS FETCHED AGAIN FOR EVERY ENTRY: a child deeper than the walk's budget closes
-    # this directory and reopens it under another descriptor number.
-    var loop: i64 = 1;
-    while (loop == 1) {
-        var ent = wk_next(_gr_wk, depth);
-        if (ent < 0) {
-            _gr_report(dir_path, 0 - ent, suppress);
-            loop = 0;
-        } elif (ent == 0) {
-            loop = 0;
-        } else {
-            dir_fd = wk_fd(_gr_wk, depth);
-            var name = fs_dent_name(ent);
-            var st[144];  # 144 bytes (18 i64 slots)
-            # Built BEFORE the stat: `fs_stat_entry`'s agnos arm needs
-            # the full path (no dirfd-relative stat there), and every
-            # diagnostic below wants it too.
-            var nlen = strlen(name);
-            var dlen = strlen(dir_path);
-            var sep = 1;
-            if (dlen > 0) {
-                if (load8(dir_path + dlen - 1) == 47) { sep = 0; }
+    wk_set_u(w, 0, 0, p0);
+    var depth: i64 = 0;
+    var running: i64 = 1;
+    while (running == 1) {
+        var plen = wk_u(w, depth, 0);
+        var ent = wk_next(w, depth);
+        if (ent <= 0) {
+            wk_path_cut(w, plen);
+            var here = wk_path(w);
+            if (ent < 0) { _gr_report(here, 0 - ent, suppress); }
+            var shown = here;
+            if (plen == 0) { shown = "."; }
+            wk_close(w, depth, shown);
+            if (depth == 0) {
+                running = 0;
             } else {
-                sep = 0;
+                depth = depth - 1;
+                wk_path_cut(w, wk_u(w, depth, 0));
             }
-            var sub = alloc(dlen + sep + nlen + 1);
-            memcpy(sub, dir_path, dlen);
-            if (sep == 1) { store8(sub + dlen, 47); }
-            memcpy(sub + dlen + sep, name, nlen);
-            store8(sub + dlen + sep + nlen, 0);
-            var r = fs_stat_entry(dir_fd, sub, name, &st, 0);
-            if (r == 0) {
-                if (fs_is_dir(&st) == 1) {
-                    # ⭐ --exclude-dir: the BASE NAME, so a pruned
-                    # directory is never opened at any depth.
-                    if (_gr_dir_excluded(name, 0) == 0) {
-                        if (wk_stack_room() == 0) {
-                            # ⛔ One level deeper would exhaust the stack
-                            # (src/lib/walk.cyr).
-                            wk_report_deep(_gr_wk, sub);
-                            _gr_had_error = 1;
-                        } elif (_gr_walk_dir(dir_fd, name, sub, handles, n_handles,
-                            opts, term_byte, suppress) == 1) {
-                            found_any = 1;
-                        }
-                    }
-                } elif (fs_is_reg(&st) == 1) {
-                    # M8 mitigation: O_NOFOLLOW to close
-                    # the TOCTOU window between lstat-classify and
-                    # this open. If the regular file was swapped
-                    # for a symlink, ELOOP — we report and skip
-                    # rather than leak the target's bytes.
-                    # See CVE-2026-35359 in uutils-coreutils.
-                    var fd = wk_open_entry_file(dir_fd, sub, name);
-                    if (fd < 0) {
-                        _gr_report(sub, 0 - fd, suppress);
+            continue;
+        }
+        # ⛔ `dir_fd` IS FETCHED AGAIN FOR EVERY ENTRY: a child deeper than the walk's budget
+        # closes this directory and reopens it under another descriptor number.
+        var dir_fd = wk_fd(w, depth);
+        var name = fs_dent_name(ent);
+        var st[144];  # 144 bytes (18 i64 slots)
+        # Built BEFORE the stat: `fs_stat_entry`'s agnos arm needs
+        # the full path (no dirfd-relative stat there), and every
+        # diagnostic below wants it too.
+        var clen = wk_path_push(w, plen, name);
+        var sub = wk_path(w);
+        var entered: i64 = 0;
+        var r = fs_stat_entry(dir_fd, sub, name, &st, 0);
+        if (r == 0) {
+            if (fs_is_dir(&st) == 1) {
+                # ⭐ --exclude-dir: the BASE NAME, so a pruned
+                # directory is never opened at any depth.
+                if (_gr_dir_excluded(name, 0) == 0) {
+                    var cdfd = dir_fd;
+                    var cname = name;
+                    #ifdef CYRIUS_TARGET_AGNOS
+                    cdfd = 0 - 100;
+                    cname = sub;
+                    #endif
+                    var cfd = wk_open(w, depth + 1, cdfd, cname, FS_O_DIRECTORY | FS_O_NOFOLLOW);
+                    if (cfd < 0) {
+                        _gr_report(sub, 0 - cfd, suppress);
                     } else {
-                        # ⚠ Filter here, not at emit time: a file
-                        # excluded by name must not be opened or
-                        # counted, and must not affect the exit
-                        # status.
-                        var pr: i64 = 0;
-                        if (_gr_name_allowed(sub, 0) == 1) {
-                            pr = _gr_process_fd(fd, sub, handles, n_handles, opts, term_byte);
-                        } else {
-                            k_close(fd);
-                        }
-                        k_close( fd);
-                        if (pr < 0) { _gr_report(sub, 0 - pr, suppress); }
-                        elif (pr == 1) { found_any = 1; }
+                        depth = depth + 1;
+                        wk_set_u(w, depth, 0, clen);
+                        entered = 1;
                     }
                 }
-                # Skip symlinks (ADR 0003) and other types.
+            } elif (fs_is_reg(&st) == 1) {
+                # M8 mitigation: O_NOFOLLOW to close
+                # the TOCTOU window between lstat-classify and
+                # this open. If the regular file was swapped
+                # for a symlink, ELOOP — we report and skip
+                # rather than leak the target's bytes.
+                # See CVE-2026-35359 in uutils-coreutils.
+                var fd = wk_open_entry_file(dir_fd, sub, name);
+                if (fd < 0) {
+                    _gr_report(sub, 0 - fd, suppress);
+                } else {
+                    # ⚠ Filter here, not at emit time: a file
+                    # excluded by name must not be opened or
+                    # counted, and must not affect the exit
+                    # status.
+                    var pr: i64 = 0;
+                    if (_gr_name_allowed(sub, 0) == 1) {
+                        pr = _gr_process_fd(fd, sub, handles, n_handles, opts, term_byte);
+                    }
+                    # ⚠ Once: it was closed twice when the name was filtered out.
+                    k_close( fd);
+                    if (pr < 0) { _gr_report(sub, 0 - pr, suppress); }
+                    elif (pr == 1) { found_any = 1; }
+                }
             }
+            # Skip symlinks (ADR 0003) and other types.
+        } else {
+            # ⛔ REPORTED SINCE 1.8.9, as GNU's grep does. An entry whose stat failed was skipped in
+            # silence, so `grep -r hit d` over a readable, unsearchable `d/s` (0600) exited 0 where
+            # GNU says *Permission denied* and exits 2. ⚠ An entry that vanished is reported too:
+            # GNU's grep has no vanish rule (1.8.7's churn, 407 messages).
+            _gr_report(sub, 0 - r, suppress);
         }
+        if (entered == 0) { wk_path_cut(w, plen); }
     }
-    wk_close(_gr_wk, depth, open_path);
     return found_any;
 }
 

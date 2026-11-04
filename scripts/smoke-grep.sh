@@ -752,6 +752,13 @@ if [ "$(id -u)" != 0 ]; then
     rc_same '1.8.6: -rs unreadable subdir, match'    -rs hit rcw
     rc_same '1.8.6: -rl unreadable subdir, match'    -rl hit rcw
     chmod 755 rcw/sub
+    # ⛔ 1.8.9: a directory that can be READ and not searched (0600) lists its names, and every
+    # stat below it fails with EACCES. kriya skipped those entries in silence, at exit 0.
+    chmod 600 rcw/sub
+    rc_same '1.8.9: -r readable, unsearchable subdir'    -r hit rcw
+    expect_eq '1.8.9: ...and says so' "$(LC_ALL=C grep -r hit rcw 2>&1 >/dev/null | wc -l)" \
+        "$(LC_ALL=C "$BIN" grep -r hit rcw 2>&1 >/dev/null | wc -l)"
+    chmod 755 rcw/sub
 fi
 
 # --- summary ---

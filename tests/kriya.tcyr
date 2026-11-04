@@ -236,17 +236,6 @@ fn _t_qn(src, style, want): i64 {
     return streq(out, want);
 }
 
-# The stack guard, in-process: recurse until it says stop, and count the levels it allowed. A
-# frame that comes back with its own byte changed means the guard let the stack run over.
-fn _t_wk_deep(n): i64 {
-    if (wk_stack_room() == 0) { return n; }
-    var pad[256];
-    store8(&pad, n & 255);
-    var r = _t_wk_deep(n + 1);
-    if (load8(&pad) != (n & 255)) { return 0 - 1; }
-    return r;
-}
-
 fn main() {
     alloc_init();
 
@@ -1726,7 +1715,7 @@ fn main() {
     assert_eq(_t_qh("c,d", QUOTE_IF_NEEDED, "c,d"), 1, "-m: nor is a section header");
     _q_comma = 0;
 
-    test_group("walk — the path buffer, the level chunks, the stack guard (1.8.6)");
+    test_group("walk — the path buffer and the level chunks (1.8.6)");
     var tw = wk_new(WK_READ, "test");
     assert_eq(wk_path_set(tw, "a"), 1, "path: set returns the length");
     assert_eq(wk_path_push(tw, 1, "b"), 3, "path: push returns the new length");
@@ -1762,10 +1751,6 @@ fn main() {
     assert_eq(wk_fd(tw, 0 - 1), 0 - 100, "wk_fd above level 0 is AT_FDCWD");
     assert_eq(wk_fd(tw, 2500), 0 - 9, "wk_fd of a level never opened is EBADF, not descriptor 0");
     assert_eq(wk_top(tw), 0 - 1, "a new walk has no level in use");
-    # ⛔ The guard must stop a recursion well before the stack runs out, and not absurdly early.
-    var tdeep = _t_wk_deep(0);
-    assert_eq(tdeep > 1000, 1, "stack guard: allows a deep recursion");
-    assert_eq(tdeep < 10000000, 1, "stack guard: and stops it");
 
     return assert_summary();
 
