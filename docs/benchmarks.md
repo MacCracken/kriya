@@ -92,6 +92,21 @@ GNU's key model ported (ADR 0033), against 1.9.0 and GNU 9.12 on the same box, b
 - `-n`, `-h` and `-V` read the key again in every comparison, as GNU does, at five to seven times
   GNU's cost: roadmap 1.10.8.
 
+### Past memory (1.9.2)
+
+4,000,000 lines of 4 to 16 letters (44 MB); best of two, wall clock, and peak memory:
+
+| What | kriya 1.9.2 | GNU 9.12 |
+|---|---|---|
+| `sort`, in memory | 8.79 s, 261 MB | 0.63 s, 535 MB (threads) |
+| `sort -S 10M -T .`, through temporary runs | 5.97 s, 33 MB | 1.39 s, 12 MB |
+| `sort -S 1M -T .` | 5.00 s, 19 MB | — |
+| kriya 1.9.1, which held it all | 8.71 s, 261 MB | — |
+
+- ⭐ The runs are FASTER than one in-memory sort: a 1 MiB buffer's merge sort works in cache, and
+  merging the runs is linear. The in-memory path is the one to fix (roadmap 1.10.8).
+- `-S` bounds kriya's memory to within a few MB of it; the rest is sixteen 64 KiB run readers.
+
 ## Exec and argument handling
 
 Measured at 1.6.17 and 1.7.0, against GNU on the same box:

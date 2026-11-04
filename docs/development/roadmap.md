@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.9.x** | Parsers & numerics | byte-suffix parser | **1.9.2** — size limits and follow modes |
+| **1.9.x** | Parsers & numerics | none (both shipped) | **1.9.3** — date input |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
 **1.8.x closed at 1.8.11**, when the 9.12 review's two decisions shipped. No arc depends on
@@ -58,15 +58,15 @@ kriya *does*, so expect an ADR and GNU-comparison work per item.
 
 ## 1.9.x — Parsers & numerics
 
-**Enabler:** a byte-suffix parser in `src/lib/args.cyr` (1.9.2). The other, float formatting,
-shipped at 1.9.0 as `src/lib/xfloat.cyr` ([ADR 0032](../adr/0032-floats-are-the-x86-extended-format-computed-in-integers.md)).
-`sort`'s keys shipped at 1.9.1 ([ADR 0033](../adr/0033-sort-compares-keys-as-gnus-keycompare-in-the-c-locale.md)).
+**Both enablers have shipped:** float formatting at 1.9.0, as `src/lib/xfloat.cyr`
+([ADR 0032](../adr/0032-floats-are-the-x86-extended-format-computed-in-integers.md)), and the
+byte-suffix parser at 1.9.2, as `kriya_xstrtou` in `src/lib/args.cyr`. `sort`'s keys shipped at 1.9.1
+([ADR 0033](../adr/0033-sort-compares-keys-as-gnus-keycompare-in-the-c-locale.md)), and its
+temporary runs and `tail`'s follow modes at 1.9.2
+([ADR 0034](../adr/0034-tail-follows-by-polling-as-gnus-disable-inotify-loop.md)). The rest of the
+arc is utility work.
 
 
-- **1.9.2 — Size limits and follow modes.** The byte-suffix parser (`5K`, `1M`, `1G`) serving
-  `head -c 1K`, `tail -c 1K` and `sort -S`; `tail -F` (follow by name, with retry), multi-file `-f`
-  (refused today, not merely absent) and `--pid=PID`; `sort`'s external-sort fallback above the
-  256 MiB cap, with `-T DIR`.
 - **1.9.3 — Date input.** `date -d STR` and `touch -d STR`, free-form. ⚠ Genuinely large — GNU's
   parser is notorious, and chrono's `dt_strptime` needs a format string, so it does not substitute.
   Scope it to a documented subset (ISO 8601, `@epoch`, `now`, `HH:MM[:SS]`) rather than chasing GNU.
@@ -192,6 +192,10 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
   every comparison, as GNU does, and cost more in Cyrius. Measured at 1.9.1 over 100,000 lines:
   `sort -n` **256 ms against GNU's 37**, `-h` **288 against 56**, `-V` **618 against 86**. The same
   cache serves them: the `-n`/`-h` digit-string record (and unit), and for `-V` the prefix length.
+  - ⭐ **And sort in cache-sized runs in memory too.** Measured at 1.9.2 on 4,000,000 lines (44 MB):
+    the in-memory sort takes 8.79 s, and the same input through temporary runs at `-S 1M` takes
+    5.00 s, because each 1 MiB buffer's merge sort stays in cache and the merge of the runs is
+    linear. Sorting runs of that size in memory and merging them, with no files, should beat both.
   ⚠ `scripts/difffuzz-sort.py` is the acceptance test, at 0 differences on 9.4, 9.7 and 9.12.
 
 ---
@@ -385,7 +389,6 @@ What still gates the arcs. Ship the enabler and everything under it becomes smal
 
 | Enabler | Home | Unblocks | Slot |
 |---|---|---|---|
-| Byte-suffix parser | `src/lib/args.cyr` | `head -c 1K`, `tail -c 1K`, `sort -S` | 1.9.2 |
 | niyama regex speed (quadratic search) | **upstream, filed** | `grep` on metacharacter patterns (~150× GNU) | 1.10.2, gated |
 | niyama GNU BRE operators, leftmost-longest, literal `*`, backreferences | **upstream, filed** | `grep`, `find -regex`, `nl -b p` | M11, gated |
 | chrono tzfile reader | **upstream, filed** | local time in `date`, `ls -l`, `stat`, `touch -t` | gated |

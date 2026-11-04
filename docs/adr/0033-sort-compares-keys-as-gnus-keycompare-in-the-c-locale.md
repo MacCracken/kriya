@@ -1,6 +1,6 @@
 # 0033 — `sort` compares keys as GNU's `keycompare` does, in the C locale
 
-**Status**: Accepted
+**Status**: Accepted; amended at 1.9.2 (past memory: temporary runs, `-S`, `-T`)
 **Date**: 2026-11-04
 
 ## Context
@@ -76,6 +76,33 @@ file that could not be read exited 1, which under `-c` is the answer "not sorted
 - **Neutral**
   - The external sort for inputs past the 256 MiB buffer, with `-S` and `-T`, is still roadmap
     1.9.2.
+
+## Amended at 1.9.2: past memory
+
+Until 1.9.2 an input past the 256 MiB buffer was truncated, with a warning, in every mode. Now:
+
+- **`-S SIZE` is a budget for the input's bytes and its line records together**, as GNU's buffer
+  is: 56 bytes a line, 72 under `-R`, 96 under `-g`. The default is 512 MiB. GNU's spellings are
+  taken, measured on 9.4 to 9.12: K, M, G, T, P, E, Z, Y, R, Q (and `g`, `t`) in powers of 1024,
+  `b` for bytes, `N%` of physical memory, KiB for a bare number, the largest of several, 2^64 and
+  past refused. It changes how much is held, never the order.
+- **Past it, sort writes each full buffer, sorted, to a temporary RUN**, and merges runs sixteen
+  at a time as they pile up, then into the output, with GNU's `merge` grouping. `-m` copies each
+  input to a run of its own and merges those; `-c` checks a buffer at a time, keeping the last line
+  for the next. A tie in a merge goes to the earlier run, so the output is the in-memory sort's.
+- **A run is created in the next `-T DIR`** (round robin, as GNU's), or `$TMPDIR`, or /tmp,
+  opened twice, to write and to read from the start, and **unlinked at once**. Nothing is left
+  behind however `sort` ends, an interrupt included, and agnos needs no lseek to read a run back.
+  A directory where no run can be made is GNU's exit 2.
+- ⚠ GNU's sixteen-way grouping cannot change the output, even for `-m -u` over unsorted files: a
+  line from another group never lands between two equal lines of one. kriya groups as GNU does
+  because it bounds the open runs, not for the order.
+
+Measured: 4 million lines (44 MB) sort in 8.79 s in memory, 5.97 s under `-S 10M` and 5.00 s under
+`-S 1M`, against GNU's 0.63 s on all its threads; `-S 10M` holds kriya to a 33 MB peak, where in
+memory takes 261. The runs are faster because each buffer's sort stays in cache (roadmap 1.10.8).
+`difffuzz-sort.py` gives a third of its cases a budget of a few KiB and a `-T` directory, and on
+1.9.2's final build 36,000 cases against 9.4, 9.7 and 9.12 differ in none.
 
 ## Alternatives considered
 

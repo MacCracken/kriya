@@ -6,6 +6,105 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.9.2] - 2026-11-04 — size limits and follow modes
+
+The roadmap's 1.9.2 slot, and the 1.9.x arc's second enabler: GNU's byte-suffix parser, serving
+`head`, `tail` and `sort -S`; `tail -F`, `-f` over any number of files, `--retry` and `--pid`; and
+`sort` past memory, through temporary files. Every item was measured against GNU coreutils 9.4, 9.7
+and 9.12 first, and is compared with them byte for byte
+([ADR 0034](docs/adr/0034-tail-follows-by-polling-as-gnus-disable-inotify-loop.md),
+[ADR 0033](docs/adr/0033-sort-compares-keys-as-gnus-keycompare-in-the-c-locale.md) amended).
+
+### Added
+
+- ⭐ **`kriya_xstrtou` in `src/lib/args.cyr`: gnulib's `xstrtoumax`, the byte-suffix parser.** Units
+  `b` (512), `k K` (1024), `m M`, `G g`, `T t`, `P`, `E`, `Z`, `Y`, `R`, `Q`, each where the caller
+  allows it, and GNU's second suffixes: `KB` and `KD` are 1,000, `KiB` 1,024. A unit alone is one of
+  it (`head -c K` is 1,024 bytes). The value is an exact u64, so 2^64 is GNU's overflow to the byte.
+- **`head -c`, `head -n`, `tail -c` and `tail -n` take units**: `head -c 5K`, `tail -n +2M`,
+  `head -c -1KB`. Past 2^64 a count saturates, as GNU 9.6 and later do (9.4 refused).
+- ⭐ **`tail -f` follows any number of files**, with GNU's `==> NAME <==` header whenever the output
+  switches, and **`-F`, `--follow=name`, `--retry`, `--pid=PID` (repeatable), `-s SECONDS` and
+  `--max-unchanged-stats=N`**. It is GNU 9.12's polling loop ported function for function, and is
+  compared against GNU run without inotify:
+  - `--follow=descriptor` (`-f`) stays with a renamed or removed file; `--follow=name` reopens the
+    name and says *has been replaced*, *has become inaccessible*, *has appeared*; `-F` adds
+    `--retry`; the last of `-f`, `-F` and `--follow` wins.
+  - `--pid` ends the follow once every PID has exited, after one more round.
+  - A pipe on standard input is not followed (POSIX); a regular file there is.
+  - When stdout is a pipe whose reader has gone, the follow ends at the next round, as in GNU:
+    `tail -f log | head -n 1` exits with `head`.
+  - ⚠ The default interval is 0.2 s, where GNU's polling default is 1.0 s and its inotify loop
+    answers at once ([ADR 0034](docs/adr/0034-tail-follows-by-polling-as-gnus-disable-inotify-loop.md)).
+- ⭐ **`sort` past memory.** `-S SIZE` is a budget for the input and its line records together,
+  512 MiB by default; past it each full buffer is sorted into a temporary run, and the runs are
+  merged, sixteen at a time, into the output. `-m` merges its inputs from runs, and `-c` checks a
+  buffer at a time. The output is the in-memory sort's byte for byte.
+  - **`-S`** takes GNU's spellings: K, M, G, T, P, E, Z, Y, R, Q (and `g`, `t`) in powers of 1024,
+    `b` for bytes, `N%` of physical memory, KiB for a bare number, the largest of several.
+  - **`-T DIR`**, repeatable and used in turn, else `$TMPDIR`, else /tmp. A run is opened twice and
+    unlinked at once, so nothing is left behind however `sort` ends, an interrupt included.
+- [ADR 0034](docs/adr/0034-tail-follows-by-polling-as-gnus-disable-inotify-loop.md): `tail -f`
+  follows by polling, as GNU's loop without inotify does.
+
+### Fixed
+
+- ⛔ **`sort` cut its input at 256 MiB.** Past the buffer it printed a warning and sorted, merged or
+  checked only the first 256 MiB, at exit 0 under `-c`: a file disordered after that point checked
+  as sorted. No mode truncates now.
+- **`tail -f a b` was refused**, exit 2; it follows both.
+- **`tail -f` on a regular file given as standard input** (`tail -f < log`) printed it and stopped;
+  it follows, as GNU's does.
+
+### Divergences, asserted
+
+- `tail`'s bad `-s`, `--pid`, `--max-unchanged-stats` and `--follow=` values, and `-F` with
+  standard input, exit 2, kriya's usage error, where GNU exits 1.
+- `tail --pid` keeps every PID, as GNU 9.5 and later do; 9.4 kept the last.
+
+### Performance
+
+- **`sort` through runs is faster than in memory** on large inputs. Over 4,000,000 lines (44 MB):
+  **8.79 s** in memory (1.9.1: 8.71 s), **5.97 s** at `-S 10M` and **5.00 s** at `-S 1M`, because
+  each buffer's merge sort stays in cache; GNU takes 0.63 s on its threads. `-S 10M` holds kriya to
+  a 33 MB peak where in memory takes 261 MB. Roadmap 1.10.8 carries sorting in cache-sized runs
+  without files.
+- `tail -f | head -n 1` ends within one interval of `head` exiting (204 ms at the default 0.2 s;
+  GNU's inotify loop, 4 ms).
+
+### Changed (tests)
+
+- **`smoke-tail-follow.sh`** (new, 66 cases): 28 scenarios run GNU (`---disable-inotify -s 0.1`)
+  and kriya (`-s 0.1`) side by side in two directories given the same appends, truncations,
+  removals, renames and late files at the same moments, comparing stdout and exit status; each
+  is tried up to three times, and every tail runs under `timeout`. Plus `--pid`, a pipe on stdin, a
+  reader that goes away, and every warning and refusal. Against 1.9.1, 49 of them fail. GNU 9.6's
+  two changes are asserted on older releases.
+- **`smoke-sort.sh` 395 → 527**: the external sort at budgets of 1 KiB to 64 KiB with every
+  ordering, `-m` and `-c` through runs, 17 and 20 files, lines longer than the budget and than a
+  run reader, `-o` onto an input, `-T`, `$TMPDIR`, no file left behind, and `-S` in 39 spellings;
+  106 fail against 1.9.1.
+- **`smoke-head-tail.sh` 395 → 552**: units on all four counts, compared with GNU, and the
+  refusals; 109 fail against 1.9.1.
+- **`scripts/difffuzz-sort.py`** gives a third of its cases a budget of a few KiB with a `-T`
+  directory and up to 400 lines, and `-m` up to 20 files, and fails if a temporary file is left. On
+  the final build, 12,000 cases on each of 9.4, 9.7 and 9.12: 0 differences. It found nothing new;
+  the hand-written cases found the one defect, an external `-m` that dropped the buffered start of
+  the file that overflowed the budget.
+- **`scripts/difffuzz-head-tail.py`** draws units, valid and not, on its counts, and classes GNU
+  9.12's quoted `'standard input'` header (ADR 0030): 6,000 cases, 0 unexplained.
+- **35 mutants over the parser, `tail`'s loop and the external sort: 34 killed, one equivalent**
+  (re-reading an unchanged regular file, which returns nothing). Three lived on the first run and
+  each was a missing case, now added: a file that appears late under `-f` without `--retry`, a line
+  longer than a run reader's buffer, and `-S 64K -S 1`.
+- **Unit 994 → 1,037**: `kriya_xstrtou`'s units, second suffixes and u64 edges, and `-S`'s parser.
+- **1,037 unit + 72 syscall + 18 POSIX.** Smoke is **9,745 / 0** in ubuntu:24.04 (GNU 9.4), **9,748 /
+  0** in 26.04 (9.7), and **9,840 / 0** on the dev box (9.12), across 45 scripts. On aarch64
+  under qemu, `smoke-sort`, `-head-tail` and `-tail-follow` pass against the x86_64 oracle. Fuzz is
+  green under poison; `cyrius lint`, the lints, `check-oracles.sh` and `watchlist-scan.py` are
+  clean; all three targets build warning-free; `vet` 61 deps.
+- **Sizes:** host 1,464,872 → **1,507,960**, agnos 1,473,496 → **1,512,488**.
+
 ## [1.9.1] - 2026-11-04 — sort keys
 
 The roadmap's 1.9.1 slot. `sort` takes every `-k`, character offsets, a key's own letters, and GNU's

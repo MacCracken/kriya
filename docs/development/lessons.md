@@ -231,6 +231,12 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   looks for a unit, so `1e3` becomes `1E3`, an exa (1.9.1). ⭐ Port the data flow first (copy,
   drop, fold, then compare, as GNU's `keycompare` does), and optimise a step out only with a
   case that shows it inert.
+- ⚠ **Copying a structure "for GNU's order" is a claim to measure.** 1.9.2 ported GNU's sixteen-way
+  merge grouping and documented it as deciding the order of `-m` over unsorted files. Measured
+  against 1.9.1's one merge over 70 random sets of 20 unsorted files, with and without `-u`, it
+  decided nothing, and the reason is provable: merging contiguous groups is associative, since a
+  line from another group never lands between two equal lines of one. The grouping stays, for the
+  open descriptors it bounds; the comment that gave it a job it did not do went.
 - ⚠ **A mutant can pass on the byte after the string.** At 1.9.0 one read a byte past a `nan(`
   argument and passed. argv's next string began with a letter, so the "junk after the number" check
   saw junk where there was none. A case whose stop is inside the string, `nan(ab-`, cannot be
@@ -252,6 +258,11 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   option under test, the capture fails and the WHOLE SCRIPT ends, printing no summary — which the
   mutation run reports as an empty line, not as failures. Write `|| true` inside every capture of
   a command that is allowed to fail.
+  ⚠ And a FIFTH and SIXTH at 1.9.2, in two shapes not seen before. `[ "$rc" = 143 ] && rc=running`
+  is a FALSE command when the test fails, and ended the new follow suite after one scenario,
+  silently. A bare `"$BIN" sort -o f f` line, not captured at all, ended `smoke-sort.sh` against
+  the 1.9.1 binary, which refused the `-S` before it. ⭐ Write `if …; then …; fi`, and run every new
+  block against the previous release before trusting it: both showed up only there.
 - ⭐ **A race can be made deterministic from outside the code.** 1.8.7's case is an entry that
   vanishes between a directory read and its stat. A churning second process loses that race about
   one run in twelve, and nothing in kriya should grow a test hook for it. `scripts/vanish.py` runs
