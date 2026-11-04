@@ -4,10 +4,11 @@
 #   -a              update access time only.
 #   -m              update modification time only.
 #   -c / --no-create  do not create the file if it does not exist.
+#   -d / --date=STRING  the time STRING describes: GNU's free-form dates, in UTC
+#                   (src/lib/datetime.cyr, 1.9.3); with -r, relative to the reference's times.
 #
-# ⚠ `-r REF` and `-t [[CC]YY]MMDDhhmm[.SS]` SHIPPED in 1.2.5 (see CHANGELOG);
-# only GNU `-d STR` (free-form human date) is still out, and it is roadmap
-# 1.9.3 rather than a vague wait on chrono. The intersection that shipped at M2:
+# ⚠ `-r REF` and `-t [[CC]YY]MMDDhhmm[.SS]` SHIPPED in 1.2.5, `-d` in 1.9.3. The
+# intersection that shipped at M2:
 # "create-if-missing + bump times to now", with `-a` / `-m` /
 # `-c` modifiers — covers the common script use (`touch buildmarker`,
 # `touch -c configmark`) and most of the agent surface.
@@ -31,6 +32,11 @@ var _touch_c_idx = 0;
 var _touch_h_idx = 0;
 var _touch_r_idx = 0;
 var _touch_t_idx = 0;
+var _touch_d_idx = 0;
+
+# The nanoseconds of an explicit time: `-r` copies the reference's, `-d` may give a fraction.
+var _touch_atime_ns = 0;
+var _touch_mtime_ns = 0;
 
 fn _touch_init_spec(): i64 {
     if (_touch_spec != 0) { return 0; }
@@ -41,6 +47,7 @@ fn _touch_init_spec(): i64 {
     _touch_h_idx = flags_add_bool(s, 104, "no-dereference",    0, "stamp the symlink itself, not what it points at");
     _touch_r_idx = flags_add_str (s, 114, "reference",         0, "use this file's times instead of now");
     _touch_t_idx = flags_add_str (s, 116, "",                  0, "use [[CC]YY]MMDDhhmm[.ss] instead of now");
+    _touch_d_idx = flags_add_str (s, 100, "date",              0, "use the time STRING describes instead of now");
     _touch_spec = s;
     touch_help_declare();
     return 0;
@@ -54,11 +61,13 @@ fn touch_help_declare(): i64 {
       "touch [OPTIONS] FILE...");
     help_positional(1, HELP_POS_UNBOUNDED, "FILE");
     help_destructive(1);
-    help_operands("With no time option the current time is used. ⚠ -r and -t are mutually exclusive; -t stamps are interpreted as UTC (ADR 0007).");  #skip-lint
+    help_operands("With no time option the current time is used. -t cannot be combined with -r or -d; -d takes GNU's free-form dates, relative to -r's times when both are given. Times are UTC (ADR 0007).");  #skip-lint
     help_exit(1, "a file could not be created or stamped");
     help_example("touch newfile");
     help_example("touch -t 202601011200 f");
     help_example("touch -r ref.txt copy.txt");
+    help_example("touch -d '2024-01-15 10:30' f");
+    help_example("touch -r ref.txt -d '-1 day' older.txt");
     return 0;
 }
 
@@ -122,9 +131,9 @@ fn _touch_update_times_at(path, update_atime, update_mtime, has_explicit, explic
         # mtime in both, so `touch -r ref f` gave `f` an access time it had never
         # had. Measured against GNU on a reference stamped with different a/m.
         store64(&te + 0,  explicit_atime);
-        store64(&te + 8,  0);
+        store64(&te + 8,  _touch_atime_ns);
         store64(&te + 16, explicit_mtime);
-        store64(&te + 24, 0);
+        store64(&te + 24, _touch_mtime_ns);
         if (update_atime == 0) { store64(&te + 8,  1073741822); }
         if (update_mtime == 0) { store64(&te + 24, 1073741822); }
         if (K_HAVE_UTIMES == 0) { return 0; }
@@ -315,6 +324,17 @@ fn _touch_ymd_to_epoch(y, m, d, hh, mm, ss): i64 {
     return days * 86400 + hh * 3600 + mm * 60 + ss;
 }
 
+# A `-d` STRING that could not be read: GNU's "invalid date format", or a `TZ=` kriya cannot honour.
+fn _touch_bad_date(dstr, r): i64 {
+    if (r == KDT_TZ) {
+        var tzm = "a TZ= in a date string needs time zone data, which kriya does not read (ADR 0007)";
+        report_note("touch", dstr, tzm);
+        return EXIT_USAGE;
+    }
+    report_note("touch", dstr, "invalid date format");
+    return EXIT_USAGE;
+}
+
 fn cmd_touch(start: i64): i64 {
     _touch_init_spec();
     if (kriya_args_parse(_touch_spec, start) != 0) {
@@ -337,19 +357,36 @@ fn cmd_touch(start: i64): i64 {
     var nofollow: i64 = 0;
     if (flags_get_bool(_touch_spec, _touch_h_idx) == 1) { nofollow = 1; }
 
-    # -r REF / -t STAMP. ⚠ Mutually exclusive: GNU takes the last one given, but
-    # silently picking a winner between two explicit time sources is exactly the
-    # "accepts and lies" shape v1.2.1 swept out. Refuse instead.
+    # -r REF / -t STAMP / -d STRING. ⚠ `-t` with either of the others is GNU's "times from more
+    # than one source", refused; `-r` with `-d` reads STRING relative to the reference's times.
     var ref_path = flags_get_str(_touch_spec, _touch_r_idx);
     var stamp    = flags_get_str(_touch_spec, _touch_t_idx);
+    var dstr     = flags_get_str(_touch_spec, _touch_d_idx);
     var explicit_atime: i64 = 0;
     var explicit_mtime: i64 = 0;
     var has_explicit: i64 = 0;
-    if (ref_path != 0) {
-        if (stamp != 0) {
-            k_write( 2, "kriya touch: error: -r and -t are mutually exclusive\n", 53);
+    _touch_atime_ns = 0;
+    _touch_mtime_ns = 0;
+    if (stamp != 0) {
+        if (ref_path != 0 || dstr != 0) {
+            k_write( 2, "kriya touch: error: -t cannot be given with -r or -d: times from more than one source\n", 86);
             return EXIT_USAGE;
         }
+    }
+    # POSIX: neither -a nor -m → update both. -a alone → atime only.
+    # -m alone → mtime only. Both together → update both (same as
+    # neither).
+    var update_atime: i64 = 0;
+    var update_mtime: i64 = 0;
+    if (a_set == 1) { update_atime = 1; }
+    if (m_set == 1) { update_mtime = 1; }
+    if (a_set == 0) {
+        if (m_set == 0) {
+            update_atime = 1;
+            update_mtime = 1;
+        }
+    }
+    if (ref_path != 0) {
         var rst[144];
         # ⛔ `-h` REACHES THE REFERENCE TOO, and this was a plain `k_stat`. With
         # `-h`, GNU reads the reference LINK's own times rather than its target's
@@ -366,7 +403,56 @@ fn cmd_touch(start: i64): i64 {
         }
         explicit_atime = load64(&rst + 72);          # st_atime
         explicit_mtime = load64(&rst + 88);          # st_mtime
+        # ⛔ THE NANOSECONDS TOO. `-r` copied whole seconds until 1.9.3, so the copy was up to a
+        # second older than its reference, where GNU's is the same to the nanosecond.
+        _touch_atime_ns = load64(&rst + 80);
+        _touch_mtime_ns = load64(&rst + 96);
         has_explicit = 1;
+        if (dstr != 0) {
+            var ra[16];
+            if (update_atime == 1) {
+                var r1 = kdt_parse(dstr, explicit_atime, _touch_atime_ns, &ra);
+                if (r1 != KDT_OK) { return _touch_bad_date(dstr, r1); }
+                explicit_atime = load64(&ra);
+                _touch_atime_ns = load64(&ra + 8);
+            }
+            if (update_mtime == 1) {
+                var r2 = kdt_parse(dstr, explicit_mtime, _touch_mtime_ns, &ra);
+                if (r2 != KDT_OK) { return _touch_bad_date(dstr, r2); }
+                explicit_mtime = load64(&ra);
+                _touch_mtime_ns = load64(&ra + 8);
+            }
+        }
+    } elif (dstr != 0) {
+        var nowns = clock_epoch_ns();
+        var ns_s = nowns / 1000000000;
+        var ns_n = nowns % 1000000000;
+        var rd[16];
+        var r3 = kdt_parse(dstr, ns_s, ns_n, &rd);
+        if (r3 != KDT_OK) { return _touch_bad_date(dstr, r3); }
+        explicit_atime = load64(&rd);
+        explicit_mtime = explicit_atime;
+        _touch_atime_ns = load64(&rd + 8);
+        _touch_mtime_ns = _touch_atime_ns;
+        has_explicit = 1;
+        # GNU's rule: with neither -a nor -m, `-d now` is no date at all, so that a file the
+        # caller may write but does not own can still be touched. It is "now" only when the
+        # same string read against another instant gives that instant back.
+        if (update_atime == 1) {
+            if (update_mtime == 1) {
+                if (explicit_atime == ns_s) {
+                    if (_touch_atime_ns == ns_n) {
+                        var rn[16];
+                        var alt = ns_s ^ 1;
+                        if (kdt_parse(dstr, alt, ns_n, &rn) == KDT_OK) {
+                            if (load64(&rn) == alt) {
+                                if (load64(&rn + 8) == ns_n) { has_explicit = 0; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     } elif (stamp != 0) {
         var sbox[8];
         if (_touch_parse_stamp(stamp, &sbox) != 0) {
@@ -377,20 +463,6 @@ fn cmd_touch(start: i64): i64 {
         explicit_atime = load64(&sbox);
         explicit_mtime = explicit_atime;
         has_explicit = 1;
-    }
-
-    # POSIX: neither -a nor -m → update both. -a alone → atime only.
-    # -m alone → mtime only. Both together → update both (same as
-    # neither).
-    var update_atime: i64 = 0;
-    var update_mtime: i64 = 0;
-    if (a_set == 1) { update_atime = 1; }
-    if (m_set == 1) { update_mtime = 1; }
-    if (a_set == 0) {
-        if (m_set == 0) {
-            update_atime = 1;
-            update_mtime = 1;
-        }
     }
 
     var any_failed: i64 = 0;

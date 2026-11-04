@@ -2,8 +2,7 @@
 # smoke-touch.sh — behavioural test for `kriya touch`.
 #
 # Covers create, update-existing, -a / -m selectivity, -c (no-create)
-# semantics, multi-operand exit codes. Defers -r / -t / -d testing to
-# the milestone where they ship (chrono helper dependency).
+# semantics, multi-operand exit codes, -t, -r and (since 1.9.3) -d.
 
 set -e
 
@@ -301,6 +300,55 @@ cd ..
 
 # The introspection interface knows about it.
 expect_eq "--help names --no-dereference"   "1" "$("$BIN" touch --help 2>&1 | grep -c -- '--no-dereference')"
+
+# --- 1.9.3: -d STRING, and -r's nanoseconds --------------------------------------
+#
+# ⭐ GNU's free-form dates (src/lib/datetime.cyr), compared under TZ=UTC with GNU's `stat`, to
+# the nanosecond, on files each side stamps. With -r, -d is read relative to the reference's
+# times, each of atime and mtime on its own, as GNU's touch reads it.
+TZ=UTC touch -d '2020-05-05 05:05:05.123456789' dref
+TZ=UTC touch -a -d '2019-01-01 00:00:00.5' dref
+tcmp() {   # tcmp LABEL STAT-FORMAT TOUCH-ARGS... (the format names the sides the case sets)
+    _l=$1; _f=$2; shift 2
+    rm -f dt_g dt_k
+    _grc=0; TZ=UTC touch "$@" dt_g 2>/dev/null || _grc=$?
+    _krc=0; "$BIN" touch "$@" dt_k 2>/dev/null || _krc=$?
+    if [ "$_krc" = 2 ]; then _krc=1; fi
+    _gs=$(TZ=UTC stat -c "$_f" dt_g 2>/dev/null) || _gs=""
+    _ks=$(TZ=UTC stat -c "$_f" dt_k 2>/dev/null) || _ks=""
+    expect_eq "$_l" "$_gs $_grc" "$_ks $_krc"
+}
+tcmp "touch -d ISO with nanoseconds" '%x|%y'  -d '2024-01-15 10:30:45.987654321'
+tcmp "touch -d @0" '%x|%y'                    -d @0
+tcmp "touch -d before 1970" '%x|%y'           -d '1969-07-20 20:17'
+tcmp "touch -d with a zone" '%x|%y'           -d '2024-01-15 10:30 PST'
+tcmp "touch -d relative to a date" '%x|%y'    -d '2024-01-31 +1 month'
+tcmp "touch -r copies nanoseconds" '%x|%y'    -r dref
+tcmp "touch -r -d '+1 day'" '%x|%y'           -r dref -d '+1 day'
+tcmp "touch -r -d '-2 hours'" '%x|%y'         -r dref -d '-2 hours 30 minutes'
+tcmp "touch -r -a -d" '%x'            -r dref -a -d '1 day ago'
+tcmp "touch -r -m -d" '%y'            -r dref -m -d '1 day ago'
+tcmp "touch -r -d absolute" '%x|%y'           -r dref -d 2001-01-01
+tcmp "touch -d invalid" '%x|%y'               -d bogus
+# ⚠ GNU exits 1 for "times from more than one source"; kriya's usage error is 2.
+expect_exit "touch -t with -d refused"     2 "$BIN" touch -t 202401010000 -d 2024-01-01 dt_x
+expect_exit "touch -r with -t refused"     2 "$BIN" touch -r dref -t 202401010000 dt_x
+expect_exit "touch -d invalid is 2"        2 "$BIN" touch -d bogus dt_x
+expect_exit "touch -d TZ=... refused"      2 "$BIN" touch -d 'TZ="UTC" 2024-01-01' dt_x
+# -a and -m with -d: the side not named keeps "now"; only the named one is compared.
+rm -f dt_a
+"$BIN" touch -a -d '2024-01-15 10:00' dt_a || true
+expect_eq "touch -a -d sets the atime" "2024-01-15 10:00:00.000000000 +0000" "$(TZ=UTC stat -c %x dt_a 2>/dev/null || true)"
+rm -f dt_m
+"$BIN" touch -m -d '2024-01-15 10:00' dt_m || true
+expect_eq "touch -m -d sets the mtime" "2024-01-15 10:00:00.000000000 +0000" "$(TZ=UTC stat -c %y dt_m 2>/dev/null || true)"
+# `-d now` with neither -a nor -m is no date at all, GNU's rule: the times are the kernel's now.
+rm -f dt_now
+"$BIN" touch -d now dt_now || true
+_y=$(TZ=UTC stat -c %Y dt_now 2>/dev/null) || _y=0
+_n=$(date +%s)
+_d=$((_n - _y))
+if [ "$_d" -ge 0 ] && [ "$_d" -le 2 ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL touch -d now: $_y vs $_n" >&2; fi
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

@@ -147,8 +147,14 @@ else
     echo "FAIL %s epoch parity: kriya=$k_s GNU=$g_s diff=$diff" >&2
 fi
 
-# --- %N ns: kriya ships zeros at v0.7.0 ---
-expect_eq "%N stub-zeros" "000000000" "$("$BIN" date +%N)"
+# --- %N ns: nine digits of the clock since 1.9.3 (nine zeros before) ---
+_n=$("$BIN" date +%N)
+case "$_n" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); echo "FAIL %N is nine digits: '$_n'" >&2 ;;
+esac
+_n2=$("$BIN" date +%N)
+if [ "$_n" != "$_n2" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL %N moves: $_n twice" >&2; fi
 
 # --- -u no-op (default IS UTC) ---
 out1=$("$BIN" date -u +%Z)
@@ -240,6 +246,214 @@ done
 expect_eq "sweep: $_swept directives, none GNU renders is echoed" "" "$_echoed"
 expect_eq "sweep: every one GNU echoes is echoed (bar E/O on a letter)" "" "$_overref"
 expect_eq "sweep: it covered what it claims (61 bytes x 10)" "610" "$_swept"
+
+# --- 1.9.3: -d STRING, GNU's free-form dates -------------------------------------
+#
+# ⭐ src/lib/datetime.cyr ports gnulib's parse_datetime rule for rule. Every string below has an
+# answer that does not depend on the moment it is asked, so it is compared byte for byte, with
+# its nanoseconds, against GNU under TZ=UTC. A refusal is GNU's 1 and kriya's 2 (ADR 0008).
+# scripts/difffuzz-date.py is the random half, including the strings that depend on now.
+dcmp() {   # dcmp STRING
+    _g=$(date -d "$1" '+%Y-%m-%d %H:%M:%S.%N %a %j %s' 2>/dev/null) || _g="refused"
+    _k=$("$BIN" date -d "$1" '+%Y-%m-%d %H:%M:%S.%N %a %j %s' 2>/dev/null) || _k="refused"
+    expect_eq "date -d '$1'" "$_g" "$_k"
+}
+while IFS= read -r _s; do dcmp "$_s"; done <<'DATES'
+@0
+@-1
+@1700000000.5
+@-1.5
+@ 5
+@+5
+@-1.000000001
+@1e3
+2024-01-15
+2024-1-5
+2024-01-15 10:30
+2024-01-15 10:30:45
+2024-01-15T10:30:45
+2024-01-15T10:30:45Z
+2024-01-15T10:30:45.123456789Z
+2024-01-15 10:30:45,5
+2024-01-15 10:30:45.123456789123
+2024-01-15 10:30:45 +0530
+2024-01-15 10:30:45+05:30
+2024-01-15 10:30:45 -08
+2024-01-15 10:30:45 +1400
+2024-01-15 10:30 UTC
+2024-01-15 10:30 EST
+2024-01-15 10:30 EDT
+2024-01-15 10:30 CEST
+2024-01-15 10:30 EST DST
+2024-01-15 10:30 e.s.t
+2024-01-15 10:30 Z
+2024-01-15 10:30 A
+2024-01-15 10:30 T
+2024-01-15 10:30 J
+2024-01-15 10:30 UTC+1
+2024-01-15 10:30 UTC+1 hour
+2024-01-15 10:30 UTC-0530
+2024-01-15 10:30 UTC+05:30
+2024-02-30
+2024-02-29
+2023-02-29
+438367852 wed
+2024-01-01 1.9 sec 1.9 sec 1.9 sec
+2024-01-01 0.9 sec 0.9 sec 0.347483647 sec
+2024-01-01 0.9 sec 0.9 sec 0.347483648 sec
+2024-01-01 0.9 sec ago 0.9 sec ago 0.347483648 sec ago
+2024-01-01 0.9 sec ago 0.9 sec ago 0.347483649 sec ago
+15 Jan -9223372036854775808
+Jan -15 -9223372036854775808
+2024-01--9223372036854775808
+2024-01-15 -1 sec -9223372036854775808 seconds ago
+2024-01-15 1 sec -9223372036854775808 seconds ago
+2024-01-15 -1 sec -9223372036854775808 seconds ago -9223372036854775807 sec
+2024-01-15 1 sec -9223372036854775808 seconds ago -9223372036854775807 sec
+2024-01-15 -9223372036854775807 sec 1 sec ago
+2024-01-15 -9223372036854775807 sec 2 sec ago
+2000-02-29
+1900-02-29
+2100-02-29
+2024-13-01
+2024-01-15 24:00
+2024-01-15 23:59:60
+2024-01-15 25:00
+2024-01-15 10
+2024-01-15 10:30:45 pm
+2024-01-15 12:00 am
+2024-01-15 12:00 pm
+2024-01-15 13:00 pm
+1/15/2024
+01/15/24
+2024/01/15
+Jan 15 2024
+January 15, 2024
+15 Jan 2024
+15-Jan-2024
+15-Jan-24
+15 Jan +24
+Jan-15-2024
+3 sept 2024
+3 SEPT. 2024
+Mon Jan 15 10:30:00 UTC 2024
+Mon, 15 Jan 2024 10:30:00 +0000
+Monday, January 15, 2024 10:30
+20240115
+20240115 1030
+20240115 +3 days
+20240115 +3 days ago
+2024-01-15 +1 day
+2024-01-15 1 day ago
+2024-01-15 2 days hence
+2024-01-31 +1 month
+2024-02-29 +1 year
+2024-01-15 -2 weeks
+2024-01-15 fortnight
+2024-01-15 next month
+2024-01-15 last year
+2024-01-15 this week
+2024-01-15 tomorrow
+2024-01-15 yesterday
+2024-01-15 next monday
+2024-01-15 10:00 1.5 seconds
+2024-01-15 10:00 -1.5 seconds
+2024-01-15 10:00 2 hours hence
+2024-01-15 10:00 +90 minutes
+2024-01-15 10:30 + 1 day
+2024-01-15 10:00 hence
+2024-01-15 (a (nested) comment) 10:30
+2024-01-15 (unclosed
+2024-01-15T
+2024-01-15 T
+2024-01-15 sept
+2024-01-15 tues.
+1969-12-31 23:59:59
+1969-12-31 23:59:59.999999999
+1900-01-01
+0001-01-01
+9999-12-31
+10000-01-01
+69-01-01
+68-01-01
+2147485547-01-01
+2147485548-01-01
+Jan
+-5
+99
+x
+bogus
+2024-01-15 10:30 +5 +6
+2024-01-15 2024-01-16
+10:30 11:30
+mon tue
+DATES
+# ⚠ GNU 9.11 began reading DD.MM.YYYY and DD.MM. dates (its NEWS); kriya follows it, and an
+# older GNU, which refuses them, has kriya's answer asserted instead.
+if date -d 15.01.2024 >/dev/null 2>&1; then
+    dcmp "15.01.2024"
+    dcmp "15.1.2024 10:30"
+    dcmp "7.6.24"
+else
+    expect_eq "date -d 15.01.2024 (9.11's dotted date)" "2024-01-15" "$("$BIN" date -d 15.01.2024 +%F)"
+    expect_eq "date -d 7.6.24 (9.11's dotted date)"     "2024-06-07" "$("$BIN" date -d 7.6.24 +%F)"
+    PASS=$((PASS + 1))
+fi
+# The strings that depend on now: compared to the day, the moment of asking aside.
+for _s in now today yesterday tomorrow "1 day ago" "+2 weeks" "next friday" "last monday" "10:30" \
+          "noon" "3 months ago" "" "0" "2024" "1 year" "306783000 wed"; do
+    _g=$(date -d "$_s" +%F 2>/dev/null) || _g="refused"
+    _k=$("$BIN" date -d "$_s" +%F 2>/dev/null) || _k="refused"
+    expect_eq "date -d '$_s' (to the day)" "$_g" "$_k"
+done
+# ...and the relative ones keep now's time of day: within two seconds of GNU's.
+for _s in "5 days" "1 day ago" "+2 weeks" "1 year" "3 hours ago" "fortnight"; do
+    _g=$(date -d "$_s" +%s 2>/dev/null) || _g=0
+    _k=$("$BIN" date -d "$_s" +%s 2>/dev/null) || _k=0
+    _d=$((_k - _g))
+    if [ "$_d" -lt 0 ]; then _d=$((0 - _d)); fi
+    if [ "$_k" != 0 ] && [ "$_d" -le 2 ]; then _ok=yes; else _ok="gnu $_g, kriya $_k"; fi
+    expect_eq "date -d '$_s' (to the second)" "yes" "$_ok"
+done
+# Years outside 1000-9999: glibc's %Y counts a minus sign among its four, %F adds a + past 9999,
+# and a year a struct tm cannot hold is out of range (exit 1, as in GNU).
+for _e in -62167219200 -62198755200 -62135596801 -99999999999 253402300800 99999999999999 \
+          67767976233532799 -67768040609740800; do
+    expect_eq "date -d @$_e years" "$(date -d "@$_e" '+%Y|%y|%F|%D|%a|%j|%s')" \
+        "$("$BIN" date -d "@$_e" '+%Y|%y|%F|%D|%a|%j|%s')"
+done
+for _e in 67767976233532800 -67768040609740801 99999999999999999; do
+    rc=0; "$BIN" date -d "@$_e" > /dev/null 2>&1 || rc=$?
+    _grc=0; date -d "@$_e" > /dev/null 2>&1 || _grc=$?
+    expect_eq "date -d @$_e out of range" "$_grc" "$rc"
+done
+# ...and still ends the output line, as GNU 9.6 and later do (`show_date_helper`); 9.4 wrote nothing.
+_out=$("$BIN" date -d @99999999999999999 +%s 2>/dev/null | od -An -c | tr -d ' ') || true
+expect_eq "out of range writes a newline (9.6+)" '\n' "$_out"
+_gv=$(date --version | sed -n '1s/.* \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')
+if [ "${_gv% *}" -gt 9 ] || [ "${_gv#* }" -ge 6 ]; then
+    _gout=$(date -d @99999999999999999 +%s 2>/dev/null | od -An -c | tr -d ' ') || true
+    expect_eq "...as this GNU does" "$_gout" "$_out"
+fi
+# The option's spellings, and the last -d winning, as in GNU.
+expect_eq "--date=STRING"        "2024-03-03" "$("$BIN" date --date=2024-03-03 +%F)"
+expect_eq "--date STRING"        "2024-03-03" "$("$BIN" date --date 2024-03-03 +%F)"
+expect_eq "-dSTRING"             "2024-03-03" "$("$BIN" date -d2024-03-03 +%F)"
+expect_eq "-ud STRING"           "2024-03-03" "$("$BIN" date -ud 2024-03-03 +%F)"
+expect_eq "the last -d wins"     "2025-02-02" "$("$BIN" date -d 2024-01-01 -d 2025-02-02 +%F)"
+expect_eq "+FORMAT before -d"    "2024-05-05" "$("$BIN" date +%F -d 2024-05-05)"
+expect_eq "-d with the default format" "$(date -d '2024-01-15 10:30:45')" "$("$BIN" date -d '2024-01-15 10:30:45')"
+# ⚠ Refusals are 2 here, where GNU exits 1: an invalid date is an invalid option value.
+expect_exit "-d invalid date"    2 "$BIN" date -d bogus
+expect_exit "-d with no STRING"  2 "$BIN" date -d
+expect_exit "-d and a non-+ operand" 2 "$BIN" date -d 2024-01-15 2024
+# ⚠ A leading TZ="..." needs zone data, which kriya does not keep (ADR 0007): refused, exit 2.
+expect_exit "-d TZ=... refused"  2 "$BIN" date -d 'TZ="Europe/Paris" 2024-01-15 10:00'
+err=$("$BIN" date -d 'TZ="UTC" 2024-01-15' 2>&1 >/dev/null) || true
+case "$err" in
+    *"time zone data"*) PASS=$((PASS + 1)) ;;
+    *) FAIL=$((FAIL + 1)); echo "FAIL TZ= refusal says why: '$err'" >&2 ;;
+esac
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

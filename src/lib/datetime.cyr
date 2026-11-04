@@ -1,0 +1,1197 @@
+# datetime.cyr — GNU's free-form date strings, in UTC: `date -d`, `touch -d` (1.9.3).
+#
+# ⭐ A PORT OF GNULIB'S `parse_datetime` (parse-datetime.y, as coreutils 9.12 builds it), rule for
+# rule, rather than a subset of its own: the lexer (`yylex`), the word tables (`lookup_word`), the
+# grammar, and the arithmetic of `parse_datetime_body`. Every string GNU accepts under `TZ=UTC` is
+# accepted with GNU's answer, every one it refuses is refused, and `difffuzz-date.py` compares the
+# two. GNU's quirks come with it, on purpose: `+90 minutes` after a time is read as a zone offset
+# first (and fails), a lone `x` is the military zone X, and `2024` alone is 20:24.
+#
+# Two departures, both because kriya keeps no time zone data (ADR 0007):
+#   - everything is UTC: the "local" zone is UTC, so GNU's local-zone words never arise;
+#   - a leading `TZ="..."` is refused (`KDT_TZ`), where GNU loads that zone.
+#
+# The grammar is LALR(1) in GNU, and its shift/reduce conflicts resolve by shifting. Each item here
+# makes the same choice with the same one-token look ahead, and fails where bison would.
+
+enum KdtTok {
+    KT_EOF = 0;    KT_CH = 1;      KT_UNUM = 2;   KT_SNUM = 3;   KT_UDEC = 4;   KT_SDEC = 5;
+    KT_UDOT = 6;   KT_AGO = 7;     KT_DST = 8;    KT_YEARU = 9;  KT_MONTHU = 10; KT_HOURU = 11;
+    KT_MINU = 12;  KT_SECU = 13;   KT_DAYU = 14;  KT_SHIFT = 15; KT_DAY = 16;   KT_DAYZONE = 17;
+    KT_MER = 18;   KT_MONTH = 19;  KT_ORD = 20;   KT_ZONE = 21;  KT_J = 22;     KT_T = 23;
+    KT_BAD = 24;
+}
+
+# A token: kind, value (seconds for a decimal), digits, negative, nanoseconds.
+enum KdtTokRec {
+    KTR_K = 0;  KTR_V = 8;  KTR_D = 16;  KTR_N = 24;  KTR_NS = 32;  KTR_SZ = 40;
+}
+
+enum KdtResult {
+    KDT_OK = 0;
+    KDT_BAD = 1;
+    KDT_TZ = 2;
+}
+
+enum KdtMer { KM_AM = 0; KM_PM = 1; KM_24 = 2; }
+
+var _kdt_toks = 0;
+var _kdt_ntok = 0;
+var _kdt_cap = 0;
+var _kdt_notdec = 0;
+
+fn _kdt_isspace(c): i64 {
+    if (c == 32) { return 1; }
+    if (c >= 9) { if (c <= 13) { return 1; } }
+    return 0;
+}
+fn _kdt_isdigit(c): i64 {
+    if (c >= 48) { if (c <= 57) { return 1; } }
+    return 0;
+}
+fn _kdt_isalpha(c): i64 {
+    if (c >= 65) { if (c <= 90) { return 1; } }
+    if (c >= 97) { if (c <= 122) { return 1; } }
+    return 0;
+}
+
+fn _kdt_push(k, v, d, neg, ns): i64 {
+    if (_kdt_ntok >= _kdt_cap) {
+        var c = _kdt_cap * 2;
+        if (c < 32) { c = 32; }
+        var nt = alloc(c * KTR_SZ);
+        if (_kdt_ntok > 0) { memcpy(nt, _kdt_toks, _kdt_ntok * KTR_SZ); }
+        _kdt_toks = nt;
+        _kdt_cap = c;
+    }
+    var t = _kdt_toks + _kdt_ntok * KTR_SZ;
+    store64(t + KTR_K, k);
+    store64(t + KTR_V, v);
+    store64(t + KTR_D, d);
+    store64(t + KTR_N, neg);
+    store64(t + KTR_NS, ns);
+    _kdt_ntok = _kdt_ntok + 1;
+    return 0;
+}
+
+# --- the word tables: GNU's `lookup_word` ----------------------------------------------------
+#
+# A table is NUL-separated "NAME\0" entries paired with a kind and value list.
+
+var _kdt_w = 0;      # the word, upper-cased
+
+fn _kdt_streq(a, b): i64 { return streq(a, b); }
+
+# Find `w` in a list of names "A\0B\0...\0\0"; returns the index or -1.
+fn _kdt_find(names, w): i64 {
+    var p = names;
+    var i: i64 = 0;
+    while (load8(p) != 0) {
+        if (streq(p, w) == 1) { return i; }
+        p = p + strlen(p) + 1;
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# The universal and the fixed zone tables (GNU's `universal_time_zone_table` and
+# `time_zone_table`): kind into `*k_p`, offset in seconds returned; 0 kind when absent.
+fn _kdt_zone(w, k_p): i64 {
+    store64(k_p, 0);
+    var u = _kdt_find("GMT\0UT\0UTC\0\0", w);
+    if (u >= 0) {
+        store64(k_p, KT_ZONE);
+        return 0;
+    }
+    var names = "WET\0WEST\0BST\0ART\0BRT\0BRST\0NST\0NDT\0AST\0ADT\0CLT\0CLST\0EST\0EDT\0CST\0CDT\0MST\0MDT\0PST\0PDT\0AKST\0AKDT\0HST\0HAST\0HADT\0SST\0WAT\0CET\0CEST\0MET\0MEZ\0MEST\0MESZ\0EET\0EEST\0CAT\0SAST\0EAT\0MSK\0MSD\0IST\0SGT\0KST\0JST\0GST\0NZST\0NZDT\0\0";  #skip-lint
+    var i = _kdt_find(names, w);
+    if (i < 0) { return 0; }
+    # Minutes east of UTC, and 1 for a daylight zone (tDAYZONE).
+    var mins = "0 0 0 -180 -180 -180 -210 -210 -240 -240 -240 -240 -300 -300 -360 -360 -420 -420 -480 -480 -540 -540 -600 -600 -600 -720 60 60 60 60 60 60 60 120 120 120 120 180 180 180 330 480 540 540 600 720 720";  #skip-lint
+    var day = "01100101010101010101010010001001101000010000001";
+    var p = mins;
+    var j: i64 = 0;
+    while (j < i) {
+        while (load8(p) != 32) { p = p + 1; }
+        p = p + 1;
+        j = j + 1;
+    }
+    var neg: i64 = 0;
+    if (load8(p) == 45) { neg = 1; p = p + 1; }
+    var v: i64 = 0;
+    while (_kdt_isdigit(load8(p)) == 1) {
+        v = v * 10 + load8(p) - 48;
+        p = p + 1;
+    }
+    if (neg == 1) { v = 0 - v; }
+    if (load8(day + i) == 49) { store64(k_p, KT_DAYZONE); }
+    else { store64(k_p, KT_ZONE); }
+    return v * 60;
+}
+
+# GNU's `lookup_word` on the upper-cased word at `w` (which it may edit). Kind into `*k_p`
+# (KT_BAD when unknown), value returned.
+fn _kdt_lookup(w, k_p): i64 {
+    store64(k_p, KT_BAD);
+    var mer = _kdt_find("AM\0A.M.\0PM\0P.M.\0\0", w);
+    if (mer >= 0) {
+        store64(k_p, KT_MER);
+        if (mer < 2) { return KM_AM; }
+        return KM_PM;
+    }
+    var wl = strlen(w);
+    var abbrev: i64 = 0;
+    if (wl == 3) { abbrev = 1; }
+    if (wl == 4) { if (load8(w + 3) == 46) { abbrev = 1; } }
+    var md = "JANUARY\0FEBRUARY\0MARCH\0APRIL\0MAY\0JUNE\0JULY\0AUGUST\0SEPTEMBER\0SEPT\0OCTOBER\0NOVEMBER\0DECEMBER\0SUNDAY\0MONDAY\0TUESDAY\0TUES\0WEDNESDAY\0WEDNES\0THURSDAY\0THUR\0THURS\0FRIDAY\0SATURDAY\0\0";  #skip-lint
+    var mdk = "MMMMMMMMMMMMMDDDDDDDDDDD";
+    var mdv = "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x09\x0a\x0b\x0c\x00\x01\x02\x02\x03\x03\x04\x04\x04\x05\x06";
+    var p = md;
+    var i: i64 = 0;
+    while (load8(p) != 0) {
+        var hit: i64 = 0;
+        if (abbrev == 1) {
+            if (load8(p) == load8(w)) {
+                if (load8(p + 1) == load8(w + 1)) {
+                    if (load8(p + 2) == load8(w + 2)) { hit = 1; }
+                }
+            }
+        } elif (streq(p, w) == 1) { hit = 1; }
+        if (hit == 1) {
+            if (load8(mdk + i) == 77) { store64(k_p, KT_MONTH); }
+            else { store64(k_p, KT_DAY); }
+            return load8(mdv + i);
+        }
+        p = p + strlen(p) + 1;
+        i = i + 1;
+    }
+    var zk[8];
+    var zv = _kdt_zone(w, &zk);
+    if (load64(&zk) != 0) {
+        store64(k_p, load64(&zk));
+        return zv;
+    }
+    if (streq(w, "DST") == 1) {
+        store64(k_p, KT_DST);
+        return 0;
+    }
+    var unit = _kdt_unit(w, k_p);
+    if (load64(k_p) != KT_BAD) { return unit; }
+    # A plural: strip the S and try the units again.
+    if (wl > 0) {
+        if (load8(w + wl - 1) == 83) {
+            store8(w + wl - 1, 0);
+            var u2 = _kdt_unit(w, k_p);
+            store8(w + wl - 1, 83);
+            if (load64(k_p) != KT_BAD) { return u2; }
+        }
+    }
+    var rel = "TOMORROW\0YESTERDAY\0TODAY\0NOW\0LAST\0THIS\0NEXT\0FIRST\0THIRD\0FOURTH\0FIFTH\0SIXTH\0SEVENTH\0EIGHTH\0NINTH\0TENTH\0ELEVENTH\0TWELFTH\0AGO\0HENCE\0\0";  #skip-lint
+    var ri = _kdt_find(rel, w);
+    if (ri >= 0) {
+        if (ri <= 3) {
+            store64(k_p, KT_SHIFT);
+            if (ri == 0) { return 1; }
+            if (ri == 1) { return 0 - 1; }
+            return 0;
+        }
+        if (ri <= 17) {
+            store64(k_p, KT_ORD);
+            if (ri == 4) { return 0 - 1; }
+            if (ri == 5) { return 0; }
+            if (ri <= 7) { return 1; }
+            return ri - 5;
+        }
+        store64(k_p, KT_AGO);
+        if (ri == 18) { return 0 - 1; }
+        return 1;
+    }
+    # Military zones: A-I = +1..+9, K-M = +10..+12, N-Y = -1..-12, Z = 0; J local, T special.
+    if (wl == 1) {
+        var c = load8(w);
+        if (c == 74) {
+            store64(k_p, KT_J);
+            return 0;
+        }
+        if (c == 84) {
+            store64(k_p, KT_T);
+            return 0;
+        }
+        if (c >= 65) {
+            if (c <= 73) {
+                store64(k_p, KT_ZONE);
+                return (c - 64) * 3600;
+            }
+        }
+        if (c >= 75) {
+            if (c <= 77) {
+                store64(k_p, KT_ZONE);
+                return (c - 65) * 3600;
+            }
+        }
+        if (c >= 78) {
+            if (c <= 89) {
+                store64(k_p, KT_ZONE);
+                return (0 - (c - 77)) * 3600;
+            }
+        }
+        if (c == 90) {
+            store64(k_p, KT_ZONE);
+            return 0;
+        }
+    }
+    # Drop the periods and try the zone tables again.
+    var found: i64 = 0;
+    var q: i64 = 0;
+    var r: i64 = 0;
+    while (load8(w + r) != 0) {
+        if (load8(w + r) == 46) { found = 1; }
+        else {
+            store8(w + q, load8(w + r));
+            q = q + 1;
+        }
+        r = r + 1;
+    }
+    store8(w + q, 0);
+    if (found == 1) {
+        var zk2[8];
+        var zv2 = _kdt_zone(w, &zk2);
+        if (load64(&zk2) != 0) {
+            store64(k_p, load64(&zk2));
+            return zv2;
+        }
+    }
+    store64(k_p, KT_BAD);
+    return 0;
+}
+
+# GNU's `time_units_table`.
+fn _kdt_unit(w, k_p): i64 {
+    store64(k_p, KT_BAD);
+    var i = _kdt_find("YEAR\0MONTH\0FORTNIGHT\0WEEK\0DAY\0HOUR\0MINUTE\0MIN\0SECOND\0SEC\0\0", w);
+    if (i < 0) { return 0; }
+    if (i == 0) { store64(k_p, KT_YEARU); return 1; }
+    if (i == 1) { store64(k_p, KT_MONTHU); return 1; }
+    if (i == 2) { store64(k_p, KT_DAYU); return 14; }
+    if (i == 3) { store64(k_p, KT_DAYU); return 7; }
+    if (i == 4) { store64(k_p, KT_DAYU); return 1; }
+    if (i == 5) { store64(k_p, KT_HOURU); return 1; }
+    if (i <= 7) { store64(k_p, KT_MINU); return 1; }
+    store64(k_p, KT_SECU);
+    return 1;
+}
+
+# --- the lexer: GNU's `yylex`, run over the whole string first ---------------------------------
+#
+# It depends on nothing the parser does, so the tokens can be made up front. `KT_BAD` stands for
+# GNU's '?' (an overflow, an unknown word).
+
+fn _kdt_lex(s): i64 {
+    _kdt_ntok = 0;
+    _kdt_notdec = 0;
+    if (_kdt_w == 0) { _kdt_w = alloc(32); }
+    var i: i64 = 0;
+    var going: i64 = 1;
+    while (going == 1) {
+        while (_kdt_isspace(load8(s + i)) == 1) { i = i + 1; }
+        var c = load8(s + i);
+        var numeric: i64 = 0;
+        if (_kdt_isdigit(c) == 1) { numeric = 1; }
+        if (c == 45) { numeric = 1; }
+        if (c == 43) { numeric = 1; }
+        if (numeric == 1) {
+            var p = i;
+            var sign: i64 = 0;
+            var skip: i64 = 0;
+            if (c == 45 || c == 43) {
+                sign = 1;
+                if (c == 45) { sign = 0 - 1; }
+                p = p + 1;
+                while (_kdt_isspace(load8(s + p)) == 1) { p = p + 1; }
+                i = p;
+                if (_kdt_isdigit(load8(s + p)) == 0) { skip = 1; }       # the sign is dropped
+            }
+            if (skip == 0) {
+                var value: i64 = 0;
+                var ovf: i64 = 0;
+                while (_kdt_isdigit(load8(s + p)) == 1) {
+                    var d = load8(s + p) - 48;
+                    if (sign < 0) {
+                        if (value < (0 - 922337203685477580)) { ovf = 1; }
+                        elif (value == (0 - 922337203685477580)) { if (d > 8) { ovf = 1; } }
+                        value = value * 10 - d;
+                    } else {
+                        if (value > 922337203685477580) { ovf = 1; }
+                        elif (value == 922337203685477580) { if (d > 7) { ovf = 1; } }
+                        value = value * 10 + d;
+                    }
+                    p = p + 1;
+                }
+                if (ovf == 1) {
+                    _kdt_push(KT_BAD, 0, 0, 0, 0);
+                    return 0;
+                }
+                var c2 = load8(s + p);
+                var dec: i64 = 0;
+                if (c2 == 46 || c2 == 44) {
+                    if (_kdt_isdigit(load8(s + p + 1)) == 1) { dec = 1; }
+                }
+                var normal: i64 = 1;
+                if (dec == 1) {
+                    if (_kdt_notdec == 1) {
+                        # The second period of a DD.MM.YYYY date.
+                        _kdt_notdec = 0;
+                        var nn: i64 = 0;
+                        if (sign < 0) { nn = 1; }
+                        _kdt_push(KT_UDOT, value, p - i, nn, 0);
+                        i = p;
+                        normal = 2;
+                    } else {
+                        var old_p = p;
+                        var q = p + 1;
+                        var ns = load8(s + q) - 48;
+                        q = q + 1;
+                        var dd: i64 = 2;
+                        var dotted: i64 = 0;
+                        while (dd <= 9 && dotted == 0) {
+                            ns = ns * 10;
+                            if (load8(s + q) == 46) { dotted = 1; }
+                            elif (_kdt_isdigit(load8(s + q)) == 1) {
+                                ns = ns + load8(s + q) - 48;
+                                q = q + 1;
+                            }
+                            dd = dd + 1;
+                        }
+                        if (dotted == 1) {
+                            # Do not read DD.MM.YYYY as a decimal.
+                            p = old_p;
+                            _kdt_notdec = 1;
+                        } else {
+                            if (sign < 0) {
+                                var trunc: i64 = 1;
+                                while (trunc == 1 && _kdt_isdigit(load8(s + q)) == 1) {
+                                    if (load8(s + q) != 48) {
+                                        ns = ns + 1;
+                                        trunc = 0;
+                                    } else { q = q + 1; }
+                                }
+                            }
+                            while (_kdt_isdigit(load8(s + q)) == 1) { q = q + 1; }
+                            var sec = value;
+                            if (sign < 0) {
+                                if (ns != 0) {
+                                    sec = sec - 1;
+                                    ns = 1000000000 - ns;
+                                }
+                            }
+                            var dk = KT_UDEC;
+                            if (sign != 0) { dk = KT_SDEC; }
+                            _kdt_push(dk, sec, 0, 0, ns);
+                            i = q;
+                            normal = 0;
+                        }
+                    }
+                } else {
+                    _kdt_notdec = 0;
+                }
+                if (normal == 1) {
+                    var nk = KT_UNUM;
+                    if (sign != 0) { nk = KT_SNUM; }
+                    var ng: i64 = 0;
+                    if (sign < 0) { ng = 1; }
+                    _kdt_push(nk, value, p - i, ng, 0);
+                    i = p;
+                }
+            }
+        } elif (_kdt_isalpha(c) == 1) {
+            var n: i64 = 0;
+            var wc = c;
+            while (_kdt_isalpha(wc) == 1 || wc == 46) {
+                if (n < 19) {
+                    var u = wc;
+                    if (u >= 97) { if (u <= 122) { u = u - 32; } }
+                    store8(_kdt_w + n, u);
+                    n = n + 1;
+                }
+                i = i + 1;
+                wc = load8(s + i);
+            }
+            store8(_kdt_w + n, 0);
+            var kk[8];
+            var vv = _kdt_lookup(_kdt_w, &kk);
+            _kdt_push(load64(&kk), vv, 0, 0, 0);
+            if (load64(&kk) == KT_BAD) { return 0; }
+        } elif (c == 40) {
+            # A parenthesized comment, nested; an unclosed one ends the input.
+            var depth: i64 = 0;
+            var inside: i64 = 1;
+            while (inside == 1) {
+                var cc = load8(s + i);
+                i = i + 1;
+                if (cc == 0) {
+                    _kdt_push(KT_EOF, 0, 0, 0, 0);
+                    return 0;
+                }
+                if (cc == 40) { depth = depth + 1; }
+                elif (cc == 41) { depth = depth - 1; }
+                if (depth == 0) { inside = 0; }
+            }
+        } elif (c == 0) {
+            _kdt_push(KT_EOF, 0, 0, 0, 0);
+            going = 0;
+        } else {
+            _kdt_push(KT_CH, c, 0, 0, 0);
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# --- the parser state: GNU's `parser_control` --------------------------------------------------
+var _kp = 0;
+
+enum KdtPc {
+    KP_YEAR = 0;    KP_YEARD = 8;   KP_MONTH = 16;  KP_DAY = 24;    KP_HOUR = 32;   KP_MIN = 40;
+    KP_SEC = 48;    KP_NS = 56;     KP_MER = 64;    KP_TZ = 72;
+    KP_RNS = 80;    KP_RSEC = 88;   KP_RMIN = 96;   KP_RHOUR = 104; KP_RDAY = 112;  KP_RMON = 120;
+    KP_RYEAR = 128; KP_RELS = 136;  KP_DATES = 144; KP_DAYS = 152;  KP_TIMES = 160; KP_ZONES = 168;
+    KP_JZ = 176;    KP_DORD = 184;  KP_DNUM = 192;  KP_TSPEC = 200; KP_SZ = 208;
+}
+
+fn _kdt_tk(i): i64 { return _kdt_toks + i * KTR_SZ; }
+fn _kdt_kind(i): i64 {
+    if (i >= _kdt_ntok) { return KT_EOF; }
+    return load64(_kdt_tk(i) + KTR_K);
+}
+fn _kdt_val(i): i64 { return load64(_kdt_tk(i) + KTR_V); }
+fn _kdt_dig(i): i64 { return load64(_kdt_tk(i) + KTR_D); }
+fn _kdt_ch(i, c): i64 {
+    if (_kdt_kind(i) != KT_CH) { return 0; }
+    if (_kdt_val(i) == c) { return 1; }
+    return 0;
+}
+fn _kdt_isunit(k): i64 {
+    if (k >= KT_YEARU) { if (k <= KT_DAYU) { return 1; } }
+    return 0;
+}
+
+fn _kdt_inc(off): i64 {
+    store64(_kp + off, load64(_kp + off) + 1);
+    return 0;
+}
+
+# `a + b` with GNU's overflow failure: 1 when it would overflow an i64.
+fn _kdt_add_ovf(a, b): i64 {
+    if (b > 0) { if (a > 9223372036854775807 - b) { return 1; } }
+    if (b < 0) { if (a < (0 - 9223372036854775807) - 1 - b) { return 1; } }
+    return 0;
+}
+# 1 when `a - b` overflows an i64, as GNU's `ckd_sub`.
+fn _kdt_sub_ovf(a, b): i64 {
+    if (b < 0) { if (a > 9223372036854775807 + b) { return 1; } }
+    if (b > 0) { if (a < (0 - 9223372036854775807) - 1 + b) { return 1; } }
+    return 0;
+}
+# 1 when token `i`'s value cannot be negated: GNU's grammar aborts on `ckd_sub (&x, 0, v)`.
+fn _kdt_negovf(i): i64 {
+    if (_kdt_val(i) == (0 - 9223372036854775807) - 1) { return 1; }
+    return 0;
+}
+
+# GNU's `apply_relative_time`: the relative amount in `rel` (7 i64s: ns sec min hour day month
+# year) times `factor` (1 or -1). 0 on an overflow.
+fn _kdt_apply_rel(rel, factor): i64 {
+    var offs[56];
+    store64(&offs, KP_RNS);
+    store64(&offs + 8, KP_RSEC);
+    store64(&offs + 16, KP_RMIN);
+    store64(&offs + 24, KP_RHOUR);
+    store64(&offs + 32, KP_RDAY);
+    store64(&offs + 40, KP_RMON);
+    store64(&offs + 48, KP_RYEAR);
+    var j: i64 = 0;
+    while (j < 7) {
+        var o = load64(&offs + j * 8);
+        var cur = load64(_kp + o);
+        var add = load64(rel + j * 8);
+        var nv: i64 = 0;
+        if (factor < 0) {
+            if (_kdt_sub_ovf(cur, add) == 1) { return 0; }
+            nv = cur - add;
+        } else {
+            if (_kdt_add_ovf(cur, add) == 1) { return 0; }
+            nv = cur + add;
+        }
+        # GNU keeps the relative nanoseconds in an int: `1.9 sec` three times overflows it.
+        if (j == 0) { if (_kdt_int_ovf(nv) == 1) { return 0; } }
+        store64(_kp + o, nv);
+        j = j + 1;
+    }
+    store64(_kp + KP_RELS, 1);
+    return 1;
+}
+
+# A relative unit into `rel` (zeroed): amount `n` of unit token kind `k` with value `uv`.
+# 0 on an overflow.
+fn _kdt_rel_unit(rel, k, uv, n, ns): i64 {
+    var z: i64 = 0;
+    while (z < 56) { store64(rel + z, 0); z = z + 8; }
+    if (k == KT_YEARU) { store64(rel + 48, n); }
+    elif (k == KT_MONTHU) { store64(rel + 40, n); }
+    elif (k == KT_DAYU) {
+        if (n != 0) {
+            var prod = n * uv;
+            if (prod / uv != n) { return 0; }
+            store64(rel + 32, prod);
+        }
+    } elif (k == KT_HOURU) { store64(rel + 24, n); }
+    elif (k == KT_MINU) { store64(rel + 16, n); }
+    else {
+        store64(rel + 8, n);
+        store64(rel, ns);
+    }
+    return 1;
+}
+
+# GNU's `time_zone_hhmm`: the offset of number token `t` (and minutes `mm`, -1 when none) into
+# KP_TZ. 0 when out of range.
+fn _kdt_hhmm(t, mm): i64 {
+    var v = _kdt_val(t);
+    var digits = _kdt_dig(t);
+    var neg = load64(_kdt_tk(t) + KTR_N);
+    if (digits <= 2) { if (mm < 0) { v = v * 100; } }
+    var n_minutes: i64 = 0;
+    if (mm < 0) {
+        n_minutes = (v / 100) * 60 + v % 100;
+    } else {
+        if (v > 153722867280912930) { return 0; }
+        if (v < (0 - 153722867280912930)) { return 0; }
+        n_minutes = v * 60;
+        if (neg == 1) { n_minutes = n_minutes - mm; } else { n_minutes = n_minutes + mm; }
+    }
+    if (n_minutes < (0 - 1440)) { return 0; }
+    if (n_minutes > 1440) { return 0; }
+    store64(_kp + KP_TZ, n_minutes * 60);
+    return 1;
+}
+
+fn _kdt_set_time(h, m, s, ns, mer): i64 {
+    store64(_kp + KP_HOUR, h);
+    store64(_kp + KP_MIN, m);
+    store64(_kp + KP_SEC, s);
+    store64(_kp + KP_NS, ns);
+    store64(_kp + KP_MER, mer);
+    return 0;
+}
+
+# GNU's `digits_to_date_time`, for a bare number token `t`.
+fn _kdt_digits(t): i64 {
+    var v = _kdt_val(t);
+    var d = _kdt_dig(t);
+    var as_year: i64 = 0;
+    if (load64(_kp + KP_DATES) != 0) {
+        if (load64(_kp + KP_YEARD) == 0) {
+            if (load64(_kp + KP_RELS) == 0) {
+                if (load64(_kp + KP_TIMES) != 0) { as_year = 1; }
+                if (d > 2) { as_year = 1; }
+            }
+        }
+    }
+    if (as_year == 1) {
+        store64(_kp + KP_YEAR, v);
+        store64(_kp + KP_YEARD, d);
+        return 0;
+    }
+    if (d > 4) {
+        _kdt_inc(KP_DATES);
+        store64(_kp + KP_DAY, v % 100);
+        store64(_kp + KP_MONTH, (v / 100) % 100);
+        store64(_kp + KP_YEAR, v / 10000);
+        store64(_kp + KP_YEARD, d - 4);
+        return 0;
+    }
+    _kdt_inc(KP_TIMES);
+    if (d <= 2) { _kdt_set_time(v, 0, 0, 0, KM_24); }
+    else { _kdt_set_time(v / 100, v % 100, 0, 0, KM_24); }
+    return 0;
+}
+
+# An optional `zone_offset` at token `i` (a signed number, then optionally `:` and minutes).
+# Returns the next token, or -1 on failure.
+fn _kdt_o_zone(i): i64 {
+    if (_kdt_kind(i) != KT_SNUM) { return i; }
+    var mm: i64 = 0 - 1;
+    var j = i + 1;
+    if (_kdt_ch(j, 58) == 1) {
+        if (_kdt_kind(j + 1) != KT_UNUM) { return 0 - 1; }
+        mm = _kdt_val(j + 1);
+        j = j + 2;
+    }
+    _kdt_inc(KP_ZONES);
+    if (_kdt_hhmm(i, mm) == 0) { return 0 - 1; }
+    return j;
+}
+
+# `iso_8601_time` at token `i`: H zone_offset, H:M [zone_offset], H:M:S [zone_offset]. Returns the
+# next token or -1.
+fn _kdt_iso_time(i): i64 {
+    if (_kdt_kind(i) != KT_UNUM) { return 0 - 1; }
+    var h = _kdt_val(i);
+    if (_kdt_kind(i + 1) == KT_SNUM) {
+        _kdt_set_time(h, 0, 0, 0, KM_24);
+        return _kdt_o_zone(i + 1);
+    }
+    if (_kdt_ch(i + 1, 58) == 0) { return 0 - 1; }
+    if (_kdt_kind(i + 2) != KT_UNUM) { return 0 - 1; }
+    var m = _kdt_val(i + 2);
+    if (_kdt_ch(i + 3, 58) == 1) {
+        var k = _kdt_kind(i + 4);
+        var sec: i64 = 0;
+        var ns: i64 = 0;
+        if (k == KT_UNUM) { sec = _kdt_val(i + 4); }
+        elif (k == KT_UDEC) {
+            sec = _kdt_val(i + 4);
+            ns = load64(_kdt_tk(i + 4) + KTR_NS);
+        } else { return 0 - 1; }
+        _kdt_set_time(h, m, sec, ns, KM_24);
+        return _kdt_o_zone(i + 5);
+    }
+    _kdt_set_time(h, m, 0, 0, KM_24);
+    return _kdt_o_zone(i + 3);
+}
+
+# A `rel` item from a relative unit at `i` (after its amount, if any): an optional `ago`/`hence`.
+fn _kdt_rel_tail(rel, i): i64 {
+    var factor: i64 = 1;
+    var j = i;
+    if (_kdt_kind(j) == KT_AGO) {
+        factor = _kdt_val(j);
+        j = j + 1;
+    }
+    if (_kdt_apply_rel(rel, factor) == 0) { return 0 - 1; }
+    return j;
+}
+
+# One item at token `i`; returns the next token, or -1 when the string is invalid there.
+fn _kdt_item(i): i64 {
+    var rel[56];
+    var k = _kdt_kind(i);
+    if (k == KT_UNUM) {
+        var v = _kdt_val(i);
+        var k1 = _kdt_kind(i + 1);
+        if (k1 == KT_MER) {
+            _kdt_inc(KP_TIMES);
+            _kdt_set_time(v, 0, 0, 0, _kdt_val(i + 1));
+            return i + 2;
+        }
+        if (_kdt_ch(i + 1, 58) == 1) {
+            if (_kdt_kind(i + 2) != KT_UNUM) { return 0 - 1; }
+            var mi = _kdt_val(i + 2);
+            if (_kdt_kind(i + 3) == KT_MER) {
+                _kdt_inc(KP_TIMES);
+                _kdt_set_time(v, mi, 0, 0, _kdt_val(i + 3));
+                return i + 4;
+            }
+            if (_kdt_ch(i + 3, 58) == 1) {
+                var ks = _kdt_kind(i + 4);
+                var sc: i64 = 0;
+                var sn: i64 = 0;
+                if (ks == KT_UNUM) { sc = _kdt_val(i + 4); }
+                elif (ks == KT_UDEC) {
+                    sc = _kdt_val(i + 4);
+                    sn = load64(_kdt_tk(i + 4) + KTR_NS);
+                } else { return 0 - 1; }
+                _kdt_inc(KP_TIMES);
+                if (_kdt_kind(i + 5) == KT_MER) {
+                    _kdt_set_time(v, mi, sc, sn, _kdt_val(i + 5));
+                    return i + 6;
+                }
+                _kdt_set_time(v, mi, sc, sn, KM_24);
+                return _kdt_o_zone(i + 5);
+            }
+            _kdt_inc(KP_TIMES);
+            _kdt_set_time(v, mi, 0, 0, KM_24);
+            return _kdt_o_zone(i + 3);
+        }
+        if (_kdt_ch(i + 1, 47) == 1) {
+            if (_kdt_kind(i + 2) != KT_UNUM) { return 0 - 1; }
+            _kdt_inc(KP_DATES);
+            if (_kdt_ch(i + 3, 47) == 1) {
+                if (_kdt_kind(i + 4) != KT_UNUM) { return 0 - 1; }
+                # YYYY/MM/DD when the first has 4 or more digits, else MM/DD/YY.
+                if (_kdt_dig(i) >= 4) {
+                    store64(_kp + KP_YEAR, v);
+                    store64(_kp + KP_YEARD, _kdt_dig(i));
+                    store64(_kp + KP_MONTH, _kdt_val(i + 2));
+                    store64(_kp + KP_DAY, _kdt_val(i + 4));
+                } else {
+                    store64(_kp + KP_MONTH, v);
+                    store64(_kp + KP_DAY, _kdt_val(i + 2));
+                    store64(_kp + KP_YEAR, _kdt_val(i + 4));
+                    store64(_kp + KP_YEARD, _kdt_dig(i + 4));
+                }
+                return i + 5;
+            }
+            store64(_kp + KP_MONTH, v);
+            store64(_kp + KP_DAY, _kdt_val(i + 2));
+            return i + 3;
+        }
+        if (_kdt_ch(i + 1, 46) == 1) {
+            var k2 = _kdt_kind(i + 2);
+            if (k2 == KT_UNUM) {
+                if (_kdt_ch(i + 3, 46) == 0) { return 0 - 1; }
+                _kdt_inc(KP_DATES);
+                store64(_kp + KP_DAY, v);
+                store64(_kp + KP_MONTH, _kdt_val(i + 2));
+                return i + 4;
+            }
+            if (k2 == KT_UDOT) {
+                if (_kdt_ch(i + 3, 46) == 0) { return 0 - 1; }
+                if (_kdt_kind(i + 4) != KT_UNUM) { return 0 - 1; }
+                _kdt_inc(KP_DATES);
+                store64(_kp + KP_DAY, v);
+                store64(_kp + KP_MONTH, _kdt_val(i + 2));
+                store64(_kp + KP_YEAR, _kdt_val(i + 4));
+                store64(_kp + KP_YEARD, _kdt_dig(i + 4));
+                return i + 5;
+            }
+            return 0 - 1;
+        }
+        if (k1 == KT_MONTH) {
+            _kdt_inc(KP_DATES);
+            store64(_kp + KP_DAY, v);
+            store64(_kp + KP_MONTH, _kdt_val(i + 1));
+            var k2b = _kdt_kind(i + 2);
+            if (k2b == KT_SNUM) {
+                if (_kdt_negovf(i + 2) == 1) { return 0 - 1; }
+                store64(_kp + KP_YEAR, 0 - _kdt_val(i + 2));
+                store64(_kp + KP_YEARD, _kdt_dig(i + 2));
+                return i + 3;
+            }
+            if (k2b == KT_UNUM) {
+                store64(_kp + KP_YEAR, _kdt_val(i + 2));
+                store64(_kp + KP_YEARD, _kdt_dig(i + 2));
+                return i + 3;
+            }
+            return i + 2;
+        }
+        if (k1 == KT_SNUM) {
+            var k2c = _kdt_kind(i + 2);
+            if (k2c == KT_SNUM) {
+                # ISO 8601: YYYY-MM-DD, then perhaps T and a time.
+                store64(_kp + KP_YEAR, v);
+                store64(_kp + KP_YEARD, _kdt_dig(i));
+                if (_kdt_negovf(i + 1) == 1) { return 0 - 1; }
+                if (_kdt_negovf(i + 2) == 1) { return 0 - 1; }
+                store64(_kp + KP_MONTH, 0 - _kdt_val(i + 1));
+                store64(_kp + KP_DAY, 0 - _kdt_val(i + 2));
+                _kdt_inc(KP_DATES);
+                if (_kdt_kind(i + 3) == KT_T) {
+                    _kdt_inc(KP_TIMES);
+                    return _kdt_iso_time(i + 4);
+                }
+                return i + 3;
+            }
+            if (_kdt_isunit(k2c) == 1) {
+                # A number and a signed relative unit: YYYYMMDD +N days.
+                _kdt_digits(i);
+                if (_kdt_rel_unit(&rel, k2c, _kdt_val(i + 2), _kdt_val(i + 1), 0) == 0) { return 0 - 1; }
+                if (_kdt_apply_rel(&rel, 1) == 0) { return 0 - 1; }
+                return i + 3;
+            }
+            # H followed by a zone offset.
+            _kdt_inc(KP_TIMES);
+            _kdt_set_time(v, 0, 0, 0, KM_24);
+            return _kdt_o_zone(i + 1);
+        }
+        if (k1 == KT_DAY) {
+            _kdt_inc(KP_DAYS);
+            store64(_kp + KP_DORD, v);
+            store64(_kp + KP_DNUM, _kdt_val(i + 1));
+            return i + 2;
+        }
+        if (_kdt_isunit(k1) == 1) {
+            if (_kdt_rel_unit(&rel, k1, _kdt_val(i + 1), v, 0) == 0) { return 0 - 1; }
+            return _kdt_rel_tail(&rel, i + 2);
+        }
+        _kdt_digits(i);
+        return i + 1;
+    }
+    if (k == KT_SNUM) {
+        var ku = _kdt_kind(i + 1);
+        if (_kdt_isunit(ku) == 0) { return 0 - 1; }
+        if (_kdt_rel_unit(&rel, ku, _kdt_val(i + 2 - 1), _kdt_val(i), 0) == 0) { return 0 - 1; }
+        return _kdt_rel_tail(&rel, i + 2);
+    }
+    if (k == KT_UDEC || k == KT_SDEC) {
+        if (_kdt_kind(i + 1) != KT_SECU) { return 0 - 1; }
+        _kdt_rel_unit(&rel, KT_SECU, 1, _kdt_val(i), load64(_kdt_tk(i) + KTR_NS));
+        return _kdt_rel_tail(&rel, i + 2);
+    }
+    if (k == KT_ORD) {
+        var ko = _kdt_kind(i + 1);
+        if (ko == KT_DAY) {
+            _kdt_inc(KP_DAYS);
+            store64(_kp + KP_DORD, _kdt_val(i));
+            store64(_kp + KP_DNUM, _kdt_val(i + 1));
+            return i + 2;
+        }
+        if (_kdt_isunit(ko) == 0) { return 0 - 1; }
+        if (_kdt_rel_unit(&rel, ko, _kdt_val(i + 1), _kdt_val(i), 0) == 0) { return 0 - 1; }
+        return _kdt_rel_tail(&rel, i + 2);
+    }
+    if (_kdt_isunit(k) == 1) {
+        _kdt_rel_unit(&rel, k, _kdt_val(i), 1, 0);
+        if (k == KT_DAYU) { store64(&rel + 32, _kdt_val(i)); }
+        return _kdt_rel_tail(&rel, i + 1);
+    }
+    if (k == KT_SHIFT) {
+        _kdt_rel_unit(&rel, KT_DAYU, 1, _kdt_val(i), 0);
+        if (_kdt_apply_rel(&rel, 1) == 0) { return 0 - 1; }
+        return i + 1;
+    }
+    if (k == KT_DAY) {
+        _kdt_inc(KP_DAYS);
+        store64(_kp + KP_DORD, 0);
+        store64(_kp + KP_DNUM, _kdt_val(i));
+        if (_kdt_ch(i + 1, 44) == 1) { return i + 2; }
+        return i + 1;
+    }
+    if (k == KT_MONTH) {
+        _kdt_inc(KP_DATES);
+        store64(_kp + KP_MONTH, _kdt_val(i));
+        var km = _kdt_kind(i + 1);
+        if (km == KT_SNUM) {
+            if (_kdt_kind(i + 2) != KT_SNUM) { return 0 - 1; }
+            if (_kdt_negovf(i + 1) == 1) { return 0 - 1; }
+            if (_kdt_negovf(i + 2) == 1) { return 0 - 1; }
+            store64(_kp + KP_DAY, 0 - _kdt_val(i + 1));
+            store64(_kp + KP_YEAR, 0 - _kdt_val(i + 2));
+            store64(_kp + KP_YEARD, _kdt_dig(i + 2));
+            return i + 3;
+        }
+        if (km == KT_UNUM) {
+            store64(_kp + KP_DAY, _kdt_val(i + 1));
+            if (_kdt_ch(i + 2, 44) == 1) {
+                if (_kdt_kind(i + 3) != KT_UNUM) { return 0 - 1; }
+                store64(_kp + KP_YEAR, _kdt_val(i + 3));
+                store64(_kp + KP_YEARD, _kdt_dig(i + 3));
+                return i + 4;
+            }
+            return i + 2;
+        }
+        return 0 - 1;
+    }
+    if (k == KT_ZONE || k == KT_T) {
+        _kdt_inc(KP_ZONES);
+        var zv = 0 - 25200;                                    # 'T' is -7 hours
+        if (k == KT_ZONE) { zv = _kdt_val(i); }
+        store64(_kp + KP_TZ, zv);
+        var kz = _kdt_kind(i + 1);
+        if (kz == KT_SNUM) {
+            var ku2 = _kdt_kind(i + 2);
+            if (_kdt_isunit(ku2) == 1) {
+                if (_kdt_rel_unit(&rel, ku2, _kdt_val(i + 2), _kdt_val(i + 1), 0) == 0) { return 0 - 1; }
+                if (_kdt_apply_rel(&rel, 1) == 0) { return 0 - 1; }
+                return i + 3;
+            }
+            if (k == KT_T) { return i + 1; }
+            var mm: i64 = 0 - 1;
+            var nx = i + 2;
+            if (_kdt_ch(i + 2, 58) == 1) {
+                if (_kdt_kind(i + 3) != KT_UNUM) { return 0 - 1; }
+                mm = _kdt_val(i + 3);
+                nx = i + 4;
+            }
+            if (_kdt_hhmm(i + 1, mm) == 0) { return 0 - 1; }
+            var tz = load64(_kp + KP_TZ);
+            if (_kdt_add_ovf(tz, zv) == 1) { return 0 - 1; }
+            store64(_kp + KP_TZ, tz + zv);
+            return nx;
+        }
+        if (k == KT_ZONE) {
+            if (kz == KT_DST) {
+                store64(_kp + KP_TZ, zv + 3600);
+                return i + 2;
+            }
+        }
+        return i + 1;
+    }
+    if (k == KT_DAYZONE) {
+        _kdt_inc(KP_ZONES);
+        store64(_kp + KP_TZ, _kdt_val(i) + 3600);
+        return i + 1;
+    }
+    if (k == KT_J) {
+        _kdt_inc(KP_JZ);
+        return i + 1;
+    }
+    return 0 - 1;
+}
+
+# --- the calendar, proleptic Gregorian, UTC ---------------------------------------------------
+
+fn _kdt_floordiv(a, b): i64 {
+    var q = a / b;
+    if (a % b != 0) {
+        if ((a < 0) != (b < 0)) { q = q - 1; }
+    }
+    return q;
+}
+fn _kdt_mod(a, b): i64 { return a - _kdt_floordiv(a, b) * b; }
+
+# Days since 1970-01-01 of year `y`, month `m` (1-12), day `d` — Hinnant's days_from_civil.
+fn kdt_days_from_civil(y, m, d): i64 {
+    var yy = y;
+    if (m <= 2) { yy = yy - 1; }
+    var era = _kdt_floordiv(yy, 400);
+    var yoe = yy - era * 400;
+    var mp = m + 9;
+    if (m > 2) { mp = m - 3; }
+    var doy = (153 * mp + 2) / 5 + d - 1;
+    var doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+fn kdt_is_leap(y): i64 {
+    if (_kdt_mod(y, 4) != 0) { return 0; }
+    if (_kdt_mod(y, 100) != 0) { return 1; }
+    if (_kdt_mod(y, 400) == 0) { return 1; }
+    return 0;
+}
+
+fn kdt_days_in_month(y, m): i64 {
+    if (m == 2) { return 28 + kdt_is_leap(y); }
+    if (m == 4 || m == 6 || m == 9 || m == 11) { return 30; }
+    return 31;
+}
+
+# The civil date of `epoch` into `out` (8 i64s: year, month 1-12, day, hour, min, sec, weekday
+# 0=Sunday, day of the year 1-366) — any epoch, before 1970 too.
+fn kdt_civil(epoch, out): i64 {
+    var days = _kdt_floordiv(epoch, 86400);
+    var rem = epoch - days * 86400;
+    store64(out + 24, rem / 3600);
+    store64(out + 32, (rem % 3600) / 60);
+    store64(out + 40, rem % 60);
+    store64(out + 48, _kdt_mod(days + 4, 7));
+    var z = days + 719468;
+    var era = _kdt_floordiv(z, 146097);
+    var doe = z - era * 146097;
+    var yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    var y = yoe + era * 400;
+    var doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    var mp = (5 * doy + 2) / 153;
+    var d = doy - (153 * mp + 2) / 5 + 1;
+    var m = mp + 3;
+    if (mp >= 10) { m = mp - 9; }
+    if (m <= 2) { y = y + 1; }
+    store64(out, y);
+    store64(out + 8, m);
+    store64(out + 16, d);
+    store64(out + 56, days - kdt_days_from_civil(y, 1, 1) + 1);
+    return 0;
+}
+
+# The epoch of y, mon (0-based, any value), mday (any value), h, mi, s — GNU's `mktime` in UTC,
+# out-of-range fields carried as mktime carries them.
+fn _kdt_timegm(y, mon, mday, h, mi, s): i64 {
+    var yy = y + _kdt_floordiv(mon, 12);
+    var mm = _kdt_mod(mon, 12);
+    var days = kdt_days_from_civil(yy, mm + 1, 1) + mday - 1;
+    return days * 86400 + h * 3600 + mi * 60 + s;
+}
+
+# GNU's `to_hour`: the hour under a meridian, or -1.
+fn _kdt_to_hour(h, mer): i64 {
+    if (mer == KM_24) {
+        if (h >= 0) { if (h < 24) { return h; } }
+        return 0 - 1;
+    }
+    if (h == 12) {
+        if (mer == KM_AM) { return 0; }
+        return 12;
+    }
+    if (h > 0) {
+        if (h < 12) {
+            if (mer == KM_AM) { return h; }
+            return h + 12;
+        }
+    }
+    return 0 - 1;
+}
+
+# 1 when `v` does not fit a C int.
+fn _kdt_int_ovf(v): i64 {
+    if (v > 2147483647) { return 1; }
+    if (v < (0 - 2147483648)) { return 1; }
+    return 0;
+}
+
+# The year range a `struct tm` holds: tm_year is an int, offset by 1900.
+enum KdtRange {
+    KDT_YEAR_MAX = 2147485547;
+    KDT_YEAR_MIN = 0 - 2147481748;
+}
+
+# Parse `s` against `now` (seconds, nanoseconds), as GNU's `parse_datetime` under TZ=UTC. Stores
+# the result (+0 seconds, +8 nanoseconds) in `out`. Returns KDT_OK, KDT_BAD, or KDT_TZ for a
+# leading `TZ="..."`.
+fn kdt_parse(s, now_sec, now_ns, out): i64 {
+    var p = s;
+    while (_kdt_isspace(load8(p)) == 1) { p = p + 1; }
+    if (load8(p) == 84) {
+        if (load8(p + 1) == 90) {
+            if (load8(p + 2) == 61) {
+                if (load8(p + 3) == 34) { return KDT_TZ; }
+            }
+        }
+    }
+    if (load8(p) == 0) { p = "0"; }
+    if (_kp == 0) { _kp = alloc(KP_SZ); }
+    var z: i64 = 0;
+    while (z < KP_SZ) { store64(_kp + z, 0); z = z + 8; }
+    var nowc[64];
+    kdt_civil(now_sec, &nowc);
+    store64(_kp + KP_YEAR, load64(&nowc));
+    store64(_kp + KP_YEARD, 0);
+    store64(_kp + KP_MONTH, load64(&nowc + 8));
+    store64(_kp + KP_DAY, load64(&nowc + 16));
+    store64(_kp + KP_HOUR, load64(&nowc + 24));
+    store64(_kp + KP_MIN, load64(&nowc + 32));
+    store64(_kp + KP_SEC, load64(&nowc + 40));
+    store64(_kp + KP_NS, now_ns);
+    store64(_kp + KP_MER, KM_24);
+    _kdt_lex(p);
+    # spec: '@' seconds, or items.
+    if (_kdt_ch(0, 64) == 1) {
+        var k1 = _kdt_kind(1);
+        var secs: i64 = 0;
+        var sns: i64 = 0;
+        if (k1 == KT_SNUM || k1 == KT_UNUM) { secs = _kdt_val(1); }
+        elif (k1 == KT_SDEC || k1 == KT_UDEC) {
+            secs = _kdt_val(1);
+            sns = load64(_kdt_tk(1) + KTR_NS);
+        } else { return KDT_BAD; }
+        if (_kdt_kind(2) != KT_EOF) { return KDT_BAD; }
+        store64(out, secs);
+        store64(out + 8, sns);
+        return KDT_OK;
+    }
+    var i: i64 = 0;
+    while (_kdt_kind(i) != KT_EOF) {
+        i = _kdt_item(i);
+        if (i < 0) { return KDT_BAD; }
+    }
+    var seen = load64(_kp + KP_TIMES) | load64(_kp + KP_DATES) | load64(_kp + KP_DAYS)
+      | (load64(_kp + KP_JZ) + load64(_kp + KP_ZONES));
+    if (seen > 1) { return KDT_BAD; }
+    # GNU's `to_tm_year`: a two-digit year is 1969-2068.
+    var year = load64(_kp + KP_YEAR);
+    if (year >= 0) {
+        if (load64(_kp + KP_YEARD) == 2) {
+            if (year < 69) { year = year + 2000; } else { year = year + 1900; }
+        }
+    }
+    # A negative year (`15 Jan +2024` reads its year as -2024) stands for its magnitude.
+    if (year < 0) { year = 0 - year; }
+    if (year > KDT_YEAR_MAX) { return KDT_BAD; }
+    var mon = load64(_kp + KP_MONTH) - 1;
+    var mday = load64(_kp + KP_DAY);
+    var hour: i64 = 0;
+    var min: i64 = 0;
+    var sec: i64 = 0;
+    var ns: i64 = 0;
+    var usetime: i64 = 0;
+    if (load64(_kp + KP_TIMES) != 0) { usetime = 1; }
+    if (load64(_kp + KP_RELS) != 0) {
+        if (load64(_kp + KP_DATES) == 0) {
+            if (load64(_kp + KP_DAYS) == 0) { usetime = 1; }
+        }
+    }
+    if (usetime == 1) {
+        hour = _kdt_to_hour(load64(_kp + KP_HOUR), load64(_kp + KP_MER));
+        if (hour < 0) { return KDT_BAD; }
+        min = load64(_kp + KP_MIN);
+        sec = load64(_kp + KP_SEC);
+        ns = load64(_kp + KP_NS);
+    }
+    # GNU's `mktime_ok`: every field already in range, or the date is invalid.
+    if (mon < 0) { return KDT_BAD; }
+    if (mon > 11) { return KDT_BAD; }
+    if (mday < 1) { return KDT_BAD; }
+    if (mday > kdt_days_in_month(year, mon + 1)) { return KDT_BAD; }
+    if (min < 0) { return KDT_BAD; }
+    if (min > 59) { return KDT_BAD; }
+    if (sec < 0) { return KDT_BAD; }
+    if (sec > 59) { return KDT_BAD; }
+    var start = _kdt_timegm(year, mon, mday, hour, min, sec);
+    var cv[64];
+    kdt_civil(start, &cv);
+    # A day of the week, when no date was given.
+    if (load64(_kp + KP_DAYS) != 0) {
+        if (load64(_kp + KP_DATES) == 0) {
+            var wday = load64(&cv + 48);
+            var dnum = load64(_kp + KP_DNUM);
+            var dord = load64(_kp + KP_DORD);
+            if (dord > 0) { if (wday != dnum) { dord = dord - 1; } }
+            if (dord > 1317624576693539401) { return KDT_BAD; }
+            if (dord < (0 - 1317624576693539401)) { return KDT_BAD; }
+            var incr = dord * 7 + _kdt_mod(dnum - wday + 7, 7);
+            # GNU adds the days to `tm_mday`, an int, and fails if that overflows: `438367852 wed`.
+            if (_kdt_int_ovf(load64(&cv + 16) + incr) == 1) { return KDT_BAD; }
+            start = start + incr * 86400;
+            kdt_civil(start, &cv);
+            if (load64(&cv) > KDT_YEAR_MAX) { return KDT_BAD; }
+            if (load64(&cv) < KDT_YEAR_MIN) { return KDT_BAD; }
+        }
+    }
+    # Relative years, months and days, on the date as it now stands, then normalized.
+    var ry = load64(_kp + KP_RYEAR);
+    var rm = load64(_kp + KP_RMON);
+    var rd = load64(_kp + KP_RDAY);
+    if (ry != 0 || rm != 0 || rd != 0) {
+        # GNU adds them to `struct tm`'s int fields, and an int overflow there fails.
+        var ty = load64(&cv) - 1900;
+        if (_kdt_int_ovf(ty + ry) == 1) { return KDT_BAD; }
+        if (_kdt_int_ovf(load64(&cv + 8) - 1 + rm) == 1) { return KDT_BAD; }
+        if (_kdt_int_ovf(load64(&cv + 16) + rd) == 1) { return KDT_BAD; }
+        if (_kdt_int_ovf(ry) == 1) { return KDT_BAD; }
+        if (_kdt_int_ovf(rm) == 1) { return KDT_BAD; }
+        if (_kdt_int_ovf(rd) == 1) { return KDT_BAD; }
+        var ny = load64(&cv) + ry;
+        var nm = load64(&cv + 8) - 1 + rm;
+        var nd = load64(&cv + 16) + rd;
+        start = _kdt_timegm(ny, nm, nd, hour, min, sec);
+        kdt_civil(start, &cv);
+        if (load64(&cv) > KDT_YEAR_MAX) { return KDT_BAD; }
+        if (load64(&cv) < KDT_YEAR_MIN) { return KDT_BAD; }
+    }
+    # A zone moves the instant by its offset from UTC.
+    if (load64(_kp + KP_ZONES) != 0) {
+        start = start - load64(_kp + KP_TZ);
+    }
+    # Relative hours, minutes, seconds and nanoseconds, added to the instant.
+    var sum_ns = ns + load64(_kp + KP_RNS);
+    var norm_ns = _kdt_mod(sum_ns, 1000000000);
+    var d4 = (sum_ns - norm_ns) / 1000000000;
+    var rh = load64(_kp + KP_RHOUR);
+    var rmi = load64(_kp + KP_RMIN);
+    var rs = load64(_kp + KP_RSEC);
+    if (rh > 2562047788015215) { return KDT_BAD; }
+    if (rh < (0 - 2562047788015215)) { return KDT_BAD; }
+    if (rmi > 153722867280912930) { return KDT_BAD; }
+    if (rmi < (0 - 153722867280912930)) { return KDT_BAD; }
+    var t = start;
+    if (_kdt_add_ovf(t, rh * 3600) == 1) { return KDT_BAD; }
+    t = t + rh * 3600;
+    if (_kdt_add_ovf(t, rmi * 60) == 1) { return KDT_BAD; }
+    t = t + rmi * 60;
+    if (_kdt_add_ovf(t, rs) == 1) { return KDT_BAD; }
+    t = t + rs;
+    if (_kdt_add_ovf(t, d4) == 1) { return KDT_BAD; }
+    t = t + d4;
+    store64(out, t);
+    store64(out + 8, norm_ns);
+    return KDT_OK;
+}
