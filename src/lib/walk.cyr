@@ -1,0 +1,689 @@
+# walk.cyr — the descriptor budget every fd-relative directory walk shares (1.8.6).
+#
+# ⛔ EVERY fd-RELATIVE WALK HELD ONE OPEN DIRECTORY PER LEVEL. Under the default
+# `ulimit -n 1024`, a tree deeper than 1,020 levels failed with "too many open files": `find`,
+# `du`, `rm -r` and `grep -r` stopped there, and `cp -R`, which holds a source and a destination
+# per level, at 509. GNU's fts has no such limit. ⛔ `rm -r` was the one that mattered: anyone
+# who could make a 1,021-level tree in a shared directory made it unremovable by kriya.
+#
+# ⭐ GNU's answer, and this one. A walk keeps at most WK_BUDGET directories open. Descending past
+# that closes the HIGHEST open directory, after SAVING what it had left to read, so its entries
+# are not lost along with its read position. Coming back up to a closed directory reopens it as
+# `..` of the child the walk is leaving, and ⛔ CHECKS THAT IT IS THE SAME DIRECTORY: the
+# (st_dev, st_ino) read from its descriptor just before it was closed. A `..` that leads anywhere
+# else means a directory was moved during the walk, and the walk STOPS. Carrying on would unlink,
+# copy or report the entries of a directory the walk never entered — the race the fd-relative
+# walk was adopted to close (ADR 0027), one level up.
+#
+# ⚠ A directory entered through a FOLLOWED symlink (-L) is the exception. Its `..` is its real
+# parent, not the directory the walk came from, so the directory it came from is never closed
+# (WK_L_PIN). A path through more than about a thousand symlinked directories still meets the
+# descriptor limit; GNU's -L walks stop at PATH_MAX instead.
+#
+# ⛔ THE RULE FOR A WALKER: a descriptor, or an entry name, fetched before a descent is STALE
+# after it. The level may have been closed and reopened under a different descriptor NUMBER, and
+# the old number may by then name a deeper directory. Fetch `wk_fd` and `wk_cur_name` again after
+# every call that can descend, and iterate with `wk_next` only — a level's read buffer goes back
+# to a shared pool when the level is saved.
+#
+# ⚠ agnos has no open-relative-to-a-descriptor, so its walks open by path and nothing is closed
+# early there.
+#
+# The stack half (`wk_stack_mark` / `wk_stack_room`): a recursive walk that no longer runs out of
+# descriptors runs out of STACK instead, and the kernel's answer to that is SIGSEGV. Measured at
+# 1.8.5 under an 8 MiB stack with descriptors raised: `cp -R` died between 8,000 and 12,000 levels,
+# `du` between 12,000 and 16,000, `find` and `rm -r` between 20,000 and 40,000. The guard turns
+# that into a diagnostic and exit 1. `rm -r` is iterative and does not need it.
+
+enum WkLayout {
+    WK_BUDGET    = 32;     # directories one walk keeps open
+    WK_DBUF      = 4096;   # one getdents64 read
+    WK_MAXWALKS  = 4;      # walks that can be asked to give a descriptor back (EMFILE)
+    WK_POOLMAX   = 256;
+    WK_CHUNK     = 1024;   # level records per chunk (the `>> 10` in `_wk_lv`)
+    WK_READ      = 0;      # a walk that reads its directories
+    WK_DEST      = 1;      # a walk that only creates entries in them (`cp`'s destination)
+
+    # The walk.
+    WK_H_LV      = 0;      # the level records' chunks
+    WK_H_CAP     = 8;      # ...the levels they hold
+    WK_H_TOP     = 16;     # the deepest level in use, -1 for none
+    WK_H_NOPEN   = 24;     # descriptors open
+    WK_H_BROKEN  = 32;     # 1 once a return to a parent failed: the walk is over
+    WK_H_KIND    = 40;
+    WK_H_UTIL    = 48;     # the utility name, for the diagnostics
+    WK_H_LOW     = 56;     # every level below this is closed or must stay open
+    WK_H_PB      = 64;     # the display path, NUL-terminated at the current level
+    WK_H_PCAP    = 72;
+    WK_H_DCAP    = 80;     # chunk pointers WK_H_LV has room for
+    WK_H_SZ      = 88;
+
+    # A level: one directory on the current path.
+    WK_L_FD      = 0;      # its descriptor, -1 while closed
+    WK_L_DEV     = 8;      # what it was, recorded when it was closed
+    WK_L_INO     = 16;
+    WK_L_PIN     = 24;     # 1: never close it early
+    WK_L_LIVE    = 32;     # its getdents buffer while it reads from its descriptor
+    WK_L_LEN     = 40;
+    WK_L_OFF     = 48;
+    WK_L_SAVED   = 56;     # what it had left to read when it was closed
+    WK_L_SLEN    = 64;
+    WK_L_SOFF    = 72;
+    WK_L_SCAP    = 80;
+    WK_L_MODE    = 88;     # 0 reads its descriptor, 1 reads what was saved
+    WK_L_EOF     = 96;
+    WK_L_ERR     = 104;    # a read error met while saving (positive errno), returned at the end
+    WK_L_CUR     = 112;    # the record `wk_next` returned last
+    WK_L_U0      = 120;    # four slots for the walker
+    WK_L_SZ      = 152;
+}
+
+var _wk_walks = 0;
+var _wk_nwalks: i64 = 0;
+var _wk_pool = 0;
+var _wk_npool: i64 = 0;
+var _wk_scratch = 0;
+var _wk_sbase: i64 = 0;
+var _wk_sroom: i64 = 0;
+
+# Level records live in chunks of WK_CHUNK, so a deeper walk adds a chunk and copies nothing:
+# 100,000 levels are 15 MB of records, where doubling one array spent twice that.
+fn _wk_lv(w, depth): i64 {
+    return load64(load64(w + WK_H_LV) + (depth >> 10) * 8) + (depth & 1023) * WK_L_SZ;
+}
+
+# A walk. `util` names it in its diagnostics. ⭐ Also marks the stack base: walks are made at a
+# utility's top level, before any descent.
+fn wk_new(kind, util): i64 {
+    var w = alloc(WK_H_SZ);
+    store64(w + WK_H_LV, 0);
+    store64(w + WK_H_CAP, 0);
+    store64(w + WK_H_TOP, 0 - 1);
+    store64(w + WK_H_NOPEN, 0);
+    store64(w + WK_H_BROKEN, 0);
+    store64(w + WK_H_KIND, kind);
+    store64(w + WK_H_UTIL, util);
+    store64(w + WK_H_LOW, 0);
+    store64(w + WK_H_PB, 0);
+    store64(w + WK_H_PCAP, 0);
+    store64(w + WK_H_DCAP, 0);
+    if (_wk_walks == 0) { _wk_walks = alloc(WK_MAXWALKS * 8); }
+    if (_wk_nwalks < WK_MAXWALKS) {
+        store64(_wk_walks + _wk_nwalks * 8, w);
+        _wk_nwalks = _wk_nwalks + 1;
+    }
+    if (_wk_sbase == 0) { wk_stack_mark(); }
+    return w;
+}
+
+# Room for level `depth`. 0, or -ENOMEM.
+fn _wk_grow(w, depth): i64 {
+    var cap = load64(w + WK_H_CAP);
+    if (depth < cap) { return 0; }
+    var have = cap >> 10;
+    var need = (depth >> 10) + 1;
+    var dcap = load64(w + WK_H_DCAP);
+    if (need > dcap) {
+        var ndcap = dcap * 2;
+        if (ndcap < 16) { ndcap = 16; }
+        while (ndcap < need) { ndcap = ndcap * 2; }
+        var nd = alloc(ndcap * 8);
+        if (nd == 0) { return 0 - 12; }
+        if (have > 0) { memcpy(nd, load64(w + WK_H_LV), have * 8); }
+        store64(w + WK_H_LV, nd);
+        store64(w + WK_H_DCAP, ndcap);
+    }
+    while (have < need) {
+        var c = alloc(WK_CHUNK * WK_L_SZ);
+        if (c == 0) { return 0 - 12; }
+        var i: i64 = 0;
+        var end = WK_CHUNK * WK_L_SZ;
+        while (i < end) {
+            store64(c + i, 0);
+            i = i + 8;
+        }
+        # ⚠ A level never opened has no descriptor: -1, not 0, which is stdin.
+        var r: i64 = 0;
+        while (r < WK_CHUNK) {
+            store64(c + r * WK_L_SZ + WK_L_FD, 0 - 1);
+            r = r + 1;
+        }
+        store64(load64(w + WK_H_LV) + have * 8, c);
+        have = have + 1;
+        store64(w + WK_H_CAP, have * WK_CHUNK);
+    }
+    return 0;
+}
+
+fn _wk_buf_get(): i64 {
+    if (_wk_npool > 0) {
+        _wk_npool = _wk_npool - 1;
+        return load64(_wk_pool + _wk_npool * 8);
+    }
+    return alloc(WK_DBUF);
+}
+
+fn _wk_buf_put(b): i64 {
+    if (b == 0) { return 0; }
+    if (_wk_pool == 0) { _wk_pool = alloc(WK_POOLMAX * 8); }
+    if (_wk_npool < WK_POOLMAX) {
+        store64(_wk_pool + _wk_npool * 8, b);
+        _wk_npool = _wk_npool + 1;
+    }
+    return 0;
+}
+
+# Append one record to level L's saved entries. 0, or -ENOMEM.
+fn _wk_save_rec(L, rec): i64 {
+    var rl = fs_dent_reclen(rec);
+    var slen = load64(L + WK_L_SLEN);
+    var need = slen + rl;
+    var cap = load64(L + WK_L_SCAP);
+    if (need > cap) {
+        # ⚠ Exact to start with: a level of a deep chain saves one 24-byte record, and 100,000
+        # of them at a 256-byte minimum were 25 MB.
+        var ncap = cap * 2;
+        if (ncap < need) { ncap = (need + 7) & (0 - 8); }
+        var nb = alloc(ncap);
+        if (nb == 0) { return 0 - 12; }
+        if (slen > 0) { memcpy(nb, load64(L + WK_L_SAVED), slen); }
+        store64(L + WK_L_SAVED, nb);
+        store64(L + WK_L_SCAP, ncap);
+    }
+    memcpy(load64(L + WK_L_SAVED) + slen, rec, rl);
+    store64(L + WK_L_SLEN, need);
+    return 0;
+}
+
+# Save what level L has left to read: the entry it returned last (the walker may still need its
+# NAME), the rest of its buffer, and the rest of the directory. Its buffer goes back to the pool.
+# ⚠ A read error is kept and returned when the saved entries run out, where it would have come.
+fn _wk_drain(L, fd): i64 {
+    store64(L + WK_L_SLEN, 0);
+    var have_cur: i64 = 0;
+    var cur = load64(L + WK_L_CUR);
+    if (cur != 0) {
+        if (_wk_save_rec(L, cur) == 0) { have_cur = 1; }
+        else { store64(L + WK_L_ERR, 12); }
+    }
+    var live = load64(L + WK_L_LIVE);
+    var off = load64(L + WK_L_OFF);
+    var len = load64(L + WK_L_LEN);
+    while (off < len) {
+        var rec = live + off;
+        if (fs_dent_is_dotdot(rec) == 0) {
+            if (load64(L + WK_L_ERR) == 0) {
+                if (_wk_save_rec(L, rec) != 0) { store64(L + WK_L_ERR, 12); }
+            }
+        }
+        off = off + fs_dent_reclen(rec);
+    }
+    if (_wk_scratch == 0) { _wk_scratch = alloc(WK_DBUF); }
+    var reading: i64 = 1;
+    if (load64(L + WK_L_EOF) == 1) { reading = 0; }
+    if (load64(L + WK_L_ERR) != 0) { reading = 0; }
+    while (reading == 1) {
+        var nb = fs_getdents64(fd, _wk_scratch, WK_DBUF);
+        if (nb == (0 - 4)) {
+            # EINTR — retry.
+        } elif (nb < 0) {
+            store64(L + WK_L_ERR, 0 - nb);
+            reading = 0;
+        } elif (nb == 0) {
+            reading = 0;
+        } else {
+            var o: i64 = 0;
+            while (o < nb) {
+                var r = _wk_scratch + o;
+                if (fs_dent_is_dotdot(r) == 0) {
+                    if (reading == 1) {
+                        if (_wk_save_rec(L, r) != 0) {
+                            store64(L + WK_L_ERR, 12);
+                            reading = 0;
+                        }
+                    }
+                }
+                o = o + fs_dent_reclen(r);
+            }
+        }
+    }
+    store64(L + WK_L_EOF, 1);
+    store64(L + WK_L_MODE, 1);
+    if (have_cur == 1) {
+        var sv = load64(L + WK_L_SAVED);
+        store64(L + WK_L_CUR, sv);
+        store64(L + WK_L_SOFF, fs_dent_reclen(sv));
+    } else {
+        store64(L + WK_L_CUR, 0);
+        store64(L + WK_L_SOFF, 0);
+    }
+    _wk_buf_put(live);
+    store64(L + WK_L_LIVE, 0);
+    store64(L + WK_L_LEN, 0);
+    store64(L + WK_L_OFF, 0);
+    return 0;
+}
+
+# Close level `i` early. 1 if it was closed. ⚠ A directory whose identity cannot be read is
+# kept open: without it, the `..` that reopens it could not be checked.
+fn _wk_evict(w, i): i64 {
+    var L = _wk_lv(w, i);
+    var fd = load64(L + WK_L_FD);
+    if (fd < 0) { return 0; }
+    var st[144];
+    if (fs_fstatat(fd, "", &st, 4096) != 0) { return 0; }       # AT_EMPTY_PATH
+    if (load64(w + WK_H_KIND) == WK_READ) {
+        if (load64(L + WK_L_MODE) == 0) { _wk_drain(L, fd); }
+    }
+    store64(L + WK_L_DEV, fs_dev(&st));
+    store64(L + WK_L_INO, fs_ino(&st));
+    fs_close(fd);
+    store64(L + WK_L_FD, 0 - 1);
+    store64(w + WK_H_NOPEN, load64(w + WK_H_NOPEN) - 1);
+    return 1;
+}
+
+# Close the highest open level below `below` that may be closed. 1 if one was.
+fn _wk_evict_low(w, below): i64 {
+    var i = load64(w + WK_H_LOW);
+    var closed: i64 = 0;
+    var scanning: i64 = 1;
+    while (scanning == 1) {
+        if (i >= below) {
+            scanning = 0;
+        } else {
+            var L = _wk_lv(w, i);
+            if (load64(L + WK_L_FD) >= 0) {
+                if (load64(L + WK_L_PIN) == 0) {
+                    if (_wk_evict(w, i) == 1) {
+                        closed = 1;
+                        scanning = 0;
+                    } else {
+                        store64(L + WK_L_PIN, 1);
+                    }
+                }
+            }
+            # Level i is now closed or pinned, so the next scan starts above it.
+            store64(w + WK_H_LOW, i + 1);
+            i = i + 1;
+        }
+    }
+    return closed;
+}
+
+# EMFILE: any walk gives back one descriptor, never its deepest level's. 1 if one did.
+fn _wk_evict_any(): i64 {
+    var done: i64 = 0;
+    var k: i64 = 0;
+    while (k < _wk_nwalks) {
+        if (done == 0) {
+            var w = load64(_wk_walks + k * 8);
+            var top = load64(w + WK_H_TOP);
+            if (top > 0) {
+                if (_wk_evict_low(w, top) == 1) { done = 1; }
+            }
+        }
+        k = k + 1;
+    }
+    return done;
+}
+
+# openat, asking the walks for a descriptor back while the process is out of them. ⭐ Public
+# for the files a walk opens: the descriptors the walks hold must not starve the work they do
+# (`cp -R` under `ulimit -n 64` failed every file more than about 30 levels down).
+fn wk_openat(pdfd, name, flags, mode): i64 {
+    var r = fs_openat(pdfd, name, flags, mode);
+    var trying: i64 = 1;
+    while (trying == 1) {
+        var full: i64 = 0;
+        if (r == (0 - 24)) { full = 1; }       # EMFILE
+        if (r == (0 - 23)) { full = 1; }       # ENFILE
+        if (full == 0) {
+            trying = 0;
+        } elif (_wk_evict_any() == 1) {
+            r = fs_openat(pdfd, name, flags, mode);
+        } else {
+            trying = 0;
+        }
+    }
+    return r;
+}
+
+fn _wk_openat(pdfd, name, flags): i64 { return wk_openat(pdfd, name, flags, 0); }
+
+# `fs_open_entry_file`'s bargain (O_RDONLY | O_NOFOLLOW: dirfd-relative on Linux, by path on
+# agnos), through `wk_openat`.
+fn wk_open_entry_file(dirfd, fullpath, name): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return k_open(fullpath, FS_O_NOFOLLOW, 0);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return wk_openat(dirfd, name, FS_O_NOFOLLOW, 0);
+    #endif
+}
+
+# A destination directory: read-only first, and on EACCES alone the O_PATH form, which still
+# serves as a dirfd (`fs_opendir_dest`'s rule).
+fn _wk_opendest(pdfd, name, flags): i64 {
+    var fd = _wk_openat(pdfd, name, flags);
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (fd == (0 - 13)) { fd = _wk_openat(pdfd, name, flags | FS_O_PATH); }
+    #endif
+    return fd;
+}
+
+# Open directory `name` in `pdfd` as level `depth`, one below the deepest level in use. `flags`
+# are the walker's (O_DIRECTORY, with O_NOFOLLOW unless it follows). The descriptor, or -errno.
+fn wk_open(w, depth, pdfd, name, flags): i64 {
+    if (_wk_grow(w, depth) != 0) { return 0 - 12; }
+    var f = flags;
+    #ifndef CYRIUS_TARGET_AGNOS
+    f = f | FS_O_CLOEXEC;
+    #endif
+    #ifdef CYRIUS_TARGET_AGNOS
+    # No symlinks there, and `fs_opendir_nofollow` never passed the flag to agnos's open.
+    if ((f & FS_O_NOFOLLOW) != 0) { f = f - FS_O_NOFOLLOW; }
+    #endif
+    var fd: i64 = 0;
+    if (load64(w + WK_H_KIND) == WK_DEST) { fd = _wk_opendest(pdfd, name, f); }
+    else { fd = _wk_openat(pdfd, name, f); }
+    if (fd < 0) { return fd; }
+    var L = _wk_lv(w, depth);
+    store64(L + WK_L_FD, fd);
+    store64(L + WK_L_DEV, 0);
+    store64(L + WK_L_INO, 0);
+    store64(L + WK_L_PIN, 0);
+    store64(L + WK_L_LIVE, 0);
+    if (load64(w + WK_H_KIND) == WK_READ) { store64(L + WK_L_LIVE, _wk_buf_get()); }
+    store64(L + WK_L_LEN, 0);
+    store64(L + WK_L_OFF, 0);
+    store64(L + WK_L_SLEN, 0);
+    store64(L + WK_L_SOFF, 0);
+    store64(L + WK_L_MODE, 0);
+    store64(L + WK_L_EOF, 0);
+    store64(L + WK_L_ERR, 0);
+    store64(L + WK_L_CUR, 0);
+    store64(L + WK_L_U0, 0);
+    store64(L + WK_L_U0 + 8, 0);
+    store64(L + WK_L_U0 + 16, 0);
+    store64(L + WK_L_U0 + 24, 0);
+    store64(w + WK_H_TOP, depth);
+    store64(w + WK_H_NOPEN, load64(w + WK_H_NOPEN) + 1);
+    if (depth < load64(w + WK_H_LOW)) { store64(w + WK_H_LOW, depth); }
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (depth > 0) {
+        # A followed open may have gone through a symlink, whose `..` is not the directory the
+        # walk came from: then that directory stays open. ⚠ An lstat that fails says nothing
+        # either way, so it pins too.
+        if ((f & FS_O_NOFOLLOW) == 0) {
+            var lst[144];
+            var keep: i64 = 1;
+            if (fs_lstat_at(pdfd, name, &lst) == 0) {
+                if (fs_is_lnk(&lst) == 0) { keep = 0; }
+            }
+            if (keep == 1) { store64(_wk_lv(w, depth - 1) + WK_L_PIN, 1); }
+        }
+        # ⚠ Never the new level or its parent: the walker is reading the parent right now.
+        var over: i64 = 1;
+        while (over == 1) {
+            if (load64(w + WK_H_NOPEN) <= WK_BUDGET) { over = 0; }
+            elif (_wk_evict_low(w, depth - 1) == 0) { over = 0; }
+        }
+    }
+    #endif
+    return fd;
+}
+
+# Reopen level depth-1 as `..` of level `depth`, and check it is the directory that was closed.
+fn _wk_restore(w, depth, display): i64 {
+    var L = _wk_lv(w, depth);
+    var P = _wk_lv(w, depth - 1);
+    var util = load64(w + WK_H_UTIL);
+    var flags = FS_O_DIRECTORY | FS_O_NOFOLLOW | FS_O_CLOEXEC;
+    var nfd: i64 = 0;
+    if (load64(w + WK_H_KIND) == WK_DEST) { nfd = _wk_opendest(load64(L + WK_L_FD), "..", flags); }
+    else { nfd = _wk_openat(load64(L + WK_L_FD), "..", flags); }
+    if (nfd < 0) {
+        var dl = strlen(display);
+        var dd = alloc(dl + 4);
+        memcpy(dd, display, dl);
+        memcpy(dd + dl, "/..", 4);
+        errmsg_report(util, dd, 0 - nfd);
+        store64(w + WK_H_BROKEN, 1);
+        return nfd;
+    }
+    var st[144];
+    var same: i64 = 0;
+    if (fs_fstatat(nfd, "", &st, 4096) == 0) {
+        if (fs_dev(&st) == load64(P + WK_L_DEV)) {
+            if (fs_ino(&st) == load64(P + WK_L_INO)) { same = 1; }
+        }
+    }
+    if (same == 0) {
+        fs_close(nfd);
+        report_note(util, display, "directory moved during the walk; stopping");
+        store64(w + WK_H_BROKEN, 1);
+        return 0 - 116;                                            # ESTALE
+    }
+    store64(P + WK_L_FD, nfd);
+    store64(w + WK_H_NOPEN, load64(w + WK_H_NOPEN) + 1);
+    if (depth - 1 < load64(w + WK_H_LOW)) { store64(w + WK_H_LOW, depth - 1); }
+    return 0;
+}
+
+# Leave level `depth`, the deepest in use. Its parent's descriptor is restored FIRST, while
+# this one can still name it. `display` is this directory's path, for the diagnostics.
+# 0, or -errno when the parent could not be restored: the walk is then broken (`wk_broken`).
+fn wk_close(w, depth, display): i64 {
+    var L = _wk_lv(w, depth);
+    var r: i64 = 0;
+    if (depth > 0) {
+        if (load64(w + WK_H_BROKEN) == 0) {
+            if (load64(_wk_lv(w, depth - 1) + WK_L_FD) < 0) {
+                if (load64(L + WK_L_FD) >= 0) { r = _wk_restore(w, depth, display); }
+            }
+        }
+    }
+    var fd = load64(L + WK_L_FD);
+    if (fd >= 0) {
+        fs_close(fd);
+        store64(w + WK_H_NOPEN, load64(w + WK_H_NOPEN) - 1);
+    }
+    store64(L + WK_L_FD, 0 - 1);
+    _wk_buf_put(load64(L + WK_L_LIVE));
+    store64(L + WK_L_LIVE, 0);
+    store64(w + WK_H_TOP, depth - 1);
+    return r;
+}
+
+# Close whatever a walk still has open, and make it ready for the next operand.
+fn wk_reset(w): i64 {
+    var top = load64(w + WK_H_TOP);
+    var i: i64 = 0;
+    while (i <= top) {
+        var L = _wk_lv(w, i);
+        var fd = load64(L + WK_L_FD);
+        if (fd >= 0) { fs_close(fd); }
+        store64(L + WK_L_FD, 0 - 1);
+        _wk_buf_put(load64(L + WK_L_LIVE));
+        store64(L + WK_L_LIVE, 0);
+        i = i + 1;
+    }
+    store64(w + WK_H_TOP, 0 - 1);
+    store64(w + WK_H_NOPEN, 0);
+    store64(w + WK_H_BROKEN, 0);
+    store64(w + WK_H_LOW, 0);
+    return 0;
+}
+
+fn wk_broken(w): i64 { return load64(w + WK_H_BROKEN); }
+
+# The deepest level in use, -1 for none.
+fn wk_top(w): i64 { return load64(w + WK_H_TOP); }
+
+# The utility the diagnostics name (`cp`'s walks serve `mv` too).
+fn wk_set_util(w, util): i64 { store64(w + WK_H_UTIL, util); return 0; }
+
+# Level `depth`'s descriptor; AT_FDCWD above level 0. ⚠ -EBADF for a closed level, so a call
+# made with it fails rather than acting on whatever directory now holds the number.
+fn wk_fd(w, depth): i64 {
+    if (depth < 0) { return 0 - 100; }
+    var fd = load64(_wk_lv(w, depth) + WK_L_FD);
+    if (fd < 0) { return 0 - 9; }
+    return fd;
+}
+
+# The next entry of level `depth` (never `.` or `..`): a linux_dirent64 record for the
+# `fs_dent_*` accessors. 0 at the end, -errno on a read error.
+fn wk_next(w, depth): i64 {
+    if (load64(w + WK_H_BROKEN) == 1) { return 0; }
+    var L = _wk_lv(w, depth);
+    if (load64(L + WK_L_MODE) == 1) {
+        var soff = load64(L + WK_L_SOFF);
+        if (soff < load64(L + WK_L_SLEN)) {
+            var srec = load64(L + WK_L_SAVED) + soff;
+            store64(L + WK_L_SOFF, soff + fs_dent_reclen(srec));
+            store64(L + WK_L_CUR, srec);
+            return srec;
+        }
+        var e = load64(L + WK_L_ERR);
+        if (e != 0) {
+            store64(L + WK_L_ERR, 0);
+            return 0 - e;
+        }
+        return 0;
+    }
+    var live = load64(L + WK_L_LIVE);
+    var result: i64 = 0;
+    var looking: i64 = 1;
+    while (looking == 1) {
+        var off = load64(L + WK_L_OFF);
+        if (off < load64(L + WK_L_LEN)) {
+            var rec = live + off;
+            store64(L + WK_L_OFF, off + fs_dent_reclen(rec));
+            if (fs_dent_is_dotdot(rec) == 0) {
+                store64(L + WK_L_CUR, rec);
+                result = rec;
+                looking = 0;
+            }
+        } elif (load64(L + WK_L_EOF) == 1) {
+            looking = 0;
+        } else {
+            var nb = fs_getdents64(load64(L + WK_L_FD), live, WK_DBUF);
+            if (nb == (0 - 4)) {
+                # EINTR — retry.
+            } elif (nb < 0) {
+                store64(L + WK_L_EOF, 1);
+                result = nb;
+                looking = 0;
+            } elif (nb == 0) {
+                store64(L + WK_L_EOF, 1);
+                looking = 0;
+            } else {
+                store64(L + WK_L_LEN, nb);
+                store64(L + WK_L_OFF, 0);
+            }
+        }
+    }
+    return result;
+}
+
+# The name of the entry `wk_next` returned last at level `depth`.
+fn wk_cur_name(w, depth): i64 {
+    var c = load64(_wk_lv(w, depth) + WK_L_CUR);
+    if (c == 0) { return ""; }
+    return fs_dent_name(c);
+}
+
+fn wk_u(w, depth, k): i64 { return load64(_wk_lv(w, depth) + WK_L_U0 + k * 8); }
+fn wk_set_u(w, depth, k, v): i64 { store64(_wk_lv(w, depth) + WK_L_U0 + k * 8, v); return 0; }
+
+# --- the display path ------------------------------------------------
+# One buffer each level appends its name to and truncates again on the way out (fts's), so a
+# walk's memory is its depth, not its entry count times its depth. ⚠ The buffer can MOVE: read
+# `wk_path` again after any `wk_path_push`.
+
+fn wk_path(w): i64 { return load64(w + WK_H_PB); }
+
+fn _wk_path_room(w, need): i64 {
+    var cap = load64(w + WK_H_PCAP);
+    if (need <= cap) { return 0; }
+    var ncap = cap * 2;
+    if (ncap < 4096) { ncap = 4096; }
+    while (ncap < need) { ncap = ncap * 2; }
+    var nb = alloc(ncap);
+    var old = load64(w + WK_H_PB);
+    if (old != 0) { memcpy(nb, old, cap); }
+    store64(w + WK_H_PB, nb);
+    store64(w + WK_H_PCAP, ncap);
+    return 0;
+}
+
+# Start the path at `s`; its length.
+fn wk_path_set(w, s): i64 {
+    var n = strlen(s);
+    _wk_path_room(w, n + 1);
+    memcpy(load64(w + WK_H_PB), s, n);
+    store8(load64(w + WK_H_PB) + n, 0);
+    return n;
+}
+
+# Append `/name` at `plen`, `path_join`'s rule: no `/` after one already there, none before a
+# first name. The new length.
+fn wk_path_push(w, plen, name): i64 {
+    var nl = strlen(name);
+    var sep: i64 = 0;
+    if (plen > 0) {
+        if (load8(load64(w + WK_H_PB) + plen - 1) != 47) { sep = 1; }
+    }
+    _wk_path_room(w, plen + sep + nl + 1);
+    var pb = load64(w + WK_H_PB);
+    if (sep == 1) { store8(pb + plen, 47); }
+    memcpy(pb + plen + sep, name, nl);
+    store8(pb + plen + sep + nl, 0);
+    return plen + sep + nl;
+}
+
+fn wk_path_cut(w, plen): i64 {
+    store8(load64(w + WK_H_PB) + plen, 0);
+    return 0;
+}
+
+# --- the stack guard ---------------------------------------------------
+
+# The diagnostic for a directory the guard does not enter: `kriya <util>: <path>: …`, exit 1.
+fn wk_report_deep(w, display): i64 {
+    report_note(load64(w + WK_H_UTIL), display, "directory nested too deeply to walk");
+    return 0;
+}
+
+# Record where the stack is now, and how far a walk may take it: the soft RLIMIT_STACK, less a
+# quarter (argv and the environment count against it, up to a quarter by ARG_MAX's rule) and
+# 256 KiB for the deepest call's own frames. ⚠ An unlimited or unreadable limit is taken as
+# 8 MiB, the usual default: the guard is then a guess, and a conservative one.
+fn wk_stack_mark(): i64 {
+    var here: i64 = 0;
+    _wk_sbase = &here;
+    var room: i64 = 8388608;
+    #ifndef CYRIUS_TARGET_AGNOS
+    var rl[16];
+    if (sys_getrlimit(3, &rl) == 0) {                              # RLIMIT_STACK
+        var lim = load64(&rl);
+        if (lim > 0) {
+            room = lim;
+            if (room > 268435456) { room = 268435456; }
+        }
+    }
+    #endif
+    _wk_sroom = room - room / 4 - 262144;
+    if (_wk_sroom < 65536) { _wk_sroom = 65536; }
+    return 0;
+}
+
+# 1 while a walk may go one level deeper without exhausting the stack.
+fn wk_stack_room(): i64 {
+    if (_wk_sbase == 0) { return 1; }
+    var here: i64 = 0;
+    if (_wk_sbase - &here < _wk_sroom) { return 1; }
+    return 0;
+}

@@ -141,14 +141,57 @@ fn _rm_verbose(kind_word, display): i64 {
     return 0;
 }
 
+# The walk `_rm_dir_at` removes with, made on first use (src/lib/walk.cyr).
+var _rm_wk = 0;
+
+# Unlink one non-directory entry `ename` of `dir_fd`, displayed as `disp`, after `-i`'s
+# prompt. 1 when it failed.
+fn _rm_unlink_entry(dir_fd, ename, disp, st, force, interactive, verbose): i64 {
+    # Symlinks are unlinked as names (NEVER followed).
+    if (interactive == 1) {
+        var prompt_kind = "remove";
+        if (fs_is_lnk(st) == 1) { prompt_kind = "remove symbolic link"; }
+        if (fs_is_reg(st) == 1) {
+            if (load64(st + 48) == 0) {
+                prompt_kind = "remove regular empty file";
+            } else {
+                prompt_kind = "remove regular file";
+            }
+        }
+        if (_rm_prompt(prompt_kind, disp) == 0) { return 0; }
+    }
+    var ur = fs_unlinkat(dir_fd, ename, 0);
+    if (ur != 0) {
+        if (force == 1) {
+            if ((0 - ur) == 2) { return 0; }
+        }
+        _rm_report(disp, 0 - ur);
+        return 1;
+    }
+    if (verbose == 1) { _rm_verbose("removed", disp); }
+    return 0;
+}
+
 # Recursively remove the directory `name` rooted at `parent_dirfd`.
 # Caller has confirmed it is a real directory (not a symlink).
 # Returns 0 on success, negative errno on failure. With `force`,
 # missing entries are not errors; without, they propagate as -ENOENT.
+#
+# ⛔ A LOOP, NOT A RECURSION, SINCE 1.8.6. The recursive form held one open directory per level
+# and stopped at 1,020 levels under `ulimit -n 1024`, and with descriptors raised it died of
+# SIGSEGV between 20,000 and 40,000 levels; its joined display path per entry made its memory the
+# square of the depth (550 MB at 40,000). Now the levels live in the shared walk, which keeps at
+# most 32 directories open, and one path buffer serves every entry. Measured GNU `rm -r` at
+# 100,000 levels: 28 MB.
+# Per level, the walk's slots hold U0, this directory's path length, and U1, 1 once something in
+# it could not be removed (so neither can it).
 fn _rm_dir_at(parent_dirfd, name, display, force, interactive, verbose): i64 {
+    if (_rm_wk == 0) { _rm_wk = wk_new(WK_READ, "rm"); }
+    var w = _rm_wk;
+    wk_reset(w);
     # Open the directory NOFOLLOW. A symlink swap between the
     # classifying lstat and this open fails ELOOP — no silent follow.
-    var dir_fd = fs_opendir_nofollow(parent_dirfd, name);
+    var dir_fd = wk_open(w, 0, parent_dirfd, name, FS_O_DIRECTORY | FS_O_NOFOLLOW);
     if (dir_fd < 0) {
         var derrno = 0 - dir_fd;
         if (force == 1) {
@@ -164,117 +207,122 @@ fn _rm_dir_at(parent_dirfd, name, display, force, interactive, verbose): i64 {
     # inside the loop.
     if (interactive == 1) {
         if (_rm_prompt("descend into directory", display) == 0) {
-            fs_close(dir_fd);
+            wk_close(w, 0, display);
             return 0;
         }
     }
+    wk_set_u(w, 0, 0, wk_path_set(w, display));
+    wk_set_u(w, 0, 1, 0);
 
-    var any_failed: i64 = 0;
-    var ent_buf = alloc(4096);
-    var loop: i64 = 1;
-    while (loop == 1) {
-        var nb = fs_getdents64(dir_fd, ent_buf, 4096);
-        if (nb < 0) {
-            if ((0 - nb) == 4) {
-                # EINTR — retry.
-            } else {
-                _rm_report(display, 0 - nb);
-                any_failed = 1;
-                loop = 0;
+    var result: i64 = 0;
+    var depth: i64 = 0;
+    var running: i64 = 1;
+    while (running == 1) {
+        var ent = wk_next(w, depth);
+        var plen = wk_u(w, depth, 0);
+        if (ent <= 0) {
+            # This directory is read to the end (or could not be): leave it, then remove it.
+            wk_path_cut(w, plen);
+            var here = wk_path(w);
+            if (ent < 0) {
+                _rm_report(here, 0 - ent);
+                wk_set_u(w, depth, 1, 1);
             }
-        } else {
-            if (nb == 0) {
-                loop = 0;
+            var failed = wk_u(w, depth, 1);
+            if (wk_close(w, depth, here) != 0) {
+                # ⛔ The way back up is not the way the walk came down: stop, and remove
+                # nothing more. The walk has reported it.
+                result = 0 - 5;
+                running = 0;
+                continue;
+            }
+            # ⚠ The parent's descriptor and this directory's name in it are fetched AFTER the
+            # close, which is what restored them.
+            var pfd = parent_dirfd;
+            var dname = name;
+            if (depth > 0) {
+                pfd = wk_fd(w, depth - 1);
+                dname = wk_cur_name(w, depth - 1);
+            }
+            var rc: i64 = 0;
+            if (failed == 1) {
+                # Don't try to remove the directory itself — its contents
+                # weren't fully drained.
+                rc = 0 - 5;
             } else {
-                var off: i64 = 0;
-                while (off < nb) {
-                    var ent = ent_buf + off;
-                    var reclen = fs_dent_reclen(ent);
-                    if (fs_dent_is_dotdot(ent) == 0) {
-                        var ename = fs_dent_name(ent);
-                        var child_disp = path_join(display, ename);
-                        # Classify the entry via lstat (ADR 0003: never follow).
-                        var st[144];
-                        var sr = fs_lstat_at(dir_fd, ename, &st);
-                        if (sr != 0) {
-                            if (force == 1) {
-                                if ((0 - sr) == 2) {
-                                    # Vanished between getdents and lstat; tolerable.
-                                } else {
-                                    _rm_report(child_disp, 0 - sr);
-                                    any_failed = 1;
-                                }
-                            } else {
-                                _rm_report(child_disp, 0 - sr);
-                                any_failed = 1;
-                            }
-                        } else {
-                            if (fs_is_dir(&st) == 1) {
-                                # Real directory — recurse, then remove.
-                                var rr = _rm_dir_at(dir_fd, ename, child_disp, force, interactive, verbose);
-                                if (rr != 0) { any_failed = 1; }
-                            } else {
-                                # File, symlink, or other — unlink the name.
-                                # Symlinks are unlinked as names (NEVER followed).
-                                if (interactive == 1) {
-                                    var prompt_kind = "remove";
-                                    if (fs_is_lnk(&st) == 1) { prompt_kind = "remove symbolic link"; }
-                                    if (fs_is_reg(&st) == 1) {
-                                        if (load64(&st + 48) == 0) {
-                                            prompt_kind = "remove regular empty file";
-                                        } else {
-                                            prompt_kind = "remove regular file";
-                                        }
-                                    }
-                                    if (_rm_prompt(prompt_kind, child_disp) == 0) {
-                                        off = off + reclen;
-                                        continue;
-                                    }
-                                }
-                                var ur = fs_unlinkat(dir_fd, ename, 0);
-                                if (ur != 0) {
-                                    if (force == 1) {
-                                        if ((0 - ur) != 2) {
-                                            _rm_report(child_disp, 0 - ur);
-                                            any_failed = 1;
-                                        }
-                                    } else {
-                                        _rm_report(child_disp, 0 - ur);
-                                        any_failed = 1;
-                                    }
-                                } else {
-                                    if (verbose == 1) { _rm_verbose("removed", child_disp); }
-                                }
-                            }
-                        }
+                # Now remove the (drained) directory. With -i and we already
+                # prompted "descend into" above, GNU rm doesn't re-prompt; we
+                # match that.
+                var rmd = fs_unlinkat(pfd, dname, 512);  # AT_REMOVEDIR
+                if (rmd != 0) {
+                    rc = rmd;
+                    if (force == 1) {
+                        if ((0 - rmd) == 2) { rc = 0; }
                     }
-                    off = off + reclen;
+                    if (rc != 0) { _rm_report(here, 0 - rmd); }
+                } else {
+                    if (verbose == 1) { _rm_verbose("removed directory", here); }
                 }
             }
+            if (depth == 0) {
+                result = rc;
+                running = 0;
+            } else {
+                if (rc != 0) { wk_set_u(w, depth - 1, 1, 1); }
+                depth = depth - 1;
+            }
+            continue;
+        }
+        var ename = fs_dent_name(ent);
+        var clen = wk_path_push(w, plen, ename);
+        var child_disp = wk_path(w);
+        var dfd = wk_fd(w, depth);
+        # Classify the entry via lstat (ADR 0003: never follow).
+        var st[144];
+        var sr = fs_lstat_at(dfd, ename, &st);
+        if (sr != 0) {
+            var vanished: i64 = 0;
+            if (force == 1) {
+                # Vanished between getdents and lstat; tolerable.
+                if ((0 - sr) == 2) { vanished = 1; }
+            }
+            if (vanished == 0) {
+                _rm_report(child_disp, 0 - sr);
+                wk_set_u(w, depth, 1, 1);
+            }
+        } elif (fs_is_dir(&st) == 1) {
+            # Real directory — descend; it is removed when the walk comes back out of it.
+            var cfd = wk_open(w, depth + 1, dfd, ename, FS_O_DIRECTORY | FS_O_NOFOLLOW);
+            if (cfd < 0) {
+                var gone: i64 = 0;
+                if (force == 1) {
+                    if (cfd == (0 - 2)) { gone = 1; }      # ENOENT under -f is fine
+                }
+                if (gone == 0) {
+                    _rm_report(child_disp, 0 - cfd);
+                    wk_set_u(w, depth, 1, 1);
+                }
+            } elif (interactive == 1) {
+                if (_rm_prompt("descend into directory", child_disp) == 0) {
+                    # Declined: left in place, and so is every directory above it.
+                    wk_close(w, depth + 1, child_disp);
+                } else {
+                    depth = depth + 1;
+                    wk_set_u(w, depth, 0, clen);
+                }
+            } else {
+                depth = depth + 1;
+                wk_set_u(w, depth, 0, clen);
+            }
+        } else {
+            # File, symlink, or other — unlink the name.
+            if (_rm_unlink_entry(dfd, ename, child_disp, &st, force, interactive, verbose) == 1) {
+                wk_set_u(w, depth, 1, 1);
+            }
         }
     }
-
-    fs_close(dir_fd);
-
-    if (any_failed == 1) {
-        # Don't try to remove the directory itself — its contents
-        # weren't fully drained.
-        return 0 - 5;
-    }
-
-    # Now remove the (drained) directory. With -i and we already
-    # prompted "descend into" above, GNU rm doesn't re-prompt; we
-    # match that.
-    var rmd = fs_unlinkat(parent_dirfd, name, 512);  # AT_REMOVEDIR
-    if (rmd != 0) {
-        if (force == 1) {
-            if ((0 - rmd) == 2) { return 0; }
-        }
-        _rm_report(display, 0 - rmd);
-        return rmd;
-    }
-    if (verbose == 1) { _rm_verbose("removed directory", display); }
-    return 0;
+    wk_reset(w);
+    return result;
 }
 
 # Top-level per-operand handler.

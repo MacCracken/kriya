@@ -18,6 +18,7 @@ include "src/lib/quote.cyr"
 include "src/lib/report.cyr"
 include "src/lib/icase.cyr"
 include "src/lib/fs.cyr"
+include "src/lib/walk.cyr"
 # ⚠ after fs.cyr: userdb reads `FsStat` offsets to size its file read.
 include "src/lib/userdb.cyr"
 include "src/lib/protected.cyr"

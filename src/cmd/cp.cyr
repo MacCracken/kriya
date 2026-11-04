@@ -283,6 +283,8 @@ fn _cp_report(operand, errno): i64 { return errmsg_report(_cp_util, operand, err
 # was told about a command it never ran. One name, set once by the utility that
 # is running; never a second reporter.
 var _cp_util = "cp";
+var _cp_swk = 0;            # the source walk (src/lib/walk.cyr), made in `_cp_dir_top`
+var _cp_dwk = 0;            # ...and the destination's
 
 # `kriya <util>: ` on stderr, for the diagnostics written piecewise.
 fn _cp_prefix(): i64 {
@@ -1139,7 +1141,7 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
   verbose, src_st, follow): i64 {
     var src_open_flags: i64 = 0;
     if (follow == 0) { src_open_flags = FS_O_NOFOLLOW; }
-    var src_fd = fs_openat(src_dirfd, src_name, src_open_flags, 0);
+    var src_fd = wk_openat(src_dirfd, src_name, src_open_flags, 0);
     if (src_fd < 0) {
         _cp_report(src_display, 0 - src_fd);
         return src_fd;
@@ -1225,7 +1227,7 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
     var perms = _cp_create_mode(src_st, preserve);
     # O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW — O_NOFOLLOW is per-arch (see fs.cyr).
     var dst_flags = FS_O_WRONLY | FS_O_CREAT | FS_O_TRUNC | FS_O_NOFOLLOW;
-    var dst_fd = fs_openat(dst_dirfd, dst_name, dst_flags, perms);
+    var dst_fd = wk_openat(dst_dirfd, dst_name, dst_flags, perms);
     # ⭐ ONE RULE FOR EVERY FAILED OPEN UNDER `-f` (1.6.13). This arm used to
     # retry ELOOP alone — the destination was a symlink O_NOFOLLOW refused — and
     # that case is still here, now beside the read-only file and the busy binary
@@ -1245,7 +1247,7 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
                     return ur;
                 }
             }
-            dst_fd = fs_openat(dst_dirfd, dst_name, FS_O_WRONLY | FS_O_CREAT | FS_O_EXCL | FS_O_NOFOLLOW, perms);
+            dst_fd = wk_openat(dst_dirfd, dst_name, FS_O_WRONLY | FS_O_CREAT | FS_O_EXCL | FS_O_NOFOLLOW, perms);
         }
         if (dst_fd < 0) {
             fs_close(src_fd);
@@ -1342,6 +1344,10 @@ fn _cp_file_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_displa
 # symlink fails ELOOP per ADR 0003.
 fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst_display, policy, allow_follow, force,
   interactive, preserve, verbose, src_st): i64 {
+    # ⭐ Both directories are levels of the shared walks (src/lib/walk.cyr), which keep at most 32
+    # of each open however deep the tree is: the source in `_cp_swk`, the destination in
+    # `_cp_dwk`. They move in step, so this level is one below the source walk's deepest.
+    var depth = wk_top(_cp_swk) + 1;
     # ⛔ THE DESTINATION IS CREATED BEFORE THE SOURCE IS OPENED, and the order is
     # GNU's rather than the obvious one. Measured on a source directory with no
     # owner READ — 0300, 0333, 0111 — GNU leaves `dst/sub` behind at
@@ -1395,7 +1401,7 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
     # still makes exactly the open it always made. ⭐ The same fallback fixes a
     # directory cp MADE under a umask that strips owner read — `umask 0477` gives
     # 0300 — which GNU copies in full (to 300/300/200) and kriya stopped at.
-    var dst_fd = fs_opendir_dest(dst_dirfd, dst_name);
+    var dst_fd = wk_open(_cp_dwk, depth, dst_dirfd, dst_name, FS_O_DIRECTORY | FS_O_NOFOLLOW);
     if (dst_fd < 0) {
         _cp_report(dst_display, 0 - dst_fd);
         return dst_fd;
@@ -1457,9 +1463,9 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
     var src_fd: i64 = 0;
     if (allow_follow == 1) {
         # O_RDONLY | O_DIRECTORY. No NOFOLLOW: policy-driven follow.
-        src_fd = fs_openat(src_dirfd, src_name, FS_O_DIRECTORY, 0);
+        src_fd = wk_open(_cp_swk, depth, src_dirfd, src_name, FS_O_DIRECTORY);
     } else {
-        src_fd = fs_opendir_nofollow(src_dirfd, src_name);
+        src_fd = wk_open(_cp_swk, depth, src_dirfd, src_name, FS_O_DIRECTORY | FS_O_NOFOLLOW);
     }
     if (src_fd < 0) {
         _cp_report(src_display, 0 - src_fd);
@@ -1475,7 +1481,7 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
         } else {
             if (dir_widened == 1) { fs_fd_chmod(dst_fd, fs_perms(src_st) & 0o7777); }
         }
-        fs_close(dst_fd);
+        wk_close(_cp_dwk, depth, dst_display);
         return src_fd;
     }
 
@@ -1499,117 +1505,130 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
     if (policy == CP_POLICY_L) {
         if (fs_dirstack_push(_cp_path, fs_dev(src_st), fs_ino(src_st)) != 0) {
             _cp_prefix(); k_write( 2, "cannot track directory depth: out of memory\n", 44);
-            fs_close(src_fd);
-            fs_close(dst_fd);
+            wk_close(_cp_swk, depth, src_display);
+            wk_close(_cp_dwk, depth, dst_display);
             return 0 - 12;                 # ENOMEM
         }
         pushed = 1;
     }
 
+    # ⛔ BOTH DESCRIPTORS ARE FETCHED AGAIN FOR EVERY ENTRY: a child deeper than the walks' budget
+    # closes this level and reopens it under other descriptor numbers (src/lib/walk.cyr).
     var any_failed: i64 = 0;
-    var ent_buf = alloc(4096);
     var loop: i64 = 1;
     while (loop == 1) {
-        var nb = fs_getdents64(src_fd, ent_buf, 4096);
-        if (nb < 0) {
-            if ((0 - nb) == 4) {
-                # EINTR — retry.
-            } else {
-                _cp_report(src_display, 0 - nb);
-                any_failed = 1;
-                loop = 0;
-            }
+        var ent = wk_next(_cp_swk, depth);
+        if (ent < 0) {
+            _cp_report(src_display, 0 - ent);
+            any_failed = 1;
+            loop = 0;
+        } elif (ent == 0) {
+            loop = 0;
+        } elif (wk_broken(_cp_dwk) == 1) {
+            # ⛔ The destination's way back up was not its way down: write nothing more.
+            any_failed = 1;
+            loop = 0;
         } else {
-            if (nb == 0) {
-                loop = 0;
+            src_fd = wk_fd(_cp_swk, depth);
+            dst_fd = wk_fd(_cp_dwk, depth);
+            var name = fs_dent_name(ent);
+            var child_src_disp = path_join(src_display, name);
+            var child_dst_disp = path_join(dst_display, name);
+            # Classify the child. policy + top_level=0 →
+            # follow only under POLICY_L.
+            var child_st[144];
+            var follow = _cp_should_follow(policy, 0);
+            var csr: i64 = 0;
+            if (follow == 1) {
+                csr = fs_fstatat(src_fd, name, &child_st, 0);
             } else {
-                var off: i64 = 0;
-                while (off < nb) {
-                    var ent = ent_buf + off;
-                    var reclen = fs_dent_reclen(ent);
-                    if (fs_dent_is_dotdot(ent) == 0) {
-                        var name = fs_dent_name(ent);
-                        var child_src_disp = path_join(src_display, name);
-                        var child_dst_disp = path_join(dst_display, name);
-                        # Classify the child. policy + top_level=0 →
-                        # follow only under POLICY_L.
-                        var child_st[144];
-                        var follow = _cp_should_follow(policy, 0);
-                        var csr: i64 = 0;
+                csr = fs_lstat_at(src_fd, name, &child_st);
+            }
+            if (csr != 0) {
+                _cp_report(child_src_disp, 0 - csr);
+                any_failed = 1;
+            } else {
+                var rr: i64 = 0;
+                if (fs_is_lnk(&child_st) == 1) {
+                    rr = _cp_symlink_at(src_fd, name, child_src_disp,
+                      dst_fd, name, child_dst_disp,
+                      force, verbose, &child_st, preserve);
+                } else {
+                    if (fs_is_dir(&child_st) == 1) {
+                        # ⛔ A DIRECTORY WE ARE ALREADY INSIDE IS A
+                        # CYCLE, and only a followed symlink can
+                        # produce one. GNU names the LINK, not the
+                        # directory it resolves to, because the link
+                        # is the thing the user can delete.
+                        var cyclic: i64 = 0;
+                        var is_dest: i64 = 0;
                         if (follow == 1) {
-                            csr = fs_fstatat(src_fd, name, &child_st, 0);
-                        } else {
-                            csr = fs_lstat_at(src_fd, name, &child_st);
-                        }
-                        if (csr != 0) {
-                            _cp_report(child_src_disp, 0 - csr);
-                            any_failed = 1;
-                        } else {
-                            var rr: i64 = 0;
-                            if (fs_is_lnk(&child_st) == 1) {
-                                rr = _cp_symlink_at(src_fd, name, child_src_disp,
-                                  dst_fd, name, child_dst_disp,
-                                  force, verbose, &child_st, preserve);
-                            } else {
-                                if (fs_is_dir(&child_st) == 1) {
-                                    # ⛔ A DIRECTORY WE ARE ALREADY INSIDE IS A
-                                    # CYCLE, and only a followed symlink can
-                                    # produce one. GNU names the LINK, not the
-                                    # directory it resolves to, because the link
-                                    # is the thing the user can delete.
-                                    var cyclic: i64 = 0;
-                                    var is_dest: i64 = 0;
-                                    if (follow == 1) {
-                                        if (fs_dirstack_has(_cp_path, fs_dev(&child_st),
-                                            fs_ino(&child_st)) == 1) { cyclic = 1; }
-                                        if (_cp_dst_root_ino != 0) {
-                                            if (fs_dev(&child_st) == _cp_dst_root_dev) {
-                                                if (fs_ino(&child_st) == _cp_dst_root_ino) { is_dest = 1; }
-                                            }
-                                        }
-                                    }
-                                    if (is_dest == 1) {
-                                        _cp_prefix(); k_write( 2, "not descending into the destination '", 37);
-                                        k_write( 2, child_src_disp, strlen(child_src_disp));
-                                        k_write( 2, "'\n", 2);
-                                        rr = 0 - 22;              # EINVAL
-                                    } else {
-                                        if (cyclic == 1) {
-                                            _cp_prefix(); k_write( 2, "cannot copy cyclic symbolic link '", 34);
-                                            k_write( 2, child_src_disp, strlen(child_src_disp));
-                                            k_write( 2, "'\n", 2);
-                                            rr = 0 - 40;              # ELOOP
-                                        } else {
-                                            # `follow` carries the lstat-vs-stat decision
-                                            # into the descend: if we stat'd to get here,
-                                            # the dir open must also follow.
-                                            rr = _cp_dir_descend_at(src_fd, name, child_src_disp,
-                                              dst_fd, name, child_dst_disp,
-                                              policy, follow, force, interactive,
-                                              preserve, verbose, &child_st);
-                                        }
-                                    }
-                                } else {
-                                    if (fs_is_reg(&child_st) == 1) {
-                                        rr = _cp_file_at(src_fd, name, child_src_disp,
-                                          dst_fd, name, child_dst_disp,
-                                          force, interactive, preserve, verbose, &child_st, follow);
-                                    } else {
-                                        _cp_prefix();
-                                        k_write( 2, child_src_disp, strlen(child_src_disp));
-                                        k_write( 2, ": unsupported file type (FIFO/socket/device)\n", 45);
-                                        rr = 0 - 22;
-                                    }
+                            if (fs_dirstack_has(_cp_path, fs_dev(&child_st),
+                                fs_ino(&child_st)) == 1) { cyclic = 1; }
+                            if (_cp_dst_root_ino != 0) {
+                                if (fs_dev(&child_st) == _cp_dst_root_dev) {
+                                    if (fs_ino(&child_st) == _cp_dst_root_ino) { is_dest = 1; }
                                 }
                             }
-                            if (rr != 0) { any_failed = 1; }
+                        }
+                        if (is_dest == 1) {
+                            _cp_prefix(); k_write( 2, "not descending into the destination '", 37);
+                            k_write( 2, child_src_disp, strlen(child_src_disp));
+                            k_write( 2, "'\n", 2);
+                            rr = 0 - 22;              # EINVAL
+                        } else {
+                            if (cyclic == 1) {
+                                _cp_prefix(); k_write( 2, "cannot copy cyclic symbolic link '", 34);
+                                k_write( 2, child_src_disp, strlen(child_src_disp));
+                                k_write( 2, "'\n", 2);
+                                rr = 0 - 40;              # ELOOP
+                            } else {
+                                # `follow` carries the lstat-vs-stat decision
+                                # into the descend: if we stat'd to get here,
+                                # the dir open must also follow.
+                                if (wk_stack_room() == 0) {
+                                    # ⛔ One level deeper would exhaust the stack
+                                    # (src/lib/walk.cyr).
+                                    wk_report_deep(_cp_swk, child_src_disp);
+                                    rr = 0 - 5;
+                                } else {
+                                    rr = _cp_dir_descend_at(src_fd, name, child_src_disp,
+                                      dst_fd, name, child_dst_disp,
+                                      policy, follow, force, interactive,
+                                      preserve, verbose, &child_st);
+                                }
+                            }
+                        }
+                    } else {
+                        if (fs_is_reg(&child_st) == 1) {
+                            rr = _cp_file_at(src_fd, name, child_src_disp,
+                              dst_fd, name, child_dst_disp,
+                              force, interactive, preserve, verbose, &child_st, follow);
+                        } else {
+                            _cp_prefix();
+                            k_write( 2, child_src_disp, strlen(child_src_disp));
+                            k_write( 2, ": unsupported file type (FIFO/socket/device)\n", 45);
+                            rr = 0 - 22;
                         }
                     }
-                    off = off + reclen;
                 }
+                if (rr != 0) { any_failed = 1; }
             }
         }
     }
+    # ⛔ A broken walk has no descriptors to restore through, and the directory it stopped in is
+    # not finished: leave it, and say the copy failed.
+    var walk_broken: i64 = 0;
+    if (wk_broken(_cp_swk) == 1) { walk_broken = 1; }
+    if (wk_broken(_cp_dwk) == 1) { walk_broken = 1; }
+    if (walk_broken == 1) {
+        wk_close(_cp_swk, depth, src_display);
+        wk_close(_cp_dwk, depth, dst_display);
+        if (pushed == 1) { fs_dirstack_pop(_cp_path); }
+        return 0 - 5;
+    }
+    src_fd = wk_fd(_cp_swk, depth);
+    dst_fd = wk_fd(_cp_dwk, depth);
 
     # ⚠ THE RESTORE STILL RUNS LAST — after every child is written, so the
     # directory's own mtime is not bumped by the writes inside it — but now it
@@ -1641,8 +1660,8 @@ fn _cp_dir_descend_at(src_dirfd, src_name, src_display, dst_dirfd, dst_name, dst
         }
     }
 
-    fs_close(src_fd);
-    fs_close(dst_fd);
+    wk_close(_cp_swk, depth, src_display);
+    wk_close(_cp_dwk, depth, dst_display);
     if (pushed == 1) { fs_dirstack_pop(_cp_path); }
 
     if (any_failed == 1) { return 0 - 5; }
@@ -1659,6 +1678,14 @@ fn _cp_dir_top(src_path, dst_path, policy, allow_follow_top, force, interactive,
     # records it the first time it opens a destination directory.
     _cp_dst_root_dev = 0;
     _cp_dst_root_ino = 0;
+    if (_cp_swk == 0) {
+        _cp_swk = wk_new(WK_READ, _cp_util);
+        _cp_dwk = wk_new(WK_DEST, _cp_util);
+    }
+    wk_set_util(_cp_swk, _cp_util);
+    wk_set_util(_cp_dwk, _cp_util);
+    wk_reset(_cp_swk);
+    wk_reset(_cp_dwk);
     return _cp_dir_descend_at(0 - 100, src_path, src_path,
       0 - 100, dst_path, dst_path,
       policy, allow_follow_top, force, interactive, preserve, verbose, src_st);

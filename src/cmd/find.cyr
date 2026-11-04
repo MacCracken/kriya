@@ -155,6 +155,7 @@ var _f_mindepth    = 0;
 var _f_depth_first = 0;    # -depth: post-order
 var _f_prune_hit   = 0;    # -prune ran for the entry being evaluated
 var _f_walk_path   = 0;    # -L: the directories the walk is inside (`fs_dirstack_*`)
+var _f_wk          = 0;    # the walk's open directories (src/lib/walk.cyr), made in `cmd_find`
 var _f_nostat      = 0;    # the entry being evaluated could not be stat'd (`_f_eval_leaf`)
 var _f_nest        = 0;    # parentheses open while parsing
 var _f_nest_cap    = 0;    # ...and how many may be: `_f_nest_max`, read once
@@ -1004,7 +1005,8 @@ fn _f_eval_type_predicate(letter, stat_buf): i64 {
 
 # Returns 1 (regular file size 0) OR (directory with no entries beyond .. /.
 # Other types yield 0.
-fn _f_eval_empty_predicate(path, stat_buf, depth): i64 {
+fn _f_eval_empty_predicate(ctx, stat_buf, depth): i64 {
+    var path = load64(ctx + 0);
     var m = load64(stat_buf + 24);
     var ifmt = m & FS_S_IFMT;
     if (ifmt == FS_S_IFREG) {
@@ -1017,9 +1019,12 @@ fn _f_eval_empty_predicate(path, stat_buf, depth): i64 {
         # open would be silently followed even under default `-P`.
         # Mirrors the conditional NOFOLLOW pattern used at the main
         # descent site (_f_descend / line ~918).
-        var open_flags: i64 = FS_O_DIRECTORY;  # | O_RDONLY
+        # ⛔ Relative to the parent's open directory since 1.8.6, as every other open of the walk
+        # is (ADR 0027). By PATH it re-resolved every ancestor, and past PATH_MAX it failed:
+        # `find` on a 2,100-level tree said "file name too long" for each directory -empty tested.
+        var open_flags: i64 = FS_O_DIRECTORY | FS_O_CLOEXEC;  # | O_RDONLY
         if (_f_follows(depth) == 0) { open_flags = open_flags | FS_O_NOFOLLOW; }
-        var dfd = fs_openat(0 - 100, path, open_flags, 0);
+        var dfd = fs_openat(load64(ctx + 32), load64(ctx + 40), open_flags, 0);
         if (dfd < 0) {
             # ⛔ REPORTED, as GNU's `pred_empty` does, and the exit is 1. A directory
             # -empty could not open was silently "not empty" at exit 0 (1.7.1).
@@ -1634,7 +1639,7 @@ fn _f_eval_leaf(n, ctx): i64 {
           load64(st + 48)); }
     if (k == F_N_MTIME)  { return _f_eval_mtime_predicate(load64(n + 8), load64(n + 16), load64(st + 88)); }
     if (k == F_N_MMIN)   { return _f_eval_mmin_predicate (load64(n + 8), load64(n + 16), load64(st + 88)); }
-    if (k == F_N_EMPTY)  { return _f_eval_empty_predicate(path, st, depth); }
+    if (k == F_N_EMPTY)  { return _f_eval_empty_predicate(ctx, st, depth); }
     if (k == F_N_PERM)   { return _f_eval_perm_predicate(load64(n + 8), load64(n + 16), load64(n + 24), st); }
     if (k == F_N_PRUNE) {
         # POSIX: always true, and no effect under -depth, where the entries are
@@ -1774,6 +1779,15 @@ fn _f_name_of(path): i64 {
     return b;
 }
 
+# 1 when the walk may enter `path`. ⛔ Otherwise one level deeper would exhaust the stack
+# (src/lib/walk.cyr): reported, exit 1. The entry itself is still evaluated.
+fn _f_stack_room(path): i64 {
+    if (wk_stack_room() == 1) { return 1; }
+    wk_report_deep(_f_wk, path);
+    _f_any_failed = 1;
+    return 0;
+}
+
 # Evaluate the expression for one entry, when it is deep enough to be looked at.
 # ⛔ THE PRUNE FLAG IS CLEARED FIRST, EVEN FOR AN ENTRY ABOVE -mindepth. Cleared
 # only on the way to `_f_eval`, it survived from the last entry evaluated to the
@@ -1874,12 +1888,26 @@ fn _f_walk(pdfd, rel, path, depth): i64 {
     if (_f_depth_first == 0) {
         _f_visit(&ctx, depth);
         if (_f_prune_hit == 1) { descend = 0; }
-        if (descend == 1) { _f_descend(pdfd, rel, path, depth, st_buf); }
+        if (descend == 1) {
+            if (_f_stack_room(path) == 1) { _f_descend(pdfd, rel, path, depth, st_buf); }
+        }
         return 0;
     }
     # -depth: the entries first. ⚠ An unreadable directory is still evaluated
     # after its error, as GNU's -depth does; without -depth it already was.
-    if (descend == 1) { _f_descend(pdfd, rel, path, depth, st_buf); }
+    if (descend == 1) {
+        if (_f_stack_room(path) == 1) { _f_descend(pdfd, rel, path, depth, st_buf); }
+        # ⛔ The walk may have closed the parent while it was below, and reopened it under
+        # another descriptor number: `-delete` and `-execdir` must use the new one, and the
+        # entry's name as the parent level now holds it (src/lib/walk.cyr).
+        if (wk_broken(_f_wk) == 1) { return 0; }
+        #ifndef CYRIUS_TARGET_AGNOS
+        if (depth > 0) {
+            store64(&ctx + 32, wk_fd(_f_wk, depth - 1));
+            store64(&ctx + 40, wk_cur_name(_f_wk, depth - 1));
+        }
+        #endif
+    }
     _f_visit(&ctx, depth);
     return 0;
 }
@@ -1890,7 +1918,9 @@ fn _f_descend(pdfd, rel, path, depth, st_buf): i64 {
     # per directory level (`ls /proc/$$/fd` in the child: `0 1 2 3 4 5`; GNU's: `0 1 2`).
     var open_flags: i64 = FS_O_DIRECTORY | FS_O_CLOEXEC;  # | O_RDONLY
     if (_f_follows(depth) == 0) { open_flags = open_flags | FS_O_NOFOLLOW; }
-    var dfd = fs_openat(pdfd, rel, open_flags, 0);
+    # ⭐ A level of the shared walk (src/lib/walk.cyr), which keeps at most 32 directories open
+    # however deep the tree is.
+    var dfd = wk_open(_f_wk, depth, pdfd, rel, open_flags);
     if (dfd < 0) {
         _f_report_path(path, 0 - dfd);
         _f_any_failed = 1;
@@ -1903,60 +1933,49 @@ fn _f_descend(pdfd, rel, path, depth, st_buf): i64 {
         if (fs_dirstack_push(_f_walk_path, fs_dev(st_buf), fs_ino(st_buf)) != 0) {
             report_note("find", path, "cannot track directory depth: out of memory");
             _f_any_failed = 1;
-            fs_close(dfd);
+            wk_close(_f_wk, depth, path);
             return 0;
         }
         pushed = 1;
     }
-    var dbuf = alloc(4096);
+    # ⛔ `dfd` IS FETCHED AGAIN FOR EVERY ENTRY: a child deeper than the walk's budget closes
+    # this directory and reopens it under another descriptor number.
     var loop: i64 = 1;
     while (loop == 1) {
-        var nb = fs_getdents64(dfd, dbuf, 4096);
-        if (nb < 0) {
-            if ((0 - nb) == 4) {
-                # EINTR retry
-            } else {
-                _f_report_path(path, 0 - nb);
-                _f_any_failed = 1;
-                loop = 0;
-            }
+        var ent = wk_next(_f_wk, depth);
+        if (ent < 0) {
+            _f_report_path(path, 0 - ent);
+            _f_any_failed = 1;
+            loop = 0;
+        } elif (ent == 0) {
+            loop = 0;
         } else {
-            if (nb == 0) { loop = 0; }
-            else {
-                var off: i64 = 0;
-                while (off < nb) {
-                    var ent = dbuf + off;
-                    var reclen = fs_dent_reclen(ent);
-                    var ename = fs_dent_name(ent);
-                    if (fs_dent_is_dotdot(ent) == 0) {
-                        var elen = strlen(ename);
-                        var plen = strlen(path);
-                        var sep: i64 = 1;
-                        if (plen > 0) {
-                            if (load8(path + plen - 1) == 47) { sep = 0; }
-                        }
-                        var sub = alloc(plen + sep + elen + 1);
-                        memcpy(sub, path, plen);
-                        if (sep == 1) { store8(sub + plen, 47); }
-                        memcpy(sub + plen + sep, ename, elen);
-                        store8(sub + plen + sep + elen, 0);
-                        # ⚠ `ename` lives in `dbuf`, which is read again only after this entry's
-                        # whole subtree has returned, so it is safe to hand down uncopied.
-                        var cdfd = dfd;
-                        var crel = ename;
-                        #ifdef CYRIUS_TARGET_AGNOS
-                        cdfd = 0 - 100;
-                        crel = sub;
-                        #endif
-                        _f_walk(cdfd, crel, sub, depth + 1);
-                    }
-                    off = off + reclen;
-                }
+            dfd = wk_fd(_f_wk, depth);
+            var ename = fs_dent_name(ent);
+            var elen = strlen(ename);
+            var plen = strlen(path);
+            var sep: i64 = 1;
+            if (plen > 0) {
+                if (load8(path + plen - 1) == 47) { sep = 0; }
             }
+            var sub = alloc(plen + sep + elen + 1);
+            memcpy(sub, path, plen);
+            if (sep == 1) { store8(sub + plen, 47); }
+            memcpy(sub + plen + sep, ename, elen);
+            store8(sub + plen + sep + elen, 0);
+            # ⚠ `ename` is good until the next `wk_next` of this level; the child's walk
+            # takes it again from the walk where it needs it after a descent.
+            var cdfd = dfd;
+            var crel = ename;
+            #ifdef CYRIUS_TARGET_AGNOS
+            cdfd = 0 - 100;
+            crel = sub;
+            #endif
+            _f_walk(cdfd, crel, sub, depth + 1);
         }
     }
     if (pushed == 1) { fs_dirstack_pop(_f_walk_path); }
-    fs_close(dfd);
+    wk_close(_f_wk, depth, path);
     return 0;
 }
 
@@ -2142,6 +2161,7 @@ fn cmd_find(start: i64): i64 {
     }
 
     if (_f_follow_mode == 1) { _f_walk_path = fs_dirstack_new(); }
+    if (_f_wk == 0) { _f_wk = wk_new(WK_READ, "find"); }
 
     var npaths = vec_len(start_paths);
     var pi: i64 = 0;
@@ -2167,7 +2187,13 @@ fn cmd_find(start: i64): i64 {
                 }
             }
         }
-        if (walk_it == 1) { _f_walk(0 - 100, p, p, 0); }
+        if (walk_it == 1) {
+            wk_reset(_f_wk);
+            _f_walk(0 - 100, p, p, 0);
+            # ⛔ A walk stopped because its way back up had moved (src/lib/walk.cyr) reported it,
+            # and is a failure: the first cut exited 0 here.
+            if (wk_broken(_f_wk) == 1) { _f_any_failed = 1; }
+        }
         pi = pi + 1;
     }
     _f_flush_execs(_f_ast);

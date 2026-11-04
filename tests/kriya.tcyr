@@ -72,6 +72,9 @@ include "src/lib/mode.cyr"
 # ⚠ M15e, PRE-EMPTIVELY (1.8.5): `date.cyr` for its directive scanner,
 # `_date_scan_directive`, which reads the format string and nothing else.
 include "src/cmd/date.cyr"
+# ⚠ M15e (1.8.6): the walk module, for its path buffer, level chunks and stack guard. It needs
+# `fs.cyr` and `report.cyr`, both above.
+include "src/lib/walk.cyr"
 
 # ⭐ The modes the real callers use, so a test reads as "FORMAT says this, `%b`
 # says that" rather than as a bitmask.
@@ -222,6 +225,17 @@ fn _t_qh(src, style, want): i64 {
     var k = quote_header(src, n, style, out);
     store8(out + k, 0);
     return streq(out, want);
+}
+
+# The stack guard, in-process: recurse until it says stop, and count the levels it allowed. A
+# frame that comes back with its own byte changed means the guard let the stack run over.
+fn _t_wk_deep(n): i64 {
+    if (wk_stack_room() == 0) { return n; }
+    var pad[256];
+    store8(&pad, n & 255);
+    var r = _t_wk_deep(n + 1);
+    if (load8(&pad) != (n & 255)) { return 0 - 1; }
+    return r;
 }
 
 fn main() {
@@ -1688,6 +1702,47 @@ fn main() {
     assert_eq(_date_is_conv(67), 1, "C is a GNU conversion");
     assert_eq(_date_is_conv(102), 0, "f is not");
     assert_eq(_date_is_conv(37), 0, "% is not, for this purpose: decorated, GNU echoes it");
+
+    test_group("walk — the path buffer, the level chunks, the stack guard (1.8.6)");
+    var tw = wk_new(WK_READ, "test");
+    assert_eq(wk_path_set(tw, "a"), 1, "path: set returns the length");
+    assert_eq(wk_path_push(tw, 1, "b"), 3, "path: push returns the new length");
+    assert_eq(streq(wk_path(tw), "a/b"), 1, "path: one `/` between names");
+    wk_path_cut(tw, 1);
+    assert_eq(streq(wk_path(tw), "a"), 1, "path: cut back to a level");
+    wk_path_set(tw, "a/");
+    wk_path_push(tw, 2, "b");
+    assert_eq(streq(wk_path(tw), "a/b"), 1, "path: no second `/` after one already there");
+    wk_path_set(tw, "/");
+    wk_path_push(tw, 1, "b");
+    assert_eq(streq(wk_path(tw), "/b"), 1, "path: under `/`");
+    wk_path_set(tw, "");
+    wk_path_push(tw, 0, "b");
+    assert_eq(streq(wk_path(tw), "b"), 1, "path: none before a first name");
+    # ⭐ Records live in chunks of 1,024: the levels either side of a boundary must not alias.
+    assert_eq(_wk_grow(tw, 3000), 0, "chunks: room for 3,001 levels");
+    var tlv: i64 = 0;
+    var tdepths[40];
+    store64(&tdepths, 0); store64(&tdepths + 8, 1023); store64(&tdepths + 16, 1024);
+    store64(&tdepths + 24, 2047); store64(&tdepths + 32, 3000);
+    while (tlv < 5) {
+        wk_set_u(tw, load64(&tdepths + tlv * 8), 0, 7000 + tlv);
+        tlv = tlv + 1;
+    }
+    var tok: i64 = 1;
+    tlv = 0;
+    while (tlv < 5) {
+        if (wk_u(tw, load64(&tdepths + tlv * 8), 0) != 7000 + tlv) { tok = 0; }
+        tlv = tlv + 1;
+    }
+    assert_eq(tok, 1, "chunks: levels 0, 1023, 1024, 2047 and 3000 are five records");
+    assert_eq(wk_fd(tw, 0 - 1), 0 - 100, "wk_fd above level 0 is AT_FDCWD");
+    assert_eq(wk_fd(tw, 2500), 0 - 9, "wk_fd of a level never opened is EBADF, not descriptor 0");
+    assert_eq(wk_top(tw), 0 - 1, "a new walk has no level in use");
+    # ⛔ The guard must stop a recursion well before the stack runs out, and not absurdly early.
+    var tdeep = _t_wk_deep(0);
+    assert_eq(tdeep > 1000, 1, "stack guard: allows a deep recursion");
+    assert_eq(tdeep < 10000000, 1, "stack guard: and stops it");
 
     return assert_summary();
 

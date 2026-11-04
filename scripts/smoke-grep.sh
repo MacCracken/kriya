@@ -191,7 +191,9 @@ expect_exit 'missing file'         2 "$BIN" grep foo no_such_file
 expect_exit 'directory no -r'      2 "$BIN" grep foo tree
 expect_exit '-q match exit 0'      0 "$BIN" grep -q foo basic
 expect_exit '-q no match exit 1'   1 "$BIN" grep -q zzz basic
-expect_exit '-s missing file'      1 "$BIN" grep -s foo no_such_file
+# ⛔ This asserted 1 until 1.8.6 — kriya's own answer, never GNU's, which is 2: `-s` silences the
+# message, not the error. The cases under "1.8.6" below ask GNU.
+expect_exit '-s missing file'      2 "$BIN" grep -s foo no_such_file
 
 # --- every -e, not just the last (v1.2.1) ---
 # ⛔ `grep -e alpha -e gamma` matched only `gamma`. The spec has ONE value slot,
@@ -721,6 +723,36 @@ g16 "-r -e"                      -r -e hit
 g16 "-r PAT . keeps ./"          -r hit .
 # `-` is still standard input, operand or not.
 expect_eq "1.6.16: -r PAT - reads stdin" "$(echo hit | grep -r hit -)" "$(echo hit | "$BIN" grep -r hit -)"
+
+# --- 1.8.6: the exit status, against GNU ------------------------------------
+# ⛔ Three rules kriya had wrong, measured against GNU grep 3.12: `-s` silences the message and
+# not the error (exit 2, was 0 or 1); `-q` with a selected line is 0 EVEN AFTER AN ERROR, POSIX's
+# words (was 2); and an error inside a `-r` walk counts at all (was 0 or 1 — the diagnostic was
+# printed and the status never heard of it).
+rc_same() {   # rc_same <label> <args...>: kriya's exit status equals GNU's
+    name=$1; shift
+    grc=0; LC_ALL=C grep "$@" </dev/null >/dev/null 2>&1 || grc=$?
+    krc=0; LC_ALL=C "$BIN" grep "$@" </dev/null >/dev/null 2>&1 || krc=$?
+    expect_eq "$name" "$grc" "$krc"
+}
+printf 'x\n' > rc_one
+rc_same '1.8.6: -s missing'                -s x no_such_file
+rc_same '1.8.6: -s match, then missing'    -s x rc_one no_such_file
+rc_same '1.8.6: -sc match, then missing'   -sc x rc_one no_such_file
+rc_same '1.8.6: -q missing, then match'    -q x no_such_file rc_one
+rc_same '1.8.6: -qs missing, then match'   -qs x no_such_file rc_one
+rc_same '1.8.6: -q missing, no match'      -q y no_such_file rc_one
+rc_same '1.8.6: missing, then match'       x no_such_file rc_one
+# ⚠ Only as a regular user: root reads a 000 directory, so nothing would fail.
+if [ "$(id -u)" != 0 ]; then
+    mkdir -p rcw/sub; echo hit > rcw/a; echo hit > rcw/sub/b; chmod 000 rcw/sub
+    rc_same '1.8.6: -r unreadable subdir, match'     -r hit rcw
+    rc_same '1.8.6: -r unreadable subdir, no match'  -r nomatch rcw
+    rc_same '1.8.6: -rq unreadable subdir, match'    -rq hit rcw
+    rc_same '1.8.6: -rs unreadable subdir, match'    -rs hit rcw
+    rc_same '1.8.6: -rl unreadable subdir, match'    -rl hit rcw
+    chmod 755 rcw/sub
+fi
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))
