@@ -1237,6 +1237,165 @@ expect_eq "COLUMNS after 9 KB is honoured" \
     "$(cd big8 && env -i BIG8="$BIG8" COLUMNS=20 LC_ALL=C TERM=dumb ls -C)" \
     "$(cd big8 && env -i BIG8="$BIG8" COLUMNS=20 LC_ALL=C TERM=dumb "$BIN" ls -C)"
 
+# --- 1.8.10: POSIX's last eight, -H -L -c -f -k -p -s -u ------------------
+#
+# Byte for byte against GNU, on ONE fixture that both run over: inode numbers and the
+# nanoseconds -t compares differ between two fixtures. The mtime, atime and ctime orders of
+# a, big and c all differ, so a listing sorted by the wrong field cannot pass.
+# ⛔ THE ATIME CASES COME FIRST, and the long ones list files only. Under relatime the first
+# read of a directory or a symlink moves its atime, so a GNU run that read one would hand kriya
+# a different listing. Nothing before them reads `sub` or follows a link.
+mkdir -p o1810/d o1810/lp/in
+(
+    cd o1810/d
+    echo aa > a; head -c 200000 /dev/zero > big; : > c; mkdir sub; : > sub/x
+    ln -s sub lsub; ln -s a la; ln -s nowhere dang; ln -s .. up
+    touch -m -d '2021-01-01 00:00:00' a; touch -m -d '2020-01-01 00:00:00' big
+    touch -m -d '2022-01-01 00:00:00' c
+    touch -a -d '2019-06-01 00:00:00' a; touch -a -d '2023-06-01 00:00:00' big
+    touch -a -d '2021-06-01 00:00:00' c
+    touch -h -m -d '2018-01-01 00:00:00' la lsub dang up
+    sleep 0.05; chmod 600 big; sleep 0.05; chmod 600 a; sleep 0.05; chmod 644 c
+)
+ln -s .. o1810/lp/in/back
+o18() {   # o18 <name> <arg...>: stdout and the exit status against GNU's, in o1810
+    _n=$1; shift
+    _grc=0; (cd o1810 && env -u COLUMNS TZ=UTC LC_ALL=C ls "$@") > o18.g 2>/dev/null || _grc=$?
+    _krc=0; (cd o1810 && env -u COLUMNS TZ=UTC LC_ALL=C "$BIN" ls "$@") > o18.k 2>/dev/null || _krc=$?
+    expect_eq "$_n" "$(cat -A o18.g) rc=$_grc" "$(cat -A o18.k) rc=$_krc"
+}
+# ⚠ For the cases GNU exits 2 for, a dangling operand under -H or -L and an -R loop, kriya
+# exits 1: the operand-exit decision (ADR 0008) is open. Stdout against GNU's; kriya's exit
+# status and its diagnostic asserted.
+o18e() {  # o18e <name> <kriya's exit> <diagnostic text> <arg...>
+    _n=$1; _x=$2; _m=$3; shift 3
+    (cd o1810 && env -u COLUMNS TZ=UTC LC_ALL=C ls "$@") > o18.g 2>/dev/null || true
+    _krc=0; (cd o1810 && env -u COLUMNS TZ=UTC LC_ALL=C "$BIN" ls "$@") > o18.k 2> o18.e || _krc=$?
+    expect_eq "$_n" "$(cat -A o18.g)" "$(cat -A o18.k)"
+    expect_eq "$_n: exit" "$_x" "$_krc"
+    expect_match "$_n: diagnostic" "$_m" "$(cat o18.e)"
+}
+LI=--time-style=long-iso
+# -u and -c: without -l, and with no -t -S -f, they sort by their time; the last one wins.
+o18 "-u sorts by atime without -l"             -1u d
+o18 "-tu"                                      -1tu d
+o18 "-cu: the last one wins"                   -1cu d
+o18 "-lu shows the atime, sorted by name"      -l "$LI" -u d/c d/a d/big
+o18 "-lut sorts by it"                         -l "$LI" -ut d/c d/a d/big
+o18 "-u then -r"                               -1 -u -r d
+o18 "-c sorts by ctime without -l"             -1c d
+o18 "-tc"                                      -1tc d
+o18 "-uc: the last one wins"                   -1uc d
+o18 "-ct"                                      -1ct d
+o18 "-r -c reverses the ctime sort"            -1r -c d
+o18 "-S overrides -c's sort"                   -1S -c d
+o18 "-lc shows the ctime, sorted by name"      -l "$LI" -c d
+o18 "-lct sorts by it"                         -l "$LI" -ct d
+o18 "-c --full-time: the nanoseconds too"      -l --full-time -c d
+# -f: -a, unsorted; -r ignored; last wins with -t and -S, and with -a and -A.
+o18 "-f is directory order with . and .."      -1f d
+o18 "-fr: nothing to reverse"                  -1fr d
+o18 "-ft sorts by time"                        -1ft d
+o18 "-tf does not"                             -1tf d
+o18 "-fS sorts by size"                        -1fS d
+# ⛔ GNU 9.6 MADE `-f` PLAIN `-aU`. Before it, `-f` also turned off an EARLIER -l, -s and --color
+# (NEWS 9.6: "'ls -fl' and 'ls -lf' are now equivalent"), so 9.4's `-lf` is one name per line.
+# kriya follows 9.6 on. PROBED: on an older oracle `-lf` is compared against GNU's `-fl`, which is
+# long on every version.
+GNU_F_KEEPS_L=0
+[ "$(cd o1810 && env -u COLUMNS LC_ALL=C ls -lf d | head -1 | cut -c1-5)" = total ] && GNU_F_KEEPS_L=1
+if [ "$GNU_F_KEEPS_L" = 1 ]; then
+    o18 "-lf stays long"                       -l "$LI" -f d
+else
+    echo "note: $(ls --version | head -1) predates -f keeping an earlier -l (9.6);"
+    echo "      '-lf stays long' was compared against 'ls -fl'"
+    _grc=0; (cd o1810 && env -u COLUMNS TZ=UTC LC_ALL=C ls -f -l "$LI" d) > o18.g 2>/dev/null || _grc=$?
+    _krc=0; (cd o1810 && env -u COLUMNS TZ=UTC LC_ALL=C "$BIN" ls -l "$LI" -f d) > o18.k 2>/dev/null || _krc=$?
+    expect_eq "-lf stays long" "$(cat -A o18.g) rc=$_grc" "$(cat -A o18.k) rc=$_krc"
+fi
+o18 "-fA hides . and .."                       -1fA d
+o18 "-Af shows them"                           -1Af d
+o18 "-Aa: -a after -A shows them (1.8.10 fix)" -1Aa d
+o18 "-aA hides them"                           -1aA d
+o18 "-f -d"                                    -f -d d
+o18 "-Cf"                                      -Cf -w 80 d
+o18 "-f over operands keeps their order"       -1f d/c d/a d/big
+# -s and -k: blocks, right-aligned to the listing, bare under -m; total without -l.
+o18 "-s"                                       -1s d
+o18 "--size"                                   -1 --size d
+o18 "-s in columns"                            -s -C -w 40 d
+o18 "-s across"                                -s -x -w 40 d
+o18 "-s with -m is unpadded"                   -s -m -w 60 d
+o18 "-sh"                                      -1sh d
+o18 "-sk"                                      -1sk d
+o18 "--kibibytes"                              -1s --kibibytes d
+o18 "-skh: -h wins"                            -1skh d
+o18 "-shk: -h wins"                            -1shk d
+o18 "-lsh: the blocks column first"            -l "$LI" -sh d
+o18 "-ls"                                      -l "$LI" -s d
+o18 "-lis: the inode before it"                -l "$LI" -is d
+o18 "-is"                                      -1is d
+o18 "-si"                                      -1 -si d
+o18 "-s of file operands: no total"            -s1 d/big d/a
+o18 "-s of a file and a directory"             -s1 d/a d/sub
+o18 "-sdl"                                     -sdl "$LI" d
+o18 "-lk leaves the size column"               -l "$LI" -k d/big
+# -p: `/` after a directory only; last wins with -F.
+o18 "-p"                                       -1p d
+o18 "-pF classifies"                           -1pF d
+o18 "-Fp writes slashes"                       -1Fp d
+o18 "-lp: no indicator after a link target"    -l "$LI" -p d
+o18 "-dp"                                      -dp d/sub d/lsub
+o18 "-pR"                                      -1pR d
+o18 "-p in columns"                            -p -C -w 40 d
+o18 "-p -i"                                    -1p -i d
+# -H and -L, and POSIX's default for an operand that links to a directory.
+o18 "a dir-link operand is the directory"      -1 d/lsub
+o18 "...not under -F"                          -1F d/lsub
+o18 "...nor -d"                                -1 -d d/lsub
+o18 "...nor -l"                                -l "$LI" d/lsub d/la
+o18 "...but under -p it is"                    -1p d/lsub
+o18 "-H follows operands"                      -l "$LI" -H d/la d/lsub
+o18 "--dereference-command-line"               -l "$LI" --dereference-command-line d/la
+o18 "-FH"                                      -1FH d/lsub
+o18 "-dH"                                      -ldH "$LI" d/lsub
+o18 "-H does not follow entries"               -l "$LI" -H d
+o18 "-L follows operands"                      -l "$LI" -L d/la d/lsub
+o18 "-dL"                                      -ldL "$LI" d/lsub
+o18 "-L follows entries; a dangling one fails" -l "$LI" -L d
+o18 "--dereference"                            -l "$LI" --dereference d
+o18 "-L where nothing is statted: quiet"       -1L d
+o18 "-LF reports the dangling link"            -1LF d
+o18 "-Li too"                                  -1Li d
+o18 "-Ls too"                                  -1Ls d
+o18 "-Lp too"                                  -1Lp d
+o18 "-HL: -L wins"                             -l "$LI" -HL d
+o18 "-LH: -H wins"                             -l "$LI" -LH d
+o18 "-R does not follow a link"                -R lp
+o18 "-RH neither, below the operand"           -RH lp
+o18 "-L lists through a link"                  -1L lp/in
+# ⚠ A directory left is no longer "being listed": one reached by two names is listed twice.
+mkdir -p o1810/twice/real && : > o1810/twice/real/f && ln -s real o1810/twice/link
+o18 "-RL lists one directory under two names"  -RL twice
+o18e "-RL refuses a directory it is inside" 1 "lp/in/back: not listing already-listed directory" -RL lp
+o18e "-lH: a dangling operand"              1 "d/dang"  -l "$LI" -H d/dang
+o18e "-1L: a dangling operand"              1 "d/dang"  -1L d/dang
+o18 "...and without them it is the link"       -l "$LI" d/dang
+# ⛔ `?` FOR AN INODE AND A BLOCK COUNT THAT COULD NOT BE READ (1.8.10). kriya wrote the
+# zeroed buffer's `0` for the inode; and in -l the owner and group `?` are left-justified,
+# as GNU writes a name, where kriya right-justified them (the `-L ... dangling` case above).
+if [ "$SKIP_UNSTAT" = "0" ]; then
+    mkdir -p o1810/q && : > o1810/q/a && : > o1810/q/b && chmod 444 o1810/q
+    o18 "unreadable: -i writes ?"                  -1i q
+    o18 "unreadable: -s writes ?"                  -1s q
+    o18 "unreadable: -is"                          -1is q
+    o18 "unreadable: -s in columns"                -sC -w 40 q
+    o18 "unreadable: -s with -m"                   -sm q
+    chmod 755 o1810/q
+else
+    echo "note: running as root — the unreadable -i / -s cases are skipped"
+fi
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

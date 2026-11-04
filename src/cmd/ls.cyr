@@ -16,6 +16,16 @@
 #   -t / -S                 sort by mtime / by size, largest first.
 #   -F                      append a type indicator (`/` `*` `@` `|` `=`).
 #   -i / --inode            prepend the inode number.
+#   -s / --size             prepend each entry's allocated blocks (1 KiB, or `-h`-scaled),
+#                           and write `total` without -l too.
+#   -k / --kibibytes        1 KiB blocks for -s and `total`, which is kriya's only unit.
+#   -c / -u                 the status-change / access time instead of the modification
+#                           time, for -t and the -l date; last wins. Without -l, and with
+#                           no -t, -S or -f, they also sort by that time.
+#   -f                      -a, unsorted: directory order, -r ignored. Last wins with -t
+#                           and -S, and with -a / -A.
+#   -p                      append `/` to directories; last wins with -F.
+#   -H / -L                 follow symlinks named as operands / every symlink; last wins.
 #   format group, last wins: -1, -C, -x, -m, -l, --format=WORD, and the long
 #   implications -n, -g, -o, --full-time and -D / --dired.
 #   -l                      long form: mode, links, owner, group, size (or
@@ -53,6 +63,9 @@
 # Symlink policy: ls is purely informational. ADR 0003 doesn't apply.
 # `-l` of a symlink renders `link -> target`; the target is not opened.
 # `-R` does not follow symlinks into subdirectories (matches GNU default).
+# ⭐ An OPERAND that is a symlink to a directory is listed as that directory, unless -d, -F
+# or -l is given (POSIX, and GNU's default); -H follows every operand and -L every link
+# (1.8.10, see `_ls_stat_operand`).
 #
 # Each operand is processed independently. Exit `EXIT_FAILURE` if any
 # failed; partial successes still print.
@@ -84,6 +97,15 @@ var _ls_ft_idx = 0;
 var _ls_ts_idx = 0;
 var _ls_D_idx  = 0;
 var _ls_T_idx  = 0;
+# POSIX's last eight (1.8.10).
+var _ls_c_idx  = 0;
+var _ls_u_idx  = 0;
+var _ls_f_idx  = 0;
+var _ls_s_idx  = 0;
+var _ls_k_idx  = 0;
+var _ls_p_idx  = 0;
+var _ls_H_idx  = 0;
+var _ls_L_idx  = 0;
 
 # ── 1.6.12 display state, all resolved ONCE in `cmd_ls` before any listing
 
@@ -296,11 +318,16 @@ fn _ls_scan_format(): i64 {
 
 fn _ls_init_spec(): i64 {
     if (_ls_spec != 0) { return 0; }
+    # ⛔ THE STDLIB TABLE HOLDS 32 FLAGS, and `ls` registers 36 since 1.8.10. A flag past the cap
+    # is refused with -1 and nothing else, so `-H` and `-L` would have parsed as unknown options.
+    # `FLAGS_MAX` is the stdlib's knob for a driver that needs more, read by `flags_new` and
+    # every `_flags_add`.
+    if (FLAGS_MAX < 48) { FLAGS_MAX = 48; }
     var s = flags_new();
     _ls_a_idx = flags_add_bool(s, 97,  "all",             0, "include all entries including . and ..");
     _ls_A_idx = flags_add_bool(s, 65,  "almost-all",      0, "include dotfiles but skip . and ..");
     _ls_l_idx = flags_add_bool(s, 108, "",                0, "long form");
-    _ls_h_idx = flags_add_bool(s, 104, "human-readable",  0, "human-readable size suffixes (with -l)");
+    _ls_h_idx = flags_add_bool(s, 104, "human-readable",  0, "human-readable size suffixes (with -l or -s)");
     _ls_r_idx = flags_add_bool(s, 114, "reverse",         0, "reverse sort order");
     _ls_1_idx = flags_add_bool(s, 49,  "",                0, "force one entry per line");
     _ls_F_idx = flags_add_bool(s, 70,  "",                0, "append type indicator");
@@ -319,6 +346,16 @@ fn _ls_init_spec(): i64 {
     _ls_T_idx = flags_add_int(s, 84, "tabsize",           0, "tab stops every COLS (0 = spaces only)");
     _ls_d_idx = flags_add_bool(s, 100, "directory",       0, "list dir operands as entries, not contents");
     _ls_R_idx = flags_add_bool(s, 82,  "recursive",       0, "descend into subdirectories");
+    # ⭐ 1.8.10: POSIX's last eight. GNU resolves -c/-u, -H/-L, -F/-p, -a/-A/-f and -t/-S/-f by
+    # their ORDER, so `cmd_ls` asks the parser which came last rather than reading the bits.
+    _ls_c_idx = flags_add_bool(s, 99,  "",                0, "use the status-change time for -t and -l");
+    _ls_u_idx = flags_add_bool(s, 117, "",                0, "use the access time for -t and -l");
+    _ls_f_idx = flags_add_bool(s, 102, "",                0, "do not sort, and list all entries (-a)");
+    _ls_s_idx = flags_add_bool(s, 115, "size",            0, "print each entry's allocated size in blocks");
+    _ls_k_idx = flags_add_bool(s, 107, "kibibytes",       0, "1024-byte blocks for -s and total (the default)");
+    _ls_p_idx = flags_add_bool(s, 112, "",                0, "append / to directories");
+    _ls_H_idx = flags_add_bool(s, 72,  "dereference-command-line", 0, "follow symbolic links named as operands");
+    _ls_L_idx = flags_add_bool(s, 76,  "dereference",     0, "follow every symbolic link");
     # ⭐ POSIX's `-q` (1.8.8), and GNU's way back out: last one wins (see `_ls_qmark`).
     _ls_q_idx = flags_add_bool(s, 113, "hide-control-chars", 0, "write ? for each non-printable byte");
     _ls_sc_idx = flags_add_bool(s, 0, "show-control-chars", 0, "write non-printable bytes as they are");
@@ -889,11 +926,17 @@ fn _ls_emit_mtime(sec, nsec): i64 {
     return 0;
 }
 
+# ⭐ `-p` (1.8.10): the indicator is `/` after a directory and nothing else, not after a symlink
+# to one either. It is `-F`'s indicator with the rest switched off, and the two are one
+# last-wins setting in GNU: `-pF` classifies, `-Fp` writes slashes.
+var _ls_slash_only = 0;
+
 # Append a `-F`-style type suffix character (returns the byte written,
 # or 0 if none).
 fn _ls_type_suffix(st): i64 {
     var m = load64(st + 24);
     if ((m & FS_S_IFMT) == FS_S_IFDIR) { return 47; }   # / dir
+    if (_ls_slash_only == 1) { return 0; }
     if ((m & FS_S_IFMT) == FS_S_IFLNK) { return 64; }   # @ symlink
     if ((m & FS_S_IFMT) == FS_S_IFIFO) { return 124; }  # | fifo
     if ((m & FS_S_IFMT) == FS_S_IFSOCK) { return 61; }   # = socket
@@ -1686,8 +1729,25 @@ enum LsSortKey {
     LS_SORT_NAME = 0;
     LS_SORT_TIME = 1;
     LS_SORT_SIZE = 2;
+    LS_SORT_NONE = 3;   # -f: directory order
 }
 var _ls_sortkey = 0;
+
+# ⭐ `-c` / `-u` (1.8.10): the stat field `-t` sorts by and `-l` shows, the modification time
+# unless one is given; its nanoseconds are the next field. Last wins (`-cu` is the access
+# time), measured against GNU 9.12.
+var _ls_tfield = 88;
+
+fn _ls_pick_tfield(): i64 {
+    var sc = kriya_short_seq(_ls_spec, 99);    # -c
+    var su = kriya_short_seq(_ls_spec, 117);   # -u
+    if (sc == 0) {
+        if (su == 0) { return FS_STAT_MTIME; }
+        return FS_STAT_ATIME;
+    }
+    if (su > sc) { return FS_STAT_ATIME; }
+    return FS_STAT_CTIME;
+}
 
 # Three-way byte-comparison: < 0 if a<b, 0 if equal, > 0 if a>b.
 # Cyrius stdlib only exposes `streq`; we need ordering for the sort.
@@ -1712,16 +1772,26 @@ fn _ls_strcmp(a, b): i64 {
 # `kriya_argv_option_end`, which stops at the first operand — while the parser
 # permutes. `ls aa bb cc -rt` therefore honoured the `-r` and SILENTLY DROPPED
 # the `-t` from the same cluster, sorting by name and exiting 0.
+#
+# ⭐ `-f` is the third member (1.8.10): `-tf` is unsorted and `-ft` sorts by time. And with none
+# of the three, `-c` or `-u` sorts by its time unless the format is long, where it only picks
+# the date shown: `ls -c` is newest-ctime first and `ls -lc` is by name. POSIX leaves the
+# first unspecified; GNU's rule, measured.
 fn _ls_pick_sortkey(): i64 {
     var st = kriya_short_seq(_ls_spec, 116);   # -t
     var ss = kriya_short_seq(_ls_spec, 83);    # -S
-    if (st == 0) {
-        if (ss == 0) { return LS_SORT_NAME; }
-        return LS_SORT_SIZE;
+    var sf = kriya_short_seq(_ls_spec, 102);   # -f
+    var key = LS_SORT_NAME;
+    var at: i64 = 0;
+    if (st > at) { key = LS_SORT_TIME; at = st; }
+    if (ss > at) { key = LS_SORT_SIZE; at = ss; }
+    if (sf > at) { key = LS_SORT_NONE; at = sf; }
+    if (at == 0) {
+        if (_ls_tfield != FS_STAT_MTIME) {
+            if (_ls_format != LS_FMT_LONG) { key = LS_SORT_TIME; }
+        }
     }
-    if (ss == 0) { return LS_SORT_TIME; }
-    if (ss > st) { return LS_SORT_SIZE; }
-    return LS_SORT_TIME;
+    return key;
 }
 
 # Three-way order of two entries under the active sort key: negative when `a`
@@ -1738,14 +1808,14 @@ fn _ls_pick_sortkey(): i64 {
 # wrong order on any filesystem with sub-second stamps.
 fn _ls_cmp(a, b): i64 {
     if (_ls_sortkey == LS_SORT_TIME) {
-        var ta = load64(_ls_rec_st(a) + FS_STAT_MTIME);
-        var tb = load64(_ls_rec_st(b) + FS_STAT_MTIME);
+        var ta = load64(_ls_rec_st(a) + _ls_tfield);
+        var tb = load64(_ls_rec_st(b) + _ls_tfield);
         if (ta != tb) {
             if (ta > tb) { return 0 - 1; }      # newest first
             return 1;
         }
-        var na = load64(_ls_rec_st(a) + FS_STAT_MTIME_NSEC);
-        var nb = load64(_ls_rec_st(b) + FS_STAT_MTIME_NSEC);
+        var na = load64(_ls_rec_st(a) + _ls_tfield + 8);
+        var nb = load64(_ls_rec_st(b) + _ls_tfield + 8);
         if (na != nb) {
             if (na > nb) { return 0 - 1; }
             return 1;
@@ -1770,6 +1840,9 @@ fn _ls_cmp(a, b): i64 {
 # `-t`/`-S` anyway, and leaving a quadratic sort inside the release that is
 # ABOUT sorting would have been an odd place to draw the line.
 fn _ls_sort(entries, reverse): i64 {
+    # `-f`: the order the directory read gave, or the operands' own. ⚠ And `-r` with it: GNU
+    # reverses a sort, and there is none.
+    if (_ls_sortkey == LS_SORT_NONE) { return 0; }
     var n = vec_len(entries);
     if (n < 2) { return 0; }
     var src = alloc(n * 8);
@@ -1823,11 +1896,74 @@ fn _ls_sort(entries, reverse): i64 {
     return 0;
 }
 
+# ⭐ HOW FAR `ls` FOLLOWS SYMLINKS (1.8.10), GNU's four modes. The default follows an operand
+# only when it names a directory, and not under -d, -F or -l (POSIX: "symbolic links named as
+# operands that refer to directories are followed unless -d, -F or -l"). -H follows every
+# operand, -L every link the listing meets; the last of the two wins.
+enum LsDeref {
+    LS_DEREF_NEVER   = 0;
+    LS_DEREF_DIRLINK = 1;
+    LS_DEREF_ARGS    = 2;
+    LS_DEREF_ALL     = 3;
+}
+var _ls_deref = 1;
+# ⚠ -L follows an ENTRY only where GNU looks at it. A format that needs no stat and no type
+# (no -l, -s, -i, -F, -p, colour, -R or sort by time or size) never stats, so a dangling link
+# is listed by name with no error: `ls -1L` is quiet where `ls -1LF` reports it.
+var _ls_deref_quiet = 0;
+
+# ⭐ `-R` NEVER LISTS A DIRECTORY IT IS INSIDE (1.8.10). With -L a link back up the tree made
+# the recursion endless; GNU keeps the (dev, ino) of every directory being listed and refuses
+# one already among them, `ls: lp/in/back: not listing already-listed directory`. That stops a
+# bind-mount loop too, so it is on for every -R, as in GNU. ⚠ GNU exits 2 for it, kriya 1:
+# the operand-exit decision (ADR 0008) is open, and this follows kriya's current rule.
+var _ls_active = 0;
+var _ls_cur_dev = 0;
+var _ls_cur_ino = 0;
+var _ls_loop_hit = 0;   # `_ls_collect` refused a directory already being listed
+
+# An operand's stat under `_ls_deref`. A followed operand is listed with its target's metadata
+# under its own name, and no ` -> `.
+fn _ls_stat_operand(p, st): i64 {
+    if (_ls_deref == LS_DEREF_NEVER) { return fs_lstat_at(0 - 100, p, st); }
+    var r = fs_fstatat(0 - 100, p, st, 0);
+    if (_ls_deref != LS_DEREF_DIRLINK) { return r; }
+    # The default: a link to anything but a directory, or one that does not resolve, is the
+    # link itself. ⚠ A dangling link under -H or -L is `cannot access`, as GNU has it.
+    var again: i64 = 0;
+    if (r == (0 - 2)) { again = 1; }
+    if (r == (0 - 40)) { again = 1; }
+    if (r == 0) {
+        if (fs_is_dir(st) == 0) { again = 1; }
+    }
+    if (again == 1) { return fs_lstat_at(0 - 100, p, st); }
+    return r;
+}
+
 # Collect entries from `dir_path`. Returns a vec of records, or 0 on
 # open failure (caller reports its own error).
 fn _ls_collect(dir_path, all_mode, almost_all): i64 {
     var dir_fd = fs_openat(0 - 100, dir_path, FS_O_DIRECTORY, 0);  # O_RDONLY | O_DIRECTORY
     if (dir_fd < 0) { return dir_fd; }
+    #ifndef CYRIUS_TARGET_AGNOS
+    # The loop check, before a byte is read: GNU's is between the open and the header. ⚠ agnos
+    # has no symlinks, and no `fstat` of a descriptor here, so a loop cannot be made there.
+    if (_ls_active != 0) {
+        var dst[144];
+        var fr = fs_fstatat(dir_fd, "", &dst, 4096);   # AT_EMPTY_PATH
+        if (fr != 0) {
+            fs_close(dir_fd);
+            return fr;
+        }
+        if (fs_dirstack_has(_ls_active, fs_dev(&dst), fs_ino(&dst)) == 1) {
+            fs_close(dir_fd);
+            _ls_loop_hit = 1;
+            return 0 - 1;
+        }
+        _ls_cur_dev = fs_dev(&dst);
+        _ls_cur_ino = fs_ino(&dst);
+    }
+    #endif
 
     var entries = vec_new();
     var dent_buf = alloc(4096);
@@ -1867,21 +2003,40 @@ fn _ls_collect(dir_path, all_mode, almost_all): i64 {
                         memcpy(name_copy, name, nlen + 1);
                         var rec = _ls_rec_new(name_copy);
                         var ent_fp = path_join(dir_path, name);
-                        var sr = fs_stat_entry(dir_fd, ent_fp, name, _ls_rec_st(rec), 0);
-                        var gone: i64 = 0;
-                        if (sr == (0 - 2)) {
-                            # ⭐ Vanished since the read (see `_ls_vanish_keep`): no message, no
-                            # failure. Left out, unless the format never needed the stat; then the
-                            # directory read's name and type stand, as GNU's listing has them.
-                            gone = 1;
-                            if (_ls_vanish_keep == 1) {
-                                if (fs_dent_type(ent) != FS_DT_UNKNOWN) {
-                                    gone = 2;
-                                    _ls_rec_set_bad(rec);
-                                    store64(_ls_rec_st(rec) + 24, _ls_mode_from_dtype(fs_dent_type(ent)));
+                        var follow: i64 = 0;
+                        if (_ls_deref == LS_DEREF_ALL) { follow = 1; }
+                        var sr = fs_stat_entry(dir_fd, ent_fp, name, _ls_rec_st(rec), follow);
+                        # ⭐ -L: a stat that fails is either an entry gone since the read or a
+                        # link whose target cannot be followed; the lstat tells them apart, as in
+                        # GNU 9.12. A dangling link is no vanished entry: it is `cannot access`
+                        # with its type kept (`l?????????`), or, where GNU never stats, the link.
+                        var dangling: i64 = 0;
+                        if (follow == 1) {
+                            if (sr < 0) {
+                                if (fs_stat_entry(dir_fd, ent_fp, name, _ls_rec_st(rec), 0) == 0) {
+                                    dangling = 1;
+                                    if (_ls_deref_quiet == 1) { sr = 0; }
+                                    if (fs_is_lnk(_ls_rec_st(rec)) == 0) { sr = 0; }
                                 }
                             }
-                            sr = 0 - 1;
+                        }
+                        var gone: i64 = 0;
+                        if (sr == (0 - 2)) {
+                            if (dangling == 0) {
+                                # ⭐ Vanished since the read (see `_ls_vanish_keep`): no message, no
+                                # failure. Left out, unless the format never needed the stat; then
+                                # the directory read's name and type stand, as GNU's listing has
+                                # them.
+                                gone = 1;
+                                if (_ls_vanish_keep == 1) {
+                                    if (fs_dent_type(ent) != FS_DT_UNKNOWN) {
+                                        gone = 2;
+                                        _ls_rec_set_bad(rec);
+                                        store64(_ls_rec_st(rec) + 24, _ls_mode_from_dtype(fs_dent_type(ent)));
+                                    }
+                                }
+                                sr = 0 - 1;
+                            }
                         }
                         if (gone == 1) {
                             include_it = 0;
@@ -1937,26 +2092,93 @@ fn _ls_collect(dir_path, all_mode, almost_all): i64 {
 # offset out by two. Set to the directory operands while the file list prints.
 var _ls_wextra = 0;
 
-# Widest inode among `entries` and the extra operands.
+# Widest inode among `entries` and the extra operands. ⚠ An entry whose stat failed shows `?`
+# and does not widen the column, as in GNU.
 fn _ls_ino_width(entries): i64 {
     var w: i64 = 0;
     var n = vec_len(entries);
     var i: i64 = 0;
     while (i < n) {
-        var wi = _ls_dec_width(load64(_ls_rec_st(vec_get(entries, i)) + 8));
-        if (wi > w) { w = wi; }
+        var rec = vec_get(entries, i);
+        if (_ls_rec_bad(rec) == 0) {
+            var wi = _ls_dec_width(load64(_ls_rec_st(rec) + 8));
+            if (wi > w) { w = wi; }
+        }
         i = i + 1;
     }
     if (_ls_wextra != 0) {
         var m = vec_len(_ls_wextra);
         var j: i64 = 0;
         while (j < m) {
-            var wj = _ls_dec_width(load64(_ls_rec_st(vec_get(_ls_wextra, j)) + 8));
-            if (wj > w) { w = wj; }
+            var rj = vec_get(_ls_wextra, j);
+            if (_ls_rec_bad(rj) == 0) {
+                var wj = _ls_dec_width(load64(_ls_rec_st(rj) + 8));
+                if (wj > w) { w = wj; }
+            }
             j = j + 1;
         }
     }
     return w;
+}
+
+# ⭐ `-s` (1.8.10): each entry's allocated size, `st_blocks` (512-byte units) shown as 1 KiB
+# blocks rounded up, as `total` is, or `-h`-scaled. GNU 9.12's rules, measured:
+#   - right-aligned to the widest in the listing, file operands with the directory operands
+#     (`_ls_wextra`); bare under `-m`; `?` where the stat failed, which does not widen it;
+#   - after the inode and before the name, or before the mode in `-l`;
+#   - `total` without `-l` too, for each directory and never for the file operands.
+# `-k` asks for the 1 KiB unit, which is the only one kriya has: `BLOCK_SIZE`,
+# `LS_BLOCK_SIZE` and POSIXLY_CORRECT's 512 are not read.
+var _ls_blocks = 0;   # 1 under -s
+var _ls_hum    = 0;   # 1 under -h
+var _ls_bw     = 0;   # the listing's block-column width, set by `_ls_print_dir`
+
+fn _ls_blocks_str(rec, buf): i64 {
+    if (_ls_rec_bad(rec) == 1) {
+        store8(buf, 63);
+        return 1;
+    }
+    var b = load64(_ls_rec_st(rec) + FS_STAT_BLOCKS);
+    if (_ls_hum == 1) { return _ls_human(b, 512, 1, 1, buf); }
+    return _ls_human(b, 512, 1024, 0, buf);
+}
+
+fn _ls_blocks_width(entries): i64 {
+    if (_ls_blocks == 0) { return 0; }
+    var w: i64 = 0;
+    var buf[64];
+    var n = vec_len(entries);
+    var nx: i64 = 0;
+    if (_ls_wextra != 0) { nx = vec_len(_ls_wextra); }
+    var i: i64 = 0;
+    while (i < n + nx) {
+        var rec = 0;
+        if (i < n) { rec = vec_get(entries, i); }
+        else { rec = vec_get(_ls_wextra, i - n); }
+        if (_ls_rec_bad(rec) == 0) {
+            var k = _ls_blocks_str(rec, &buf);
+            if (k > w) { w = k; }
+        }
+        i = i + 1;
+    }
+    return w;
+}
+
+# Write the entry's blocks and a space, right-aligned to `_ls_bw` when `pad` is 1. Returns the
+# columns written.
+fn _ls_emit_blocks(rec, pad): i64 {
+    var buf[64];
+    var k = _ls_blocks_str(rec, &buf);
+    var cols = k;
+    if (pad == 1) {
+        if (_ls_bw > k) {
+            _ls_emit_spaces(_ls_bw - k);
+            cols = _ls_bw;
+        }
+    }
+    _ls_out(&buf, k);
+    _ls_out(" ", 1);
+    return cols + 1;
 }
 
 # ⛔ `$COLUMNS` NO LONGER FORCES COLUMNS OFF A TTY, and `-w` never did under GNU:
@@ -2138,11 +2360,21 @@ fn _ls_emit_spaces(n): i64 {
 # measured, and GNU says so in `print_file_name_and_frills`.
 fn _ls_entry_width(rec, F_mode, inode_mode, ino_w): i64 {
     var dw = _ls_name_width(_ls_rec_name(rec));
+    var bb[64];
     if (F_mode == 1) { if (_ls_type_suffix(_ls_rec_st(rec)) != 0) { dw = dw + 1; } }
     if (inode_mode == 1) {
         var iw = ino_w;
-        if (iw < 0) { iw = _ls_dec_width(load64(_ls_rec_st(rec) + 8)); }
+        if (iw < 0) {
+            iw = 1;
+            if (_ls_rec_bad(rec) == 0) { iw = _ls_dec_width(load64(_ls_rec_st(rec) + 8)); }
+        }
         dw = dw + iw + 1;
+    }
+    # ⚠ GNU counts the column's width, not the entry's: with every stat failed it is 0, and
+    # `? ` is one wider than counted. Kept, so the layout is GNU's.
+    if (_ls_blocks == 1) {
+        if (ino_w < 0) { dw = dw + _ls_blocks_str(rec, &bb) + 1; }
+        else { dw = dw + _ls_bw + 1; }
     }
     return dw;
 }
@@ -2152,10 +2384,21 @@ fn _ls_entry_width(rec, F_mode, inode_mode, ino_w): i64 {
 fn _ls_cell_open(rec, inode_mode, ino_w): i64 {
     _ls_set_normal();
     if (inode_mode == 1) {
-        var ino = load64(_ls_rec_st(rec) + 8);
-        if (ino_w < 0) { _ls_emit_dec_padded(ino, 0); }
-        else { _ls_emit_dec_padded(ino, ino_w); }
+        # ⛔ AN INODE THAT COULD NOT BE READ IS `?` (1.8.10), as `-l` already had it. kriya wrote
+        # the zeroed buffer's `0`, measured in a directory with no search permission.
+        if (_ls_rec_bad(rec) == 1) {
+            if (ino_w < 0) { _ls_out("?", 1); }
+            else { _ls_emit_q_padded(ino_w); }
+        } else {
+            var ino = load64(_ls_rec_st(rec) + 8);
+            if (ino_w < 0) { _ls_emit_dec_padded(ino, 0); }
+            else { _ls_emit_dec_padded(ino, ino_w); }
+        }
         _ls_out(" ", 1);
+    }
+    if (_ls_blocks == 1) {
+        if (ino_w < 0) { _ls_emit_blocks(rec, 0); }
+        else { _ls_emit_blocks(rec, 1); }
     }
     return 0;
 }
@@ -2476,6 +2719,7 @@ fn _ls_print_long(entries, human, F_mode, inode_mode, numeric): i64 {
             _ls_out(" ", 1);
             col = col + w_ino + 1;
         }
+        if (_ls_blocks == 1) { col = col + _ls_emit_blocks(rec, 1); }
         var perm_buf[16];
         _ls_render_symperm(load64(st + 24), &perm_buf);
         if (bad == 1) {
@@ -2490,12 +2734,16 @@ fn _ls_print_long(entries, human, F_mode, inode_mode, numeric): i64 {
         if (bad == 1) {
             _ls_emit_q_padded(w_nlink); _ls_out(" ", 1);
             col = col + w_nlink + 1;
+            # ⛔ THE OWNER AND GROUP `?` ARE LEFT-JUSTIFIED (1.8.10), the way a name is: GNU
+            # writes them through the name path, `-n` or not. kriya right-justified them, which
+            # showed only once a listing mixed failed rows with good ones, as `-lL` with a
+            # dangling link does: `l????????? ? ?     ?` against kriya's `?     ?     ?`.
             if (_ls_no_owner == 0) {
-                _ls_emit_q_padded(w_uid); _ls_out(" ", 1);
+                _ls_out("?", 1); _ls_emit_spaces(w_uid - 1); _ls_out(" ", 1);
                 col = col + w_uid + 1;
             }
             if (_ls_no_group == 0) {
-                _ls_emit_q_padded(w_gid); _ls_out(" ", 1);
+                _ls_out("?", 1); _ls_emit_spaces(w_gid - 1); _ls_out(" ", 1);
                 col = col + w_gid + 1;
             }
             _ls_emit_q_padded(w_size); _ls_out(" ", 1);
@@ -2528,7 +2776,7 @@ fn _ls_print_long(entries, human, F_mode, inode_mode, numeric): i64 {
             _ls_out(" ", 1);
             col = col + w_size + 1;
             var tb[64];
-            var tn = _ls_render_time(load64(st + 88), load64(st + 96), &tb);
+            var tn = _ls_render_time(load64(st + _ls_tfield), load64(st + _ls_tfield + 8), &tb);
             store8(&tb + tn, 32);
             _ls_out(&tb, tn + 1);
             col = col + tn + 1;
@@ -2556,6 +2804,7 @@ fn _ls_print_long(entries, human, F_mode, inode_mode, numeric): i64 {
 }
 
 fn _ls_print_dir(entries, long_mode, human, F_mode, inode_mode): i64 {
+    _ls_bw = _ls_blocks_width(entries);
     if (long_mode == 1) {
         return _ls_print_long(entries, human, F_mode, inode_mode, _ls_numeric);
     }
@@ -2611,6 +2860,11 @@ var _ls_hdr_first = 1;
 fn _ls_list_dir(dir_path, all_mode, almost_all, long_mode, human, reverse, F_mode, inode_mode, R_mode, header,
   is_child): i64 {
     var entries_or_err = _ls_collect(dir_path, all_mode, almost_all);
+    if (_ls_loop_hit == 1) {
+        _ls_loop_hit = 0;
+        report_note("ls", dir_path, "not listing already-listed directory");
+        return 1;
+    }
     if (entries_or_err < 0) {
         # ⭐ A subdirectory `-R` found that is gone by the time it is opened: no section, no
         # message, no failure (GNU 9.12). ⚠ An operand still fails.
@@ -2626,8 +2880,20 @@ fn _ls_list_dir(dir_path, all_mode, almost_all, long_mode, human, reverse, F_mod
         _ls_emit_header(dir_path);
     }
     var entries = entries_or_err;
+    var pushed: i64 = 0;
+    if (_ls_active != 0) {
+        #ifndef CYRIUS_TARGET_AGNOS
+        if (fs_dirstack_push(_ls_active, _ls_cur_dev, _ls_cur_ino) != 0) {
+            report_note("ls", dir_path, "cannot track directory depth: out of memory");
+            return 1;
+        }
+        pushed = 1;
+        #endif
+    }
     _ls_sort(entries, reverse);
-    if (long_mode == 1) { _ls_print_total(entries, human); }
+    var want_total = long_mode;
+    if (_ls_blocks == 1) { want_total = 1; }
+    if (want_total == 1) { _ls_print_total(entries, human); }
     _ls_print_dir(entries, long_mode, human, F_mode, inode_mode);
 
     # ⛔ A SUBDIRECTORY THAT FAILS FAILS THE RUN (1.6.12). The recursive call's
@@ -2661,6 +2927,7 @@ fn _ls_list_dir(dir_path, all_mode, almost_all, long_mode, human, reverse, F_mod
             i = i + 1;
         }
     }
+    if (pushed == 1) { fs_dirstack_pop(_ls_active); }
     return sub_failed;
 }
 
@@ -2752,10 +3019,16 @@ fn cmd_ls(start: i64): i64 {
         return EXIT_USAGE;
     }
 
+    # ⛔ `-a`, `-A` AND `-f` ARE ONE LAST-WINS SETTING (1.8.10). kriya let `-A` win whatever the
+    # order, so `ls -Aa` hid `.` and `..`; GNU shows them, and `-f` is an `-a`.
     var all_mode: i64 = 0;
-    if (flags_get_bool(_ls_spec, _ls_a_idx) == 1) { all_mode = 1; }
     var almost_all: i64 = 0;
-    if (flags_get_bool(_ls_spec, _ls_A_idx) == 1) { almost_all = 1; }
+    var va = kriya_opt_seq(_ls_spec, 97, "all");
+    var vA = kriya_opt_seq(_ls_spec, 65, "almost-all");
+    var vf = kriya_short_seq(_ls_spec, 102);
+    if (vf > va) { va = vf; }
+    if (va > vA) { all_mode = 1; }
+    if (vA > va) { almost_all = 1; }
     # ⭐ THE FORMAT COMES FROM THE ARGV WALK, NOT FROM THE FLAG BITS, because the
     # group is last-wins and the table has no order.
     _ls_scan_format();
@@ -2786,8 +3059,22 @@ fn cmd_ls(start: i64): i64 {
     var reverse: i64 = 0;
     if (flags_get_bool(_ls_spec, _ls_r_idx) == 1) { reverse = 1; }
     var F_mode: i64 = 0;
-    if (flags_get_bool(_ls_spec, _ls_F_idx) == 1) { F_mode = 1; }
-    if (F_mode == 1) { _ls_F_long = long_mode; }
+    if (human == 1) { _ls_hum = 1; }
+    if (flags_get_bool(_ls_spec, _ls_s_idx) == 1) { _ls_blocks = 1; }
+    # `-F` and `-p` are one indicator style, the last one given; `F_mode` is "an indicator is
+    # written" and `classify` is `-F`'s own.
+    var classify: i64 = 0;
+    var ind_F = kriya_short_seq(_ls_spec, 70);
+    var ind_p = kriya_short_seq(_ls_spec, 112);
+    if (ind_F > ind_p) {
+        F_mode = 1;
+        classify = 1;
+    }
+    if (ind_p > ind_F) {
+        F_mode = 1;
+        _ls_slash_only = 1;
+    }
+    if (classify == 1) { _ls_F_long = long_mode; }
     var inode_mode: i64 = 0;
     if (flags_get_bool(_ls_spec, _ls_i_idx) == 1) { inode_mode = 1; }
     # ⚠ `-n` implies `-l` in GNU, and the implication lives in the last-wins walk;
@@ -2810,6 +3097,7 @@ fn cmd_ls(start: i64): i64 {
         _ls_now_s = t0 / 1000000000;
         _ls_now_ns = t0 % 1000000000;
     }
+    _ls_tfield = _ls_pick_tfield();
     _ls_sortkey = _ls_pick_sortkey();
     # ⚠ `--color` takes an OPTIONAL value: bare means `always`. GNU also accepts
     # `yes`/`force`, `tty`/`if-tty` and `no`/`none` as aliases.
@@ -2844,7 +3132,9 @@ fn cmd_ls(start: i64): i64 {
     # colour off again.
     _ls_vanish_keep = 1;
     if (long_mode == 1) { _ls_vanish_keep = 0; }
-    if (F_mode == 1) { _ls_vanish_keep = 0; }
+    # ⚠ `-F`, not `-p`: a slash needs the type alone, which the directory read gives.
+    if (classify == 1) { _ls_vanish_keep = 0; }
+    if (_ls_blocks == 1) { _ls_vanish_keep = 0; }
     if (inode_mode == 1) { _ls_vanish_keep = 0; }
     if (_ls_color == 1) { _ls_vanish_keep = 0; }
     if (_ls_sortkey == LS_SORT_TIME) { _ls_vanish_keep = 0; }
@@ -2903,6 +3193,21 @@ fn cmd_ls(start: i64): i64 {
     if (flags_get_bool(_ls_spec, _ls_d_idx) == 1) { d_mode = 1; }
     var R_mode: i64 = 0;
     if (flags_get_bool(_ls_spec, _ls_R_idx) == 1) { R_mode = 1; }
+    if (R_mode == 1) {
+        if (d_mode == 0) { _ls_active = fs_dirstack_new(); }
+    }
+    _ls_deref = LS_DEREF_DIRLINK;
+    if (d_mode == 1) { _ls_deref = LS_DEREF_NEVER; }
+    if (classify == 1) { _ls_deref = LS_DEREF_NEVER; }
+    if (long_mode == 1) { _ls_deref = LS_DEREF_NEVER; }
+    var dH = kriya_opt_seq(_ls_spec, 72, "dereference-command-line");
+    var dL = kriya_opt_seq(_ls_spec, 76, "dereference");
+    if (dH > dL) { _ls_deref = LS_DEREF_ARGS; }
+    if (dL > dH) { _ls_deref = LS_DEREF_ALL; }
+    # Where GNU never looks at an entry, -L does not either (see `_ls_deref_quiet`).
+    _ls_deref_quiet = _ls_vanish_keep;
+    if (R_mode == 1) { _ls_deref_quiet = 0; }
+    if (_ls_slash_only == 1) { _ls_deref_quiet = 0; }
 
     var npos = flags_positional_count(_ls_spec);
     var rc: i64 = EXIT_SUCCESS;
@@ -2956,7 +3261,7 @@ fn cmd_ls(start: i64): i64 {
     while (i < npos) {
         var p = flags_positional(_ls_spec, i);
         var st[144];
-        var sr = fs_lstat_at(0 - 100, p, &st);
+        var sr = _ls_stat_operand(p, &st);
         if (sr != 0) {
             _ls_report(p, 0 - sr);
             any_failed = 1;

@@ -90,6 +90,9 @@ if [ "$HAVE_HOOK" = 1 ]; then
     gone "ls -i, gone at its stat"      stat v d/v "$LS" -i d
     gone "ls -t, gone at its stat"      stat v d/v "$LS" -t d
     gone "ls -S, gone at its stat"      stat v d/v "$LS" -S d
+    # ⭐ 1.8.10: `-s` needs the stat, and so does `-c` alone, which sorts by the ctime.
+    gone "ls -s, gone at its stat"      stat v d/v "$LS" -s d
+    gone "ls -c, gone at its stat"      stat v d/v "$LS" -c d
     # ⚠ The `total` too: GNU's leaves the entry's blocks out, and so must the row count.
     gone "ls -l, a link gone at its readlink" readlink l d/l "$LS" -l --time-style=long-iso d
     gone "du -a, a file gone at its stat"     stat v d/v "$DU" -a d
@@ -106,6 +109,12 @@ if [ "$HAVE_HOOK" = 1 ]; then
     expect_eq "ls, gone at its stat: the name stands" "1 0 [] a b dang l s v" "$FIRED $RC [$ERR] $(echo $OUT)"
     mk; hook stat v d/v "$LS" -1 d
     expect_eq "ls -1, gone at its stat: the name stands" "1 0 [] a b dang l s v" "$FIRED $RC [$ERR] $(echo $OUT)"
+    # ⭐ 1.8.10: `-p` needs the type alone, which the read gives, so the slash stands too; and
+    # `-1L` stats nothing in GNU, so a target gone under kriya's stat is kept like any other.
+    mk; hook stat s d/s "$LS" -p d
+    expect_eq "ls -p, a directory gone at its stat: kept, with its /" "1 0 [] a b dang l s/ v" "$FIRED $RC [$ERR] $(echo $OUT)"
+    mk; hook stat v d/v "$LS" -1L d
+    expect_eq "ls -1L, gone at its stat: the name stands" "1 0 [] a b dang l s v" "$FIRED $RC [$ERR] $(echo $OUT)"
     # -R: kept from the read, so it is entered, and gone: no section, nothing said.
     mk; hook stat s d/s "$LS" -R d
     expect_eq "ls -R, a directory gone at its stat" "1 0 [] d: a b dang l s v" "$FIRED $RC [$ERR] $(echo $OUT)"
