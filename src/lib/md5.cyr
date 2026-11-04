@@ -1,0 +1,182 @@
+# md5.cyr — MD5 (RFC 1321), for `sort -R`.
+#
+# ⭐ GNU's `sort -R` orders keys by the MD5 of a 16-byte random salt followed by the key, and
+# `--random-source=FILE` fixes the salt to FILE's first 16 bytes (1.9.1). With the same digest kriya
+# gives GNU's order byte for byte under the same source, which is what lets `-R` be tested against
+# GNU at all. MD5 is not a security property here; GNU picked it as a fast keyed shuffle.
+#
+# A context is MD5_CTXSZ bytes: the four 32-bit state words, each in an i64, the byte count, the
+# bytes buffered, and the 64-byte block buffer. Contexts are plain memory: copy one with `memcpy`
+# to continue from the same state twice, as `sort` does for each pair of keys.
+# ⚠ Words are kept masked to 32 bits; `>>` is Cyrius's logical shift, which a rotation wants.
+
+enum Md5Ctx {
+    MD5_A = 0;
+    MD5_B = 8;
+    MD5_C = 16;
+    MD5_D = 24;
+    MD5_LEN = 32;
+    MD5_HAVE = 40;
+    MD5_BUF = 48;
+    MD5_CTXSZ = 112;
+}
+
+var _md5_k = 0;
+var _md5_s = 0;
+
+fn _md5_tables(): i64 {
+    if (_md5_k != 0) { return 0; }
+    _md5_k = alloc(64 * 8);
+    _md5_s = alloc(64 * 8);
+    # K[i] = floor(|sin(i + 1)| * 2^32).
+    var kv = alloc(64 * 8);
+    store64(kv + 0, 0xd76aa478); store64(kv + 8, 0xe8c7b756);
+    store64(kv + 16, 0x242070db); store64(kv + 24, 0xc1bdceee);
+    store64(kv + 32, 0xf57c0faf); store64(kv + 40, 0x4787c62a);
+    store64(kv + 48, 0xa8304613); store64(kv + 56, 0xfd469501);
+    store64(kv + 64, 0x698098d8); store64(kv + 72, 0x8b44f7af);
+    store64(kv + 80, 0xffff5bb1); store64(kv + 88, 0x895cd7be);
+    store64(kv + 96, 0x6b901122); store64(kv + 104, 0xfd987193);
+    store64(kv + 112, 0xa679438e); store64(kv + 120, 0x49b40821);
+    store64(kv + 128, 0xf61e2562); store64(kv + 136, 0xc040b340);
+    store64(kv + 144, 0x265e5a51); store64(kv + 152, 0xe9b6c7aa);
+    store64(kv + 160, 0xd62f105d); store64(kv + 168, 0x02441453);
+    store64(kv + 176, 0xd8a1e681); store64(kv + 184, 0xe7d3fbc8);
+    store64(kv + 192, 0x21e1cde6); store64(kv + 200, 0xc33707d6);
+    store64(kv + 208, 0xf4d50d87); store64(kv + 216, 0x455a14ed);
+    store64(kv + 224, 0xa9e3e905); store64(kv + 232, 0xfcefa3f8);
+    store64(kv + 240, 0x676f02d9); store64(kv + 248, 0x8d2a4c8a);
+    store64(kv + 256, 0xfffa3942); store64(kv + 264, 0x8771f681);
+    store64(kv + 272, 0x6d9d6122); store64(kv + 280, 0xfde5380c);
+    store64(kv + 288, 0xa4beea44); store64(kv + 296, 0x4bdecfa9);
+    store64(kv + 304, 0xf6bb4b60); store64(kv + 312, 0xbebfbc70);
+    store64(kv + 320, 0x289b7ec6); store64(kv + 328, 0xeaa127fa);
+    store64(kv + 336, 0xd4ef3085); store64(kv + 344, 0x04881d05);
+    store64(kv + 352, 0xd9d4d039); store64(kv + 360, 0xe6db99e5);
+    store64(kv + 368, 0x1fa27cf8); store64(kv + 376, 0xc4ac5665);
+    store64(kv + 384, 0xf4292244); store64(kv + 392, 0x432aff97);
+    store64(kv + 400, 0xab9423a7); store64(kv + 408, 0xfc93a039);
+    store64(kv + 416, 0x655b59c3); store64(kv + 424, 0x8f0ccc92);
+    store64(kv + 432, 0xffeff47d); store64(kv + 440, 0x85845dd1);
+    store64(kv + 448, 0x6fa87e4f); store64(kv + 456, 0xfe2ce6e0);
+    store64(kv + 464, 0xa3014314); store64(kv + 472, 0x4e0811a1);
+    store64(kv + 480, 0xf7537e82); store64(kv + 488, 0xbd3af235);
+    store64(kv + 496, 0x2ad7d2bb); store64(kv + 504, 0xeb86d391);
+    memcpy(_md5_k, kv, 64 * 8);
+    var i: i64 = 0;
+    while (i < 64) {
+        # The four rounds' four rotations: 7 12 17 22, 5 9 14 20, 4 11 16 23, 6 10 15 21.
+        var rot = "\x07\x0c\x11\x16\x05\x09\x0e\x14\x04\x0b\x10\x17\x06\x0a\x0f\x15";
+        var sv = load8(rot + (i / 16) * 4 + i % 4);
+        store64(_md5_s + i * 8, sv);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn md5_init(ctx): i64 {
+    _md5_tables();
+    store64(ctx + MD5_A, 0x67452301);
+    store64(ctx + MD5_B, 0xefcdab89);
+    store64(ctx + MD5_C, 0x98badcfe);
+    store64(ctx + MD5_D, 0x10325476);
+    store64(ctx + MD5_LEN, 0);
+    store64(ctx + MD5_HAVE, 0);
+    return 0;
+}
+
+# One 64-byte block at `p` into the state.
+fn _md5_block(ctx, p): i64 {
+    var M = 4294967295;
+    var a = load64(ctx + MD5_A);
+    var b = load64(ctx + MD5_B);
+    var c = load64(ctx + MD5_C);
+    var d = load64(ctx + MD5_D);
+    var i: i64 = 0;
+    while (i < 64) {
+        var f: i64 = 0;
+        var g: i64 = 0;
+        if (i < 16) {
+            f = (b & c) | ((b ^ M) & d);
+            g = i;
+        } elif (i < 32) {
+            f = (d & b) | ((d ^ M) & c);
+            g = (5 * i + 1) % 16;
+        } elif (i < 48) {
+            f = b ^ c ^ d;
+            g = (3 * i + 5) % 16;
+        } else {
+            f = c ^ (b | (d ^ M));
+            g = (7 * i) % 16;
+        }
+        var q = p + g * 4;
+        var w = load8(q) | (load8(q + 1) << 8) | (load8(q + 2) << 16) | (load8(q + 3) << 24);
+        var t = (a + f + load64(_md5_k + i * 8) + w) & M;
+        var s = load64(_md5_s + i * 8);
+        var rot = ((t << s) | (t >> (32 - s))) & M;
+        a = d;
+        d = c;
+        c = b;
+        b = (b + rot) & M;
+        i = i + 1;
+    }
+    store64(ctx + MD5_A, (load64(ctx + MD5_A) + a) & M);
+    store64(ctx + MD5_B, (load64(ctx + MD5_B) + b) & M);
+    store64(ctx + MD5_C, (load64(ctx + MD5_C) + c) & M);
+    store64(ctx + MD5_D, (load64(ctx + MD5_D) + d) & M);
+    return 0;
+}
+
+fn md5_update(ctx, p, n): i64 {
+    store64(ctx + MD5_LEN, load64(ctx + MD5_LEN) + n);
+    var have = load64(ctx + MD5_HAVE);
+    var i: i64 = 0;
+    while (i < n) {
+        if (have == 0) {
+            # Whole blocks straight from the input.
+            if (n - i >= 64) {
+                _md5_block(ctx, p + i);
+                i = i + 64;
+                continue;
+            }
+        }
+        store8(ctx + MD5_BUF + have, load8(p + i));
+        have = have + 1;
+        i = i + 1;
+        if (have == 64) {
+            _md5_block(ctx, ctx + MD5_BUF);
+            have = 0;
+        }
+    }
+    store64(ctx + MD5_HAVE, have);
+    return 0;
+}
+
+# The 16-byte digest into `out`. The context is spent.
+fn md5_final(ctx, out): i64 {
+    var bits = load64(ctx + MD5_LEN) * 8;
+    var pad[72];
+    store8(&pad, 128);
+    var k: i64 = 1;
+    while (k < 72) { store8(&pad + k, 0); k = k + 1; }
+    var have = load64(ctx + MD5_HAVE);
+    var padlen = 56 - have;
+    if (have >= 56) { padlen = 120 - have; }
+    var len_before = load64(ctx + MD5_LEN);
+    md5_update(ctx, &pad, padlen);
+    var lb[8];
+    var j: i64 = 0;
+    while (j < 8) { store8(&lb + j, (bits >> (8 * j)) & 255); j = j + 1; }
+    md5_update(ctx, &lb, 8);
+    store64(ctx + MD5_LEN, len_before);
+    var w: i64 = 0;
+    while (w < 4) {
+        var v = load64(ctx + w * 8);
+        store8(out + w * 4, v & 255);
+        store8(out + w * 4 + 1, (v >> 8) & 255);
+        store8(out + w * 4 + 2, (v >> 16) & 255);
+        store8(out + w * 4 + 3, (v >> 24) & 255);
+        w = w + 1;
+    }
+    return 0;
+}

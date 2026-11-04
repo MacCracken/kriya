@@ -85,8 +85,11 @@ printf 'x\n' > small.txt
 # subshell aborts at the non-zero status before it can echo it.
 rc=0; "$BIN" du -h . >/dev/null 2>&1 || rc=$?
 expect_eq "du -h is human-readable, not help" "0" "$rc"
+# ⚠ `sort -h` was a bad option, exit 2, until 1.9.1; it is GNU's human-numeric
+# sort now, the meaning ADR 0002 kept the letter free for.
 rc=0; "$BIN" sort -h small.txt >/dev/null 2>&1 || rc=$?
-expect_eq "sort -h is a bad option, not help" "2" "$rc"
+expect_eq "sort -h is human-numeric sort, not help" "0" "$rc"
+expect_eq "sort -h sorts" "$(printf '2\n1K\n')" "$(printf '1K\n2\n' | "$BIN" sort -h 2>&1)"
 case "$("$BIN" du -h . 2>&1 | head -1)" in
     NAME*) FAIL=$((FAIL + 1)); printf "FAIL du -h printed help\n" >&2 ;;
     *) PASS=$((PASS + 1)) ;;
@@ -160,8 +163,8 @@ expect_eq "kriya --version with an argument is a usage error" "2" "$rc"
 rc=0; "$BIN" ls -- --version >/dev/null 2>&1 || rc=$?
 expect_eq "-- makes --version an operand" "1" "$rc"
 
-# ⛔ `-V` IS NOT A VERSION ALIAS — reserved for `sort -V` (version-string sort,
-# roadmap 1.9.1), exactly as `-h` is reserved per utility. Pinned so nobody
+# ⛔ `-V` IS NOT A VERSION ALIAS — it is `sort -V` (version-string sort, since
+# 1.9.1), exactly as `-h` is reserved per utility. Pinned so nobody
 # "helpfully" adds it.
 rc=0; "$BIN" ls -V >/dev/null 2>&1 || rc=$?
 expect_eq "ls -V is a bad option, not version" "2" "$rc"

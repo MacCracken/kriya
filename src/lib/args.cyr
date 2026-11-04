@@ -838,9 +838,8 @@ var _kriya_help_tok = 0;
 #
 # ⚠ `-V` is NOT a version alias, for the same reason `-h` is not a help alias
 # (ADR 0002). GNU gives `sort -V` to version-STRING SORT, and kriya's `sort`
-# header reserves it for exactly that (roadmap 1.9.1) — so claiming `-V` here
-# would either collide on arrival or force `sort` to be the one utility where it
-# means something else. A short letter that means one thing on 37 utilities and
+# has meant exactly that since 1.9.1 — so claiming `-V` here would force `sort`
+# to be the one utility where it means something else. A short letter that means one thing on 37 utilities and
 # something else on one is worse than a short letter that never means it.
 fn _kriya_tok_is_version(tok, tlen): i64 {
     if (tlen == 9) {

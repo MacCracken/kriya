@@ -1,0 +1,159 @@
+# vercmp.cyr — version order: gnulib's `filenvercmp`, for `sort -V`.
+#
+# ⭐ GNU's `sort -V` compares keys with gnulib's `filenvercmp` (filevercmp.c), the Debian `Version`
+# algorithm with file-name rules on top. This is a line-for-line port of the one coreutils 9.1 to
+# 9.12 build in (1.9.1), so kriya's version order is GNU's byte for byte:
+#
+#   - The empty string sorts first. Then names that start with `.`: `.`, then `..`, then the rest.
+#   - A file suffix, the longest match of `(\.[A-Za-z~][A-Za-z0-9~]*)*$` that is not the whole
+#     string, is cut off and the prefixes are compared first. Only on a tie are the whole strings
+#     compared.
+#   - The Debian part alternates runs of non-digits and digits. Non-digits compare by `_vc_order`:
+#     the end of the string before everything but `~`, `~` before even the end, letters by their
+#     byte, any other byte after every letter. Digit runs compare as numbers, leading zeros dropped.
+#
+# ⚠ Lengths are explicit, so a NUL byte is an ordinary character here, as it is in GNU's `sort`.
+# ⚠ "Letter" and "digit" are ASCII only, `c_isalpha` and `c_isdigit`: a byte past 127 is "other".
+
+fn _vc_isdigit(c): i64 {
+    if (c >= 48) { if (c <= 57) { return 1; } }
+    return 0;
+}
+
+fn _vc_isalpha(c): i64 {
+    if (c >= 65) { if (c <= 90) { return 1; } }
+    if (c >= 97) { if (c <= 122) { return 1; } }
+    return 0;
+}
+
+# A suffix byte after the first: a letter, a digit or `~`.
+fn _vc_suffix_ch(c): i64 {
+    if (_vc_isalpha(c) == 1) { return 1; }
+    if (_vc_isdigit(c) == 1) { return 1; }
+    if (c == 126) { return 1; }
+    return 0;
+}
+
+# The length of the part of `s` (`n` bytes) before its file suffix — gnulib's `file_prefixlen`.
+fn _vc_prefixlen(s, n): i64 {
+    var prefixlen: i64 = 0;
+    var i: i64 = 0;
+    while (i < n) {
+        i = i + 1;
+        prefixlen = i;
+        var more: i64 = 1;
+        while (more == 1) {
+            more = 0;
+            if (i + 1 < n) {
+                if (load8(s + i) == 46) {
+                    var c1 = load8(s + i + 1);
+                    var starts: i64 = _vc_isalpha(c1);
+                    if (c1 == 126) { starts = 1; }
+                    if (starts == 1) {
+                        i = i + 2;
+                        var run: i64 = 1;
+                        while (run == 1) {
+                            if (i >= n) { run = 0; }
+                            elif (_vc_suffix_ch(load8(s + i)) == 1) { i = i + 1; }
+                            else { run = 0; }
+                        }
+                        more = 1;
+                    }
+                }
+            }
+        }
+    }
+    return prefixlen;
+}
+
+# The weight of `s[pos]` among non-digits; `pos == len` is the end of the string.
+fn _vc_order(s, pos, len): i64 {
+    if (pos == len) { return 0 - 1; }
+    var c = load8(s + pos);
+    if (_vc_isdigit(c) == 1) { return 0; }
+    if (_vc_isalpha(c) == 1) { return c; }
+    if (c == 126) { return 0 - 2; }
+    return c + 256;
+}
+
+# dpkg's `verrevcmp`, as gnulib modified it.
+fn _vc_verrevcmp(s1, l1, s2, l2): i64 {
+    var p1: i64 = 0;
+    var p2: i64 = 0;
+    while (p1 < l1 || p2 < l2) {
+        var first_diff: i64 = 0;
+        var nd: i64 = 1;
+        while (nd == 1) {
+            nd = 0;
+            if (p1 < l1) { if (_vc_isdigit(load8(s1 + p1)) == 0) { nd = 1; } }
+            if (p2 < l2) { if (_vc_isdigit(load8(s2 + p2)) == 0) { nd = 1; } }
+            if (nd == 1) {
+                var c1 = _vc_order(s1, p1, l1);
+                var c2 = _vc_order(s2, p2, l2);
+                if (c1 != c2) { return c1 - c2; }
+                p1 = p1 + 1;
+                p2 = p2 + 1;
+            }
+        }
+        while (p1 < l1 && load8(s1 + p1) == 48) { p1 = p1 + 1; }
+        while (p2 < l2 && load8(s2 + p2) == 48) { p2 = p2 + 1; }
+        var dd: i64 = 1;
+        while (dd == 1) {
+            dd = 0;
+            if (p1 < l1) {
+                if (p2 < l2) {
+                    var d1 = load8(s1 + p1);
+                    var d2 = load8(s2 + p2);
+                    if (_vc_isdigit(d1) == 1) {
+                        if (_vc_isdigit(d2) == 1) {
+                            if (first_diff == 0) { first_diff = d1 - d2; }
+                            p1 = p1 + 1;
+                            p2 = p2 + 1;
+                            dd = 1;
+                        }
+                    }
+                }
+            }
+        }
+        if (p1 < l1) { if (_vc_isdigit(load8(s1 + p1)) == 1) { return 1; } }
+        if (p2 < l2) { if (_vc_isdigit(load8(s2 + p2)) == 1) { return 0 - 1; } }
+        if (first_diff != 0) { return first_diff; }
+    }
+    return 0;
+}
+
+# Version order of `a` (`alen` bytes) and `b` (`blen` bytes): negative, 0 or positive.
+fn filenvercmp(a, alen, b, blen): i64 {
+    if (alen == 0) {
+        if (blen == 0) { return 0; }
+        return 0 - 1;
+    }
+    if (blen == 0) { return 1; }
+    if (load8(a) == 46) {
+        if (load8(b) != 46) { return 0 - 1; }
+        if (alen == 1) {
+            if (blen == 1) { return 0; }
+            return 0 - 1;
+        }
+        if (blen == 1) { return 1; }
+        var add: i64 = 0;
+        if (alen == 2) { if (load8(a + 1) == 46) { add = 1; } }
+        var bdd: i64 = 0;
+        if (blen == 2) { if (load8(b + 1) == 46) { bdd = 1; } }
+        if (add == 1) {
+            if (bdd == 1) { return 0; }
+            return 0 - 1;
+        }
+        if (bdd == 1) { return 1; }
+    } elif (load8(b) == 46) {
+        return 1;
+    }
+    var apl = _vc_prefixlen(a, alen);
+    var bpl = _vc_prefixlen(b, blen);
+    var r = _vc_verrevcmp(a, apl, b, bpl);
+    if (r != 0) { return r; }
+    if (apl == alen) {
+        if (bpl == blen) { return 0; }
+    }
+    return _vc_verrevcmp(a, alen, b, blen);
+}

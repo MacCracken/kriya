@@ -51,9 +51,19 @@ expect_eq() {
 expect_full() {
     name=$1
     shift
+    expect_full_rc "$name" 1 "$@"
+}
+
+# expect_full_rc NAME RC UTIL [ARGS...] — the same, for a utility whose error
+# status is not 1: `sort` exits 2 for every error, as POSIX and GNU have it
+# (ADR 0008, amended at 1.9.1).
+expect_full_rc() {
+    name=$1
+    want=$2
+    shift 2
     rc=0
     err=$(timeout 10 "$BIN" "$@" <"$WORK/f" 2>&1 >/dev/full) || rc=$?
-    expect_eq "$name exit 1" "1" "$rc"
+    expect_eq "$name exit $want" "$want" "$rc"
     # Either message is correct. `sort` and `tr` already noticed the failed
     # write themselves and report it in their own vocabulary ("(write): no
     # space left on device"); the dispatcher's generic "write error" line is
@@ -87,7 +97,7 @@ else
     expect_full "wc"      wc -l "$WORK/f"
     expect_full "ls"      ls "$WORK"
     expect_full "head"    head -n 2 "$WORK/f"
-    expect_full "sort"    sort "$WORK/f"
+    expect_full_rc "sort" 2 sort "$WORK/f"
     expect_full "uniq"    uniq "$WORK/f"
     expect_full "nl"      nl "$WORK/f"
     expect_full "cut"     cut -c 1-3 "$WORK/f"
@@ -98,6 +108,9 @@ else
     gnu_rc=0; timeout 10 seq 1 5 >/dev/full 2>/dev/null || gnu_rc=$?
     kri_rc=0; timeout 10 "$BIN" seq 1 5 >/dev/full 2>/dev/null || kri_rc=$?
     expect_eq "seq matches GNU exit status" "$gnu_rc" "$kri_rc"
+    gnu_rc=0; LC_ALL=C timeout 10 sort "$WORK/f" >/dev/full 2>/dev/null || gnu_rc=$?
+    kri_rc=0; timeout 10 "$BIN" sort "$WORK/f" >/dev/full 2>/dev/null || kri_rc=$?
+    expect_eq "sort matches GNU exit status" "$gnu_rc" "$kri_rc"
 
     # A utility that already detected its own failure keeps its own exit code —
     # the sticky flag is a net under success, not an override.

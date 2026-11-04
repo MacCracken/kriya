@@ -58,10 +58,13 @@ include "src/cmd/tail.cyr"
 # their pure number and LIST parsers; `cut`'s reports through `report_note`, so
 # `report.cyr` (quote.cyr and errmsg.cyr above) comes with it.
 include "src/lib/report.cyr"
+# ⚠ M15e, with the reference: `seq.cyr` and `printf.cyr` read and write floats through it (1.9.0),
+# and `sort -g` reads its keys with it (1.9.1). `md5.cyr` and `vercmp.cyr` are `sort -R` and `-V`.
+include "src/lib/xfloat.cyr"
+include "src/lib/md5.cyr"
+include "src/lib/vercmp.cyr"
 include "src/cmd/sort.cyr"
 include "src/cmd/cut.cyr"
-# ⚠ M15e, with the reference: `seq.cyr` and `printf.cyr` read and write floats through it (1.9.0).
-include "src/lib/xfloat.cyr"
 include "src/cmd/seq.cyr"
 # ⚠ M15e, PRE-EMPTIVELY (1.6.17). `printf.cyr` is here for its number reader,
 # `_pf_num`, which reports through `report.cyr` above and reads nothing else.
@@ -197,12 +200,64 @@ fn _t_tobs_r(tok): i64 {
 
 # `_so_cmp_numeric` on two keys written into one buffer: -1 / 0 / +1.
 fn _t_ncmp(a, b): i64 {
+    _so_tables();
     var al = strlen(a);
     var bl = strlen(b);
     var buf = alloc(al + bl + 1);
     memcpy(buf, a, al);
     memcpy(buf + al, b, bl);
-    return _so_cmp_numeric(buf, 0, al, al, bl);
+    return _so_cmp_numeric(buf, al, buf + al, bl);
+}
+
+# The sign of a comparison, so a test states only the order.
+fn _t_sign(v): i64 {
+    if (v < 0) { return 0 - 1; }
+    if (v > 0) { return 1; }
+    return 0;
+}
+
+# MD5 of `s` as 32 hex digits, compared with `want`: 1 when they match.
+fn _t_md5(s, want): i64 {
+    var ctx[112];
+    var dig[16];
+    md5_init(&ctx);
+    md5_update(&ctx, s, strlen(s));
+    md5_final(&ctx, &dig);
+    var hex = "0123456789abcdef";
+    var i: i64 = 0;
+    while (i < 16) {
+        var b = load8(&dig + i);
+        if (load8(want + 2 * i) != load8(hex + (b >> 4))) { return 0; }
+        if (load8(want + 2 * i + 1) != load8(hex + (b & 15))) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn _t_vc(a, b): i64 { return _t_sign(filenvercmp(a, strlen(a), b, strlen(b))); }
+
+# Field `which` (0 start, 1 limit) of key `spec` in `line`, as an offset from its start.
+fn _t_field(spec, line, which): i64 {
+    _so_tables();
+    var k = _so_parse_key(spec);
+    var beg[8];
+    var lim[8];
+    _so_key_bounds(line, strlen(line), k, &beg, &lim);
+    if (which == 0) { return load64(&beg) - line; }
+    return load64(&lim) - line;
+}
+
+fn _t_hcmp(a, b): i64 {
+    _so_tables();
+    return _t_sign(_so_cmp_human(a, strlen(a), b, strlen(b)));
+}
+
+fn _t_gcmp(a, b): i64 {
+    var ra[32];
+    var rb[32];
+    var oka = _so_gen_read(a, &ra);
+    var okb = _so_gen_read(b, &rb);
+    return _t_sign(_so_cmp_general(oka, &ra, okb, &rb));
 }
 
 # How many ranges `_cut_parse_list` makes of `s`, or -1 when it refuses it.
@@ -1806,6 +1861,114 @@ fn main() {
     assert_eq(xf_cmp(xb, xa), 0 - 1, "0.5 < 3");
     xf_parse("nan", XF_LDBL, xb);
     assert_eq(xf_cmp(xb, xa), 2, "a NaN is unordered");
+
+    # --- 1.9.1: sort's keys, MD5 and version order ---
+    test_group("md5 — RFC 1321's vectors (1.9.1)");
+    assert_eq(_t_md5("", "d41d8cd98f00b204e9800998ecf8427e"), 1, "the empty string");
+    assert_eq(_t_md5("a", "0cc175b9c0f1b6a831c399e269772661"), 1, "a");
+    assert_eq(_t_md5("abc", "900150983cd24fb0d6963f7d28e17f72"), 1, "abc");
+    assert_eq(_t_md5("message digest", "f96b697d7cb7938d525a2f31aaf161d0"), 1, "message digest");
+    assert_eq(_t_md5("abcdefghijklmnopqrstuvwxyz", "c3fcd3d76192e4007dfb496cca67e13b"), 1, "the alphabet");
+    assert_eq(_t_md5("12345678901234567890123456789012345678901234567890123456789012345678901234567890",
+      "57edf4a22be3c955ac49da2e2107b67a"), 1, "80 digits: two blocks");
+    assert_eq(_t_md5("0123456789012345678901234567890123456789012345678901234",
+      "6e7a4fc92eb1c3f6e652425bcc8d44b5"), 1, "55 bytes: the padding fits one block");
+    assert_eq(_t_md5("01234567890123456789012345678901234567890123456789012345",
+      "8af270b2847610e742b0791b53648c09"), 1, "56 bytes: the padding needs a second");
+
+    test_group("filenvercmp — gnulib's version order, as GNU sort -V measures it (1.9.1)");
+    assert_eq(_t_vc("1.2", "1.10"), 0 - 1, "digit runs are numbers");
+    assert_eq(_t_vc("1~rc1", "1"), 0 - 1, "~ sorts before the end");
+    assert_eq(_t_vc("", "a"), 0 - 1, "empty first");
+    assert_eq(_t_vc("~", ""), 1, "even before ~");
+    assert_eq(_t_vc(".", ".."), 0 - 1, ". then ..");
+    assert_eq(_t_vc("..", ".a"), 0 - 1, ".. then other dot names");
+    assert_eq(_t_vc(".a", "a"), 0 - 1, "dot names before the rest");
+    assert_eq(_t_vc("foo-1.0.tar.gz", "foo-1.0a.tar.gz"), 0 - 1, "the suffix is cut first");
+    assert_eq(_t_vc("1.02", "1.2"), 0, "leading zeros drop");
+    assert_eq(_t_vc("a1", "a01"), 0, "...in any run");
+    assert_eq(_t_vc("a", "a.b"), 0 - 1, "a suffix sorts after none");
+    assert_eq(_t_vc("2a", "a2"), 0 - 1, "a digit before a letter");
+    assert_eq(_t_vc("v1.2", "1.2"), 1, "a letter after a digit");
+    assert_eq(_t_vc("a.~b", "a"), 1, ".~b is a suffix");
+    assert_eq(_t_vc("1a", "1.a"), 1, "a letter after .");
+    assert_eq(_t_vc("a+", "a."), 0 - 1, "other bytes by value, after letters");
+    assert_eq(_t_vc("1-2", "1.2"), 0 - 1, "- before .");
+
+    test_group("_so_parse_key — GNU's -k (1.9.1)");
+    _so_tables();
+    var sk = _so_parse_key("2");
+    assert_eq(load64(sk + SO_K_SWORD), 1, "-k2: field 2, zero-based");
+    assert_eq(load64(sk + SO_K_EWORD), 0 - 1, "...to the end of the line");
+    sk = _so_parse_key("1");
+    assert_eq(load64(sk + SO_K_SWORD), 0 - 1, "-k1 is the line's start");
+    sk = _so_parse_key("1.1");
+    assert_eq(load64(sk + SO_K_SWORD), 0 - 1, "-k1.1 is too");
+    sk = _so_parse_key("1.2");
+    assert_eq(load64(sk + SO_K_SWORD), 0, "-k1.2: field 1");
+    assert_eq(load64(sk + SO_K_SCHAR), 1, "...character 2, zero-based");
+    sk = _so_parse_key("2.3b,4.5nr");
+    assert_eq(load64(sk + SO_K_SCHAR), 2, "start character");
+    assert_eq(load64(sk + SO_K_SKIPS), 1, "b after POS1 is the start's");
+    assert_eq(load64(sk + SO_K_SKIPE), 0, "...and not the end's");
+    assert_eq(load64(sk + SO_K_EWORD), 3, "end field, zero-based");
+    assert_eq(load64(sk + SO_K_ECHAR), 5, "end character, one-based");
+    assert_eq(load64(sk + SO_K_NUM) + load64(sk + SO_K_REV), 2, "n and r after POS2 count for the key");
+    sk = _so_parse_key("1,1b");
+    assert_eq(load64(sk + SO_K_SKIPS) * 10 + load64(sk + SO_K_SKIPE), 1, "b after POS2 is the end's");
+    sk = _so_parse_key("2,2.0");
+    assert_eq(load64(sk + SO_K_ECHAR), 0, "an end offset may be 0");
+    sk = _so_parse_key("1di");
+    assert_eq(load64(sk + SO_K_IGNORE), _so_t_dict, "i never overrides d");
+    sk = _so_parse_key("99999999999999999999");
+    assert_eq(load64(sk + SO_K_SWORD), KRIYA_COUNT_MAX - 1, "a huge field saturates");
+    assert_eq(_so_parse_key("0"), 0, "field 0 refused");
+    assert_eq(_so_parse_key("1.0"), 0, "start character 0 refused");
+    assert_eq(_so_parse_key("2,0"), 0, "end field 0 refused");
+    assert_eq(_so_parse_key("2x"), 0, "a stray letter refused");
+    assert_eq(_so_parse_key("1."), 0, "no digits after . refused");
+    assert_eq(_so_key_incompatible(_so_parse_key("1nd")), 1, "-nd is incompatible");
+    assert_eq(_so_key_incompatible(_so_parse_key("1dV")), 0, "-dV is not");
+    assert_eq(_so_key_incompatible(_so_parse_key("1fbrn")), 0, "f, b and r combine with anything");
+
+    test_group("begfield / limfield — GNU's fields (1.9.1)");
+    _so_tab = 0 - 1;
+    assert_eq(_t_field("2", "a  b c", 0), 1, "without -t a field keeps its leading blanks");
+    assert_eq(_t_field("2b", "a  b c", 0), 3, "-b drops them");
+    assert_eq(_t_field("2,2", "a  b c", 1), 4, "-k2,2 ends after the field's text");
+    assert_eq(_t_field("1,1.5", "ab cdef", 1), 5, "an end offset runs past its field");
+    assert_eq(_t_field("1,1.2", "ab cdef", 1), 2, "...or stops inside it");
+    assert_eq(_t_field("3", "a b", 0), 3, "a field past the end is empty");
+    assert_eq(_t_field("1.3", "ab", 0), 2, "a character past the end stops there");
+    _so_tab = 58;
+    assert_eq(_t_field("2", "a::b", 0), 2, "-t: field 2 starts after the first :");
+    assert_eq(_t_field("2,2", "a::b", 1), 2, "...and is empty");
+    assert_eq(_t_field("2,3", "a::b", 1), 4, "-k2,3 runs to the end of field 3");
+    assert_eq(_t_field("1,2.1", "ab:cd", 1), 4, "-k1,2.1 takes field 2's first character");
+    _so_tab = 0 - 1;
+
+    test_group("sort comparators — -h, -M, -g and argmatch (1.9.1)");
+    assert_eq(_t_hcmp("2K", "1M"), 0 - 1, "K before M whatever the digits");
+    assert_eq(_t_hcmp("999", "1K"), 0 - 1, "no unit before K");
+    assert_eq(_t_hcmp("-1M", "-1K"), 0 - 1, "negative units flip");
+    assert_eq(_t_hcmp("0K", "1"), 0 - 1, "a unit on zero does not count");
+    assert_eq(_t_hcmp("1k", "1K"), 0, "k is K");
+    assert_eq(_t_hcmp("1e3", "2"), 0 - 1, "e is not a unit");
+    assert_eq(_t_hcmp("1.5Q", "9R"), 1, "Q is the largest");
+    assert_eq(_so_month("  feb", 5), 2, "blanks, then any case");
+    assert_eq(_so_month("DECEMBER", 8), 12, "a prefix is enough");
+    assert_eq(_so_month("ja", 2), 0, "two letters are not a month");
+    assert_eq(_t_gcmp("abc", "-inf"), 0 - 1, "a conversion error first");
+    assert_eq(_t_gcmp("nan", "-inf"), 0 - 1, "then NaNs");
+    assert_eq(_t_gcmp("-nan", "nan"), 0 - 1, "-nan before nan");
+    assert_eq(_t_gcmp("-0", "0"), 0, "-0 is 0");
+    assert_eq(_t_gcmp("1e3", "0x3e9"), 0 - 1, "1000 < 1001");
+    assert_eq(_t_gcmp("1e5000", "inf"), 0, "an overflow is inf");
+    assert_eq(_so_argmatch("q", "quiet\0silent\0diagnose-first", "CCc", 3), 67, "a prefix");
+    assert_eq(_so_argmatch("", "quiet\0silent\0diagnose-first", "CCc", 3), 0 - 2, "empty is ambiguous");
+    assert_eq(_so_argmatch("x", "quiet\0silent\0diagnose-first", "CCc", 3), 0 - 1, "no match");
+    assert_eq(_so_argmatch("n", "general-numeric\0human-numeric\0month\0numeric\0random\0version",
+      "ghMnRV", 6), 110, "n is numeric");
 
     return assert_summary();
 

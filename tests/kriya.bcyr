@@ -10,6 +10,9 @@
 #     `cp --preserve=links` both pay on every file they touch
 #   - kriya_parse_count, the `head` / `tail` count parser, plain and
 #     saturating (1.6.15)
+#   - the per-comparison cost of `sort -R` (an MD5 continued from the salted
+#     state, for a 12-byte key) and `sort -V` (filenvercmp of two package
+#     names) (1.9.1)
 #
 # These are the per-step costs that compose the dispatcher hot path.
 # True process-spawn cold-start needs `time ./build/kriya true`-style
@@ -38,6 +41,9 @@ include "src/lib/args.cyr"
 include "src/lib/help.cyr"
 include "src/cmd/true.cyr"
 include "src/cmd/false.cyr"
+# `sort -R`'s digest and `sort -V`'s order (1.9.1); both stand alone.
+include "src/lib/md5.cyr"
+include "src/lib/vercmp.cyr"
 
 # The inode set under bench. ⚠ Built in `main` rather than here: a non-literal
 # initializer at module scope costs a `gvar_toks` slot.
@@ -48,6 +54,11 @@ var _grep_bench_bre   = 0;
 var _grep_bench_re2   = 0;
 var _grep_bench_line  = "the quick brown fox jumps over the lazy dog";
 var _grep_bench_llen  = 43;
+
+# `sort -R`: the salted state, a scratch context and the digest, set up in `main`.
+var _md5_bench_salted = 0;
+var _md5_bench_ctx    = 0;
+var _md5_bench_dig    = 0;
 
 # ---- benchmark fixtures --------------------------------------------------
 
@@ -154,6 +165,19 @@ fn bench_niyama_re2_search() {
     return 0;
 }
 
+# One `sort -R` key digest: the salted state copied, the key added, the digest taken.
+fn bench_md5_key() {
+    memcpy(_md5_bench_ctx, _md5_bench_salted, MD5_CTXSZ);
+    md5_update(_md5_bench_ctx, "pkg-1.10.3-x", 12);
+    md5_final(_md5_bench_ctx, _md5_bench_dig);
+    return 0;
+}
+
+fn bench_filenvercmp() {
+    var r = filenvercmp("pkg-1.10.3.tar.gz", 17, "pkg-1.9.12.tar.gz", 17);
+    return 0;
+}
+
 # ---- runner --------------------------------------------------------------
 
 fn main() {
@@ -236,6 +260,19 @@ fn main() {
     var b18 = bench_new("args/parse_count_saturating");
     bench_run_batch(b18, &bench_parse_count_saturating, 10000, 100);
     bench_report(b18);
+
+    _md5_bench_salted = alloc(MD5_CTXSZ);
+    _md5_bench_ctx = alloc(MD5_CTXSZ);
+    _md5_bench_dig = alloc(16);
+    md5_init(_md5_bench_salted);
+    md5_update(_md5_bench_salted, "0123456789abcdef", 16);
+    var b19 = bench_new("sort/md5_key_digest");
+    bench_run_batch(b19, &bench_md5_key, 10000, 100);
+    bench_report(b19);
+
+    var b20 = bench_new("sort/filenvercmp");
+    bench_run_batch(b20, &bench_filenvercmp, 10000, 100);
+    bench_report(b20);
 
     return 0;
 }
