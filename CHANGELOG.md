@@ -6,6 +6,81 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.8.9] - 2026-11-03 — every walk is a loop
+
+The roadmap's 1.8.9 slot. 1.8.6 bounded every walk's open directories and made `rm -r` a loop
+([ADR 0029](docs/adr/0029-walks-keep-32-directories-open-and-stop-when-the-way-back-moved.md)). `find`, `du`,
+`cp -R` and `grep -r` were still recursions, which a stack guard stopped short of a crash. They are loops
+now, and the ADR is amended.
+
+### Changed
+
+- ⭐ **`find`, `du`, `cp -R` and `grep -r` have no depth limit but memory.** Under an 8 MiB stack the
+  1.8.6 guard stopped them at 15,701, 10,767, 5,798 and 14,494 levels. Measured at 100,000 levels under
+  `ulimit -n 1024`:
+
+  | Walk | 1.8.9 | GNU |
+  |---|---|---|
+  | `find -name f` | 0.97 s, 42.8 MB | 5.37 s, 33.3 MB |
+  | `du -s` | 1.02 s, 20.7 MB | 1.13 s, 38.5 MB |
+  | `grep -rl` | 0.94 s, 20.7 MB | 1.12 s, 32.8 MB |
+  | `cp -R` | 2.07 s, 52.7 MB | stops at PATH_MAX, 2,040 levels |
+  | `rm -r` (a loop since 1.8.6) | 1.28 s, 20.7 MB | 1.39 s, 27.9 MB |
+
+  - A directory's state lives in its level's slots in the shared walk (`wk_u`), and each walk's paths in
+    one buffer (`wk_path_push`). Each recursion became two halves, entering a directory and leaving
+    it, with a loop between them. Output order is unchanged. 33 `find` listings, 18 `du` listings and
+    4 `grep -r` listings over `/usr/include`, `/usr/lib/python3*` and `/etc` are byte-identical to
+    GNU's, and a `cp -R` of `/usr/include` copies every entry and symlink target as it is.
+  - The stack guard, `wk_stack_room`, is removed with the recursion.
+- ⛔ **`find` kept every entry's path and stat**, so its memory was the entry count times the depth:
+  `find /usr -name none` (202,664 entries) took 42.6 MB at 1.8.8 and 99.0 at 1.8.3. It takes **5.2 MB**
+  now, where GNU takes 8.2, in 0.47 s (1.8.8: 0.50; GNU: 0.26, which is 1.10.6's stat work). An entry's
+  stat and context record are one buffer per depth. This was the memory half of roadmap 1.10.6.
+  - ⚠ The first loop took `-name`'s name from a scan of the whole path, as the recursion had, so every
+    entry cost its depth: 21 s over 100,000 levels. The name is the directory entry's now: 0.97 s.
+- `cp -R` keeps its two display paths in the walks' buffers, where every entry's two paths were joined
+  and kept (164 MB at 8,000 levels). `--preserve=links` copies the destination path it remembers.
+
+### Fixed
+
+- ⛔ **`grep -r` skipped an entry whose stat failed, in silence.** Over a readable but unsearchable
+  directory (0600), `grep -r hit d` exited 0 where GNU says *Permission denied* and exits 2. It is
+  reported now. GNU's `grep` has no vanish rule, and neither has kriya's.
+- ⛔ **`du` dropped the line of a directory it could not read, and under `-b` counted its size.** GNU's
+  FTS_DNR reports *cannot read directory* and still prints the directory with its own blocks: 0 under
+  `-b`, where a directory counts nothing. kriya said *cannot access* and printed no line. Under `-b` it
+  added the directory's st_size to its parent, so `du -ba x` over an unreadable `x/u` said 65 where GNU
+  says 5. Found by comparing `/etc`; older than 1.8.6.
+
+### Changed (tests)
+
+- **`smoke-deep.sh` 46 → 54.**
+  - Its stack section asserts GNU's answer now, not a diagnostic. Every walk runs over 3,000 levels
+    under a 1 MiB stack, where a recursion could not have held a thousand, and over 30,000 levels,
+    past every old guard.
+  - `find -depth` past PATH_MAX checks that a directory's context record survives the path buffer
+    growing under it.
+- **`smoke-du.sh` 94 → 101** (the unreadable directory, against GNU; 5 fail on 1.8.8); **`smoke-grep.sh`
+  358 → 360**.
+- **Unit 892 → 890**: the stack guard's two cases went with it.
+- **Sixteen mutants**, each breaking one piece of a loop's bookkeeping, and twelve die:
+  - a total not carried up, `-S` ignored, an unreadable directory's line dropped;
+  - a failed stat skipped, a nested failure not carried up, the mode to restore forgotten;
+  - a stale stat restored, the link master kept as a buffer pointer;
+  - `find -depth`'s record keeping a stale path or parent, `-name` handed the path, `-L` never popping.
+  - ⚠ The four that live are EQUIVALENT: each drops the path cut after an entry the walk did not
+    enter, and nothing reads the buffer there. Every push writes at the level's own length, and every
+    way out of a level cuts back to it.
+  - Restored, the build is byte-identical.
+- **890 unit + 72 syscall + 18 POSIX.** Smoke is **8,167 / 0** in ubuntu:24.04 (GNU 9.4), **8,170 / 0** in
+  26.04 (9.7), and **8,262 / 0** on the dev box (9.12), across 44 scripts. On aarch64 under qemu, `smoke-deep`,
+  `-find`, `-du`, `-cp-recursive`, `-grep`, `-vanish` and `-mv` pass, bar `smoke-du`'s qemu-only `ulimit -v`
+  case. The `find` permission fuzz shows 0 differences in 2,000 modes, and the find and grep fuzz harnesses
+  are green under poison. `cyrius lint`, the lints, `check-oracles.sh` and `watchlist-scan.py` are clean,
+  and all three targets build warning-free.
+- **Sizes:** host 1,359,352 → **1,363,544**, agnos 1,363,880 → **1,368,072**.
+
 ## [1.8.8] - 2026-11-03 — GNU 9.12's output rules
 
 The roadmap's 1.8.8 slot: what the 9.12 review recommended following

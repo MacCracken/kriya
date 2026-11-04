@@ -1,6 +1,6 @@
 # 0029 — A walk keeps 32 directories open, and stops when the way back up has moved
 
-**Status**: Accepted
+**Status**: Accepted; amended at 1.8.9 (every walk is a loop, and decision 5's stack guard is gone)
 **Date**: 2026-11-03
 
 ## Context
@@ -55,6 +55,10 @@ walk stops if that is not the directory it closed.**
    environment, less 256 KiB for the deepest call's own frames. Such a directory is reported,
    `kriya <util>: '<dir>': directory nested too deeply to walk`, and the operand fails. It is not
    a crash. `rm -r` is a loop, not a recursion: its depth is bounded by memory alone.
+   - ⭐ **Amended at 1.8.9: all five walks are loops**, and the guard is removed with the
+     recursion. A walker keeps each directory's state in its level's four slots (`wk_u`) and its
+     paths in the walk's one buffer (`wk_path_push`). Depth is bounded by memory alone: 100,000
+     levels in 21–53 MB for each walk, measured at 1.8.9.
 6. **agnos** has no open-relative-to-a-descriptor, so its walks open by path and nothing is
    closed early there.
 
@@ -75,11 +79,11 @@ and they iterate with `wk_next` only.
   - Walks never hold more than 32 descriptors each. Each open is O_CLOEXEC, so a `find -exec`
     child sees what GNU's sees.
 - **Negative**
-  - **A kriya limit GNU does not have.** `find`, `du`, `cp -R` and `grep -r` stop at the stack
-    guard. Measured under an 8 MiB stack at 1.8.6, on one 25,000-level chain, the first directory
-    each one refused was at level **15,701** for `find`, **14,494** for `grep -r`, **10,767** for
-    `du` and **5,798** for `cp -R`. Each printed one diagnostic. `cp -R` still goes nearly three
-    times as deep as GNU's. Making the four loops, as `rm -r` now is, is roadmap 1.8.9.
+  - **A kriya limit GNU does not have** (until 1.8.9). `find`, `du`, `cp -R` and `grep -r` stopped
+    at the stack guard. Measured under an 8 MiB stack at 1.8.6, on one 25,000-level chain, the
+    first directory each one refused was at level **15,701** for `find`, **14,494** for `grep -r`,
+    **10,767** for `du` and **5,798** for `cp -R`. Each printed one diagnostic. ⭐ Gone at 1.8.9,
+    when the four became loops.
   - A walk deeper than 32 levels does more work for each directory beyond the budget: an
     `fstat` and a read to the end on the way down, and an `openat("..")` and an `fstat` on the
     way back up. A walk within the budget reads exactly as it did.
@@ -104,6 +108,6 @@ and they iterate with `wk_next` only.
 - **Make every walk a loop now.** `rm -r` is the one where a limit is a security problem, and it
   is a loop. The other four have recursive shapes their output order depends on, `find`'s
   `-depth` and `-prune` and `du`'s per-level totals. Converting them is a separate change, and
-  until then the guard bounds them.
+  until then the guard bounds them. ⭐ Done at 1.8.9.
 - **Stop the whole invocation on a moved directory**, as GNU does. kriya's error model is per
   operand, and a moved directory is a property of one operand's tree.

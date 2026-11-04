@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.9** — the walks as loops |
+| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.10** — `ls`'s POSIX options |
 | **1.9.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.9.0** — floats |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
@@ -62,20 +62,6 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 (`src/lib/argbatch.cyr`), which counts as GNU's `buildcmd` does
 ([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
 
-- **1.8.9 — `find`, `du`, `cp -R` and `grep -r` walk as loops.** 1.8.6 gave every walk a budget of
-  32 open directories ([ADR 0029](../adr/0029-walks-keep-32-directories-open-and-stop-when-the-way-back-moved.md))
-  and made `rm -r` a loop, so its depth is bounded by memory alone: 100,000 levels in 20.7 MB. The
-  other four are still recursions. A stack guard (`wk_stack_room`) stops each one with a
-  diagnostic and exit 1 where it would have died of SIGSEGV. Measured under an 8 MiB stack at
-  1.8.6, the first level each refused: `find` 15,701, `grep -r` 14,494, `du` 10,767 and `cp -R`
-  5,798. GNU's `find`, `du` and `grep` have no limit, and GNU `cp -R` stops at PATH_MAX, 2,040.
-  - The per-level state each keeps in its frame moves into the walk's level slots (`wk_u`), as
-    `rm`'s did. ⚠ The output order is the recursion's: `find`'s pre-order and `-depth`, `-prune`
-    after the visit, and `du`'s line for a directory after its entries.
-  - ⛔ **`find`'s memory goes with it.** Every entry's path is bump-allocated and never freed, so
-    `find` near the guard holds about 250 MB, and `find -depth -delete` 2.1 GB when it reports a
-    failure at every level. The loop takes the one path buffer `rm` and `du` use (`wk_path_push`).
-    That is the memory half of 1.10.6, which keeps the stat half.
 - **1.8.10 — `ls`'s remaining POSIX options, and what the 9.12 review left to decide.** 1.8.8
   shipped the rest of the review ([audit](../audit/2026-11-03-gnu-9.12-parity.md)).
   - **Eight POSIX options are refused, exit 2**: `-H -L -c -f -k -p -s -u`. The 2026-05-18 POSIX
@@ -235,11 +221,9 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
     and kriya's 14, because kriya stats every entry it reads and GNU stats none. That is not GNU
     9.12's vanish rule, which findutils does not have (its `-ignore_readdir_race` is off by default),
     and it goes with this slot.
-  - **The memory half moved to roadmap 1.8.9** at 1.8.6, with the loop that needs the same path
-    buffer. Every entry's path and stat buffer are bump-allocated and never freed: `find /usr -name
-    none` peaks at **99.0 MB against GNU's 8.5 MB** (202,664 entries), and at 150.2 MB under `-L`
-    against 8.6 MB (measured at 1.8.3). The `getdents64` buffers are the shared walk's since 1.8.6,
-    one per open directory.
+  - **The memory half shipped at 1.8.9**, with the loop that needed the same path buffer:
+    `find /usr -name none` peaks at 5.2 MB against GNU's 8.2 (202,664 entries), where it was 99.0 MB
+    at 1.8.3 and 42.6 at 1.8.8. The time is this slot's: 0.47 s against GNU's 0.26.
 
 ---
 

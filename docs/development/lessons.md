@@ -357,6 +357,16 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   levels, `du` from 12,000, `find` and `rm -r` from 20,000. No probe under the default limit could
   have shown it, because the descriptor limit always came first.
 
+- ⛔ *A rewrite inherits its predecessor's per-entry costs, and depth multiplies them.* 1.8.9 made
+  `find` a loop with one path buffer, and it still took 21 s over 100,000 levels against GNU's 5: each
+  entry's `-name` took its name from a scan of the whole path for its last `/`, as the recursion
+  always had, so every entry cost its depth. The recursion hid it, because its stack ran out first.
+  The directory entry already holds the name: 0.97 s. ⭐ Measure a walk at a depth where O(depth) per
+  entry shows, not only at the depths the old code could reach.
+- ⛔ *A pointer recorded before a descent can be stale after it, buffers included.* A walk's one path
+  buffer GROWS by moving, so `find -depth`'s record of a directory, written before the walk went down,
+  held the old address once the path passed 4 KiB. Rebuild such a record on the way back up, and test
+  past the buffer's first growth (`smoke-deep.sh`, 2,500 levels).
 - ⛔ *A cached descriptor is a NUMBER, and numbers are reused.* Once a walk may close a directory
   and reopen it later (1.8.6), a descriptor a walker held across a descent is not merely invalid. The
   kernel hands the freed number to the next open, so the stale one can name a DEEPER directory, and
