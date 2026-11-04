@@ -6,6 +6,73 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 This file is **released items only**. Deferred follow-ups (post-1.0 GNU-parity features, Cyrius proposal sweeps, perf optimizations, the boot-burn signal) live in [`docs/development/roadmap.md`](docs/development/roadmap.md) under **Post-1.0 milestones**.
 
+## [1.8.7] - 2026-11-03 — an entry that vanishes mid-walk is not an error
+
+The roadmap's 1.8.7 slot, from the 9.12 review (audit § 7b). GNU 9.12 NEWS: *"'du', 'ls' ... no longer
+fail merely because files may be being removed in parallel."*
+
+### Fixed
+
+- ⛔ **`ls` and `du` failed when another process removed entries while they read a directory.** An entry
+  the directory read returned, and that was gone by the time it was stat'd or opened, was reported as
+  *cannot access* and failed the run. In 200 listings of a directory another process was churning:
+
+  | Command | GNU 9.12 | 1.8.6 | 1.8.7 |
+  |---|---|---|---|
+  | `ls -l`, files vanishing | 0 failed | 17 | 0 |
+  | `ls`, files vanishing | 0 | 18 | 0 |
+  | `ls -R`, directories vanishing | 0 | 28 (265 messages) | 0 |
+  | `du -a`, files vanishing | 0 | 22 | 0 |
+  | `du -s`, directories vanishing | 0 | 6 | 0 |
+
+  1.8.7 was also measured over 300 runs of `ls -l`, `ls`, `ls -R`, `ls -lR`, `du -a` and `du -s`, with
+  both files and directories vanishing: no failures.
+- **GNU 9.12's rules, measured exactly.** A new ptrace hook removes the entry at the command's first stat
+  or open of it, so the race is lost every time. GNU 9.7 reports and exits 1 in every case below:
+  - **ENOENT only**, and only for an entry a directory read returned. A command-line operand that
+    vanishes still fails, and so does any other errno (a directory that can be read and not searched).
+  - **`ls` leaves the entry out when the format needs its stat**: long format (`-l`, `-n`, `-g`, `-o`),
+    `-F`, `-i`, colour, or a sort by time or size. The `total` leaves it out too.
+  - **`ls` keeps the name when the format does not need the stat.** GNU never looks, so its listing is
+    the directory read's. kriya stats every entry, and keeps the name and type that read returned.
+  - In long format, **a symlink whose `readlink` fails with ENOENT is left out**. kriya had shown it
+    without its target, silently.
+  - **Under `ls -R`, a subdirectory gone by the time it is opened** has no section and no message.
+  - **`du` leaves the entry out whole**: a file, a directory gone at its stat or at its open, its size
+    and its line. A file gone inside a subdirectory leaves that subdirectory at 0.
+  - ⚠ **Under `du -L`, a dangling symlink still answers ENOENT and is still there**, so it is still
+    reported, as in GNU. An entry counts as gone only when its `lstat` agrees.
+
+### Changed
+
+- **Roadmap:** the 1.8.7 slot is removed; the next slot is **1.8.8**.
+  - 1.8.8 gains a decision. `ls` exits 1 for an operand it cannot access, where GNU exits 2, and
+    [ADR 0008](docs/adr/0008-posix-exit-code-policy.md)'s tiers keep 2 for usage errors.
+  - 1.10.6 records why kriya's `find` fails under the same churn, 14 runs in 200, where GNU's does not:
+    kriya stats every entry, and findutils stats none. findutils has no vanish rule (`-ignore_readdir_race`
+    is off by default).
+
+### Tests
+
+- **`smoke-vanish.sh`, new: 31 cases.**
+  - **23 deterministic ones**, through `scripts/vanish.py`. That hook runs a command under ptrace and
+    removes the entry at its Nth stat, open or `readlink` of the name. Each case compares the result with
+    kriya's own listing of the tree once the entry is gone, with nothing on stderr and exit 0, or else
+    asserts that the failure still happens.
+  - **8 churn cases** of 100 runs each, asserting zero failures.
+  - **25 of the 31 fail against 1.8.6.** The six that pass are the ones that assert a failure still
+    happens (three operands, two EACCES) and one churn case, whose rate varies from run to run.
+  - ⚠ The hook needs x86_64 and ptrace. Its cases are skipped, and counted, without them.
+- **Fourteen mutants, one per rule, all die.** One survived the first run: a mutant that forgave every
+  errno. Its case used a `chmod 000` directory, which fails at the open, and the open never consults
+  the vanish rule. The case now uses a 0600 directory, whose entries fail their stat with EACCES.
+- **883 unit + 72 syscall + 18 POSIX.** Smoke is **8,050 / 0** in ubuntu:24.04 (GNU 9.4), **8,053 / 0** in
+  26.04 (9.7), and **8,144 / 0** on the dev box (9.12), across 43 scripts. Both containers allow ptrace, so
+  all 31 cases ran in each. On aarch64 under qemu, `smoke-vanish`, `-ls` and `-du` pass, bar `smoke-du`'s
+  qemu-only `ulimit -v` case. Fuzz is green under poison. `cyrius lint`, the lints, `check-oracles.sh`
+  and `watchlist-scan.py` are clean, and all three targets build warning-free.
+- **Sizes:** host 1,355,072 → **1,359,192**, agnos 1,359,592 → **1,363,712**.
+
 ## [1.8.6] - 2026-11-03 — deep trees: every walk keeps 32 directories open
 
 The roadmap's 1.8.6 slot. Every fd-relative walk held one open directory per level, so a tree deeper

@@ -157,6 +157,12 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
 
 ### Testing the tests: mutation and adversarial review
 
+- ⛔ **A mutant that widens a rule survives a case whose failure takes another path.** 1.8.7's
+  vanish rule forgives ENOENT alone, and a mutant that forgave EVERY errno passed the case meant to
+  pin it: a `chmod 000` directory fails at its OPEN, and the open has its own ENOENT test that never
+  asks the rule. A 0600 directory (readable, not searchable) lists its names and fails every stat
+  below it with EACCES, which is the path the rule sits on. ⭐ Ask of a "still fails" case which
+  line of code produces the failure.
 - ⛔ **A mutant can be killed by a HANG, and a suite with no timeout reports nothing.** 1.8.6's
   mutant that stopped saving a closed directory's entries made the walk read that directory again
   from the start when it came back, so it walked the same subtree for ever. The first mutation run
@@ -195,6 +201,15 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   option under test, the capture fails and the WHOLE SCRIPT ends, printing no summary — which the
   mutation run reports as an empty line, not as failures. Write `|| true` inside every capture of
   a command that is allowed to fail.
+- ⭐ **A race can be made deterministic from outside the code.** 1.8.7's case is an entry that
+  vanishes between a directory read and its stat. A churning second process loses that race about
+  one run in twelve, and nothing in kriya should grow a test hook for it. `scripts/vanish.py` runs
+  the command under ptrace and removes the entry when the command's Nth stat, open or `readlink` of
+  that name arrives, so the race is lost every time, for kriya and for GNU alike. That is how GNU
+  9.12's exact rules were measured: which formats leave the entry out, which keep the name, and
+  that a dangling link is still reported. ⚠ Two traps cost an hour: a `/proc/PID/mem` handle opened
+  before the child's `exec` reads the old address space, empty; and a read into an unmapped page
+  returns EMPTY rather than raising, so a loop waiting for the NUL spins.
 - ⛔ **A limit test must SET the limit.** CI runners allow far more than 1,024 descriptors, so a
   1,100-level tree passes there against walks that fail at 1,021 on a desktop. `smoke-deep.sh` runs
   every budget case under `ulimit -n 64` (or 8), set by the script.
@@ -656,7 +671,10 @@ from this file"). Removing the shipped entries would have deleted the lessons wi
   measured ugrep's answers (1.8.6). The smoke scripts run under `sh` and get `/usr/bin`'s GNU tools.
   Ad-hoc probes must name `/usr/bin/grep` and `/usr/bin/find`, or run under `sh`. ⚠ zsh also leaves
   an unquoted `$args` unsplit, so a probe loop over argument strings handed kriya ONE argument, and
-  the *bad option* exit 2 was read as a result. Write comparison loops as `sh` scripts.
+  the *bad option* exit 2 was read as a result. Write comparison loops as `sh` scripts. (It bit
+  again at 1.8.7, one release after it was written down.) ⛔ And `pkill -f PATTERN` from the tool
+  shell matches the tool shell's own command line, which contains the pattern, and kills it
+  (exit 144). List the processes, then kill by PID.
 
 - **If kriya does not read an environment variable, the ORACLE must not either** — or the test
   measures the shell rather than the code. Cost three separate repairs: `BLOCK_SIZE` for `du`/`df`,

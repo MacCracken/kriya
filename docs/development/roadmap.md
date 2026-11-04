@@ -36,7 +36,7 @@ Two rules hold across the arcs:
 
 | Arc | Theme | Open enabler | Next up |
 |---|---|---|---|
-| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.7** — vanishing entries |
+| **1.8.x** | Traversal, exec, filesystem reporting, syscall portability | — | **1.8.8** — GNU 9.12's output rules |
 | **1.9.x** | Parsers & numerics | float formatting, byte-suffix parser | **1.9.0** — floats |
 | **1.10.x** | Performance | niyama regex speed (upstream, filed) | **1.10.0** — `wc -c` fast path |
 
@@ -62,17 +62,6 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
 (`src/lib/argbatch.cyr`), which counts as GNU's `buildcmd` does
 ([ADR 0026](../adr/0026-batched-exec-counts-a-command-line-as-gnu-does.md)).
 
-- **1.8.7 — An entry that vanishes mid-walk is not an error.** GNU 9.12's `ls` and `du` skip an
-  entry that a directory read returned and that is gone by the time it is stat'ed (`ENOENT` only,
-  and never for a command-line operand). In 300 listings of a directory another process was
-  churning, GNU 9.12 exited non-zero 0 times. kriya exited non-zero 19 times in `ls -l` and 19 in
-  `du -a`, each time with *cannot access* ([audit § 7b](../audit/2026-11-03-gnu-9.12-parity.md)).
-  The `ls` site is `src/cmd/ls.cyr`'s per-entry `fs_stat_entry` failure path.
-  - ⚠ **GNU keeps one exception**: a dangling symlink still lists (it `lstat`s before giving up).
-  - `du`'s walk is the shared one since 1.8.6 (`src/lib/walk.cyr`), and `ls` is not a walk at all:
-    `ls -R` opens by path and reads each directory whole. ⚠ It cannot be tested deterministically
-    without a hook between `getdents` and `fstatat`. The churn probe is a statistical smoke, so it
-    needs a fixed iteration count and a zero-failure assertion.
 - **1.8.8 — GNU 9.12's output rules.** Measured on 9.4, 9.7, 9.11 and 9.12 in
   [`docs/audit/2026-11-03-gnu-9.12-parity.md`](../audit/2026-11-03-gnu-9.12-parity.md). Every
   smoke case the split touches is version-gated today, so CI's oracle can move without warning.
@@ -108,6 +97,10 @@ Everything here builds on the spawn helper (`src/lib/spawn.cyr`) and the command
       carried them until this one. `-q` belongs here; the other eight need a slot.
   - **Head and tail headers stay POSIX's**, unquoted (§ 1; the draft ADR is in Appendix A). That
     is no code change. It is listed so the decision is not mistaken for an omission.
+  - **⛔ DECISION FIRST: `ls` exits 1 for an operand it cannot access, where GNU exits 2** (found at
+    1.8.7). GNU's 2 is "serious trouble", a command-line argument it cannot reach, and its 1 is a
+    lesser failure such as a subdirectory. POSIX says only ">0". [ADR 0008](../adr/0008-posix-exit-code-policy.md)'s
+    tiers keep 2 for usage errors, so following GNU is a policy change and needs an amendment.
 - **1.8.9 — `find`, `du`, `cp -R` and `grep -r` walk as loops.** 1.8.6 gave every walk a budget of
   32 open directories ([ADR 0029](../adr/0029-walks-keep-32-directories-open-and-stop-when-the-way-back-moved.md))
   and made `rm -r` a loop, so its depth is bounded by memory alone: 100,000 levels in 20.7 MB. The
@@ -255,6 +248,11 @@ v0.8.0 table in [`docs/benchmarks.md`](../benchmarks.md) is older.
     on them from `d_type`, and reports only the subdirectory; kriya lists them too since 1.7.1, but
     reports every entry and cannot answer `-type` (`smoke-find.sh` pins the listing). Measured at
     1.7.1 by review.
+  - ⚠ **And it is why `find` fails where GNU's does not when entries vanish** (measured at 1.8.7). In
+    200 listings of a directory another process was churning, GNU `find d` exited non-zero 0 times
+    and kriya's 14, because kriya stats every entry it reads and GNU stats none. That is not GNU
+    9.12's vanish rule, which findutils does not have (its `-ignore_readdir_race` is off by default),
+    and it goes with this slot.
   - **The memory half moved to roadmap 1.8.9** at 1.8.6, with the loop that needs the same path
     buffer. Every entry's path and stat buffer are bump-allocated and never freed: `find /usr -name
     none` peaks at **99.0 MB against GNU's 8.5 MB** (202,664 entries), and at 150.2 MB under `-L`
