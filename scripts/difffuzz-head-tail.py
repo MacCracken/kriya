@@ -5,7 +5,8 @@ Usage:  python3 scripts/difffuzz-head-tail.py build/kriya [cases] [seed]
 
 Draws command lines from the count grammars 1.6.15 implemented: the obsolescent
 first argument (`head -3kv`, `tail +5c`, `tail -b`) and signed `-n` / `-c`
-values with GNU's optional blanks and extra signs (`-n -+3`, `-c ' +3'`). Each
+values with GNU's optional blanks and extra signs (`-n -+3`, `-c ' +3'`), and
+since 1.9.2 GNU's units on them, valid and not (`-c 2KiB`, `-n 1g`). Each
 runs over five fixtures (ten lines, an unended last line, blank lines, an empty
 file, and 1.2 MB of lines, past one read window), with stdin closed, and is
 compared with the GNU binaries on the host on stdout bytes and exit status.
@@ -66,6 +67,9 @@ def value():
     if rnd.random() < 0.1:
         v += " "
     v += digits()
+    if rnd.random() < 0.25:     # 1.9.2: GNU's units, and spellings that are not
+        v += rnd.choice(["b", "k", "K", "KB", "KiB", "kB", "M", "MB", "MiB", "KD", "E", "Q",
+                         "g", "t", "B", "D", "Ki", "KiBx", "bB", "c", "w", "KK"])
     if rnd.random() < 0.1:
         v += rnd.choice(["x", " "])
     return v
@@ -95,6 +99,11 @@ def documented(argv, g, k):
         return "GNU's -n 0 / +HUGE early exit"
     if u == "tail" and g[1] == 0 and k[1] == 2 and re.search(r"(^|\s)-?\s*-0+(\s|$)", text):
         return "GNU tail's negative zero"
+    # GNU 9.12 quotes a header that needs it, `'standard input'` included; kriya prints POSIX's
+    # pathname unquoted (ADR 0030).
+    if g[1] == k[1] and b"==> 'standard input' <==" in g[0] and \
+            g[0].replace(b"==> 'standard input' <==", b"==> standard input <==") == k[0]:
+        return "GNU 9.12's quoted standard input header (ADR 0030)"
     return None
 
 

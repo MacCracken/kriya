@@ -20,6 +20,8 @@
 #   -s               stable: lines that tie on every key keep their input order.
 #   -u               only the first line of each run of equal keys.
 #   -z               lines end in NUL.
+#   -S SIZE          memory before temporary files: K M G T ... (powers of 1024), b, N%; KiB alone.
+#   -T DIR           temporary files in DIR; repeat for several, used in turn.
 #   --sort=WORD      general-numeric, human-numeric, month, numeric, random or version.
 #   --random-source=FILE   salt `-R` with FILE's first 16 bytes instead of getrandom.
 #
@@ -40,8 +42,9 @@
 # The first key's bounds are found once per line, as GNU's `fillbuf` finds them, and so are its
 # MD5 digest under `-R` and its value under `-g`.
 #
-# Memory cap: a single 256 MiB input buffer (`_SORT_INPUT_CAP`). Past it a warning is printed and
-# the input is truncated. An external sort for larger inputs, with `-S` and `-T`, is roadmap 1.9.2.
+# Memory: a budget of 512 MiB (`-S SIZE`) for the input and its line records together. Past it,
+# since 1.9.2, sorted runs go to temporary files in `-T DIR` (or $TMPDIR, or /tmp) and are merged,
+# `-m` merges its inputs from runs, and `-c` checks a buffer at a time: see "beyond memory".
 #
 # ⛔ HISTORY THAT SHAPED THIS (each pinned in scripts/smoke-sort.sh):
 #   - A repeated `-k` kept only the LAST key until 1.9.1: `sort -k2,2 -k1,1` sorted by field 1,
@@ -76,8 +79,9 @@ var _so_m_idx = 0;
 var _so_cc_idx = 0;
 var _so_sort_idx = 0;
 var _so_rs_idx = 0;
+var _so_ss_idx = 0;
+var _so_tt_idx = 0;
 
-var _SORT_INPUT_CAP: i64 = 268435456;  # 256 MiB
 var _SORT_READ_BUFSZ: i64 = 65536;
 
 # Every error is 2, as POSIX's ">1" and GNU's SORT_FAILURE; 1 is only ever "out of order".
@@ -102,6 +106,8 @@ fn _so_init_spec(): i64 {
     _so_v_idx = flags_add_bool(s, 86,  "version-sort",         0, "compare version numbers");
     _so_sort_idx = flags_add_str(s, 0, "sort",                 0, "sort by WORD: general-numeric, human-numeric, ...");
     _so_rs_idx = flags_add_str(s, 0,   "random-source",        0, "salt -R from FILE");
+    _so_ss_idx = flags_add_str(s, 83,  "buffer-size",          0, "use SIZE of memory before temporary files");
+    _so_tt_idx = flags_add_str(s, 84,  "temporary-directory",  0, "temporary files in DIR (repeatable)");
     _so_t_idx = flags_add_str(s,  116, "field-separator",      0, "field separator (1 byte)");
     _so_k_idx = flags_add_str(s,  107, "key",                  0, "sort key POS1[,POS2]; repeatable");
     _so_c_idx = flags_add_bool(s, 99,  "check",                0, "check the input is sorted");
@@ -123,7 +129,7 @@ fn sort_help_declare(): i64 {
       "sort [OPTIONS] [FILE...]");
     help_positional(0, HELP_POS_UNBOUNDED, "FILE");
     help_destructive(1);
-    help_operands("⚠ Sorts in memory with a 256 MiB cap; an external-sort fallback is a named follow-up.");  # roadmap 1.9.2  #skip-lint
+    help_operands("Sorts in memory up to -S (512 MiB), then through temporary files in -T DIR, $TMPDIR or /tmp.");
     help_exit(1, "-c or -C found the input out of order");
     help_exit(2, "a usage error, or a file could not be read or written");
     help_example("sort names.txt");
@@ -1011,108 +1017,7 @@ fn _so_merge_sort(src, tmp, n): i64 {
     return from;
 }
 
-# `-m`: merge each file's lines, already in order, GNU's `mergefps` way — always the smallest
-# current line, a tie going to the earlier file. `fstart` holds each file's first record index
-# and `fstart[nf]` the total. The merged pointers go to `out`.
-#
-# ⚠ Lines are NOT sorted within a file: `sort -m` of an unsorted file prints it as it is, as GNU's
-# does, and the order across files is then whatever that rule gives — GNU's exactly.
-fn _so_merge_files(ptrs, fstart, nf, out): i64 {
-    var cur = alloc(nf * 8 + 8);
-    var ord = alloc(nf * 8 + 8);
-    var na: i64 = 0;
-    var f: i64 = 0;
-    while (f < nf) {
-        store64(cur + f * 8, load64(fstart + f * 8));
-        if (load64(fstart + f * 8) < load64(fstart + (f + 1) * 8)) {
-            # Insert f by (current line, file index); everything already there has a lower index.
-            var pos = na;
-            var placing: i64 = 1;
-            while (placing == 1) {
-                if (pos == 0) { placing = 0; }
-                else {
-                    var g = load64(ord + (pos - 1) * 8);
-                    var c = _so_compare(load64(ptrs + load64(cur + g * 8) * 8), load64(ptrs + load64(cur + f * 8) * 8));
-                    if (c > 0) {
-                        store64(ord + pos * 8, g);
-                        pos = pos - 1;
-                    } else { placing = 0; }
-                }
-            }
-            store64(ord + pos * 8, f);
-            na = na + 1;
-        }
-        f = f + 1;
-    }
-    var o: i64 = 0;
-    while (na > 0) {
-        var f0 = load64(ord);
-        var ci = load64(cur + f0 * 8);
-        store64(out + o * 8, load64(ptrs + ci * 8));
-        o = o + 1;
-        ci = ci + 1;
-        store64(cur + f0 * 8, ci);
-        if (ci >= load64(fstart + (f0 + 1) * 8)) {
-            var j: i64 = 1;
-            while (j < na) {
-                store64(ord + (j - 1) * 8, load64(ord + j * 8));
-                j = j + 1;
-            }
-            na = na - 1;
-        } else {
-            # The new line goes before the first line larger than it, ties by file index.
-            var rec = load64(ptrs + ci * 8);
-            var lo: i64 = 1;
-            var hi = na;
-            while (lo < hi) {
-                var probe = (lo + hi) / 2;
-                var g2 = load64(ord + probe * 8);
-                var c2 = _so_compare(rec, load64(ptrs + load64(cur + g2 * 8) * 8));
-                var before: i64 = 0;
-                if (c2 < 0) { before = 1; }
-                if (c2 == 0) { if (f0 < g2) { before = 1; } }
-                if (before == 1) { hi = probe; } else { lo = probe + 1; }
-            }
-            var j2: i64 = 1;
-            while (j2 < lo) {
-                store64(ord + (j2 - 1) * 8, load64(ord + j2 * 8));
-                j2 = j2 + 1;
-            }
-            store64(ord + (lo - 1) * 8, f0);
-        }
-    }
-    return o;
-}
-
 # --- input ----------------------------------------------------------------------------------------
-
-# Slurp `fd` into `buf` up to `cap` bytes. Returns total bytes read.
-# On overflow, sets `*overflow_p` to 1 and truncates.
-fn _so_slurp(fd, buf, cap, overflow_p): i64 {
-    var have: i64 = 0;
-    var read_buf = alloc(_SORT_READ_BUFSZ);
-    var loop: i64 = 1;
-    while (loop == 1) {
-        var room = cap - have;
-        var n = k_read( fd, read_buf, _SORT_READ_BUFSZ);
-        if (n < 0) {
-            if ((0 - n) != 4) { return n; }
-        } elif (n == 0) {
-            loop = 0;
-        } else {
-            var copy_n = n;
-            if (copy_n > room) {
-                copy_n = room;
-                store64(overflow_p, 1);
-            }
-            if (copy_n > 0) {
-                memcpy(buf + have, read_buf, copy_n);
-                have = have + copy_n;
-            }
-        }
-    }
-    return have;
-}
 
 # The lines of [p, e) with terminator `term`; a last line without one still counts.
 fn _so_count_lines(p, e, term): i64 {
@@ -1159,38 +1064,51 @@ fn _so_fill_records(p, e, term, recs, ptrs, ri): i64 {
 
 # The first key's bounds, and its digest or value, for every record — as GNU's `fillbuf` finds
 # the first key once per line.
-fn _so_prepare(ptrs, n): i64 {
+# The bytes each line's first-key cache takes: a digest under `-R`, a value under `-g`, else 0.
+fn _so_auxsz(): i64 {
     if (_so_nkeys == 0) { return 0; }
     var k = load64(_so_keys);
-    var rand = load64(k + SO_K_RAND);
-    var gen = load64(k + SO_K_GEN);
+    if (load64(k + SO_K_RAND) == 1) { return 16; }
+    if (load64(k + SO_K_GEN) == 1) { return 40; }
+    return 0;
+}
+
+# One record's first-key bounds, and its digest or value in `slot` when `_so_auxsz` says so.
+fn _so_rec_keys(r, slot): i64 {
+    if (_so_nkeys == 0) { return 0; }
+    var k = load64(_so_keys);
+    _so_key_bounds(load64(r + SO_R_TEXT), load64(r + SO_R_LEN), k, r + SO_R_KBEG, r + SO_R_KLIM);
+    if (slot == 0) { return 0; }
+    var kb = load64(r + SO_R_KBEG);
+    var kl = load64(r + SO_R_KLIM) - kb;
+    var tl: i64 = 0;
+    if (load64(k + SO_K_RAND) == 1) {
+        var t = kb;
+        tl = kl;
+        var xf: i64 = 0;
+        if (load64(k + SO_K_IGNORE) != 0) { xf = 1; }
+        if (load64(k + SO_K_TRANS) != 0) { xf = 1; }
+        if (xf == 1) { t = _so_xform(0, kb, kl, load64(k + SO_K_IGNORE), load64(k + SO_K_TRANS), &tl); }
+        _so_digest(t, tl, slot);
+    } else {
+        store64(slot, _so_gen_read(_so_xform(0, kb, kl, 0, 0, &tl), slot + 8));
+    }
+    store64(r + SO_R_AUX, slot);
+    return 0;
+}
+
+# The first key's bounds, and its digest or value, for every record — as GNU's `fillbuf` finds
+# the first key once per line.
+fn _so_prepare(ptrs, n): i64 {
+    if (_so_nkeys == 0) { return 0; }
+    var auxsz = _so_auxsz();
     var aux: i64 = 0;
-    var auxsz: i64 = 0;
-    if (rand == 1) { auxsz = 16; }
-    if (gen == 1) { auxsz = 40; }
     if (auxsz > 0) { aux = alloc(n * auxsz + 8); }
     var i: i64 = 0;
     while (i < n) {
-        var r = load64(ptrs + i * 8);
-        _so_key_bounds(load64(r + SO_R_TEXT), load64(r + SO_R_LEN), k, r + SO_R_KBEG, r + SO_R_KLIM);
-        if (auxsz > 0) {
-            var slot = aux + i * auxsz;
-            var kb = load64(r + SO_R_KBEG);
-            var kl = load64(r + SO_R_KLIM) - kb;
-            var tl: i64 = 0;
-            if (rand == 1) {
-                var t = kb;
-                tl = kl;
-                var xf: i64 = 0;
-                if (load64(k + SO_K_IGNORE) != 0) { xf = 1; }
-                if (load64(k + SO_K_TRANS) != 0) { xf = 1; }
-                if (xf == 1) { t = _so_xform(0, kb, kl, load64(k + SO_K_IGNORE), load64(k + SO_K_TRANS), &tl); }
-                _so_digest(t, tl, slot);
-            } else {
-                store64(slot, _so_gen_read(_so_xform(0, kb, kl, 0, 0, &tl), slot + 8));
-            }
-            store64(r + SO_R_AUX, slot);
-        }
+        var slot: i64 = 0;
+        if (auxsz > 0) { slot = aux + i * auxsz; }
+        _so_rec_keys(load64(ptrs + i * 8), slot);
         i = i + 1;
     }
     return 0;
@@ -1239,33 +1157,1085 @@ fn _so_emit(p, n, term): i64 {
     return 0;
 }
 
-# --- options --------------------------------------------------------------------------------------
+# --- beyond memory: temporary runs and GNU's merge (1.9.2) -------------------------------------
+#
+# ⭐ NO MODE TRUNCATES ANY MORE. Until 1.9.2 an input past the 256 MiB buffer was cut there, with a
+# warning, in sort, `-m` and `-c` alike. Now the budget (`-S`, default 512 MiB) covers the input's
+# bytes and its line records together, as GNU's buffer does, and past it:
+#
+#   - sort: each full buffer is sorted and written to a temporary file, a RUN; runs are merged
+#     sixteen at a time as they pile up, and the last ones into the output, in GNU's `merge` order;
+#   - `-m`: each input is copied to a run of its own, and the runs merged exactly as in memory;
+#   - `-c`: the input is checked a buffer at a time, the last line of one against the first of
+#     the next.
+#
+# A run is created in the next `-T` directory (round robin, as GNU's), or `$TMPDIR`, or /tmp,
+# opened twice (to write, and to read from the start) and unlinked at once: nothing is left
+# behind however `sort` ends, an interrupt included, and agnos needs no lseek to read it back.
+#
+# ⚠ Equal lines keep their input order through every merge, a tie going to the earlier run, so
+# the output is the in-memory sort's byte for byte: `-s`, `-u` and the last-resort compare
+# included. `-u` drops duplicates inside each run and again at each merge, which keeps the first
+# of each group either way. GNU merges sixteen inputs at a time (NMERGE) and so does this, which
+# keeps the descriptors open few. ⚠ The grouping cannot show in the output, even under `-m -u`
+# over unsorted files: within a group a line from elsewhere never lands between two equal lines,
+# so merging groups first gives the one merge's order (measured against 1.9.1's one merge).
 
-# GNU's `argmatch`: the code of the name `val` matches exactly or as the only prefix (prefixes of
-# names with the same code count once); -1 when none matches, -2 when it is ambiguous. `names` is
-# `n` NUL-separated names and `codes` their codes, one byte each.
-fn _so_argmatch(val, names, codes, n): i64 {
-    var vlen = strlen(val);
-    var found: i64 = 0 - 1;
-    var amb: i64 = 0;
-    var p = names;
-    var i: i64 = 0;
-    while (i < n) {
-        var nl = strlen(p);
-        if (vlen <= nl) {
-            if (memeq(p, val, vlen) == 1) {
-                var code = load8(codes + i);
-                if (vlen == nl) { return code; }
-                if (found < 0) { found = code; }
-                elif (found != code) { amb = 1; }
+enum SoSrc {
+    SO_S_KIND = 0;      # 0 records in memory, 1 a run on disk
+    SO_S_PTRS = 8;
+    SO_S_IDX  = 16;
+    SO_S_END  = 24;
+    SO_S_RD   = 32;
+    SO_S_SZ   = 40;
+}
+
+enum SoRd {
+    SO_RD_FD   = 0;
+    SO_RD_BUF  = 8;
+    SO_RD_CAP  = 16;
+    SO_RD_POS  = 24;
+    SO_RD_END  = 32;
+    SO_RD_EOF  = 40;
+    SO_RD_HAS  = 48;
+    SO_RD_REC  = 56;     # the current line's record, SO_R_SZ bytes
+    SO_RD_AUX  = 96;     # its first-key cache, 40 bytes
+    SO_RD_SZ   = 136;
+}
+
+var _so_budget = 536870912;     # 512 MiB: input bytes plus 56 a line, more with a cache
+var _so_tdirs = 0;
+var _so_tdir_i = 0;
+var _so_tseq = 0;
+var _so_err = 0;                # a fatal error inside the merge machinery, already reported
+var _so_rd_free = 0;            # readers not in use
+var _so_keep_rec = 0;
+var _so_keep_buf = 0;
+var _so_keep_cap = 0;
+var _so_keep_aux = 0;
+var _so_out_fd = 1;             # the output, which a merge into a run hands `_so_ofd` back to
+var _so_term = 10;              # the line terminator: newline, or NUL under -z
+var _SO_NMERGE: i64 = 16;
+var _SO_RDBUF: i64 = 65536;
+
+# Per-line memory, for the budget: the record, its pointer twice (sort and merge), the cache.
+fn _so_line_cost(): i64 { return SO_R_SZ + 16 + _so_auxsz(); }
+
+# A temporary run: written through `*wfd_p`, read from the start through `*rfd_p`, its name
+# already gone. 0, or the exit status after a diagnostic.
+fn _so_temp_new(wfd_p, rfd_p): i64 {
+    var nd = vec_len(_so_tdirs);
+    var dir = vec_get(_so_tdirs, _so_tdir_i);
+    _so_tdir_i = (_so_tdir_i + 1) % nd;
+    var dl = strlen(dir);
+    var name = alloc(dl + 64);
+    var tries: i64 = 0;
+    while (tries < 1000) {
+        memcpy(name, dir, dl);
+        var p = dl;
+        var tag = "/kriya-sort.";
+        memcpy(name + p, tag, 12);
+        p = p + 12;
+        p = p + _so_put_dec(name + p, sys_getpid());
+        store8(name + p, 46);
+        p = p + 1;
+        p = p + _so_put_dec(name + p, _so_tseq);
+        store8(name + p, 0);
+        _so_tseq = _so_tseq + 1;
+        var wfd = k_open(name, 0o301, 0o600);               # O_WRONLY | O_CREAT | O_EXCL
+        if (wfd >= 0) {
+            var rfd = k_open(name, 0, 0);
+            k_unlink(name);
+            if (rfd < 0) {
+                k_close( wfd);
+                k_write( 2, "kriya sort: cannot create temporary file in ", 44);
+                _report_operand(dir);
+                _so_errtail(0 - rfd);
+                return SO_EXIT_TROUBLE;
             }
+            store64(wfd_p, wfd);
+            store64(rfd_p, rfd);
+            return 0;
         }
-        p = p + nl + 1;
+        if (wfd != (0 - 17)) {                              # anything but EEXIST
+            k_write( 2, "kriya sort: cannot create temporary file in ", 44);
+            _report_operand(dir);
+            _so_errtail(0 - wfd);
+            return SO_EXIT_TROUBLE;
+        }
+        tries = tries + 1;
+    }
+    k_write( 2, "kriya sort: cannot create temporary file in ", 44);
+    _report_operand(dir);
+    _so_errtail(17);
+    return SO_EXIT_TROUBLE;
+}
+
+# `: ERROR` and a newline to stderr.
+fn _so_errtail(errno): i64 {
+    k_write( 2, ": ", 2);
+    if (errmsg_is_known(errno) == 1) {
+        var m = errmsg_for(errno);
+        k_write( 2, m, strlen(m));
+    } else { k_write( 2, "error", 5); }
+    k_write( 2, "\n", 1);
+    return 0;
+}
+
+# `v` (>= 0) in decimal at `out`; returns the digits written.
+fn _so_put_dec(out, v): i64 {
+    var tmp[24];
+    var t: i64 = 0;
+    var r = v;
+    if (r == 0) { store8(&tmp, 48); t = 1; }
+    while (r > 0) {
+        store8(&tmp + t, 48 + (r % 10));
+        r = r / 10;
+        t = t + 1;
+    }
+    var i: i64 = 0;
+    while (i < t) {
+        store8(out + i, load8(&tmp + t - 1 - i));
         i = i + 1;
     }
-    if (amb == 1) { return 0 - 2; }
-    return found;
+    return t;
 }
+
+# A reader, from the free list or new, reading `fd` from where it is.
+fn _so_rd_get(fd): i64 {
+    var rd = _so_rd_free;
+    if (rd != 0) { _so_rd_free = load64(rd + SO_RD_HAS); }
+    else {
+        rd = alloc(SO_RD_SZ);
+        store64(rd + SO_RD_BUF, alloc(_SO_RDBUF));
+        store64(rd + SO_RD_CAP, _SO_RDBUF);
+    }
+    store64(rd + SO_RD_FD, fd);
+    store64(rd + SO_RD_POS, 0);
+    store64(rd + SO_RD_END, 0);
+    store64(rd + SO_RD_EOF, 0);
+    store64(rd + SO_RD_HAS, 0);
+    return rd;
+}
+
+fn _so_rd_put(rd): i64 {
+    k_close( load64(rd + SO_RD_FD));
+    store64(rd + SO_RD_HAS, _so_rd_free);
+    _so_rd_free = rd;
+    return 0;
+}
+
+# The next line of a run into the reader's record. 1 when there is one, 0 at the end.
+fn _so_rd_next(rd): i64 {
+    var buf = load64(rd + SO_RD_BUF);
+    while (1 == 1) {
+        var pos = load64(rd + SO_RD_POS);
+        var end = load64(rd + SO_RD_END);
+        var q = _so_memchr(buf + pos, buf + end, _so_term);
+        var take: i64 = 0 - 1;
+        if (q < buf + end) { take = q - buf; }
+        elif (load64(rd + SO_RD_EOF) == 1) {
+            if (pos >= end) {
+                store64(rd + SO_RD_HAS, 0);
+                return 0;
+            }
+            take = end;
+        }
+        if (take >= 0) {
+            var r = rd + SO_RD_REC;
+            store64(r + SO_R_TEXT, buf + pos);
+            store64(r + SO_R_LEN, take - pos);
+            store64(r + SO_R_KBEG, buf + pos);
+            store64(r + SO_R_KLIM, buf + take);
+            store64(r + SO_R_AUX, 0);
+            var slot: i64 = 0;
+            if (_so_auxsz() > 0) { slot = rd + SO_RD_AUX; }
+            _so_rec_keys(r, slot);
+            store64(rd + SO_RD_POS, take + 1);
+            store64(rd + SO_RD_HAS, 1);
+            return 1;
+        }
+        # No whole line left: keep the partial one at the front, grow if it fills the buffer.
+        if (pos > 0) {
+            memcpy(buf, buf + pos, end - pos);
+            end = end - pos;
+            store64(rd + SO_RD_POS, 0);
+            store64(rd + SO_RD_END, end);
+        }
+        var cap = load64(rd + SO_RD_CAP);
+        if (end == cap) {
+            var nb = alloc(cap * 2);
+            memcpy(nb, buf, end);
+            buf = nb;
+            store64(rd + SO_RD_BUF, nb);
+            store64(rd + SO_RD_CAP, cap * 2);
+            cap = cap * 2;
+        }
+        var n = k_read( load64(rd + SO_RD_FD), buf + end, cap - end);
+        if (n < 0) {
+            if (n != (0 - 4)) {
+                k_write( 2, "kriya sort: read failed: a temporary file", 41);
+                _so_errtail(0 - n);
+                _so_err = 1;
+                store64(rd + SO_RD_HAS, 0);
+                return 0;
+            }
+        } elif (n == 0) {
+            store64(rd + SO_RD_EOF, 1);
+        } else {
+            store64(rd + SO_RD_END, end + n);
+        }
+    }
+    return 0;
+}
+
+fn _so_src_mem(ptrs, lo, hi): i64 {
+    var s = alloc(SO_S_SZ);
+    store64(s + SO_S_KIND, 0);
+    store64(s + SO_S_PTRS, ptrs);
+    store64(s + SO_S_IDX, lo);
+    store64(s + SO_S_END, hi);
+    store64(s + SO_S_RD, 0);
+    return s;
+}
+
+# A run on disk read through `rfd`, its first line loaded.
+fn _so_src_file(rfd): i64 {
+    var s = alloc(SO_S_SZ);
+    store64(s + SO_S_KIND, 1);
+    var rd = _so_rd_get(rfd);
+    store64(s + SO_S_RD, rd);
+    _so_rd_next(rd);
+    return s;
+}
+
+fn _so_src_head(s): i64 {
+    if (load64(s + SO_S_KIND) == 0) {
+        var i = load64(s + SO_S_IDX);
+        if (i < load64(s + SO_S_END)) { return load64(load64(s + SO_S_PTRS) + i * 8); }
+        return 0;
+    }
+    var rd = load64(s + SO_S_RD);
+    if (rd == 0) { return 0; }
+    if (load64(rd + SO_RD_HAS) == 1) { return rd + SO_RD_REC; }
+    return 0;
+}
+
+# Past the current line; a finished run gives its reader back.
+fn _so_src_adv(s): i64 {
+    if (load64(s + SO_S_KIND) == 0) {
+        store64(s + SO_S_IDX, load64(s + SO_S_IDX) + 1);
+        return 0;
+    }
+    var rd = load64(s + SO_S_RD);
+    if (_so_rd_next(rd) == 0) {
+        _so_rd_put(rd);
+        store64(s + SO_S_RD, 0);
+    }
+    return 0;
+}
+
+# A copy of record `r` that outlives its reader's buffer, for `-u`'s comparison.
+fn _so_keep(r): i64 {
+    var len = load64(r + SO_R_LEN);
+    if (_so_keep_rec == 0) {
+        _so_keep_rec = alloc(SO_R_SZ);
+        _so_keep_aux = alloc(40);
+    }
+    if (len + 1 > _so_keep_cap) {
+        var c = len + 1;
+        if (c < 4096) { c = 4096; }
+        if (c < _so_keep_cap * 2) { c = _so_keep_cap * 2; }
+        _so_keep_buf = alloc(c);
+        _so_keep_cap = c;
+    }
+    memcpy(_so_keep_buf, load64(r + SO_R_TEXT), len);
+    var k = _so_keep_rec;
+    store64(k + SO_R_TEXT, _so_keep_buf);
+    store64(k + SO_R_LEN, len);
+    store64(k + SO_R_KBEG, _so_keep_buf);
+    store64(k + SO_R_KLIM, _so_keep_buf + len);
+    store64(k + SO_R_AUX, 0);
+    var slot: i64 = 0;
+    if (_so_auxsz() > 0) { slot = _so_keep_aux; }
+    _so_rec_keys(k, slot);
+    return k;
+}
+
+# GNU's `mergefps` over `k` sources from `srcs[at]`: the smallest current line each time, a tie
+# to the earlier source, and under `-u` the first of each run of equal lines. To memory when
+# `dptrs` is not 0 (every source then in memory too), returning how many; else written through
+# `_so_ofd`, returning 0 or a negative errno.
+fn _so_merge_srcs(srcs, at, k, dptrs): i64 {
+    var ord = alloc(k * 8 + 8);
+    var na: i64 = 0;
+    var f: i64 = 0;
+    while (f < k) {
+        var sf = vec_get(srcs, at + f);
+        var hf = _so_src_head(sf);
+        if (hf != 0) {
+            var pos = na;
+            var placing: i64 = 1;
+            while (placing == 1) {
+                if (pos == 0) { placing = 0; }
+                else {
+                    var g = load64(ord + (pos - 1) * 8);
+                    if (_so_compare(_so_src_head(vec_get(srcs, at + g)), hf) > 0) {
+                        store64(ord + pos * 8, g);
+                        pos = pos - 1;
+                    } else { placing = 0; }
+                }
+            }
+            store64(ord + pos * 8, f);
+            na = na + 1;
+        }
+        f = f + 1;
+    }
+    var out: i64 = 0;
+    var prev: i64 = 0;
+    while (na > 0) {
+        var f0 = load64(ord);
+        var s0 = vec_get(srcs, at + f0);
+        var rec = _so_src_head(s0);
+        var emit: i64 = 1;
+        if (_so_unique == 1) {
+            if (prev != 0) {
+                if (_so_compare(prev, rec) == 0) { emit = 0; }
+            }
+        }
+        if (emit == 1) {
+            if (dptrs != 0) {
+                store64(dptrs + out * 8, rec);
+                out = out + 1;
+                prev = rec;
+            } else {
+                var w = _so_emit(load64(rec + SO_R_TEXT), load64(rec + SO_R_LEN), _so_term);
+                if (w != 0) { return w; }
+                if (_so_unique == 1) { prev = _so_keep(rec); }
+            }
+        }
+        _so_src_adv(s0);
+        if (_so_err != 0) { return 0 - 5; }
+        var nh = _so_src_head(s0);
+        if (nh == 0) {
+            var j: i64 = 1;
+            while (j < na) {
+                store64(ord + (j - 1) * 8, load64(ord + j * 8));
+                j = j + 1;
+            }
+            na = na - 1;
+        } else {
+            var lo: i64 = 1;
+            var hi = na;
+            while (lo < hi) {
+                var probe = (lo + hi) / 2;
+                var g2 = load64(ord + probe * 8);
+                var c2 = _so_compare(nh, _so_src_head(vec_get(srcs, at + g2)));
+                var before: i64 = 0;
+                if (c2 < 0) { before = 1; }
+                if (c2 == 0) { if (f0 < g2) { before = 1; } }
+                if (before == 1) { hi = probe; } else { lo = probe + 1; }
+            }
+            var j2: i64 = 1;
+            while (j2 < lo) {
+                store64(ord + (j2 - 1) * 8, load64(ord + j2 * 8));
+                j2 = j2 + 1;
+            }
+            store64(ord + (lo - 1) * 8, f0);
+        }
+    }
+    if (dptrs != 0) { return out; }
+    return 0;
+}
+
+# Write lines through `_so_ofd` into a new run and return it as a source, or 0 after a reported
+# error (`_so_err` set). `wfd` is the run's write end, `rfd` its read end.
+fn _so_run_done(wfd, rfd, werr): i64 {
+    if (werr == 0) { werr = _so_flush(); }
+    k_close( wfd);
+    _so_ofd = _so_out_fd;
+    if (werr != 0) {
+        k_write( 2, "kriya sort: write failed: a temporary file", 42);
+        _so_errtail(0 - werr);
+        _so_err = 1;
+        k_close( rfd);
+        return 0;
+    }
+    return _so_src_file(rfd);
+}
+
+# Sources `srcs[at .. at + k)` merged into one new source: in memory when they all are, else a
+# run on disk. 0 after a reported error.
+fn _so_merge_new(srcs, at, k): i64 {
+    var allmem: i64 = 1;
+    var total: i64 = 0;
+    var i: i64 = 0;
+    while (i < k) {
+        var s = vec_get(srcs, at + i);
+        if (load64(s + SO_S_KIND) != 0) { allmem = 0; }
+        else { total = total + load64(s + SO_S_END) - load64(s + SO_S_IDX); }
+        i = i + 1;
+    }
+    if (allmem == 1) {
+        var d = alloc(total * 8 + 8);
+        var cnt = _so_merge_srcs(srcs, at, k, d);
+        return _so_src_mem(d, 0, cnt);
+    }
+    var fds[16];
+    if (_so_temp_new(&fds, &fds + 8) != 0) {
+        _so_err = 1;
+        return 0;
+    }
+    _so_flush();
+    _so_ofd = load64(&fds);
+    var werr = _so_merge_srcs(srcs, at, k, 0);
+    return _so_run_done(load64(&fds), load64(&fds + 8), werr);
+}
+
+# GNU's `merge` up to its last pass: while more than NMERGE sources remain, merge them NMERGE at
+# a time from the front, with GNU's one shorter merge so that the rest fit the next pass. Returns
+# how many are left for the caller's last merge into the output, or -1 after a reported error.
+fn _so_merge_reduce(srcs): i64 {
+    var n = vec_len(srcs);
+    while (_SO_NMERGE < n) {
+        var out: i64 = 0;
+        var inp: i64 = 0;
+        while (_SO_NMERGE <= n - inp) {
+            var m = _so_merge_new(srcs, inp, _SO_NMERGE);
+            if (m == 0) { return 0 - 1; }
+            vec_set(srcs, out, m);
+            out = out + 1;
+            inp = inp + _SO_NMERGE;
+        }
+        var remainder = n - inp;
+        var cheap = _SO_NMERGE - out % _SO_NMERGE;
+        if (cheap < remainder) {
+            var ns = remainder - cheap + 1;
+            var m2 = _so_merge_new(srcs, inp, ns);
+            if (m2 == 0) { return 0 - 1; }
+            vec_set(srcs, out, m2);
+            out = out + 1;
+            inp = inp + ns;
+        }
+        var j: i64 = 0;
+        while (inp + j < n) {
+            vec_set(srcs, out + j, vec_get(srcs, inp + j));
+            j = j + 1;
+        }
+        n = n - (inp - out);
+    }
+    return n;
+}
+
+# The external sort's pending runs, oldest first, and the level of each: sixteen of one level
+# become one of the next as soon as they are there, so open descriptors stay few.
+var _so_pend = 0;
+var _so_plev = 0;
+
+fn _so_pend_push(src): i64 {
+    vec_push(_so_pend, src);
+    vec_push(_so_plev, 0);
+    var going: i64 = 1;
+    while (going == 1) {
+        going = 0;
+        var n = vec_len(_so_pend);
+        if (n >= _SO_NMERGE) {
+            var lv = vec_get(_so_plev, n - 1);
+            var same: i64 = 1;
+            var i: i64 = n - _SO_NMERGE;
+            while (i < n) {
+                if (vec_get(_so_plev, i) != lv) { same = 0; }
+                i = i + 1;
+            }
+            if (same == 1) {
+                var m = _so_merge_new(_so_pend, n - _SO_NMERGE, _SO_NMERGE);
+                if (m == 0) { return 1; }
+                var keep = vec_new();
+                var keepl = vec_new();
+                var j: i64 = 0;
+                while (j < n - _SO_NMERGE) {
+                    vec_push(keep, vec_get(_so_pend, j));
+                    vec_push(keepl, vec_get(_so_plev, j));
+                    j = j + 1;
+                }
+                vec_push(keep, m);
+                vec_push(keepl, lv + 1);
+                _so_pend = keep;
+                _so_plev = keepl;
+                going = 1;
+            }
+        }
+    }
+    return 0;
+}
+
+# Reusable arrays for one buffer's records.
+var _so_c_recs = 0;
+var _so_c_ptrs = 0;
+var _so_c_tmp = 0;
+var _so_c_aux = 0;
+var _so_c_cap = 0;
+
+# Records for the lines of buf[0..len), every one terminated; the pointers go to `_so_c_ptrs`.
+# Returns how many.
+fn _so_chunk_records(buf, len): i64 {
+    var n = _so_count_lines(buf, buf + len, _so_term);
+    if (n > _so_c_cap) {
+        var c = n;
+        if (c < _so_c_cap * 2) { c = _so_c_cap * 2; }
+        _so_c_recs = alloc(c * SO_R_SZ + 8);
+        _so_c_ptrs = alloc(c * 8 + 8);
+        _so_c_tmp = alloc(c * 8 + 8);
+        var a = _so_auxsz();
+        if (a > 0) { _so_c_aux = alloc(c * a + 8); }
+        _so_c_cap = c;
+    }
+    _so_fill_records(buf, buf + len, _so_term, _so_c_recs, _so_c_ptrs, 0);
+    var auxsz = _so_auxsz();
+    var i: i64 = 0;
+    while (i < n) {
+        var slot: i64 = 0;
+        if (auxsz > 0) { slot = _so_c_aux + i * auxsz; }
+        _so_rec_keys(load64(_so_c_ptrs + i * 8), slot);
+        i = i + 1;
+    }
+    return n;
+}
+
+# Sort buf[0..len) and write it out as a run, pushed onto the pending list. 0, or 1 after a
+# reported error.
+fn _so_spill(buf, len): i64 {
+    var n = _so_chunk_records(buf, len);
+    var order = _so_merge_sort(_so_c_ptrs, _so_c_tmp, n);
+    var fds[16];
+    if (_so_temp_new(&fds, &fds + 8) != 0) { return 1; }
+    _so_ofd = load64(&fds);
+    var werr: i64 = 0;
+    var prev: i64 = 0;
+    var i: i64 = 0;
+    while (i < n && werr == 0) {
+        var rec = load64(order + i * 8);
+        var emit: i64 = 1;
+        if (_so_unique == 1) {
+            if (prev != 0) {
+                if (_so_compare(prev, rec) == 0) { emit = 0; }
+            }
+        }
+        if (emit == 1) {
+            werr = _so_emit(load64(rec + SO_R_TEXT), load64(rec + SO_R_LEN), _so_term);
+            prev = rec;
+        }
+        i = i + 1;
+    }
+    var src = _so_run_done(load64(&fds), load64(&fds + 8), werr);
+    if (src == 0) { return 1; }
+    return _so_pend_push(src);
+}
+
+# Physical memory in bytes, for `-S N%`: /proc/meminfo's MemTotal, or 64 MiB, gnulib's guess.
+fn _so_physmem(): i64 {
+    var fd = k_open("/proc/meminfo", 0, 0);
+    if (fd < 0) { return 67108864; }
+    var b[512];
+    var n = k_read( fd, &b, 511);
+    k_close( fd);
+    if (n <= 0) { return 67108864; }
+    store8(&b + n, 0);
+    var i: i64 = 0;
+    while (i < n) {
+        if (load8(&b + i) >= 48) {
+            if (load8(&b + i) <= 57) {
+                var len: i64 = 0;
+                var kb = kriya_count_digits(&b + i, &len);
+                return kriya_count_mul(kb, 1024);
+            }
+        }
+        if (load8(&b + i) == 10) { return 67108864; }
+        i = i + 1;
+    }
+    return 67108864;
+}
+
+# GNU's `specify_sort_size`: bytes, -1 when malformed, -2 when too large, -3 for a bad suffix.
+# Units `EgGkKmMPQRtTYZ` (powers of 1024), `b` for bytes, `%` of physical memory; a bare number is
+# KiB.
+fn _so_parse_size(val): i64 {
+    var o[32];
+    var e = kriya_xstrtou(val, "EgGkKmMPQRtTYZ", &o);
+    var end = load64(&o + 8);
+    var hi = load64(&o + 16);
+    var lo = load64(&o + 24);
+    var lastdig: i64 = 0;
+    if (end > 0) { if (_vc_isdigit(load8(val + end - 1)) == 1) { lastdig = 1; } }
+    if (e == 0) {
+        if (lastdig == 1) {
+            _kx_hi = hi;
+            _kx_lo = lo;
+            _kx_ovf = 0;
+            _kx_mul(1024);
+            if (_kx_ovf == 1) { return 0 - 2; }
+            hi = _kx_hi;
+            lo = _kx_lo;
+        }
+    }
+    if (e == KRIYA_XS_BADSUFFIX) {
+        if (lastdig == 1) {
+            if (load8(val + end + 1) == 0) {
+                var c = load8(val + end);
+                if (c == 98) { e = 0; }
+                if (c == 37) {
+                    var nd = f64_add(f64_mul(f64_from(hi), 0x41F0000000000000), f64_from(lo));   # 2^32
+                    var mem = f64_div(f64_mul(f64_from(_so_physmem()), nd), 0x4059000000000000); # 100
+                    if (f64_ge(mem, 0x43F0000000000000) == 1) { return 0 - 2; }               # 2^64
+                    if (f64_ge(mem, 0x43D0000000000000) == 1) { return 4611686018427387904; }  # 2^62
+                    return f64_to(mem);
+                }
+            }
+        }
+    }
+    if (e == 0) {
+        if (hi > 2147483647) { return KRIYA_COUNT_MAX; }
+        return (hi << 32) | lo;
+    }
+    if (e == KRIYA_XS_OVERFLOW) { return 0 - 2; }
+    if ((e & KRIYA_XS_BADSUFFIX) != 0) { return 0 - 3; }
+    return 0 - 1;
+}
+
+# --- reading the inputs ---------------------------------------------------------------------------
+var _so_buf = 0;
+var _so_bcap = 0;
+
+# Double the input buffer for a line longer than it.
+fn _so_grow(have): i64 {
+    var nb = alloc(_so_bcap * 2);
+    if (nb == 0) { return 1; }
+    memcpy(nb, _so_buf, have);
+    _so_buf = nb;
+    _so_bcap = _so_bcap * 2;
+    return 0;
+}
+
+# The last terminator in buf[0..have), plus one; 0 when there is none.
+fn _so_cut(have): i64 {
+    var q = have;
+    while (q > 0) {
+        if (load8(_so_buf + q - 1) == _so_term) { return q; }
+        q = q - 1;
+    }
+    return 0;
+}
+
+# Open input `p` ("-" is standard input). Returns the descriptor, or a negative errno.
+fn _so_open_in(p): i64 {
+    if (load8(p) == 45) {
+        if (load8(p + 1) == 0) { return 0; }
+    }
+    return k_open(p, 0, 0);
+}
+
+fn _so_count_terms(p, n): i64 {
+    var c: i64 = 0;
+    var i: i64 = 0;
+    while (i < n) {
+        if (load8(p + i) == _so_term) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+# Write the records `order[0..n)` to the output, the first of each run of equal lines under -u.
+# Opens `-o` first. Returns the exit status.
+fn _so_open_out(): i64 {
+    _so_out_fd = 1;
+    if (_so_outfile != 0) {
+        var fd = k_open(_so_outfile, 0o1101, 0o666);        # O_WRONLY | O_CREAT | O_TRUNC
+        if (fd < 0) {
+            _so_report(_so_outfile, 0 - fd);
+            return SO_EXIT_TROUBLE;
+        }
+        _so_out_fd = fd;
+    }
+    _so_ofd = _so_out_fd;
+    return 0;
+}
+
+fn _so_close_out(werr): i64 {
+    if (werr == 0) { werr = _so_flush(); }
+    if (_so_out_fd != 1) { k_close( _so_out_fd); }
+    if (werr != 0) {
+        _so_report("(write)", 0 - werr);  # its name is roadmap 1.10.5's
+        return SO_EXIT_TROUBLE;
+    }
+    return EXIT_SUCCESS;
+}
+
+fn _so_output_records(order, n): i64 {
+    var oc = _so_open_out();
+    if (oc != 0) { return oc; }
+    var werr: i64 = 0;
+    var prev: i64 = 0;
+    var i: i64 = 0;
+    while (i < n && werr == 0) {
+        var rec = load64(order + i * 8);
+        var emit: i64 = 1;
+        if (_so_unique == 1) {
+            # The first of each run of equal keys: each line against the last one written.
+            if (prev != 0) {
+                if (_so_compare(prev, rec) == 0) { emit = 0; }
+            }
+        }
+        if (emit == 1) {
+            werr = _so_emit(load64(rec + SO_R_TEXT), load64(rec + SO_R_LEN), _so_term);
+            prev = rec;
+        }
+        i = i + 1;
+    }
+    return _so_close_out(werr);
+}
+
+# The last merge, from the reduced sources into the output.
+fn _so_output_merge(srcs): i64 {
+    var n = _so_merge_reduce(srcs);
+    if (n < 0) { return SO_EXIT_TROUBLE; }
+    var oc = _so_open_out();
+    if (oc != 0) { return oc; }
+    var w = _so_merge_srcs(srcs, 0, n, 0);
+    if (_so_err != 0) {
+        _so_close_out(0);
+        return SO_EXIT_TROUBLE;
+    }
+    return _so_close_out(w);
+}
+
+# Read operand `fi` (of `npos`) into the buffer, a buffer at a time: `full` is called back when
+# the bytes and their records pass the budget, with the buffer's length, and returns 0 to go on.
+# A file's last line ends where the file does: a missing terminator is added. Returns 0 or the
+# exit status. `*have_p` and `*lines_p` carry the buffer's length and whole lines across files.
+fn _so_read_input(p, have_p, lines_p, mode): i64 {
+    var fd = _so_open_in(p);
+    if (fd < 0) {
+        _so_report(p, 0 - fd);
+        return SO_EXIT_TROUBLE;
+    }
+    var cost = _so_line_cost();
+    var last: i64 = 0 - 1;
+    var going: i64 = 1;
+    while (going == 1) {
+        var have = load64(have_p);
+        if (have == _so_bcap) {
+            var fr = _so_full(have_p, lines_p, mode);
+            if (fr != 0) {
+                if (fd != 0) { k_close( fd); }
+                return fr;
+            }
+            have = load64(have_p);
+        }
+        var room = _so_bcap - have;
+        if (room > _SORT_READ_BUFSZ * 16) { room = _SORT_READ_BUFSZ * 16; }
+        var n = k_read( fd, _so_buf + have, room);
+        if (n < 0) {
+            if (n != (0 - 4)) {
+                if (fd != 0) { k_close( fd); }
+                _so_report(p, 0 - n);
+                return SO_EXIT_TROUBLE;
+            }
+        } elif (n == 0) {
+            going = 0;
+        } else {
+            store64(lines_p, load64(lines_p) + _so_count_terms(_so_buf + have, n));
+            store64(have_p, have + n);
+            last = load8(_so_buf + have + n - 1);
+            # -c keeps one line back, so it needs two before the budget can make progress.
+            var need: i64 = 1;
+            if (mode == 2) { need = 2; }
+            if (load64(lines_p) >= need) {
+                if (have + n + load64(lines_p) * cost >= _so_budget) {
+                    var fr2 = _so_full(have_p, lines_p, mode);
+                    if (fr2 != 0) {
+                        if (fd != 0) { k_close( fd); }
+                        return fr2;
+                    }
+                }
+            }
+        }
+    }
+    if (fd != 0) { k_close( fd); }
+    if (last >= 0) {
+        if (last != _so_term) {
+            if (load64(have_p) == _so_bcap) {
+                var fr3 = _so_full(have_p, lines_p, mode);
+                if (fr3 != 0) { return fr3; }
+            }
+            var h = load64(have_p);
+            store8(_so_buf + h, _so_term);
+            store64(have_p, h + 1);
+            store64(lines_p, load64(lines_p) + 1);
+        }
+    }
+    return 0;
+}
+
+# The buffer is full. Sort (mode 0): spill its whole lines as a run. Check (mode 2): check them
+# and keep the last. A buffer holding no whole line grows instead. Returns 0 or the exit status.
+var _so_chk_line = 1;           # -c: the line number of the buffer's first line
+fn _so_full(have_p, lines_p, mode): i64 {
+    var have = load64(have_p);
+    var cut = _so_cut(have);
+    if (cut == 0) {
+        if (_so_grow(have) != 0) { return SO_EXIT_TROUBLE; }
+        return 0;
+    }
+    var keep_from = cut;
+    if (mode == 0) {
+        if (_so_spill(_so_buf, cut) != 0) { return SO_EXIT_TROUBLE; }
+    } else {
+        # Keep the last whole line, to compare with the next buffer's first. A buffer that
+        # holds only that line grows instead.
+        var q = cut - 1;
+        while (q > 0 && load8(_so_buf + q - 1) != _so_term) { q = q - 1; }
+        if (q == 0) {
+            if (_so_grow(have) != 0) { return SO_EXIT_TROUBLE; }
+            return 0;
+        }
+        var cr = _so_check_chunk(cut);
+        if (cr != 0) { return cr; }
+        keep_from = q;
+        _so_chk_line = _so_chk_line + _so_count_lines(_so_buf, _so_buf + q, _so_term);
+    }
+    memcpy(_so_buf, _so_buf + keep_from, have - keep_from);
+    store64(have_p, have - keep_from);
+    store64(lines_p, _so_count_terms(_so_buf, have - keep_from));
+    return 0;
+}
+
+# -c / -C over buf[0..len): each line against the one before it. ⚠ With `-u` the order must be
+# STRICT, as GNU checks it: an equal pair is a disorder. Returns 0, or 1 at a disorder.
+fn _so_check_chunk(len): i64 {
+    var n = _so_chunk_records(_so_buf, len);
+    var ci: i64 = 1;
+    while (ci < n) {
+        var cmp = _so_compare(load64(_so_c_ptrs + (ci - 1) * 8), load64(_so_c_ptrs + ci * 8));
+        var disorder: i64 = 0;
+        if (cmp > 0) { disorder = 1; }
+        if (_so_unique == 1) {
+            if (cmp == 0) { disorder = 1; }
+        }
+        if (disorder == 1) {
+            if (_so_checkonly == 99) {
+                k_write( 2, "kriya sort: disorder at line ", 29);
+                _so_put_num(_so_chk_line + ci);
+                k_write( 2, "\n", 1);
+            }
+            return EXIT_FAILURE;
+        }
+        ci = ci + 1;
+    }
+    return 0;
+}
+
+# sort: every input a buffer at a time; in memory when it all fits, else runs and a merge.
+fn _so_sort_inputs(npos): i64 {
+    _so_pend = vec_new();
+    _so_plev = vec_new();
+    var have[8];
+    var lines[8];
+    store64(&have, 0);
+    store64(&lines, 0);
+    var nf = npos;
+    if (nf < 1) { nf = 1; }
+    var fi: i64 = 0;
+    while (fi < nf) {
+        var p = "-";
+        if (npos > 0) { p = flags_positional(_so_spec, fi); }
+        var r = _so_read_input(p, &have, &lines, 0);
+        if (r != 0) { return r; }
+        fi = fi + 1;
+    }
+    if (vec_len(_so_pend) == 0) {
+        var n = _so_chunk_records(_so_buf, load64(&have));
+        var order = _so_merge_sort(_so_c_ptrs, _so_c_tmp, n);
+        return _so_output_records(order, n);
+    }
+    if (load64(&have) > 0) {
+        if (_so_spill(_so_buf, load64(&have)) != 0) { return SO_EXIT_TROUBLE; }
+    }
+    return _so_output_merge(_so_pend);
+}
+
+# -c / -C: operand 0 (or standard input), checked a buffer at a time.
+fn _so_check_input(npos): i64 {
+    var have[8];
+    var lines[8];
+    store64(&have, 0);
+    store64(&lines, 0);
+    _so_chk_line = 1;
+    var p = "-";
+    if (npos > 0) { p = flags_positional(_so_spec, 0); }
+    var r = _so_read_input(p, &have, &lines, 2);
+    if (r != 0) { return r; }
+    var cr = _so_check_chunk(load64(&have));
+    if (cr != 0) { return cr; }
+    return EXIT_SUCCESS;
+}
+
+# A run holding buf[a..b) and then the rest of `fd` (when `fd` >= 0), its last line terminated.
+# 0 after a reported error.
+fn _so_copy_run(a, b, fd, name): i64 {
+    var fds[16];
+    if (_so_temp_new(&fds, &fds + 8) != 0) {
+        _so_err = 1;
+        return 0;
+    }
+    var wfd = load64(&fds);
+    var werr = _so_write_all(wfd, _so_buf + a, b - a);
+    var last: i64 = 0 - 1;
+    if (b > a) { last = load8(_so_buf + b - 1); }
+    if (fd >= 0) {
+        var tmp = alloc(_SORT_READ_BUFSZ);
+        var going: i64 = 1;
+        while (going == 1 && werr == 0) {
+            var n = k_read( fd, tmp, _SORT_READ_BUFSZ);
+            if (n < 0) {
+                if (n != (0 - 4)) {
+                    _so_report(name, 0 - n);
+                    _so_err = 1;
+                    k_close( wfd);
+                    k_close( load64(&fds + 8));
+                    return 0;
+                }
+            } elif (n == 0) { going = 0; }
+            else {
+                werr = _so_write_all(wfd, tmp, n);
+                last = load8(tmp + n - 1);
+            }
+        }
+    }
+    if (werr == 0) {
+        if (last >= 0) {
+            if (last != _so_term) {
+                var t[8];
+                store8(&t, _so_term);
+                werr = _so_write_all(wfd, &t, 1);
+            }
+        }
+    }
+    _so_obn = 0;
+    return _so_run_done(wfd, load64(&fds + 8), werr);
+}
+
+# -m: every input whole in memory when they fit, merged there; else each copied to a run of its
+# own and the runs merged. Both by GNU's NMERGE grouping, which bounds the open runs.
+fn _so_merge_inputs(npos): i64 {
+    var nf = npos;
+    if (nf < 1) { nf = 1; }
+    var fbyte = alloc(nf * 8 + 8);
+    var have[8];
+    var lines[8];
+    store64(&have, 0);
+    store64(&lines, 0);
+    var cost = _so_line_cost();
+    var fi: i64 = 0;
+    var over: i64 = 0 - 1;     # the operand that did not fit, once one does not
+    var ofd: i64 = 0 - 1;
+    while (fi < nf && over < 0) {
+        store64(fbyte + fi * 8, load64(&have));
+        var p = "-";
+        if (npos > 0) { p = flags_positional(_so_spec, fi); }
+        var fd = _so_open_in(p);
+        if (fd < 0) {
+            _so_report(p, 0 - fd);
+            return SO_EXIT_TROUBLE;
+        }
+        var last: i64 = 0 - 1;
+        var going: i64 = 1;
+        while (going == 1) {
+            var h = load64(&have);
+            var room = _so_bcap - h - 1;                  # one byte kept for a terminator
+            if (room > _SORT_READ_BUFSZ * 16) { room = _SORT_READ_BUFSZ * 16; }
+            var fits: i64 = 1;
+            if (room <= 0) { fits = 0; }
+            if (h + load64(&lines) * cost >= _so_budget) { fits = 0; }
+            if (fits == 0) {
+                over = fi;
+                ofd = fd;
+                going = 0;
+            } else {
+                var n = k_read( fd, _so_buf + h, room);
+                if (n < 0) {
+                    if (n != (0 - 4)) {
+                        _so_report(p, 0 - n);
+                        return SO_EXIT_TROUBLE;
+                    }
+                } elif (n == 0) { going = 0; }
+                else {
+                    store64(&lines, load64(&lines) + _so_count_terms(_so_buf + h, n));
+                    store64(&have, h + n);
+                    last = load8(_so_buf + h + n - 1);
+                }
+            }
+        }
+        if (over < 0) {
+            if (fd != 0) { k_close( fd); }
+            if (last >= 0) {
+                if (last != _so_term) {
+                    store8(_so_buf + load64(&have), _so_term);
+                    store64(&have, load64(&have) + 1);
+                    store64(&lines, load64(&lines) + 1);
+                }
+            }
+            fi = fi + 1;
+        }
+    }
+    var srcs = vec_new();
+    if (over < 0) {
+        store64(fbyte + nf * 8, load64(&have));
+        var total = _so_chunk_records(_so_buf, load64(&have));
+        var j: i64 = 0;
+        var at: i64 = 0;
+        while (j < nf) {
+            var cnt = _so_count_lines(_so_buf + load64(fbyte + j * 8), _so_buf + load64(fbyte + (j + 1) * 8),
+              _so_term);
+            vec_push(srcs, _so_src_mem(_so_c_ptrs, at, at + cnt));
+            at = at + cnt;
+            j = j + 1;
+        }
+        if (at != total) { return SO_EXIT_TROUBLE; }
+        return _so_output_merge(srcs);
+    }
+    # Past the budget: every input becomes a run, in order, and the runs are merged.
+    var k: i64 = 0;
+    while (k < over) {
+        var s = _so_copy_run(load64(fbyte + k * 8), load64(fbyte + (k + 1) * 8), 0 - 1, "");
+        if (s == 0) { return SO_EXIT_TROUBLE; }
+        vec_push(srcs, s);
+        k = k + 1;
+    }
+    var pname = "-";
+    if (npos > 0) { pname = flags_positional(_so_spec, over); }
+    var s2 = _so_copy_run(load64(fbyte + over * 8), load64(&have), ofd, pname);
+    if (ofd != 0) { k_close( ofd); }
+    if (s2 == 0) { return SO_EXIT_TROUBLE; }
+    vec_push(srcs, s2);
+    k = over + 1;
+    while (k < nf) {
+        var p2 = "-";
+        if (npos > 0) { p2 = flags_positional(_so_spec, k); }
+        var fd2 = _so_open_in(p2);
+        if (fd2 < 0) {
+            _so_report(p2, 0 - fd2);
+            return SO_EXIT_TROUBLE;
+        }
+        var s3 = _so_copy_run(0, 0, fd2, p2);
+        if (fd2 != 0) { k_close( fd2); }
+        if (s3 == 0) { return SO_EXIT_TROUBLE; }
+        vec_push(srcs, s3);
+        k = k + 1;
+    }
+    return _so_output_merge(srcs);
+}
+
+# --- options --------------------------------------------------------------------------------------
 
 # A `--check=` or `--sort=` value refused, in kriya's framing with GNU's choices.
 fn _so_bad_word(opt, val, why, choices): i64 {
@@ -1282,6 +2252,7 @@ fn _so_bad_word(opt, val, why, choices): i64 {
 }
 
 var _so_checkonly = 0;   # 0, 99 (`c`, diagnose) or 67 (`C`, quiet)
+var _so_size_opt = 0 - 1;   # the largest -S, in bytes, or -1
 var _so_outfile = 0;
 var _so_rsource = 0;
 
@@ -1351,6 +2322,8 @@ fn _so_scan_opts(): i64 {
                             elif (streq(nm, "random-source") == 1) { which = 1; }
                             elif (streq(nm, "sort") == 1) { which = 2; }
                             elif (streq(nm, "check") == 1) { which = 99; }
+                            elif (streq(nm, "buffer-size") == 1) { which = 83; }
+                            elif (streq(nm, "temporary-directory") == 1) { which = 84; }
                         }
                     } else {
                         var c = load8(tok + 1);
@@ -1407,7 +2380,8 @@ fn _so_scan_opts(): i64 {
             }
             _so_rsource = val;
         } elif (which == 2) {
-            var sc = _so_argmatch(val, "general-numeric\0human-numeric\0month\0numeric\0random\0version", "ghMnRV", 6);
+            var words = "general-numeric\0human-numeric\0month\0numeric\0random\0version";
+            var sc = kriya_argmatch(val, words, "ghMnRV", 6);
             if (sc < 0) {
                 var why = "is not a sort order";
                 if (sc == 0 - 2) { why = "is ambiguous"; }
@@ -1421,7 +2395,7 @@ fn _so_scan_opts(): i64 {
         } elif (which == 99) {
             var cc: i64 = 99;
             if (val != 0) {
-                cc = _so_argmatch(val, "quiet\0silent\0diagnose-first", "CCc", 3);
+                cc = kriya_argmatch(val, "quiet\0silent\0diagnose-first", "CCc", 3);
                 if (cc < 0) {
                     var why2 = "is not a check mode";
                     if (cc == 0 - 2) { why2 = "is ambiguous"; }
@@ -1433,6 +2407,19 @@ fn _so_scan_opts(): i64 {
         } elif (which == 67) {
             var rc2 = _so_opt_check(67);
             if (rc2 != 0) { return rc2; }
+        } elif (which == 83) {
+            # GNU's `-S`: several take the largest, so that their order does not matter.
+            var sz = _so_parse_size(val);
+            if (sz < 0) {
+                var smsg = "invalid -S argument";
+                if (sz == (0 - 2)) { smsg = "-S argument too large"; }
+                if (sz == (0 - 3)) { smsg = "invalid suffix in -S argument"; }
+                report_note("sort", val, smsg);
+                return EXIT_USAGE;
+            }
+            if (sz > _so_size_opt) { _so_size_opt = sz; }
+        } elif (which == 84) {
+            vec_push(_so_tdirs, val);
         }
         i = i + step;
     }
@@ -1471,8 +2458,17 @@ fn cmd_sort(start: i64): i64 {
     _so_checkonly = 0;
     _so_outfile = 0;
     _so_rsource = 0;
+    _so_size_opt = 0 - 1;
+    _so_tdirs = vec_new();
     var rc = _so_scan_opts();
     if (rc != 0) { return rc; }
+    _so_budget = 536870912;
+    if (_so_size_opt >= 0) {
+        # At least a little, and no more than the allocator can map in one piece.
+        _so_budget = _so_size_opt;
+        if (_so_budget < 1024) { _so_budget = 1024; }
+        if (_so_budget > 1610612736) { _so_budget = 1610612736; }
+    }
 
     # The global letters. Their order never matters: `-d` wins over `-i` either way round.
     var g = _so_gkey;
@@ -1570,135 +2566,27 @@ fn cmd_sort(start: i64): i64 {
         }
     }
 
-    # Read every input into one buffer, remembering where each file's bytes start.
-    var nf = npos;
-    if (nf < 1) { nf = 1; }
-    var fbyte = alloc(nf * 8 + 8);
-    var buf = alloc(_SORT_INPUT_CAP);
-    var have: i64 = 0;
-    var overflow_box[8];
-    store64(&overflow_box, 0);
-    var fi: i64 = 0;
-    while (fi < nf) {
-        store64(fbyte + fi * 8, have);
-        var p = "-";
-        if (npos > 0) { p = flags_positional(_so_spec, fi); }
-        var fd: i64 = 0;
-        var is_stdin: i64 = 0;
-        if (load8(p) == 45) {
-            if (load8(p + 1) == 0) { is_stdin = 1; }
-        }
-        if (is_stdin == 0) {
-            fd = k_open(p, 0, 0);
-            if (fd < 0) {
-                _so_report(p, 0 - fd);
-                return SO_EXIT_TROUBLE;
-            }
-        }
-        var n = _so_slurp(fd, buf + have, _SORT_INPUT_CAP - have, &overflow_box);
-        if (is_stdin == 0) { k_close( fd); }
-        if (n < 0) {
-            _so_report(p, 0 - n);
-            return SO_EXIT_TROUBLE;
-        }
-        have = have + n;
-        fi = fi + 1;
+    _so_term = term_byte;
+    if (vec_len(_so_tdirs) == 0) {
+        var td = getenv("TMPDIR");
+        if (td == 0) { td = "/tmp"; }
+        vec_push(_so_tdirs, td);
     }
-    store64(fbyte + nf * 8, have);
-    if (load64(&overflow_box) == 1) {
-        k_write( 2, "kriya sort: warning: input exceeds 256 MiB; external-sort fallback deferred — truncating\n", 91);  # roadmap 1.9.2  #skip-lint
-    }
-
-    # One record per line, each file's lines on their own: a file's last line ends with the file.
-    var nrec: i64 = 0;
-    fi = 0;
-    while (fi < nf) {
-        nrec = nrec + _so_count_lines(buf + load64(fbyte + fi * 8), buf + load64(fbyte + (fi + 1) * 8), term_byte);
-        fi = fi + 1;
-    }
-    var recs = alloc(nrec * SO_R_SZ + 8);
-    var ptrs = alloc(nrec * 8 + 8);
-    var fstart = alloc(nf * 8 + 8);
-    var ri: i64 = 0;
-    fi = 0;
-    while (fi < nf) {
-        store64(fstart + fi * 8, ri);
-        ri = _so_fill_records(buf + load64(fbyte + fi * 8), buf + load64(fbyte + (fi + 1) * 8), term_byte,
-          recs, ptrs, ri);
-        fi = fi + 1;
-    }
-    store64(fstart + nf * 8, ri);
-    _so_prepare(ptrs, nrec);
-
-    # -c / -C: each line against the one before it. ⚠ With `-u` the order must be STRICT, as GNU
-    # checks it: an equal pair is a disorder.
-    if (_so_checkonly != 0) {
-        var ci: i64 = 1;
-        while (ci < nrec) {
-            var cmp = _so_compare(load64(ptrs + (ci - 1) * 8), load64(ptrs + ci * 8));
-            var disorder: i64 = 0;
-            if (cmp > 0) { disorder = 1; }
-            if (_so_unique == 1) {
-                if (cmp == 0) { disorder = 1; }
-            }
-            if (disorder == 1) {
-                if (_so_checkonly == 99) {
-                    k_write( 2, "kriya sort: disorder at line ", 29);
-                    _so_put_num(ci + 1);
-                    k_write( 2, "\n", 1);
-                }
-                return EXIT_FAILURE;
-            }
-            ci = ci + 1;
-        }
-        return EXIT_SUCCESS;
-    }
-
-    var order = ptrs;
-    if (merge_only == 1) {
-        order = alloc(nrec * 8 + 8);
-        _so_merge_files(ptrs, fstart, nf, order);
-    } else {
-        order = _so_merge_sort(ptrs, alloc(nrec * 8 + 8), nrec);
-    }
-
-    # The output opens only now, after every input is read, so `-o` may name one of them.
+    _so_tdir_i = 0;
+    _so_err = 0;
+    _so_out_fd = 1;
     _so_ofd = 1;
-    var out_opened: i64 = 0;
-    if (_so_outfile != 0) {
-        _so_ofd = k_open(_so_outfile, 0o1101, 0o666);  # O_WRONLY | O_CREAT | O_TRUNC
-        if (_so_ofd < 0) {
-            _so_report(_so_outfile, 0 - _so_ofd);
-            return SO_EXIT_TROUBLE;
-        }
-        out_opened = 1;
-    }
     _so_ob = alloc(_SO_OBSZ);
     _so_obn = 0;
-
-    var werr: i64 = 0;
-    var prev: i64 = 0;
-    var i: i64 = 0;
-    while (i < nrec && werr == 0) {
-        var rec = load64(order + i * 8);
-        var emit: i64 = 1;
-        if (_so_unique == 1) {
-            # The first of each run of equal keys: each line against the last one written.
-            if (prev != 0) {
-                if (_so_compare(prev, rec) == 0) { emit = 0; }
-            }
-        }
-        if (emit == 1) {
-            werr = _so_emit(load64(rec + SO_R_TEXT), load64(rec + SO_R_LEN), term_byte);
-            prev = rec;
-        }
-        i = i + 1;
-    }
-    if (werr == 0) { werr = _so_flush(); }
-    if (out_opened == 1) { k_close( _so_ofd); }
-    if (werr != 0) {
-        _so_report("(write)", 0 - werr);  # its name is roadmap 1.10.5's
+    # The input buffer: the budget, or a little more for one byte past it.
+    _so_bcap = _so_budget;
+    if (_so_bcap > 1610612736) { _so_bcap = 1610612736; }
+    _so_buf = alloc(_so_bcap + 8);
+    if (_so_buf == 0) {
+        k_write( 2, "kriya sort: memory exhausted\n", 29);
         return SO_EXIT_TROUBLE;
     }
-    return EXIT_SUCCESS;
+    if (_so_checkonly != 0) { return _so_check_input(npos); }
+    if (merge_only == 1) { return _so_merge_inputs(npos); }
+    return _so_sort_inputs(npos);
 }

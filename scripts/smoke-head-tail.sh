@@ -592,10 +592,46 @@ done
 if echo "$out_err" | grep -q "file truncated"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL truncate warning missing" >&2; fi
 if echo "$out_err" | grep -q "tiny"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL truncate new content missing" >&2; fi
 
-# Multi-file follow is currently rejected with usage error.
-expect_exit "tail -f multi-file rejected" 2 "$BIN" tail -f "$follow_dir/log" "$follow_dir/big"
+# ⚠ Multi-file `-f`, `-F`, `--retry` and `--pid` have their own script since 1.9.2, which runs
+# GNU's polling loop beside kriya's: scripts/smoke-tail-follow.sh. Until then `tail -f a b`
+# was refused here, exit 2.
 
 rm -rf "$follow_dir"
+
+# --- 1.9.2: GNU's units on every count -----------------------------------------
+#
+# ⭐ The byte-suffix parser, gnulib's `xstrtoumax` with `bkKmMGTPEZYRQ0`: `K` is 1,024, `KB` and
+# `KD` 1,000, `KiB` 1,024, `b` 512, a unit alone is one of it (`-c K`), and lower-case `g` and
+# `t` are not units here. Compared with GNU on bytes and exit status, a refusal being kriya's 2.
+head -c 3000000 /dev/zero | tr '\0' 'x' > units.txt
+seq 1 3000 > units_lines.txt
+units_case() {   # units_case UTIL OPT VALUE FILE
+    _grc=0; _g=$(LC_ALL=C timeout 10 "$1" "$2" "$3" "$4" 2>/dev/null | wc -c) || _grc=$?
+    _krc=0; _k=$(timeout 10 "$BIN" "$1" "$2" "$3" "$4" 2>/dev/null | wc -c) || _krc=$?
+    expect_eq "$1 $2 '$3'" "$_g" "$_k"
+}
+for _v in 1 1K 1k 1KB 1kB 1KiB 1kiB 1KD 1M 1m 1MB 1MiB 1MD 1G 1GB 1T 1P 1E 1b 2b 0K 0b K k KB KiB b M \
+          ' 1K' +1K 7E 15E; do
+    units_case head -c "$_v" units.txt
+    units_case tail -c "$_v" units.txt
+    units_case head -c "-$_v" units.txt
+done
+for _v in 1K 1KB 2b K b +1K; do
+    units_case head -n "$_v" units_lines.txt
+    units_case tail -n "$_v" units_lines.txt
+    units_case tail -n "+$_v" units_lines.txt
+done
+for _v in 1Ki 1KiBx 1g 1t 1bB 1B 1c 1w 1D 1e3 '1K ' 1.5K 0x10 1KK x ''; do
+    rc=0; "$BIN" head -c "$_v" units.txt >/dev/null 2>&1 || rc=$?
+    expect_eq "head -c '$_v' is refused" "2" "$rc"
+    rc=0; "$BIN" tail -n "$_v" units.txt >/dev/null 2>&1 || rc=$?
+    expect_eq "tail -n '$_v' is refused" "2" "$rc"
+done
+# ⚠ Past 2^64 GNU 9.6 and later clamp, as kriya does; 9.4 refused (*Value too large*). Asserted.
+for _v in 16E 1Z 1Y 1R 1Q 99999999999999999999K; do
+    expect_eq "head -c $_v saturates" "3000000" "$(timeout 10 "$BIN" head -c "$_v" units.txt | wc -c)"
+    expect_eq "tail -c $_v saturates" "3000000" "$(timeout 10 "$BIN" tail -c "$_v" units.txt | wc -c)"
+done
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

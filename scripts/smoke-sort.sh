@@ -464,6 +464,96 @@ printf '1 x\n' > mt_m2
 gsa "sort -m -s: a tie goes to the first file" -m -s -k1,1 mt_m1 mt_m2
 gsa "sort -m -u: the first file's line is kept" -m -u -k1,1 mt_m1 mt_m2
 
+# --- 1.9.2: past memory — temporary runs, -S and -T --------------------------------
+#
+# ⭐ Until 1.9.2 an input past the 256 MiB buffer was TRUNCATED, with a warning, in every mode. A
+# budget of a few KiB (`-S`) sends small fixtures through the same temporary runs and merges a
+# large input takes, so each case is compared with GNU on bytes and exit status.
+mkdir -p tdir
+python3 -c "
+import random
+r = random.Random(7)
+with open('ext1', 'w') as f:
+    for i in range(3000):
+        f.write(''.join(r.choice('abcAB _-') for _ in range(r.randint(0, 9))) + ' ' + str(r.randint(-999, 999)) + '\\n')
+with open('ext2', 'w') as f:
+    for i in range(700):
+        f.write(r.choice(['jan', 'FEB', 'mar', 'x']) + ' ' + str(r.random()) + ' ' + str(r.randint(1, 20)) + 'K\\n')
+    f.write('no newline at the end')
+for n in range(20):
+    with open('mu%02d' % n, 'w') as f:
+        for i in range(r.randint(0, 60)):
+            f.write(str(r.randint(0, 99)) + '\\n')
+"
+for _S in 1 3 1500b 64K; do
+    for _a in "" "-u" "-r" "-s -k1,1" "-u -k2,2n" "-n -k2" "-f -k1,1 -k2,2rn" "-M -k1,1" "-g -k2,2" "-h -k3,3" \
+              "-V" "-R --random-source=ext2" "-d" "-z"; do
+        # shellcheck disable=SC2086
+        gsa "sort -S $_S -T tdir $_a" -S "$_S" -T tdir $_a ext1 ext2
+    done
+done
+LC_ALL=C sort ext1 > ext1s
+LC_ALL=C sort ext2 > ext2s
+for _S in 1 3 64K; do
+    gsa "sort -m -S $_S, two sorted"     -m -S "$_S" -T tdir ext1s ext2s
+    gsa "sort -m -u -S $_S"              -m -u -S "$_S" -T tdir ext1s ext2s ext1s
+    gsa "sort -m -S $_S, unsorted"       -m -S "$_S" -T tdir ext1 ext2
+    gsa "sort -c -S $_S, sorted"         -c -S "$_S" -T tdir ext1s
+    gsa "sort -C -S $_S, unsorted"       -C -S "$_S" -T tdir ext1
+    gsa "sort -cu -S $_S on duplicates"  -cu -S "$_S" -T tdir ext1s
+done
+# Past sixteen files GNU merges in groups of sixteen first, and so does kriya, in memory and on
+# disk. ⚠ That cannot change the order, even over unsorted files under -u (a group's equal lines
+# stay together); these pin the many-file path, not the grouping.
+gsa "sort -m, 20 unsorted files"         -m mu00 mu01 mu02 mu03 mu04 mu05 mu06 mu07 mu08 mu09 mu10 mu11 \
+                                            mu12 mu13 mu14 mu15 mu16 mu17 mu18 mu19
+gsa "sort -m -u, 20 unsorted files"      -m -u mu00 mu01 mu02 mu03 mu04 mu05 mu06 mu07 mu08 mu09 mu10 mu11 \
+                                            mu12 mu13 mu14 mu15 mu16 mu17 mu18 mu19
+gsa "sort -m -S 1, 20 unsorted files"    -m -S 1 -T tdir mu00 mu01 mu02 mu03 mu04 mu05 mu06 mu07 mu08 mu09 \
+                                            mu10 mu11 mu12 mu13 mu14 mu15 mu16 mu17 mu18 mu19
+gsa "sort -m, 17 files"                  -m mu00 mu01 mu02 mu03 mu04 mu05 mu06 mu07 mu08 mu09 mu10 mu11 \
+                                            mu12 mu13 mu14 mu15 mu16
+# -c finds the same line buffer by buffer: GNU names it FILE:N, kriya "at line N".
+_gl=$(LC_ALL=C sort -c ext1 2>&1 | sed -n 's/^sort: ext1:\([0-9]*\): disorder.*/\1/p')
+_kl=$("$BIN" sort -c -S 1 -T tdir ext1 2>&1 | sed -n 's/^kriya sort: disorder at line \([0-9]*\)$/\1/p') || true
+expect_eq "sort -c -S 1 names GNU's line" "$_gl" "$_kl"
+printf 'b\na\n' > late
+cat ext1s late > late_dis
+_gl=$(LC_ALL=C sort -c late_dis 2>&1 | sed -n 's/^sort: late_dis:\([0-9]*\): disorder.*/\1/p')
+_kl=$("$BIN" sort -c -S 1 -T tdir late_dis 2>&1 | sed -n 's/^kriya sort: disorder at line \([0-9]*\)$/\1/p') || true
+expect_eq "sort -c -S 1, a disorder buffers in" "$_gl" "$_kl"
+# A line longer than the budget grows the buffer rather than being cut, and one longer than a run
+# reader's 64 KiB grows the reader.
+python3 -c "print('z' * 20000); print('a' * 30000); print('m'); print('b' * 100000)" > longl
+gsa "sort -S 1, lines longer than the budget"   -S 1 -T tdir longl
+gsa "sort -c -S 1, lines longer than the budget" -c -S 1 -T tdir longl
+gsa "sort -m -S 1, lines longer than the budget" -m -S 1 -T tdir longl longl
+# `-o` may name an input: everything is read into runs before the output is opened.
+cp ext1 own_ext
+"$BIN" sort -S 1 -T tdir -o own_ext own_ext || true
+expect_eq "sort -S 1 -o FILE FILE" "$(LC_ALL=C sort ext1 | md5sum)" "$(md5sum < own_ext)"
+expect_eq "no temporary file is left in -T" "" "$(ls tdir)"
+# Where the runs go: -T, round robin, else $TMPDIR, else /tmp; a failure is GNU's exit 2.
+gsa "sort -T missing, fits in memory"    -T /nonexistent ext1
+gsa "sort -S 1 -T missing"               -S 1 -T /nonexistent ext1
+gsa "sort -S 1 -T . -T missing"          -S 1 -T tdir -T /nonexistent ext1
+rc=0; TMPDIR=/nonexistent "$BIN" sort -S 1 ext1 > /dev/null 2>&1 || rc=$?
+expect_eq "sort -S 1 with a missing \$TMPDIR" "2" "$rc"
+rc=0; TMPDIR="$PWD/tdir" "$BIN" sort -S 1 ext1 > tmpdir.out 2>/dev/null || rc=$?
+expect_eq "sort -S 1 under \$TMPDIR" "0 $(LC_ALL=C sort ext1 | md5sum)" "$rc $(md5sum < tmpdir.out)"
+# GNU's -S: K M G T P E Z Y R Q (and g t) in 1024s, b for bytes, N% of memory, KiB alone; the
+# largest of several; 2^64 and past too large; every refusal exit 2.
+for _S in 1 1K 1k 1M 1g 1t 1T 1P 1E 15E 16E 1Z 1b 0 0b 1% 50% K 1KB 1KiB 1B 1c b % 1b% 1K% 1e3 " 1K" +1K "1K " \
+          1.5K 0x10 99999999999999999999 18014398509481983 18014398509481984 18446744073709551615b x "" -1; do
+    gsa "sort -S '$_S'" -S "$_S" ext2
+done
+gsa "sort -S twice, the larger kept"     -S 1 -S 64K -T tdir ext1
+# ⚠ The budget changes no order, so the larger -S shows only where the smaller would need a run:
+# 300 short lines fit 64 KiB and not 1 KiB, and -T names no directory.
+head -n 300 ext1 > small300
+gsa "sort -S 64K -S 1: the larger budget"  -S 64K -S 1 -T /nonexistent small300
+gsa "sort -S 1 -S 64K: the larger budget"  -S 1 -S 64K -T /nonexistent small300
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf "%d passed, %d failed (%d total)\n" "$PASS" "$FAIL" "$TOTAL"

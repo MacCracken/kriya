@@ -52,6 +52,8 @@ include "src/cmd/nl.cyr"
 # argument grammars (1.6.15), which are pure. Their `cmd_*` bodies reach
 # `src/lib/report.cyr`, which this subset does not include — safe only while
 # nothing below calls them.
+# ⚠ M15e (1.9.2): `tail -s` reads its seconds with xfloat, so it comes before `tail.cyr`.
+include "src/lib/xfloat.cyr"
 include "src/cmd/head.cyr"
 include "src/cmd/tail.cyr"
 # ⚠ M15e, PRE-EMPTIVELY (1.6.16). `sort.cyr`, `cut.cyr` and `seq.cyr` are here for
@@ -59,8 +61,8 @@ include "src/cmd/tail.cyr"
 # `report.cyr` (quote.cyr and errmsg.cyr above) comes with it.
 include "src/lib/report.cyr"
 # ⚠ M15e, with the reference: `seq.cyr` and `printf.cyr` read and write floats through it (1.9.0),
-# and `sort -g` reads its keys with it (1.9.1). `md5.cyr` and `vercmp.cyr` are `sort -R` and `-V`.
-include "src/lib/xfloat.cyr"
+# and `sort -g` reads its keys with it (1.9.1); it is included above `tail.cyr` since 1.9.2.
+# `md5.cyr` and `vercmp.cyr` are `sort -R` and `-V`.
 include "src/lib/md5.cyr"
 include "src/lib/vercmp.cyr"
 include "src/cmd/sort.cyr"
@@ -207,6 +209,14 @@ fn _t_ncmp(a, b): i64 {
     memcpy(buf, a, al);
     memcpy(buf + al, b, bl);
     return _so_cmp_numeric(buf, al, buf + al, bl);
+}
+
+# `kriya_xstrtou` of `s` with `valid`: the value when well formed, -1 - mask when not.
+fn _t_xs(s, valid): i64 {
+    var out[32];
+    var e = kriya_xstrtou(s, valid, &out);
+    if (e == 0) { return load64(&out); }
+    return 0 - 1 - e;
 }
 
 # The sign of a comparison, so a test states only the order.
@@ -403,7 +413,7 @@ fn main() {
     assert_eq(kriya_parse_count("+"),     0 - 1, "a plus and no digits");
     assert_eq(kriya_parse_count("-3"),    0 - 1, "a minus is the CALLER's to take");
     assert_eq(kriya_parse_count("3 "),    0 - 1, "a trailing blank");
-    assert_eq(kriya_parse_count("3k"),    0 - 1, "a suffix (roadmap 1.9.2)");
+    assert_eq(kriya_parse_count("3k"),    0 - 1, "a suffix: units are kriya_parse_count_units's (1.9.2)");
     assert_eq(kriya_parse_count(""),      0 - 1, "empty");
     assert_eq(kriya_parse_count(" "),     0 - 1, "a blank alone");
     assert_eq(kriya_parse_count(0),       0 - 1, "null");
@@ -1964,11 +1974,60 @@ fn main() {
     assert_eq(_t_gcmp("-0", "0"), 0, "-0 is 0");
     assert_eq(_t_gcmp("1e3", "0x3e9"), 0 - 1, "1000 < 1001");
     assert_eq(_t_gcmp("1e5000", "inf"), 0, "an overflow is inf");
-    assert_eq(_so_argmatch("q", "quiet\0silent\0diagnose-first", "CCc", 3), 67, "a prefix");
-    assert_eq(_so_argmatch("", "quiet\0silent\0diagnose-first", "CCc", 3), 0 - 2, "empty is ambiguous");
-    assert_eq(_so_argmatch("x", "quiet\0silent\0diagnose-first", "CCc", 3), 0 - 1, "no match");
-    assert_eq(_so_argmatch("n", "general-numeric\0human-numeric\0month\0numeric\0random\0version",
+    assert_eq(kriya_argmatch("q", "quiet\0silent\0diagnose-first", "CCc", 3), 67, "a prefix");
+    assert_eq(kriya_argmatch("", "quiet\0silent\0diagnose-first", "CCc", 3), 0 - 2, "empty is ambiguous");
+    assert_eq(kriya_argmatch("x", "quiet\0silent\0diagnose-first", "CCc", 3), 0 - 1, "no match");
+    assert_eq(kriya_argmatch("n", "general-numeric\0human-numeric\0month\0numeric\0random\0version",
       "ghMnRV", 6), 110, "n is numeric");
+
+    # --- 1.9.2: the byte-suffix parser and sort -S ---
+    test_group("kriya_xstrtou — gnulib's xstrtoumax and its units (1.9.2)");
+    var hs = "bkKmMGTPEZYRQ0";
+    assert_eq(_t_xs("1", hs), 1, "a number");
+    assert_eq(_t_xs("1K", hs), 1024, "K is 1024");
+    assert_eq(_t_xs("1k", hs), 1024, "k too");
+    assert_eq(_t_xs("1KB", hs), 1000, "KB is 1000");
+    assert_eq(_t_xs("1KD", hs), 1000, "KD too, obsolescently");
+    assert_eq(_t_xs("1KiB", hs), 1024, "KiB is 1024");
+    assert_eq(_t_xs("2b", hs), 1024, "b is 512");
+    assert_eq(_t_xs("1M", hs), 1048576, "M");
+    assert_eq(_t_xs("1MB", hs), 1000000, "MB");
+    assert_eq(_t_xs("3G", hs), 3221225472, "G");
+    assert_eq(_t_xs("1E", hs), 1152921504606846976, "E is 2^60");
+    assert_eq(_t_xs("K", hs), 1024, "a unit alone is one of it");
+    assert_eq(_t_xs(" +5K", hs), 5120, "blanks and a plus first");
+    assert_eq(_t_xs("7E", hs), 8070450532247928832, "7E fits an i64");
+    assert_eq(_t_xs("8E", hs), KRIYA_COUNT_MAX, "8E fits a u64, saturated for the caller");
+    assert_eq(_t_xs("16E", hs), 0 - 1 - KRIYA_XS_OVERFLOW, "16E is 2^64: overflow");
+    assert_eq(_t_xs("18446744073709551615", ""), KRIYA_COUNT_MAX, "u64 max is not an overflow");
+    assert_eq(_t_xs("18446744073709551616", ""), 0 - 1 - KRIYA_XS_OVERFLOW, "2^64 is");
+    assert_eq(_t_xs("1g", hs), 0 - 1 - KRIYA_XS_BADSUFFIX, "g is not head's");
+    assert_eq(_t_xs("1Ki", hs), 0 - 1 - KRIYA_XS_BADSUFFIX, "Ki without B");
+    assert_eq(_t_xs("1KK", hs), 0 - 1 - KRIYA_XS_BADSUFFIX, "two units");
+    assert_eq(_t_xs("1K", "K"), 1024, "without 0, no second suffix...");
+    assert_eq(_t_xs("1KB", "K"), 0 - 1 - KRIYA_XS_BADSUFFIX, "...so KB is junk");
+    assert_eq(_t_xs("-1", hs), 0 - 1 - KRIYA_XS_INVALID, "a minus");
+    assert_eq(_t_xs("", hs), 0 - 1 - KRIYA_XS_INVALID, "empty");
+    assert_eq(_t_xs(" K", hs), 0 - 1 - KRIYA_XS_INVALID, "a lone unit counts only as the first byte");
+    assert_eq(_t_xs("x", hs), 0 - 1 - KRIYA_XS_INVALID, "no number");
+    assert_eq(kriya_parse_count_units("99999999999999999999K"), KRIYA_COUNT_MAX, "head/tail saturate");
+    assert_eq(kriya_parse_count_units("1.5K"), 0 - 1, "a fraction is junk");
+
+    test_group("sort -S — GNU's specify_sort_size (1.9.2)");
+    assert_eq(_so_parse_size("1"), 1024, "a bare number is KiB");
+    assert_eq(_so_parse_size("1b"), 1, "b is bytes");
+    assert_eq(_so_parse_size("1K"), 1024, "K");
+    assert_eq(_so_parse_size("2M"), 2097152, "M");
+    assert_eq(_so_parse_size("1t"), 1099511627776, "t is T here");
+    assert_eq(_so_parse_size("15E"), KRIYA_COUNT_MAX, "15E fits");
+    assert_eq(_so_parse_size("16E"), 0 - 2, "16E is too large");
+    assert_eq(_so_parse_size("18014398509481983"), KRIYA_COUNT_MAX, "u64 / 1024 fits as KiB");
+    assert_eq(_so_parse_size("18014398509481984"), 0 - 2, "one more does not");
+    assert_eq(_so_parse_size("1KB"), 0 - 3, "no second suffix for -S");
+    assert_eq(_so_parse_size("b"), 0 - 1, "b alone is no number");
+    assert_eq(_so_parse_size("1Kb"), 0 - 3, "b only after digits");
+    assert_eq(_so_parse_size("x"), 0 - 1, "junk");
+    assert_eq(_so_parse_size("0%"), 0, "0%");
 
     return assert_summary();
 

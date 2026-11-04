@@ -8,7 +8,10 @@ unit suffixes, month names, version strings, punctuation, control and high
 bytes, with blanks in front and duplicate lines — and a random command line:
 the global letters (`-b -d -f -g -h -i -M -n -r -R -V`), up to three `-k` keys
 with character offsets and letters of their own, `-t`, `-s`, `-u`, `-z`,
-`--sort=WORD`, and the modes `-c`, `-C` and `-m` over several files. Both
+`--sort=WORD`, and the modes `-c`, `-C` and `-m` over several files. A third of
+the cases set a budget of a few KiB (`-S`) with a `-T` directory and inputs of
+up to 400 lines, which sends them through temporary runs and merges (1.9.2),
+and `-m` sometimes takes 17 or 20 files, past GNU's sixteen-way merge passes. Both
 sides run under `LC_ALL=C` in the same directory; stdout and the exit status
 are compared, never stderr, whose framing is kriya's own. Every case carries
 `--random-source=FILE`, which makes GNU's shuffle reproducible wherever `R` is.
@@ -74,9 +77,9 @@ def line(seps):
         out += token()
     return out
 
-def make_input(seps, term):
+def make_input(seps, term, big=False):
     lines = []
-    for _ in range(rnd.randint(0, 25)):
+    for _ in range(rnd.randint(0, 400 if big else 25)):
         if lines and rnd.random() < 0.2:
             lines.append(rnd.choice(lines))
         else:
@@ -146,6 +149,11 @@ def case(tmp):
         term = "\0"
     # Always: GNU reads the file only when some key is random, `-k2R` included.
     args.append("--random-source=rs")
+    # 1.9.2: a budget small enough to send the input through temporary runs and merges.
+    big = False
+    if rnd.random() < 0.3:
+        args += ["-S", rnd.choice(["1", "1K", "2", "3", "1500b", "4K"]), "-T", "tdir"]
+        big = rnd.random() < 0.7
     mode = rnd.random()
     files = []
     if mode < 0.08:
@@ -156,12 +164,13 @@ def case(tmp):
         files = ["f0"]
     elif mode < 0.25:
         args.append("-m")
-        files = ["f%d" % i for i in range(rnd.randint(1, 4))]
+        # Past sixteen files GNU merges in groups first (it cannot change the order).
+        files = ["f%d" % i for i in range(rnd.choice([1, 2, 3, 4, 17, 20]))]
     else:
         files = ["f%d" % i for i in range(rnd.choice([1, 1, 1, 2, 3]))]
     for f in files:
         with open(os.path.join(tmp, f), "wb") as fh:
-            fh.write(make_input(seps, term))
+            fh.write(make_input(seps, term, big))
     if "-m" in args and rnd.random() < 0.6:
         # Mostly merge real sorted runs: sort each file with GNU under the same options first.
         pre = [a for a in args if a != "-m"]
@@ -179,6 +188,7 @@ def run(cmd, tmp, stdin):
     return p.stdout, p.returncode
 
 tmp = tempfile.mkdtemp(prefix="dfsort.")
+os.mkdir(os.path.join(tmp, "tdir"))
 with open(os.path.join(tmp, "rs"), "wb") as fh:
     fh.write(bytes(rnd.randrange(256) for _ in range(64)))
 diff = 0
@@ -210,6 +220,10 @@ for i in range(N):
             else:
                 for f in operands:
                     print("  %s %r" % (f, open(os.path.join(tmp, f), "rb").read()[:300]))
+left = os.listdir(os.path.join(tmp, "tdir"))
+if left:
+    print("temporary files left behind:", left[:5])
+    diff += 1
 print("sort: %d cases, %d refused by both, %d differ" % (N, refused, diff))
 if diff:
     print("inputs kept in", tmp)

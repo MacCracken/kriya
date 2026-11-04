@@ -1387,6 +1387,221 @@ fn kriya_parse_count(s): i64 {
     return n;
 }
 
+# ⭐ GNU'S BYTE-SUFFIX PARSER, gnulib's `xstrtoumax` (xstrtol.c), ported (1.9.2): the shared
+# reader for every count and size GNU takes with a unit — `head -c 1K`, `tail -n 2M`, `sort -S 1G`.
+#
+#   - White space, an optional `+`, decimal digits. A leading `-` is INVALID.
+#   - No digits but a first byte in `valid` reads as 1: `head -c K` is 1,024 bytes.
+#   - Then one suffix from `valid`: b (512), k K (1024), m M, G g, T t, P, E, Z, Y, R, Q, B (1024),
+#     c (1), w (2), each in the string only where the caller allows it. With `0` in `valid` a
+#     second suffix may follow a unit letter: `B` or `D` makes it a power of 1000 (`1KB` is 1,000),
+#     `iB` a power of 1024 (`1KiB` is 1,024).
+#   - Anything after is an invalid suffix.
+#
+# The value is a full u64, kept as two 32-bit halves so that 2^64 and past is GNU's overflow
+# exactly (`sort -S 15E` is valid and `16E` too large). Returns a mask of KriyaXs bits (0 when
+# well formed) and stores in `out`: +0 the value saturated at KRIYA_COUNT_MAX, +8 the offset in
+# `s` where parsing stopped (GNU's `*endptr`), +16 and +24 the u64's high and low halves
+# (all-ones on overflow).
+enum KriyaXs {
+    KRIYA_XS_OVERFLOW   = 1;
+    KRIYA_XS_BADSUFFIX  = 2;
+    KRIYA_XS_INVALID    = 4;
+}
+
+var _kx_hi = 0;
+var _kx_lo = 0;
+var _kx_ovf = 0;
+
+# The u64 in (_kx_hi, _kx_lo) times `f` (f < 2^31); all-ones and the overflow flag past 2^64.
+fn _kx_mul(f): i64 {
+    if (_kx_ovf == 1) { return 0; }
+    var lo = _kx_lo * f;
+    var carry = lo >> 32;
+    lo = lo & 4294967295;
+    var hi = _kx_hi * f + carry;
+    if (hi > 4294967295) {
+        _kx_ovf = 1;
+        _kx_hi = 4294967295;
+        _kx_lo = 4294967295;
+        return 0;
+    }
+    _kx_hi = hi;
+    _kx_lo = lo;
+    return 0;
+}
+
+fn _kx_add(d): i64 {
+    if (_kx_ovf == 1) { return 0; }
+    var lo = _kx_lo + d;
+    var hi = _kx_hi + (lo >> 32);
+    lo = lo & 4294967295;
+    if (hi > 4294967295) {
+        _kx_ovf = 1;
+        _kx_hi = 4294967295;
+        _kx_lo = 4294967295;
+        return 0;
+    }
+    _kx_hi = hi;
+    _kx_lo = lo;
+    return 0;
+}
+
+fn _kx_has(valid, c): i64 {
+    if (c == 0) { return 0; }
+    var i: i64 = 0;
+    while (load8(valid + i) != 0) {
+        if (load8(valid + i) == c) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn kriya_xstrtou(s, valid, out): i64 {
+    _kx_hi = 0;
+    _kx_lo = 0;
+    _kx_ovf = 0;
+    store64(out + 8, 0);
+    var i: i64 = 0;
+    var ws: i64 = 1;
+    while (ws == 1) {
+        var w = load8(s + i);
+        ws = 0;
+        if (w == 32) { ws = 1; }
+        if (w >= 9) { if (w <= 13) { ws = 1; } }
+        if (ws == 1) { i = i + 1; }
+    }
+    if (load8(s + i) == 45) {
+        store64(out, 0);
+        return KRIYA_XS_INVALID;
+    }
+    if (load8(s + i) == 43) { i = i + 1; }
+    var d0 = i;
+    while (load8(s + i) >= 48 && load8(s + i) <= 57) {
+        _kx_mul(10);
+        _kx_add(load8(s + i) - 48);
+        i = i + 1;
+    }
+    var err: i64 = 0;
+    if (i == d0) {
+        # No number: a valid suffix alone stands for 1, read from the string's FIRST byte.
+        i = 0;
+        if (_kx_has(valid, load8(s)) == 0) {
+            store64(out, 0);
+            return KRIYA_XS_INVALID;
+        }
+        _kx_lo = 1;
+    }
+    if (_kx_ovf == 1) { err = KRIYA_XS_OVERFLOW; }
+    var c = load8(s + i);
+    if (c != 0) {
+        if (_kx_has(valid, c) == 0) {
+            err = err | KRIYA_XS_BADSUFFIX;
+        } else {
+            var xbase: i64 = 1024;
+            var used: i64 = 1;
+            var unit: i64 = 0;
+            if (_kx_has("EGgkKMmPQRTtYZ", c) == 1) { unit = 1; }
+            if (unit == 1) {
+                if (_kx_has(valid, 48) == 1) {
+                    var c1 = load8(s + i + 1);
+                    if (c1 == 105) {
+                        if (load8(s + i + 2) == 66) { used = 3; }
+                    } elif (c1 == 66) {
+                        xbase = 1000;
+                        used = 2;
+                    } elif (c1 == 68) {
+                        xbase = 1000;
+                        used = 2;
+                    }
+                }
+            }
+            var power: i64 = 0 - 1;
+            var factor: i64 = 0;
+            if (c == 98) { factor = 512; }
+            elif (c == 66) { factor = 1024; }
+            elif (c == 99) { factor = 1; }
+            elif (c == 119) { factor = 2; }
+            elif (c == 107) { power = 1; }
+            elif (c == 75) { power = 1; }
+            elif (c == 77) { power = 2; }
+            elif (c == 109) { power = 2; }
+            elif (c == 71) { power = 3; }
+            elif (c == 103) { power = 3; }
+            elif (c == 84) { power = 4; }
+            elif (c == 116) { power = 4; }
+            elif (c == 80) { power = 5; }
+            elif (c == 69) { power = 6; }
+            elif (c == 90) { power = 7; }
+            elif (c == 89) { power = 8; }
+            elif (c == 82) { power = 9; }
+            elif (c == 81) { power = 10; }
+            if (factor == 0) {
+                if (power < 0) {
+                    # A byte the caller listed that is no unit, such as `0` itself.
+                    err = err | KRIYA_XS_BADSUFFIX;
+                    used = 0;
+                }
+            }
+            if (factor > 0) { _kx_mul(factor); }
+            while (power > 0) {
+                _kx_mul(xbase);
+                power = power - 1;
+            }
+            if (_kx_ovf == 1) { err = err | KRIYA_XS_OVERFLOW; }
+            i = i + used;
+            if (used > 0) {
+                if (load8(s + i) != 0) { err = err | KRIYA_XS_BADSUFFIX; }
+            }
+        }
+    }
+    store64(out + 8, i);
+    store64(out + 16, _kx_hi);
+    store64(out + 24, _kx_lo);
+    if (_kx_hi > 2147483647) { store64(out, KRIYA_COUNT_MAX); }
+    else { store64(out, (_kx_hi << 32) | _kx_lo); }
+    return err;
+}
+
+# A `head` or `tail` count with GNU's units, `bkKmMGTPEZYRQ` and the second suffixes, once the
+# utility has taken the sign that means something to it. An overflow saturates, as GNU 9.6 and
+# later clamp it (`XTOINT_MAX_QUIET`; 9.4 refused); anything malformed is -1.
+fn kriya_parse_count_units(s): i64 {
+    if (s == 0) { return 0 - 1; }
+    var out[32];
+    var e = kriya_xstrtou(s, "bkKmMGTPEZYRQ0", &out);
+    if (e == 0) { return load64(&out); }
+    if (e == KRIYA_XS_OVERFLOW) { return KRIYA_COUNT_MAX; }
+    return 0 - 1;
+}
+
+# GNU's `argmatch` (1.9.1, shared since 1.9.2 by `sort --check=` / `--sort=` and `tail
+# --follow=`): the code of the name `val` matches exactly or as the only prefix (prefixes of
+# names with the same code count once); -1 when none matches, -2 when it is ambiguous. `names` is
+# `n` NUL-separated names and `codes` their codes, one byte each.
+fn kriya_argmatch(val, names, codes, n): i64 {
+    var vlen = strlen(val);
+    var found: i64 = 0 - 1;
+    var amb: i64 = 0;
+    var p = names;
+    var i: i64 = 0;
+    while (i < n) {
+        var nl = strlen(p);
+        if (vlen <= nl) {
+            if (memeq(p, val, vlen) == 1) {
+                var code = load8(codes + i);
+                if (vlen == nl) { return code; }
+                if (found < 0) { found = code; }
+                elif (found != code) { amb = 1; }
+            }
+        }
+        p = p + nl + 1;
+        i = i + 1;
+    }
+    if (amb == 1) { return 0 - 2; }
+    return found;
+}
+
 # Parse a GNU-style duration into MILLISECONDS: an optional fractional decimal
 # with an optional unit suffix — `1`, `1.5`, `0.25`, `1s`, `2m`, `1h`, `1d`.
 # Returns -1 on any of: null, empty, a sign, a bad digit, a bad suffix, more
