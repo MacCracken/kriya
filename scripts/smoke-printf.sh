@@ -149,22 +149,9 @@ expect_exit "no FORMAT"  2 "$BIN" printf
 # (dropping the `%`) and exit 0 — so `printf '%f' 1.5` produced the text "f" and
 # reported success.
 #
-# ⛔ THIS BLOCK IS A DELIBERATE DIVERGENCE, NOT A PARITY CHECK — do not "fix" it
-# by comparing against GNU at runtime. The comment here used to call
-# %f/%e/%g/%a "invalid directives" and claim GNU exits 1 for them. **That is
-# false**: they are VALID floating-point conversions in GNU, which prints
-# `1.500000` and exits 0. kriya refuses them because it has no float formatter
-# yet (roadmap 1.9.0), and refusing loudly beats printing a wrong number. The
-# absolutes below are the point.
-#
-# ⚠ `%Z` on the other hand IS invalid in GNU, so that pair is a real parity
-# assertion and could be compared at runtime — it is kept as an absolute only
-# for symmetry with the block above it.
-for d in %f %e %g %a; do
-    rc=0; out=$("$BIN" printf "$d" 1.5 2>/dev/null) || rc=$?
-    expect_eq "$d exits 1"       "1" "$rc"
-    expect_eq "$d prints nothing" ""  "$out"
-done
+# ⭐ Until 1.9.0 kriya REFUSED %f/%e/%g/%a, exit 1 and nothing printed, because it had no float
+# formatter, and this block asserted the refusal. They are GNU's now and compared in the 1.9.0
+# block below. ⚠ `%Z` IS invalid in GNU, and is kept as an absolute.
 rc=0; out=$("$BIN" printf '%Z' 2>/dev/null) || rc=$?
 expect_eq "%Z exits 1"        "1" "$rc"
 expect_eq "%Z prints nothing" ""  "$out"
@@ -320,9 +307,7 @@ same "missing: %d %s %b %c"   '%d|%s|%b|%c|'
 same "%*d with no argument"   '%*d|'
 same "%.*d with no argument"  '%.*d|'
 same "%*.*d, one argument"    '%*.*d|' 3
-# `%q` is GNU's and not kriya's: refused by name, as the floats are.
-rc=0; out=$("$BIN" printf '%q' 'a b' 2>/dev/null) || rc=$?
-expect_eq "%q refused" "1 " "$rc $out"
+# `%q` is GNU's shell-escape quoting since 1.9.0; its cases are in the 1.9.0 block.
 
 # --- widths and precisions (1.6.17) ---
 # ⛔ They WRAPPED — `%18446744073709551617d 5` printed `5` — and below the wrap a
@@ -405,6 +390,110 @@ expect_eq "the first unused argument is named" \
 # makes a regression a failure.
 n=$(timeout 10 "$BIN" printf '%s\n' $(seq 100000) | wc -l)
 expect_eq "printf over 100,000 arguments" "100000" "$n"
+
+# --- 1.9.0: floats, %q and %N$ --------------------------------------------------
+#
+# ⭐ The floats are GNU's `long double`, read as `strtold` reads them and written as glibc writes an
+# x86 extended value (src/lib/xfloat.cyr, ADR 0032), compared byte for byte with the exit status.
+# ⚠ On an aarch64 GNU, `long double` is binary128 and these digits differ; the oracle is x86_64.
+# `scripts/difffuzz-float.py` runs 10,000s of random cases; these are the ones that name a rule.
+for v in 1.5 0 -0 0.1 2.675 738.495 1e-10 123456789 1e100 1e-300 inf -inf nan -nan 0x1.8p3 \
+         1e4932 1e-4940 0x1p-16445 0x1p-16382 9.9999995 0.5 2.5 -2.5; do
+    for f in '%f' '%e' '%g' '%a' '%F' '%E' '%G' '%A' '%.0f' '%.30f' '%.25e' '%.3g' '%#.0e' \
+             '%#g' '%+.2f' '% e' '%015.4f' '%-15g|' '%010a' '%.0a' '%.3a' '%#a'; do
+        same "$f $v" "$f|" "$v"
+    done
+done
+# Halfway cases, decided at 64 bits: binary64 gets each of these the other way.
+same "halfway cases"      '%.2f %.2f %.2f %.1f %.1f %.3f\n' 738.495 280.755 341.815 978.15 869.15 632.2075
+same "ties to even"       '%.0f %.0f %.0f %.0f %.0e\n' 0.5 1.5 2.5 3.5 2.5
+same "exact digits"       '%.40g|%.50f\n' 0.1 1e-30
+same "every digit"        '%f\n' 1e4932
+same "a long precision"   '%.1000f\n' 1e-300
+same "a carry"            '%.3e %.2f %.4g %.0a %.3a\n' 9.9995 9.995 99995 1.99 0xf.fff8p0
+same "subnormal %a"       '%a %a %a %a\n' 0x1p-16445 0x1p-16382 0x1.8p-16444 0x1p-16383
+same "%a ties to even"    '%.1a %.1a %.2a\n' 0x8.28p0 0x8.38p0 0x8.f78p0
+same "%g switches at -4"  '%g %g %g %g %g\n' 1e-4 1e-5 0.00012345 123456 1234567
+# ⛔ The fast %f path dropped the first 72 digits of an answer longer than that: `%.70f 62061.1971`
+# was `62000.000…`, found only by the fuzz in the containers.
+same "%f past 72 digits"  '%.70f %.75f %.100f\n' 62061.1971 -544645.7689817712 1e10
+# ⚠ glibc's %#g carry: P integer digits rounding into the next decade keep no fraction digits.
+same "%#g carries as glibc" '%#.2g %#.3g %#g %#.4g %#.2G %#.2g %#.3g\n' 99.96 999.6 999999.5 9999.6 99.96 9.96 99.96
+same "leading fraction zeros" '%e %e %.3f %a\n' 0.05 0.000123 0.0625 0.001
+# What `strtold` reads: blanks, signs, hex, words, and where it stops.
+for v in '  1.5' '+1.5' '.5' '5.' '-.5e1' '0x.8' '0x8.' '0X1P3' 'INF' 'infinity' 'NaN' \
+         'nan(123)' 'nan(a_b)' '  -Infinity' 1e-4951 2e-4951 3.3e-4932 \
+         0x1.fffffffffffffffep-16383 0x1.ffffffffffffffffp-16383 \
+         1.18973149535723176502e+4932 1.18973149535723176508575932662800702e4932 \
+         0x1.ffffffffffffffff8p0 0x1.fffffffffffffffe8p0 '1.5x' x 1e '1e+' 0x 0x1p infinit \
+         'nan(' infx 1e99999 1e-99999 '1.5 ' "'a" '"b'; do
+    same "read: [$v]" '%e|%a\n' "$v" "$v"
+done
+# ⚠ An EMPTY argument is not a number, exit 1, as GNU 9.7 on has it; 9.4 read it as 0 at exit 0,
+# for `%d` as for the floats. Asserted, not compared.
+rc=0; out=$("$BIN" printf '%e' '' 2>/dev/null) || rc=$?
+expect_eq "read: an empty argument" "1 0.000000e+00" "$rc $out"
+# ⚠ Past the 20,000 significant digits kept exactly, "something nonzero follows" still decides a
+# tie: 1 + 2^-64 is halfway between two extended values, and a 1 far beyond it rounds it up.
+_half="1.0000000000000000000542101086242752217003726400434970855712890625"
+_tail=$(head -c 21000 /dev/zero | tr '\0' 0)
+same "a tie broken past 20,000 digits" '%a\n' "${_half}${_tail}1"
+same "...and a tie that stays one"     '%a\n' "${_half}${_tail}"
+# ⚠ `nan(` reads its parenthesis only when it closes: GNU stops after `nan` here.
+same "read: [nan(ab-]"           '%e|\n' 'nan(ab-'
+same "char constant with junk"  '%f\n' "'abc"
+same "a missing argument is 0"  '%f|%e|%a|\n'
+same "* width and precision"    '%*.*f|%-*f|%*f|\n' 10 3 3.14159 8 2.5 -8 2.5
+same "length modifiers"         '%Lf|%lf|%hf|%jf|%10.3Lf|\n' 1 2 3 4 5
+same "' flag, C locale"         "%'f|%'g|\n" 1234567.5 1234567
+same "' rules out e and a"      "%'e" 1
+same "huge width refused"       '%2147483648f|%f\n' 1 2
+# ⚠ One divergence, asserted: GNU's `%If` prints only the decimal point (glibc's digits flag drops
+# the digits of a `long double`, measured 9.4 to 9.12); kriya prints the number.
+expect_eq "%If prints the number" "3.500000" "$("$BIN" printf '%If' 3.5)"
+# ERANGE: inf past the largest, the value below the smallest normal, a diagnostic, exit 1.
+for v in 1e5000 -1e5000 1e-4950 1e-5000 0x1p-16446; do
+    same "out of range: $v" '%e\n' "$v"
+done
+expect_eq "ERANGE is said" "1" "$("$BIN" printf '%e' 1e5000 2>&1 >/dev/null | grep -c 'numerical result out of range' || true)"
+expect_eq "an exact subnormal is not" "" "$("$BIN" printf '%e' 0x1p-16445 2>&1 >/dev/null)"
+
+# %q: shell-escape quoting, `''` for an empty argument, nothing between it and the `%`.
+for v in 'a b' '' "it's" 'plain' '~x' 'a=b' "$(printf 'a\nb')" '$x' '-n' 'a,b' '{' '#c'; do
+    same "%q [$v]" '%q|' "$v"
+done
+for f in '%5q' '%-q' '%.3q' '%lq'; do same "$f refused" "$f" a; done
+same "%q|%q with one argument"  '%q|%q|' a
+same "%q with none"             '%q'
+
+# ⭐ %N$ (POSIX:2024), GNU 9.7's rules. ⚠ 9.4 calls every one an invalid conversion: PROBED, and on
+# such an oracle kriya's answers are asserted as 9.7 and 9.12 give them.
+GNU_NPOS=0
+[ "$("$GNU" '%2$s' a b 2>/dev/null)" = b ] && GNU_NPOS=1
+npos() {   # npos <name> <9.7's stdout> <format> <arg...>
+    _n=$1; _x=$2; shift 2
+    if [ "$GNU_NPOS" = 1 ]; then same "$_n" "$@"
+    else expect_eq "$_n" "$_x" "$("$BIN" printf "$@" 2>/dev/null)"; fi
+}
+[ "$GNU_NPOS" = 1 ] || echo "note: $("$GNU" --version | head -1) predates %N\$; its cases assert 9.7's answers"
+npos "%2\$s %1\$s"            'b a|'          '%2$s %1$s|' a b
+npos "...reused"               'b a|d c|'      '%2$s %1$s|' a b c d
+npos "...short a pass"         'b a| c|'       '%2$s %1$s|' a b c
+npos "%1\$s twice"             'a a|b b|'      '%1$s %1$s|' a b
+npos "a pass uses its highest" 'c||'           '%3$s|' a b c d e
+npos "plain after numbered"    'a a b|c c |'   '%s %1$s %s|' a b c
+npos "numbered after plain"    'a a b|c c d|'  '%1$s %s %s|' a b c d
+npos "*N\$ width"              '    5|  3|'    '%*1$d|' 5 3
+npos "%2\$*1\$d"               '    3|'        '%2$*1$d|' 5 3
+npos "%2\$.*1\$f"              '3.14|'         '%2$.*1$f|' 2 3.14159
+npos "all three numbered"      '      3.14|'   '%1$*2$.*3$f|' 3.14159 10 2
+npos "a huge number is missing" '|'            '%99999999999$s|' a b
+npos "%1\$b"                   "$(printf 'a\tb|')" '%1$b|' 'a\tb'
+npos "%2\$q"                   "'b c'|"        '%2$q|' a 'b c'
+npos "past the arguments"      '|'             '%5$s|' a
+npos "one argument, two uses"  '5-5|'          '%1$s-%1$d|' 5
+same "%0\$ is invalid"          '%0$s|' a
+same "%1\$% is invalid"         '%1$%|' a
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))

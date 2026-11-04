@@ -13,14 +13,24 @@
 #   -w / --equal-width     zero-pad short numbers to match the wider
 #                          of FIRST and LAST text widths (sign byte
 #                          counted; pad goes after sign).
-#   -f / --format FMT      printf-style format. DEFERRED at v0.7.0
-#                          behind the shared printf float follow-up (roadmap 1.9.0)
-#                          (kriya printf doesn't ship %e/%f/%g yet).
-#                          Passing -f errors with a clear usage
-#                          message pointing at the deferred item.  #skip-lint
+#   -f / --format FMT      a printf format with ONE floating-point directive
+#                          (`%e %f %g %a`, upper case too, flags `-+#0 '` and space,
+#                          width, precision, an optional `L`), and `%%`. 1.9.0.
 #
-# Integer only at v0.7.0. GNU's float behaviour (`seq 0.1 0.1 0.5`)
-# defers behind the same printf float follow-up. (roadmap 1.9.0)
+# ⭐ FIRST, INCREMENT AND LAST ARE FLOATS (1.9.0), GNU's `long double`, as `printf`'s are
+# (`src/lib/xfloat.cyr`, ADR 0032). GNU's three paths, ported from seq.c:
+#   - `seq_fast`: non-negative integers of any size as decimal STRINGS, an increment up to 200,
+#     no -f or -w, a one-byte separator. `seq 18446744073709551614 18446744073709551617` is exact.
+#   - the general path: `first + i * step` in extended arithmetic, two roundings, each value
+#     printed with the format; when the value past LAST prints as LAST does and not as the one
+#     before it, it is printed too (GNU's fix for `seq 0 0.000001 0.000003`). The default format is
+#     `%.Pf`, P the most fraction digits FIRST and INCREMENT were written with, `%0W.Pf` under -w
+#     with W from the operands' text, or `%g` when an operand is not plain decimal.
+#   - kriya's own i64 loop, where its output is the general path's by construction: plain integers
+#     in range, no -f, and a FIRST that is not `-0` (GNU prints `-0`).
+# ⛔ `-s ''` WROTE NEWLINES. An empty separator is empty in GNU (`seq -s '' 3` is `123`), and kriya
+# swapped in a newline (1.9.0).
+# ⚠ Exit 2 for a bad operand or format where GNU exits 1, as before (ADR 0008).
 #
 # Empty output is not an error: if direction-of-incr disagrees with
 # direction from FIRST to LAST, exit 0 with no bytes written.
@@ -198,7 +208,7 @@ fn _seq_init_spec(): i64 {
     var s = flags_new();
     flags_add_str(s,  115, "separator", 0, "string between numbers (default newline)");
     flags_add_bool(s, 119, "equal-width", 0, "pad with leading zeroes to equal width");
-    flags_add_str(s,  102, "format",      0, "printf-style format (deferred, roadmap 1.9.0)");
+    flags_add_str(s,  102, "format",      0, "printf format with one %e, %f, %g or %a directive");
     _seq_spec = s;
     return 0;
 }
@@ -211,6 +221,7 @@ fn cmd_seq(start: i64): i64 {
     var sep    = "\n";
     var seplen: i64 = 1;
     var equal_width: i64 = 0;
+    var fmt: i64 = 0;
     var pos_buf[24];          # up to 3 positional pointers
     var npos: i64 = 0;
     var saw_double_dash: i64 = 0;
@@ -262,12 +273,7 @@ fn cmd_seq(start: i64): i64 {
                                 }
                                 sep = kriya_arg(i);
                             }
-                            if (load8(sep) == 0) {
-                                seplen = 1;
-                                sep = "\n";
-                            } else {
-                                seplen = strlen(sep);
-                            }
+                            seplen = strlen(sep);
                             i = i + 1;
                             continue;
                         }
@@ -284,11 +290,21 @@ fn cmd_seq(start: i64): i64 {
                             continue;
                         }
                     }
-                    # --format / --format=VAL  (deferred) (roadmap 1.9.0)
+                    # --format / --format=VAL
                     if (name_len == 6) {
                         if (_seq_bytes_eq(tok + 2, "format", 6) == 1) {
-                            k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 85);  # roadmap 1.9.0  #skip-lint
-                            return EXIT_USAGE;
+                            if (eq_off > 0) {
+                                fmt = tok + eq_off + 1;
+                            } else {
+                                i = i + 1;
+                                if (i >= n_argv) {
+                                    k_write( 2, "kriya seq: error: --format requires an argument\n", 48);
+                                    return EXIT_USAGE;
+                                }
+                                fmt = kriya_arg(i);
+                            }
+                            i = i + 1;
+                            continue;
                         }
                     }
                     k_write( 2, "kriya seq: error: unknown option\n", 33);
@@ -330,17 +346,22 @@ fn cmd_seq(start: i64): i64 {
                                     sep = kriya_arg(i + 1);
                                     consumed_next = 1;
                                 }
-                                if (load8(sep) == 0) {
-                                    seplen = 1;
-                                    sep = "\n";
-                                } else {
-                                    seplen = strlen(sep);
-                                }
+                                seplen = strlen(sep);
                                 loop = 0;
                             } else {
                                 if (ch == 102) {      # -f
-                                    k_write( 2, "kriya seq: error: -f/--format FORMAT is deferred (shares the printf %f/%g follow-up)\n", 85);  # roadmap 1.9.0  #skip-lint
-                                    return EXIT_USAGE;
+                                    if (p + 1 < tlen) {
+                                        fmt = tok + p + 1;
+                                    } else {
+                                        if (i + 1 >= n_argv) {
+                                            k_write( 2, "kriya seq: error: -f requires an argument\n", 42);
+                                            return EXIT_USAGE;
+                                        }
+                                        fmt = kriya_arg(i + 1);
+                                        consumed_next = 1;
+                                    }
+                                    loop = 0;
+                                    continue;
                                 }
                                 k_write( 2, "kriya seq: error: unknown option\n", 33);
                                 return EXIT_USAGE;
@@ -371,66 +392,452 @@ fn cmd_seq(start: i64): i64 {
         return EXIT_USAGE;
     }
 
-    var first: i64 = 1;
-    var incr:  i64 = 1;
-    var last:  i64 = 0;
+    return _seq_run(&pos_buf, npos, sep, seplen, equal_width, fmt);
+}
 
-    if (npos == 1) {
-        last = _seq_parse_signed(load64(&pos_buf));
-        if (_seq_err != 0) {
-            _seq_bad_operand(load64(&pos_buf), "LAST");
-            return EXIT_USAGE;
-        }
-    } else {
-        if (npos == 2) {
-            first = _seq_parse_signed(load64(&pos_buf));
-            if (_seq_err != 0) {
-                _seq_bad_operand(load64(&pos_buf), "FIRST");
-                return EXIT_USAGE;
+# --- 1.9.0: GNU's three paths -------------------------------------------------------
+
+# Buffered stdout.
+var _seq_ob = 0;
+var _seq_obl = 0;
+fn _seq_out(p, n): i64 {
+    if (_seq_ob == 0) { _seq_ob = alloc(8192); }
+    if (_seq_obl + n > 8192) {
+        if (_seq_obl > 0) { k_write( 1, _seq_ob, _seq_obl); _seq_obl = 0; }
+        if (n > 8192) { k_write( 1, p, n); return 0; }
+    }
+    memcpy(_seq_ob + _seq_obl, p, n);
+    _seq_obl = _seq_obl + n;
+    return 0;
+}
+fn _seq_flush(): i64 {
+    if (_seq_obl > 0) { k_write( 1, _seq_ob, _seq_obl); _seq_obl = 0; }
+    return 0;
+}
+
+# GNU's `all_digits_p`: at least one digit, and nothing else.
+fn _seq_all_digits(s): i64 {
+    if (load8(s) == 0) { return 0; }
+    var i: i64 = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c < 48) { return 0; }
+        if (c > 57) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn _seq_trim_zeros(s): i64 {
+    var p = s;
+    while (load8(p) == 48) { p = p + 1; }
+    if (load8(p) == 0) { if (p != s) { p = p - 1; } }
+    return p;
+}
+
+# GNU's `seq_fast`: from A to B (decimal digit strings, or B "inf") by STEP <= 200, each number a
+# string incremented in place, so of any length.
+fn _seq_fast(a0, b0, step, sep, seplen): i64 {
+    var a = _seq_trim_zeros(a0);
+    var b = _seq_trim_zeros(b0);
+    var alen = strlen(a);
+    var blen = strlen(b);
+    var inf: i64 = 0;
+    if (blen == 3) { if (_seq_bytes_eq(b, "inf", 3) == 1) { inf = 1; } }
+    var cap = alen + 32;
+    if (blen + 32 > cap) { cap = blen + 32; }
+    var p0 = alloc(cap);
+    var endp = p0 + cap;
+    var p = endp - alen;
+    memcpy(p, a, alen);
+    var any: i64 = 0;
+    var go: i64 = 1;
+    while (go == 1) {
+        var plen = endp - p;
+        var c: i64 = 0 - 1;
+        if (inf == 1) { c = 0 - 1; }
+        elif (plen != blen) { if (plen > blen) { c = 1; } }
+        else {
+            c = 0;
+            var k: i64 = 0;
+            while (k < plen) {
+                if (load8(p + k) != load8(b + k)) {
+                    if (load8(p + k) > load8(b + k)) { c = 1; } else { c = 0 - 1; }
+                    k = plen;
+                }
+                k = k + 1;
             }
-            last = _seq_parse_signed(load64(&pos_buf + 8));
-            if (_seq_err != 0) {
-                _seq_bad_operand(load64(&pos_buf + 8), "LAST");
-                return EXIT_USAGE;
+        }
+        if (c > 0) { go = 0; }
+        else {
+            if (any == 1) { _seq_out(sep, seplen); }
+            _seq_out(p, plen);
+            any = 1;
+            # Room for the digits a step can add on the left.
+            if (p - p0 < 4) {
+                var ncap = cap * 2;
+                var np0 = alloc(ncap);
+                var nendp = np0 + ncap;
+                memcpy(nendp - plen, p, plen);
+                p0 = np0;
+                endp = nendp;
+                p = nendp - plen;
+                cap = ncap;
+            }
+            var n = step;
+            while (n > 0) {
+                # GNU's `incr_grows`: add one from the right; 99..9 grows a digit.
+                var e = endp;
+                var carrying: i64 = 1;
+                while (carrying == 1) {
+                    e = e - 1;
+                    var d = load8(e);
+                    if (d < 57) { store8(e, d + 1); carrying = 0; }
+                    else {
+                        store8(e, 48);
+                        if (e == p) {
+                            p = p - 1;
+                            store8(p, 49);
+                            carrying = 0;
+                        }
+                    }
+                }
+                n = n - 1;
+            }
+        }
+    }
+    if (any == 1) { _seq_out("\n", 1); }
+    _seq_flush();
+    return EXIT_SUCCESS;
+}
+
+# An operand as GNU's `scan_arg` reads it: the value into `rec`, its print width at `wp` and its
+# fraction digits at `pp` (2^31 - 1 when it is not plain fixed point). 0, or 1 once reported.
+var _seq_pmax: i64 = 2147483647;
+
+fn _seq_strchr(s, c): i64 {
+    var i: i64 = 0;
+    while (load8(s + i) != 0) {
+        if (load8(s + i) == c) { return s + i; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# strtol(s, NULL, 10), saturating at the i64 ends.
+fn _seq_strtol(s): i64 {
+    var i: i64 = 0;
+    var neg: i64 = 0;
+    if (load8(s) == 45) { neg = 1; i = 1; }
+    elif (load8(s) == 43) { i = 1; }
+    var v: i64 = 0;
+    var over: i64 = 0;
+    while (load8(s + i) >= 48) {
+        if (load8(s + i) > 57) { return 0; }
+        if (v > (KRIYA_COUNT_MAX - (load8(s + i) - 48)) / 10) { over = 1; }
+        else { v = v * 10 + (load8(s + i) - 48); }
+        i = i + 1;
+    }
+    if (over == 1) { v = KRIYA_COUNT_MAX; }
+    if (neg == 1) { return 0 - v; }
+    return v;
+}
+
+fn _seq_scan(arg, rec, wp, pp): i64 {
+    var n = xf_parse(arg, XF_LDBL, rec);
+    var ok: i64 = 1;
+    if (n == 0) { ok = 0; }
+    elif (load8(arg + n) != 0) { ok = 0; }
+    # xstrtold: overflow fails; an underflow, gradual or to zero, is a value.
+    elif (_xf_erange == 1) { if (xf_is_inf(rec) == 1) { ok = 0; } }
+    if (ok == 0) {
+        report_note("seq", arg, "invalid floating point argument");
+        return 1;
+    }
+    if (xf_is_nan(rec) == 1) {
+        report_note("seq", arg, "invalid 'not-a-number' argument");
+        return 1;
+    }
+    var a = arg;
+    var moving: i64 = 1;
+    while (moving == 1) {
+        var c = load8(a);
+        var skip: i64 = 0;
+        if (c == 43) { skip = 1; }
+        if (c == 32) { skip = 1; }
+        if (c >= 9) { if (c <= 13) { skip = 1; } }
+        if (skip == 1) { a = a + 1; } else { moving = 0; }
+    }
+    var width: i64 = 0;
+    var prec = _seq_pmax;
+    var dpt = _seq_strchr(a, 46);
+    if (dpt == 0) { if (_seq_strchr(a, 112) == 0) { prec = 0; } }
+    var hasx: i64 = 0;
+    if (_seq_strchr(a, 120) != 0) { hasx = 1; }
+    if (_seq_strchr(a, 88) != 0) { hasx = 1; }
+    if (hasx == 0) {
+        if (xf_is_inf(rec) == 0) {
+            var fraction_len: i64 = 0;
+            width = strlen(a);
+            if (dpt != 0) {
+                # strcspn(dpt + 1, "eE")
+                var f: i64 = 0;
+                var scanning: i64 = 1;
+                while (scanning == 1) {
+                    var fc = load8(dpt + 1 + f);
+                    if (fc == 0) { scanning = 0; }
+                    elif (fc == 101) { scanning = 0; }
+                    elif (fc == 69) { scanning = 0; }
+                    else { f = f + 1; }
+                }
+                fraction_len = f;
+                prec = fraction_len;
+                if (fraction_len == 0) { width = width - 1; }
+                else {
+                    if (dpt == a) { width = width + 1; }
+                    else {
+                        var pc = load8(dpt - 1);
+                        var isd: i64 = 0;
+                        if (pc >= 48) { if (pc <= 57) { isd = 1; } }
+                        if (isd == 0) { width = width + 1; }
+                    }
+                }
+            }
+            var e = _seq_strchr(a, 101);
+            if (e == 0) { e = _seq_strchr(a, 69); }
+            if (e != 0) {
+                var exponent = _seq_strtol(e + 1);
+                if (exponent < 0 - KRIYA_COUNT_MAX) { exponent = 0 - KRIYA_COUNT_MAX; }
+                if (exponent < 0) { prec = prec - exponent; }
+                else {
+                    var mn = prec;
+                    if (exponent < mn) { mn = exponent; }
+                    prec = prec - mn;
+                }
+                width = width - (strlen(a) - (e - a));
+                if (exponent < 0) {
+                    if (dpt != 0) {
+                        if (e == dpt + 1) { width = width + 1; }
+                    } else {
+                        width = width + 1;
+                    }
+                    exponent = 0 - exponent;
+                } else {
+                    if (dpt != 0) {
+                        if (prec == 0) { if (fraction_len != 0) { width = width - 1; } }
+                    }
+                    var mn2 = fraction_len;
+                    if (exponent < mn2) { mn2 = exponent; }
+                    exponent = exponent - mn2;
+                }
+                width = width + exponent;
+            }
+            if (prec > _seq_pmax) { prec = _seq_pmax; }
+        }
+    }
+    store64(wp, width);
+    store64(pp, prec);
+    return 0;
+}
+
+# The one directive of a -f FORMAT, parsed as GNU's `long_double_format` checks it: the text
+# before and after it (`%%` already halved), its flags, width, precision and conversion.
+var _seq_fpre = 0;
+var _seq_fprel = 0;
+var _seq_fsuf = 0;
+var _seq_fsufl = 0;
+var _seq_fflags = 0;
+var _seq_fwidth = 0;
+var _seq_fprec = 0;
+var _seq_fconv = 0;
+
+fn _seq_fmt_err(fmt, what): i64 {
+    report_note("seq", fmt, what);
+    return 1;
+}
+
+fn _seq_digits_at(fmt, i, out_p): i64 {
+    var v: i64 = 0;
+    var any: i64 = 0;
+    var j = i;
+    while (load8(fmt + j) >= 48) {
+        if (load8(fmt + j) > 57) { store64(out_p, v); if (any == 0) { return i; } return j; }
+        v = v * 10 + (load8(fmt + j) - 48);
+        if (v > 2147483648) { v = 2147483648; }
+        any = 1;
+        j = j + 1;
+    }
+    if (any == 1) { store64(out_p, v); }
+    return j;
+}
+
+fn _seq_parse_format(fmt): i64 {
+    var n = strlen(fmt);
+    _seq_fpre = alloc(n + 1);
+    _seq_fsuf = alloc(n + 1);
+    _seq_fprel = 0;
+    _seq_fsufl = 0;
+    var i: i64 = 0;
+    var finding: i64 = 1;
+    while (finding == 1) {
+        var c = load8(fmt + i);
+        if (c == 0) { return _seq_fmt_err(fmt, "format has no % directive"); }
+        if (c == 37) {
+            if (load8(fmt + i + 1) != 37) { finding = 0; }
+            else {
+                store8(_seq_fpre + _seq_fprel, 37);
+                _seq_fprel = _seq_fprel + 1;
+                i = i + 2;
             }
         } else {
-            first = _seq_parse_signed(load64(&pos_buf));
-            if (_seq_err != 0) {
-                _seq_bad_operand(load64(&pos_buf), "FIRST");
-                return EXIT_USAGE;
-            }
-            incr = _seq_parse_signed(load64(&pos_buf + 8));
-            if (_seq_err != 0) {
-                _seq_bad_operand(load64(&pos_buf + 8), "INCREMENT");
-                return EXIT_USAGE;
-            }
-            last = _seq_parse_signed(load64(&pos_buf + 16));
-            if (_seq_err != 0) {
-                _seq_bad_operand(load64(&pos_buf + 16), "LAST");
-                return EXIT_USAGE;
-            }
+            store8(_seq_fpre + _seq_fprel, c);
+            _seq_fprel = _seq_fprel + 1;
+            i = i + 1;
         }
     }
-
-    if (incr == 0) {
-        k_write( 2, "kriya seq: error: increment must not be zero\n", 45);
-        return EXIT_USAGE;
+    i = i + 1;
+    _seq_fflags = 0;
+    var fl: i64 = 1;
+    while (fl == 1) {
+        var f = load8(fmt + i);
+        if (f == 45) { _seq_fflags = _seq_fflags | XF_FL_LEFT; }
+        elif (f == 43) { _seq_fflags = _seq_fflags | XF_FL_PLUS; }
+        elif (f == 35) { _seq_fflags = _seq_fflags | XF_FL_HASH; }
+        elif (f == 48) { _seq_fflags = _seq_fflags | XF_FL_ZERO; }
+        elif (f == 32) { _seq_fflags = _seq_fflags | XF_FL_SPACE; }
+        elif (f == 39) { }
+        else { fl = 0; }
+        if (fl == 1) { i = i + 1; }
     }
-
-    # Width for -w: max text-len(first, last). GNU also includes
-    # text-len(last reachable value) but for monotonic integer steps
-    # the bounds are the extrema.
-    var width: i64 = 0;
-    if (equal_width == 1) {
-        var w1 = _seq_text_len(first);
-        var w2 = _seq_text_len(last);
-        if (w1 > w2) { width = w1; } else { width = w2; }
+    _seq_fwidth = 0 - 1;
+    i = _seq_digits_at(fmt, i, &_seq_fwidth);
+    _seq_fprec = 0 - 1;
+    if (load8(fmt + i) == 46) {
+        i = i + 1;
+        _seq_fprec = 0;
+        i = _seq_digits_at(fmt, i, &_seq_fprec);
     }
+    if (load8(fmt + i) == 76) { i = i + 1; }
+    var conv = load8(fmt + i);
+    if (conv == 0) { return _seq_fmt_err(fmt, "format ends in %"); }
+    var okc: i64 = 0;
+    if (_xf_lower(conv) == 101) { okc = 1; }
+    if (_xf_lower(conv) == 102) { okc = 1; }
+    if (_xf_lower(conv) == 103) { okc = 1; }
+    if (_xf_lower(conv) == 97) { okc = 1; }
+    if (okc == 0) {
+        var msg = alloc(64);
+        memcpy(msg, "format has unknown %", 20);
+        store8(msg + 20, conv);
+        memcpy(msg + 21, " directive", 11);
+        return _seq_fmt_err(fmt, msg);
+    }
+    _seq_fconv = conv;
+    i = i + 1;
+    var after: i64 = 1;
+    while (after == 1) {
+        var c2 = load8(fmt + i);
+        if (c2 == 0) { after = 0; }
+        elif (c2 == 37) {
+            if (load8(fmt + i + 1) != 37) { return _seq_fmt_err(fmt, "format has too many % directives"); }
+            store8(_seq_fsuf + _seq_fsufl, 37);
+            _seq_fsufl = _seq_fsufl + 1;
+            i = i + 2;
+        } else {
+            store8(_seq_fsuf + _seq_fsufl, c2);
+            _seq_fsufl = _seq_fsufl + 1;
+            i = i + 1;
+        }
+    }
+    return 0;
+}
 
+# `x` in the format: the field alone, laid out by `xf_format`.
+fn _seq_field(x): i64 {
+    xf_format(x, _seq_fconv, _seq_fflags, _seq_fwidth, _seq_fprec);
+    return 0;
+}
+
+# GNU's `print_numbers`, in extended arithmetic. `_seq_fb` holds one field.
+var _seq_fb = 0;
+fn _seq_print(first, step, last, sep, seplen): i64 {
+    var neg_step: i64 = 0;
+    if (xf_cmp(step, xf_zero_rec()) < 0) { neg_step = 1; }
+    var oor: i64 = 0;
+    if (neg_step == 1) { if (xf_cmp(first, last) < 0) { oor = 1; } }
+    else { if (xf_cmp(last, first) < 0) { oor = 1; } }
+    if (oor == 1) { return EXIT_SUCCESS; }
+    var x = xf_new();
+    var x0 = xf_new();
+    var i = xf_new();
+    var one = xf_new();
+    var t = xf_new();
+    var xv = xf_new();
+    xf_copy(x, first);
+    xf_from_i64(1, i);
+    xf_from_i64(1, one);
+    var going: i64 = 1;
+    while (going == 1) {
+        xf_copy(x0, x);
+        _seq_out(_seq_fpre, _seq_fprel);
+        _seq_field(x);
+        var fl = xf_out_len();
+        if (fl > 8192) { _seq_flush(); xf_emit_fd(1); }
+        else {
+            if (_seq_fb == 0) { _seq_fb = alloc(8200); }
+            xf_write_to(_seq_fb);
+            _seq_out(_seq_fb, fl);
+        }
+        _seq_out(_seq_fsuf, _seq_fsufl);
+        if (oor == 1) { going = 0; }
+        else {
+            # first + i * step, two roundings, as GNU's `long double` computes it.
+            xf_mul(i, step, t);
+            xf_add(first, t, x);
+            xf_add(i, one, t);
+            xf_copy(i, t);
+            if (neg_step == 1) { if (xf_cmp(x, last) < 0) { oor = 1; } }
+            else { if (xf_cmp(last, x) < 0) { oor = 1; } }
+            if (xf_cmp(x, last) == 2) { oor = 0; }
+            var print_extra: i64 = 0;
+            if (oor == 1) {
+                # Past LAST: printed anyway when it prints as a number equal to LAST and not as
+                # the one before it does.
+                _seq_field(x);
+                var xs = xf_to_str();
+                var pn = xf_parse(xs, XF_LDBL, xv);
+                var pok: i64 = 1;
+                if (pn == 0) { pok = 0; }
+                elif (load8(xs + pn) != 0) { pok = 0; }
+                elif (_xf_erange == 1) { if (xf_is_inf(xv) == 1) { pok = 0; } }
+                if (pok == 1) {
+                    if (xf_cmp(xv, last) == 0) {
+                        _seq_field(x0);
+                        var x0s = xf_to_str();
+                        if (streq(x0s, xs) == 0) { print_extra = 1; }
+                    }
+                }
+                if (print_extra == 0) { going = 0; }
+            }
+            if (going == 1) { _seq_out(sep, seplen); }
+        }
+    }
+    _seq_out("\n", 1);
+    _seq_flush();
+    return EXIT_SUCCESS;
+}
+
+var _seq_zero = 0;
+fn xf_zero_rec(): i64 {
+    if (_seq_zero == 0) { _seq_zero = xf_new(); }
+    return _seq_zero;
+}
+
+# kriya's i64 loop: plain integers, the output GNU's general path gives them.
+fn _seq_int_loop(first, incr, last, sep, seplen, width): i64 {
     var BUFSZ: i64 = 8192;
     var buf = alloc(BUFSZ);
     var blen: i64 = 0;
-
     var v = first;
     var first_emit: i64 = 1;
     var go: i64 = 1;
@@ -441,18 +848,22 @@ fn cmd_seq(start: i64): i64 {
             if (v < last) { go = 0; }
         }
         if (go == 1) {
-            # Worst-case per iter: separator (seplen) + number (up to 22 bytes
-            # signed i64 incl sign) + a margin. Flush at half capacity.
             if (blen + seplen + 32 >= BUFSZ) {
                 k_write( 1, buf, blen);
                 blen = 0;
             }
             if (first_emit == 0) {
-                memcpy(buf + blen, sep, seplen);
-                blen = blen + seplen;
+                if (seplen >= BUFSZ - 64) {
+                    k_write( 1, buf, blen);
+                    blen = 0;
+                    k_write( 1, sep, seplen);
+                } else {
+                    memcpy(buf + blen, sep, seplen);
+                    blen = blen + seplen;
+                }
             }
             first_emit = 0;
-            if (equal_width == 1) {
+            if (width > 0) {
                 blen = _seq_write_int_w(buf, blen, v, width);
             } else {
                 blen = _seq_write_int(buf, blen, v);
@@ -469,8 +880,6 @@ fn cmd_seq(start: i64): i64 {
             }
         }
     }
-
-    # Final newline if anything emitted (matches GNU).
     if (first_emit == 0) {
         if (blen + 1 >= BUFSZ) {
             k_write( 1, buf, blen);
@@ -479,11 +888,202 @@ fn cmd_seq(start: i64): i64 {
         store8(buf + blen, 10);
         blen = blen + 1;
     }
-
-    if (blen > 0) {
-        k_write( 1, buf, blen);
-    }
+    if (blen > 0) { k_write( 1, buf, blen); }
     return EXIT_SUCCESS;
+}
+
+# A plain integer operand's print width as GNU's `scan_arg` counts it: its text, a leading `+`
+# not counted.
+fn _seq_int_width(s): i64 {
+    var a = s;
+    if (load8(a) == 43) { a = a + 1; }
+    return strlen(a);
+}
+
+fn _seq_run(pos_buf, npos, sep, seplen, equal_width, fmt): i64 {
+    if (fmt != 0) {
+        if (_seq_parse_format(fmt) != 0) { return EXIT_USAGE; }
+        if (equal_width == 1) {
+            k_write( 2, "kriya seq: error: a format string may not be specified", 54);
+            k_write( 2, " when printing equal width strings\n", 35);
+            return EXIT_USAGE;
+        }
+    }
+    var a0 = load64(pos_buf);
+    var a1 = load64(pos_buf + 8);
+    var a2 = load64(pos_buf + 16);
+    var user_start = "1";
+    if (npos > 1) { user_start = a0; }
+    var user_last = a0;
+    if (npos == 2) { user_last = a1; }
+    if (npos == 3) { user_last = a2; }
+    # GNU's first fast path: digit strings throughout, an increment of at most 200.
+    var fast_step_ok: i64 = 0;
+    var fstep: i64 = 1;
+    if (npos != 3) { fast_step_ok = 1; }
+    else {
+        if (_seq_all_digits(a1) == 1) {
+            fstep = _seq_parse_signed(a1);
+            if (_seq_err == 0) {
+                if (fstep > 0) { if (fstep <= 200) { fast_step_ok = 1; } }
+            }
+        }
+    }
+    var fast: i64 = 0;
+    if (_seq_all_digits(a0) == 1) {
+        fast = 1;
+        if (npos > 1) { if (_seq_all_digits(a1) == 0) { fast = 0; } }
+        if (npos == 3) {
+            if (fast_step_ok == 0) { fast = 0; }
+            if (_seq_all_digits(a2) == 0) { fast = 0; }
+        }
+    }
+    if (equal_width == 1) { fast = 0; }
+    if (fmt != 0) { fast = 0; }
+    if (seplen != 1) { fast = 0; }
+    if (fast == 1) { return _seq_fast(user_start, user_last, fstep, sep, seplen); }
+
+    # kriya's i64 loop, where its output is the general path's: plain integers, no -f, and a
+    # FIRST that is not negative zero.
+    if (fmt == 0) {
+        var ints: i64 = 1;
+        var fv: i64 = 1;
+        var sv: i64 = 1;
+        var lv: i64 = 0;
+        if (npos == 1) {
+            lv = _seq_parse_signed(a0);
+            if (_seq_err != 0) { ints = 0; }
+        } else {
+            fv = _seq_parse_signed(a0);
+            if (_seq_err != 0) { ints = 0; }
+            if (fv == 0) { if (load8(a0) == 45) { ints = 0; } }
+            if (npos == 3) {
+                sv = _seq_parse_signed(a1);
+                if (_seq_err != 0) { ints = 0; }
+                lv = _seq_parse_signed(a2);
+                if (_seq_err != 0) { ints = 0; }
+            } else {
+                lv = _seq_parse_signed(a1);
+                if (_seq_err != 0) { ints = 0; }
+            }
+        }
+        if (ints == 1) {
+            if (sv == 0) {
+                var zs = a0;
+                if (npos == 3) { zs = a1; }
+                report_note("seq", zs, "invalid zero increment value");
+                return EXIT_USAGE;
+            }
+            var w: i64 = 0;
+            if (equal_width == 1) {
+                var w1: i64 = 1;
+                if (npos > 1) { w1 = _seq_int_width(a0); }
+                w = _seq_int_width(user_last);
+                if (w1 > w) { w = w1; }
+            }
+            return _seq_int_loop(fv, sv, lv, sep, seplen, w);
+        }
+    }
+
+    # The general path.
+    var first = xf_new();
+    var step = xf_new();
+    var last = xf_new();
+    xf_from_i64(1, first);
+    xf_from_i64(1, step);
+    var fw: i64 = 1;
+    var fp: i64 = 0;
+    var sw: i64 = 1;
+    var sp: i64 = 0;
+    var lw: i64 = 0;
+    var lp: i64 = 0;
+    if (npos == 1) {
+        if (_seq_scan(a0, last, &lw, &lp) != 0) { return EXIT_USAGE; }
+    } else {
+        if (_seq_scan(a0, first, &fw, &fp) != 0) { return EXIT_USAGE; }
+        if (npos == 3) {
+            if (_seq_scan(a1, step, &sw, &sp) != 0) { return EXIT_USAGE; }
+            if (xf_is_zero(step) == 1) {
+                report_note("seq", a1, "invalid zero increment value");
+                return EXIT_USAGE;
+            }
+            if (_seq_scan(a2, last, &lw, &lp) != 0) { return EXIT_USAGE; }
+        } else {
+            if (_seq_scan(a1, last, &lw, &lp) != 0) { return EXIT_USAGE; }
+        }
+    }
+    # GNU's second fast path: integers written another way (`1e1`), or an `inf` LAST.
+    if (fp == 0) {
+        if (sp == 0) {
+            if (lp == 0) {
+                var f2: i64 = 1;
+                if (xf_is_inf(first) == 1) { f2 = 0; }
+                if (load64(first + XF_SIGN) == 1) { f2 = 0; }
+                if (load64(last + XF_SIGN) == 1) { f2 = 0; }
+                if (load64(step + XF_SIGN) == 1) { f2 = 0; }
+                var two = xf_new();
+                xf_from_i64(200, two);
+                if (xf_cmp(step, two) > 0) { f2 = 0; }
+                if (equal_width == 1) { f2 = 0; }
+                if (fmt != 0) { f2 = 0; }
+                if (seplen != 1) { f2 = 0; }
+                if (f2 == 1) {
+                    var s1 = user_start;
+                    if (_seq_all_digits(user_start) == 0) {
+                        xf_format(first, 102, 0, 0 - 1, 0);
+                        s1 = xf_to_str();
+                    }
+                    var s2 = "inf";
+                    if (xf_is_inf(last) == 0) {
+                        xf_format(last, 102, 0, 0 - 1, 0);
+                        s2 = xf_to_str();
+                    }
+                    if (load8(s1) != 45) {
+                        if (load8(s2) != 45) {
+                            # The step is an integer of at most 200 here.
+                            xf_format(step, 102, 0, 0 - 1, 0);
+                            var stp = _seq_parse_signed(xf_to_str());
+                            return _seq_fast(s1, s2, stp, sep, seplen);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (fmt == 0) {
+        # GNU's `get_default_format`.
+        _seq_fpre = "";
+        _seq_fprel = 0;
+        _seq_fsuf = "";
+        _seq_fsufl = 0;
+        var prec = fp;
+        if (sp > prec) { prec = sp; }
+        if (prec != _seq_pmax) {
+            if (lp != _seq_pmax) {
+                _seq_fconv = 102;
+                _seq_fprec = prec;
+                _seq_fflags = 0;
+                _seq_fwidth = 0 - 1;
+                if (equal_width == 1) {
+                    var first_width = fw + (prec - fp);
+                    var last_width = lw + (prec - lp);
+                    if (lp != 0) { if (prec == 0) { last_width = last_width - 1; } }
+                    if (lp == 0) { if (prec != 0) { last_width = last_width + 1; } }
+                    if (fp == 0) { if (prec != 0) { first_width = first_width + 1; } }
+                    var wd = first_width;
+                    if (last_width > wd) { wd = last_width; }
+                    _seq_fflags = XF_FL_ZERO;
+                    _seq_fwidth = wd;
+                }
+                return _seq_print(first, step, last, sep, seplen);
+            }
+        }
+        _seq_fconv = 103;
+        _seq_fprec = 0 - 1;
+        _seq_fflags = 0;
+        _seq_fwidth = 0 - 1;
+    }
+    return _seq_print(first, step, last, sep, seplen);
 }
 
 # Help/introspection record for `seq`. ⭐ Split out so `kriya --list` can
@@ -493,9 +1093,10 @@ fn seq_help_declare(): i64 {
     help_begin("seq", "Print a sequence of numbers.",
       "seq [OPTIONS] [FIRST [INCREMENT]] LAST");
     help_positional(1, 3, "FIRST,INCREMENT,LAST");
-    help_operands("Integers only. A leading -N is read as a negative FIRST, not an option.");
+    help_operands("Floating-point numbers, GNU's long double. A leading -N is a negative FIRST, not an option.");
     help_example("seq 5");
     help_example("seq 1 2 9");
     help_example("seq -w 8 11");
+    help_example("seq -f %.2f 0 0.25 1");
     return 0;
 }

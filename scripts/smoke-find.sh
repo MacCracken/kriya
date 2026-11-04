@@ -898,6 +898,35 @@ if [ -d /proc/self/fd ]; then
     expect_eq "-exec's child inherits no walk descriptor (GNU's set)" "$_g" "$_k"
 fi
 
+# --- 1.9.0: -mtime and -mmin are findutils' arithmetic ------------------------
+#
+# ⭐ N is a binary64 `double`, fractions, exponents and hex included, and a match compares the
+# file's (sec, nsec) with origin - N * unit, as findutils' `get_relative_timestamp` and
+# `pred_timewindow` do. The ages here are an hour or more from every boundary the cases test, so
+# the seconds between GNU's run and kriya's cannot move a file across one. ⛔ A file dated in the
+# future was age 0 to kriya and matched `-mtime 0`; GNU's window leaves it out.
+mkdir -p d19t
+_now=$(date +%s)
+for _m in 12 360 660 780 1380 1500 1800 2100 2820 2940 3600 4260 4380 6000; do
+    : > "d19t/m$_m"
+    touch -d "@$((_now - _m * 60))" "d19t/m$_m"
+done
+: > d19t/future
+touch -d "@$((_now + 7200))" d19t/future
+for _a in "-mtime 0.5" "-mtime -0.5" "-mtime +0.5" "-mtime 1.5" "-mtime -1.5" "-mtime +1.5" \
+          "-mtime 0" "-mtime -1" "-mtime +1" "-mtime 1" "-mtime 2" "-mmin -30" "-mmin -1.5" \
+          "-mmin +700.25" "-mmin 1e3" "-mtime 1e1" "-mtime 0x1p0" "-mtime ' 1'" "-mtime --1" \
+          "-mtime +-1" "-mtime -+1" "-mtime inf" "-mtime -inf" "-mtime +inf" "-mtime 1e300" \
+          "-mtime 1e-400" "-mmin 0.0001" "-mtime 0.0000001" "-mmin -60.5" "-mmin +5999.5"; do
+    compare_sorted "find $_a" "d19t -type f $_a"
+done
+# Refused, at kriya's usage status (GNU exits 1): not a number, junk after it, NaN, overflow.
+for _a in "-mtime '1 '" "-mtime x" "-mtime ''" "-mtime nan" "-mmin -nan" "-mtime --1e300"; do
+    _krc=0; eval "$BIN find d19t $_a" > /dev/null 2>&1 || _krc=$?
+    expect_eq "find $_a refused" "2" "$_krc"
+done
+expect_eq "the overflow is named" "1" "$("$BIN" find d19t -mtime --1e300 2>&1 | grep -c 'arithmetic overflow while converting -1e300 days to a number of seconds' || true)"
+
 # --- summary ---
 TOTAL=$((PASS + FAIL))
 printf '%d passed, %d failed (%d total)\n' "$PASS" "$FAIL" "$TOTAL"

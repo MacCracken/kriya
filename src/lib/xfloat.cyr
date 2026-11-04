@@ -1,0 +1,1640 @@
+# xfloat.cyr — floating point the way GNU's `printf`, `seq` and `find` see it, in integers.
+#
+# ⭐ GNU's `printf` and `seq` read every float argument with `strtold` and format it with glibc's
+# `printf` as a `long double`, which on x86_64 is the 80-bit extended format: a 64-bit significand,
+# exponents -16382..16383, subnormals down to 2^-16445. `find` reads `-mtime` and `-mmin` with
+# `strtod`, a binary64 `double`. kriya computes both in INTEGERS, on every target, and so gives the
+# x86_64 answer on aarch64 and agnos too
+# ([ADR 0032](../../docs/adr/0032-floats-are-the-x86-extended-format-computed-in-integers.md)).
+#
+# ⛔ binary64 is not close enough for `printf`. Measured over 3,000 short decimals, `printf %.2f`
+# differs from GNU in 40 (`738.495` is `738.49` there and `738.50` in binary64), because the halfway
+# cases round the other way at 64 bits. And GNU prints the EXACT decimal value of what it read:
+# `%.30f 0.1` is `0.100000000000000000001355252716`, and `%f 1e4000` writes all 4,001 digits.
+#
+# What this file does:
+#   - `xf_parse`: glibc's `strtold` / `strtod` in the C locale — blanks, a sign, decimal or hex
+#     (`0x1.8p3`) digits, `inf` / `infinity` / `nan` / `nan(chars)` in any case — correctly rounded,
+#     half to even, with ERANGE as glibc sets it (overflow; or an inexact result that is still tiny
+#     after rounding, x86's tininess rule).
+#   - `xf_format`: glibc's `%e %E %f %F %g %G %a %A` of such a value, exact, half to even, with the
+#     `- + space # 0` flags, a width and a precision.
+#   - `xf_add`, `xf_mul`, `xf_cmp`: correctly rounded extended arithmetic, for `seq`.
+#
+# A value is a 32-byte record: XF_CLS (XF_ZERO / XF_FIN / XF_INF / XF_NAN), XF_SIGN (1 negative),
+# XF_SIG (the significand, bit 63 its leading bit for a normal value) and XF_EXP: the value is
+# SIG * 2^(EXP - 63). A subnormal has EXP at the format's minimum and a SIG below 2^63.
+#
+# ⚠ Two integer types sit underneath: `_xb_` (binary, 32-bit limbs) for reading and arithmetic, and
+# `_xd_` (decimal, base 10^9 limbs) for writing, where an exact value is SIG * 2^k or SIG * 5^k / 10^k
+# and no division is needed. A limb is held in an i64; ⚠ `>>` is Cyrius's LOGICAL shift (`>>>` is
+# the arithmetic one), which is what unsigned limb arithmetic wants.
+
+enum XfCls {
+    XF_ZERO = 0;
+    XF_FIN  = 1;
+    XF_INF  = 2;
+    XF_NAN  = 3;
+}
+
+enum XfRec {
+    XF_CLS  = 0;
+    XF_SIGN = 8;
+    XF_SIG  = 16;
+    XF_EXP  = 24;
+    XF_RECSZ = 32;
+}
+
+# The two formats: GNU's `long double` (x86 extended) and `double` (binary64).
+enum XfFmt {
+    XF_LDBL = 0;
+    XF_DBL  = 1;
+}
+
+fn _xf_prec(fmt): i64 { if (fmt == XF_DBL) { return 53; } return 64; }
+fn _xf_emin(fmt): i64 { if (fmt == XF_DBL) { return 0 - 1022; } return 0 - 16382; }
+fn _xf_emax(fmt): i64 { if (fmt == XF_DBL) { return 1023; } return 16383; }
+
+# Set by the last `xf_parse` / `_xf_round`: 1 when the result was out of range (glibc's ERANGE).
+var _xf_erange = 0;
+var _xf_inexact = 0;
+
+fn xf_new(): i64 {
+    var r = alloc(XF_RECSZ);
+    store64(r + XF_CLS, XF_ZERO);
+    store64(r + XF_SIGN, 0);
+    store64(r + XF_SIG, 0);
+    store64(r + XF_EXP, 0);
+    return r;
+}
+
+fn xf_copy(dst, src): i64 {
+    memcpy(dst, src, XF_RECSZ);
+    return 0;
+}
+
+fn xf_set(r, cls, sign, sig, exp): i64 {
+    store64(r + XF_CLS, cls);
+    store64(r + XF_SIGN, sign);
+    store64(r + XF_SIG, sig);
+    store64(r + XF_EXP, exp);
+    return 0;
+}
+
+# --- binary big integers ------------------------------------------------------
+#
+# A big is 24 bytes: [0] limbs in use, [8] capacity, [16] the limb array, least significant first,
+# each limb 0 .. 2^32 - 1. No leading zero limbs; zero has none.
+# ⚠ Grown by doubling into a new array, the old one left behind (the allocator is a bump): the
+# module's working bigs are allocated once and reused, so what is left behind is bounded by twice
+# the largest value ever held.
+
+fn _xb_new(): i64 {
+    var b = alloc(24);
+    var d = alloc(64);
+    store64(b, 0);
+    store64(b + 8, 8);
+    store64(b + 16, d);
+    return b;
+}
+
+fn _xb_n(b): i64 { return load64(b); }
+fn _xb_limb(b, i): i64 {
+    if (i >= load64(b)) { return 0; }
+    if (i < 0) { return 0; }
+    return load64(load64(b + 16) + i * 8);
+}
+
+fn _xb_reserve(b, cap): i64 {
+    var c = load64(b + 8);
+    if (cap <= c) { return 0; }
+    var nc = c * 2;
+    while (nc < cap) { nc = nc * 2; }
+    var nd = alloc(nc * 8);
+    memcpy(nd, load64(b + 16), load64(b) * 8);
+    store64(b + 8, nc);
+    store64(b + 16, nd);
+    return 0;
+}
+
+fn _xb_trim(b): i64 {
+    var n = load64(b);
+    var d = load64(b + 16);
+    while (n > 0) {
+        if (load64(d + (n - 1) * 8) == 0) { n = n - 1; } else { store64(b, n); return 0; }
+    }
+    store64(b, 0);
+    return 0;
+}
+
+fn _xb_zero(b): i64 { store64(b, 0); return 0; }
+
+# `v` read as an unsigned 64-bit pattern.
+fn _xb_set_u64(b, v): i64 {
+    _xb_reserve(b, 2);
+    var d = load64(b + 16);
+    store64(d, v & 4294967295);
+    store64(d + 8, (v >> 32) & 4294967295);
+    store64(b, 2);
+    _xb_trim(b);
+    return 0;
+}
+
+fn _xb_copy(dst, src): i64 {
+    var n = load64(src);
+    _xb_reserve(dst, n);
+    memcpy(load64(dst + 16), load64(src + 16), n * 8);
+    store64(dst, n);
+    return 0;
+}
+
+fn _xb_is_zero(b): i64 { if (load64(b) == 0) { return 1; } return 0; }
+
+# b = b * m + a, for m and a below 2^32. ⚠ limb * m + a + carry stays below 2^64, so the i64
+# product, wrapping, holds the right 64 bits, and `>>` reads its high half unsigned.
+fn _xb_mul_add(b, m, a): i64 {
+    var n = load64(b);
+    _xb_reserve(b, n + 1);
+    var d = load64(b + 16);
+    var carry = a;
+    var i: i64 = 0;
+    while (i < n) {
+        var t = load64(d + i * 8) * m + carry;
+        store64(d + i * 8, t & 4294967295);
+        carry = t >> 32;
+        i = i + 1;
+    }
+    if (carry != 0) {
+        store64(d + n * 8, carry);
+        store64(b, n + 1);
+    }
+    return 0;
+}
+
+# b = b * 10^e.
+fn _xb_mul_pow10(b, e): i64 {
+    var k = e;
+    while (k >= 9) {
+        _xb_mul_add(b, 1000000000, 0);
+        k = k - 9;
+    }
+    var m: i64 = 1;
+    while (k > 0) { m = m * 10; k = k - 1; }
+    if (m > 1) { _xb_mul_add(b, m, 0); }
+    return 0;
+}
+
+fn _xb_bitlen(b): i64 {
+    var n = load64(b);
+    if (n == 0) { return 0; }
+    var top = _xb_limb(b, n - 1);
+    var l: i64 = 0;
+    while (top != 0) { top = top >> 1; l = l + 1; }
+    return (n - 1) * 32 + l;
+}
+
+# Bit `i`, 0 beyond the value.
+fn _xb_bit(b, i): i64 {
+    if (i < 0) { return 0; }
+    return (_xb_limb(b, i / 32) >> (i % 32)) & 1;
+}
+
+# 1 when any bit below `i` is set.
+fn _xb_any_below(b, i): i64 {
+    if (i <= 0) { return 0; }
+    var w = i / 32;
+    var j: i64 = 0;
+    var lim = w;
+    if (lim > load64(b)) { lim = load64(b); }
+    while (j < lim) {
+        if (_xb_limb(b, j) != 0) { return 1; }
+        j = j + 1;
+    }
+    var r = i % 32;
+    if (r == 0) { return 0; }
+    if ((_xb_limb(b, w) & ((1 << r) - 1)) != 0) { return 1; }
+    return 0;
+}
+
+# `n` bits from bit `lo` up (0 <= n <= 64), as an unsigned pattern; bits below 0 read as 0.
+# By limbs: the three that can hold them, shifted into place.
+fn _xb_bits(b, lo, n): i64 {
+    if (n <= 0) { return 0; }
+    if (lo < 0) {
+        # Only `_xf_round_bits` with nothing dropped asks this, never below 0 by more than n.
+        return _xb_bits(b, 0, n + lo) << (0 - lo);
+    }
+    var w = lo / 32;
+    var r = lo % 32;
+    var v = (_xb_limb(b, w) >> r) | (_xb_limb(b, w + 1) << (32 - r));
+    if (r == 0) { v = _xb_limb(b, w) | (_xb_limb(b, w + 1) << 32); }
+    if (r > 0) { v = v | (_xb_limb(b, w + 2) << (64 - r)); }
+    if (n < 64) { v = v & ((1 << n) - 1); }
+    return v;
+}
+
+# b = b << s, s >= 0.
+fn _xb_shl(b, s): i64 {
+    var n = load64(b);
+    if (n == 0) { return 0; }
+    var w = s / 32;
+    var r = s % 32;
+    _xb_reserve(b, n + w + 1);
+    var d = load64(b + 16);
+    var i = n;
+    store64(d + (n + w) * 8, 0);
+    while (i > 0) {
+        i = i - 1;
+        var v = load64(d + i * 8);
+        if (r == 0) {
+            store64(d + (i + w) * 8, v);
+        } else {
+            var hi = load64(d + (i + w + 1) * 8) | ((v >> (32 - r)) & 4294967295);
+            store64(d + (i + w + 1) * 8, hi);
+            store64(d + (i + w) * 8, (v << r) & 4294967295);
+        }
+    }
+    var z: i64 = 0;
+    while (z < w) { store64(d + z * 8, 0); z = z + 1; }
+    store64(b, n + w + 1);
+    _xb_trim(b);
+    return 0;
+}
+
+# b = b >> s, s >= 0.
+fn _xb_shr(b, s): i64 {
+    var n = load64(b);
+    var w = s / 32;
+    var r = s % 32;
+    if (w >= n) { store64(b, 0); return 0; }
+    var d = load64(b + 16);
+    var i: i64 = 0;
+    while (i < n - w) {
+        var v = load64(d + (i + w) * 8) >> r;
+        if (r > 0) {
+            if (i + w + 1 < n) { v = v | ((load64(d + (i + w + 1) * 8) << (32 - r)) & 4294967295); }
+        }
+        store64(d + i * 8, v);
+        i = i + 1;
+    }
+    store64(b, n - w);
+    _xb_trim(b);
+    return 0;
+}
+
+# b = b >> 1.
+fn _xb_shr1(b): i64 {
+    var n = load64(b);
+    var d = load64(b + 16);
+    var i: i64 = 0;
+    while (i < n) {
+        var v = load64(d + i * 8) >> 1;
+        if (i + 1 < n) { v = v | ((load64(d + (i + 1) * 8) & 1) << 31); }
+        store64(d + i * 8, v);
+        i = i + 1;
+    }
+    _xb_trim(b);
+    return 0;
+}
+
+fn _xb_cmp(a, b): i64 {
+    var na = load64(a);
+    var nb = load64(b);
+    if (na != nb) {
+        if (na > nb) { return 1; }
+        return 0 - 1;
+    }
+    var i = na;
+    while (i > 0) {
+        i = i - 1;
+        var x = _xb_limb(a, i);
+        var y = _xb_limb(b, i);
+        if (x != y) {
+            if (x > y) { return 1; }
+            return 0 - 1;
+        }
+    }
+    return 0;
+}
+
+# a = a - b, a >= b.
+fn _xb_sub(a, b): i64 {
+    var na = load64(a);
+    var d = load64(a + 16);
+    var borrow: i64 = 0;
+    var i: i64 = 0;
+    while (i < na) {
+        var t = load64(d + i * 8) - _xb_limb(b, i) - borrow;
+        borrow = 0;
+        if (t < 0) { t = t + 4294967296; borrow = 1; }
+        store64(d + i * 8, t);
+        i = i + 1;
+    }
+    _xb_trim(a);
+    return 0;
+}
+
+# a = a + b.
+fn _xb_add(a, b): i64 {
+    var na = load64(a);
+    var nb = load64(b);
+    var n = na;
+    if (nb > n) { n = nb; }
+    _xb_reserve(a, n + 1);
+    var d = load64(a + 16);
+    var carry: i64 = 0;
+    var i: i64 = 0;
+    while (i < n) {
+        var t = _xb_limb(a, i) + _xb_limb(b, i) + carry;
+        store64(d + i * 8, t & 4294967295);
+        carry = t >> 32;
+        i = i + 1;
+    }
+    store64(d + n * 8, carry);
+    store64(a, n + 1);
+    _xb_trim(a);
+    return 0;
+}
+
+# Set bit `i`.
+fn _xb_setbit(b, i): i64 {
+    var w = i / 32;
+    var n = load64(b);
+    if (w >= n) {
+        _xb_reserve(b, w + 1);
+        var d0 = load64(b + 16);
+        var j = n;
+        while (j <= w) { store64(d0 + j * 8, 0); j = j + 1; }
+        store64(b, w + 1);
+    }
+    var d = load64(b + 16);
+    store64(d + w * 8, load64(d + w * 8) | (1 << (i % 32)));
+    return 0;
+}
+
+# dst = a * b; dst is neither.
+fn _xb_mul(dst, a, b): i64 {
+    var na = load64(a);
+    var nb = load64(b);
+    _xb_reserve(dst, na + nb + 1);
+    var d = load64(dst + 16);
+    var z: i64 = 0;
+    while (z < na + nb + 1) { store64(d + z * 8, 0); z = z + 1; }
+    var i: i64 = 0;
+    while (i < na) {
+        var ai = _xb_limb(a, i);
+        var carry: i64 = 0;
+        var j: i64 = 0;
+        while (j < nb) {
+            var t = ai * _xb_limb(b, j) + load64(d + (i + j) * 8) + carry;
+            store64(d + (i + j) * 8, t & 4294967295);
+            carry = t >> 32;
+            j = j + 1;
+        }
+        var k = i + nb;
+        while (carry != 0) {
+            var t2 = load64(d + k * 8) + carry;
+            store64(d + k * 8, t2 & 4294967295);
+            carry = t2 >> 32;
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    store64(dst, na + nb + 1);
+    _xb_trim(dst);
+    return 0;
+}
+
+# --- rounding an exact value into a format ---------------------------------------
+#
+# Round B * 2^e_lsb (B >= 0, exact) to the nearest value of `fmt`, ties to even, into `out` with
+# sign `sign`. Sets `_xf_inexact`, and `_xf_erange` on overflow (the result is then infinite) or on
+# an inexact result that is TINY AFTER ROUNDING: below the smallest normal once rounded to the full
+# precision with no lower exponent limit, x86's rule and so glibc's there. Measured:
+# `0x1.fffffffffffffffep-16383` sets it (64 significant bits, exact at full precision, still tiny)
+# and `0x1.ffffffffffffffffp-16383` does not (it rounds up to the smallest normal first).
+
+# Unsigned bit length of a 64-bit pattern.
+fn _xf_ulen(v): i64 {
+    var l: i64 = 0;
+    var x = v;
+    while (x != 0) { x = x >> 1; l = l + 1; }
+    return l;
+}
+
+# Round `B` at precision `p` bits, B's top bit counted as bit `L - 1`. Returns the kept bits and
+# stores at `carry_p` 1 when rounding carried them to 2^p, and at `inex_p` 1 when bits were lost.
+fn _xf_round_bits(B, L, p, carry_p, inex_p): i64 {
+    store64(carry_p, 0);
+    store64(inex_p, 0);
+    var d = L - p;
+    if (d <= 0) {
+        # Exact: every bit is kept.
+        return _xb_bits(B, 0, L) << (0 - d);
+    }
+    var kept: i64 = 0;
+    if (p > 0) { kept = _xb_bits(B, d, p); }
+    var half = _xb_bit(B, d - 1);
+    var sticky = _xb_any_below(B, d - 1);
+    if (half == 1) { store64(inex_p, 1); }
+    if (sticky == 1) { store64(inex_p, 1); }
+    var up: i64 = 0;
+    if (half == 1) {
+        if (sticky == 1) { up = 1; }
+        if ((kept & 1) == 1) { up = 1; }
+    }
+    if (up == 1) {
+        var all: i64 = 0;
+        if (p == 64) {
+            if (kept == (0 - 1)) { all = 1; }
+        } else {
+            if (p > 0) { if (kept == (1 << p) - 1) { all = 1; } }
+        }
+        if (p <= 0) { all = 1; }
+        if (all == 1) {
+            store64(carry_p, 1);
+            return 0;
+        }
+        kept = kept + 1;
+    }
+    return kept;
+}
+
+fn _xf_round(B, e_lsb, sign, fmt, out): i64 {
+    _xf_inexact = 0;
+    var L = _xb_bitlen(B);
+    if (L == 0) {
+        xf_set(out, XF_ZERO, sign, 0, 0);
+        return 0;
+    }
+    var pmax = _xf_prec(fmt);
+    var emin = _xf_emin(fmt);
+    var emax = _xf_emax(fmt);
+    var E2 = L - 1 + e_lsb;
+    var p = pmax;
+    if (E2 < emin) { p = pmax - (emin - E2); }
+    var carry: i64 = 0;
+    var inex: i64 = 0;
+    var kept = _xf_round_bits(B, L, p, &carry, &inex);
+    _xf_inexact = inex;
+    # value = kept * 2^scale, scale the weight of the lowest kept bit.
+    var scale = E2 - p + 1;
+    if (carry == 1) {
+        # 2^p * 2^scale: one bit, at E2 + 1.
+        if (p > 0) { kept = 1 << (p - 1); scale = scale + 1; }
+        else { kept = 1; scale = E2 + 1 - (p - 1) - 1 + 1; scale = emin - pmax + 1; }
+    }
+    # Tiny after rounding: below 2^emin once rounded at full precision, with no exponent floor.
+    var tiny: i64 = 0;
+    if (E2 < emin) {
+        tiny = 1;
+        if (E2 == emin - 1) {
+            var c2: i64 = 0;
+            var i2: i64 = 0;
+            _xf_round_bits(B, L, pmax, &c2, &i2);
+            if (c2 == 1) { tiny = 0; }
+        }
+    }
+    _xf_erange = 0;
+    if (inex == 1) { if (tiny == 1) { _xf_erange = 1; } }
+    if (kept == 0) {
+        xf_set(out, XF_ZERO, sign, 0, 0);
+        return 0;
+    }
+    var bl = _xf_ulen(kept);
+    var ex = bl - 1 + scale;
+    if (ex > emax) {
+        _xf_erange = 1;
+        _xf_inexact = 1;
+        xf_set(out, XF_INF, sign, 0, 0);
+        return 0;
+    }
+    var er = ex;
+    if (er < emin) { er = emin; }
+    # Align so that bit 63 weighs 2^er.
+    var sh = 63 - er + scale;
+    xf_set(out, XF_FIN, sign, kept << sh, er);
+    return 0;
+}
+
+# --- reading: glibc's strtold / strtod in the C locale -------------------------------
+
+fn _xf_lower(c): i64 {
+    if (c >= 65) { if (c <= 90) { return c + 32; } }
+    return c;
+}
+
+# Does `s + i` start with the lower-case word `w`, in any case?
+fn _xf_word(s, i, w): i64 {
+    var k: i64 = 0;
+    while (load8(w + k) != 0) {
+        if (_xf_lower(load8(s + i + k)) != load8(w + k)) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+fn _xf_isdigit(c): i64 {
+    if (c >= 48) { if (c <= 57) { return 1; } }
+    return 0;
+}
+
+fn _xf_hexval(c): i64 {
+    if (c >= 48) { if (c <= 57) { return c - 48; } }
+    if (c >= 97) { if (c <= 102) { return c - 87; } }
+    if (c >= 65) { if (c <= 70) { return c - 55; } }
+    return 0 - 1;
+}
+
+fn _xf_isspace(c): i64 {
+    if (c == 32) { return 1; }
+    if (c >= 9) { if (c <= 13) { return 1; } }
+    return 0;
+}
+
+# Working bigs, made once.
+var _xf_b1 = 0;
+var _xf_b2 = 0;
+var _xf_b3 = 0;
+var _xf_b4 = 0;
+fn _xf_init(): i64 {
+    if (_xf_b1 != 0) { return 0; }
+    _xf_b1 = _xb_new();
+    _xf_b2 = _xb_new();
+    _xf_b3 = _xb_new();
+    _xf_b4 = _xb_new();
+    return 0;
+}
+
+# An exponent's digits at `s + i`, saturating at 10^9: index after them stored at `end_p`.
+fn _xf_exp_digits(s, i, end_p): i64 {
+    var v: i64 = 0;
+    var j = i;
+    while (_xf_isdigit(load8(s + j)) == 1) {
+        if (v < 1000000000) { v = v * 10 + (load8(s + j) - 48); }
+        j = j + 1;
+    }
+    store64(end_p, j);
+    return v;
+}
+
+# ⚠ The significant digits kept exactly. Past them only "something nonzero follows" matters, kept
+# as one more `1` digit: a halfway point between two extended values has at most about 11,500
+# significant digits, so 20,000 decide every rounding exactly.
+enum XfLimits { XF_MAXDIG = 20000; }
+
+# b = b / d for 0 < d < 2^32, in place. Returns the remainder. ⚠ rem * 2^32 + limb stays below
+# d * 2^32 <= 2^63 for d up to 10^9.
+fn _xb_div_small(b, d): i64 {
+    var n = load64(b);
+    var dp = load64(b + 16);
+    var rem: i64 = 0;
+    var i = n;
+    while (i > 0) {
+        i = i - 1;
+        var cur = (rem << 32) | load64(dp + i * 8);
+        store64(dp + i * 8, cur / d);
+        rem = cur % d;
+    }
+    _xb_trim(b);
+    return rem;
+}
+
+# value = D / 10^n, D = `_xf_b1` (nonzero), rounded into `out`. q = floor(D * 2^t / 10^n), with t
+# chosen so q has some bits to spare past the format's precision, and one sticky bit below them
+# when the division left a remainder. ⭐ 10^n is (10^9)^k * 10^r, so the division is k + 1
+# divisions by one limb, and floor(floor(x / a) / b) = floor(x / ab) with a remainder exactly when
+# either step left one: `printf %f 134.3642` divides once, where a bitwise long division stepped
+# seventy times (1.9.0, 4.3 µs an argument down to well under one).
+fn _xf_div_pow10(n, sign, fmt, out): i64 {
+    var D = _xf_b1;
+    var a = _xb_bitlen(D);
+    # bitlen(10^n) is floor(n * log2 10) + 1; an estimate within one is enough.
+    var b = (n * 3321928095) / 1000000000 + 1;
+    var t = (_xf_prec(fmt) + 6) - (a - b);
+    if (t < 0) { t = 0; }
+    _xb_shl(D, t);
+    var sticky: i64 = 0;
+    var k = n;
+    while (k >= 9) {
+        if (_xb_div_small(D, 1000000000) != 0) { sticky = 1; }
+        k = k - 9;
+    }
+    if (k > 0) {
+        var m: i64 = 1;
+        while (k > 0) { m = m * 10; k = k - 1; }
+        if (_xb_div_small(D, m) != 0) { sticky = 1; }
+    }
+    var e_lsb = 0 - t;
+    if (sticky == 1) {
+        _xb_shl(D, 1);
+        _xb_setbit(D, 0);
+        e_lsb = e_lsb - 1;
+    }
+    _xf_round(D, e_lsb, sign, fmt, out);
+    return 0;
+}
+
+# Parse a float at `s` into `out`, in `fmt`. Returns the number of bytes read, 0 when there is no
+# number (the value is then +0). Sets `_xf_erange`.
+fn xf_parse(s, fmt, out): i64 {
+    _xf_init();
+    _xf_erange = 0;
+    xf_set(out, XF_ZERO, 0, 0, 0);
+    var i: i64 = 0;
+    while (_xf_isspace(load8(s + i)) == 1) { i = i + 1; }
+    var sign: i64 = 0;
+    if (load8(s + i) == 45) { sign = 1; i = i + 1; }
+    elif (load8(s + i) == 43) { i = i + 1; }
+    # inf / infinity
+    if (_xf_word(s, i, "inf") == 1) {
+        xf_set(out, XF_INF, sign, 0, 0);
+        if (_xf_word(s, i, "infinity") == 1) { return i + 8; }
+        return i + 3;
+    }
+    # nan, and nan(n-char-sequence) when the parenthesis closes
+    if (_xf_word(s, i, "nan") == 1) {
+        xf_set(out, XF_NAN, sign, 0, 0);
+        var j = i + 3;
+        if (load8(s + j) == 40) {
+            var k = j + 1;
+            var ok: i64 = 1;
+            var scanning: i64 = 1;
+            while (scanning == 1) {
+                var c = load8(s + k);
+                var alnum: i64 = 0;
+                if (_xf_isdigit(c) == 1) { alnum = 1; }
+                if (_xf_lower(c) >= 97) { if (_xf_lower(c) <= 122) { alnum = 1; } }
+                if (c == 95) { alnum = 1; }
+                if (alnum == 1) { k = k + 1; } else { scanning = 0; }
+            }
+            if (load8(s + k) == 41) { return k + 1; }
+        }
+        return j;
+    }
+    var D = _xf_b1;
+    _xb_zero(D);
+    # Hex: `0x` with a hex digit, or a `.` and a hex digit, after it.
+    var hex: i64 = 0;
+    if (load8(s + i) == 48) {
+        if (_xf_lower(load8(s + i + 1)) == 120) {
+            if (_xf_hexval(load8(s + i + 2)) >= 0) { hex = 1; }
+            if (load8(s + i + 2) == 46) { if (_xf_hexval(load8(s + i + 3)) >= 0) { hex = 1; } }
+        }
+    }
+    if (hex == 1) {
+        var j2 = i + 2;
+        var nd: i64 = 0;       # hex digits kept
+        var fracd: i64 = 0;    # of them, after the point
+        var lost: i64 = 0;     # nonzero digits dropped past the limit
+        var extra: i64 = 0;    # integer digits dropped past the limit
+        var seen_point: i64 = 0;
+        var going: i64 = 1;
+        while (going == 1) {
+            var c2 = load8(s + j2);
+            var hv = _xf_hexval(c2);
+            if (hv >= 0) {
+                if (nd < XF_MAXDIG) {
+                    if (nd > 0) { _xb_mul_add(D, 16, hv); nd = nd + 1; }
+                    elif (hv != 0) { _xb_mul_add(D, 16, hv); nd = nd + 1; }
+                    if (seen_point == 1) { fracd = fracd + 1; }
+                } else {
+                    if (hv != 0) { lost = 1; }
+                    if (seen_point == 0) { extra = extra + 1; }
+                }
+                j2 = j2 + 1;
+            } elif (c2 == 46) {
+                if (seen_point == 0) { seen_point = 1; j2 = j2 + 1; } else { going = 0; }
+            } else { going = 0; }
+        }
+        var bexp: i64 = 0;
+        if (_xf_lower(load8(s + j2)) == 112) {
+            var k2 = j2 + 1;
+            var eneg: i64 = 0;
+            if (load8(s + k2) == 45) { eneg = 1; k2 = k2 + 1; }
+            elif (load8(s + k2) == 43) { k2 = k2 + 1; }
+            if (_xf_isdigit(load8(s + k2)) == 1) {
+                var ee: i64 = 0;
+                bexp = _xf_exp_digits(s, k2, &ee);
+                if (eneg == 1) { bexp = 0 - bexp; }
+                j2 = ee;
+            }
+        }
+        if (_xb_is_zero(D) == 1) {
+            if (lost == 0) {
+                xf_set(out, XF_ZERO, sign, 0, 0);
+                return j2;
+            }
+        }
+        if (lost == 1) { _xb_mul_add(D, 2, 1); bexp = bexp - 1; }
+        var e_lsb = bexp - 4 * fracd + 4 * extra;
+        # Far out of range on either side: no need to build it.
+        var top = _xb_bitlen(D) - 1 + e_lsb;
+        if (top > _xf_emax(fmt) + 1) {
+            _xf_erange = 1;
+            xf_set(out, XF_INF, sign, 0, 0);
+            return j2;
+        }
+        if (top < _xf_emin(fmt) - _xf_prec(fmt) - 2) {
+            _xf_erange = 1;
+            xf_set(out, XF_ZERO, sign, 0, 0);
+            return j2;
+        }
+        _xf_round(D, e_lsb, sign, fmt, out);
+        return j2;
+    }
+    # Decimal: digits, a point, digits; at least one digit in all.
+    var j3 = i;
+    var ndig: i64 = 0;       # significant digits kept in D
+    var fd: i64 = 0;         # of them, after the point
+    var any: i64 = 0;        # any digit at all
+    var lost3: i64 = 0;
+    var extra3: i64 = 0;
+    var pt: i64 = 0;
+    var go3: i64 = 1;
+    while (go3 == 1) {
+        var c3 = load8(s + j3);
+        if (_xf_isdigit(c3) == 1) {
+            any = 1;
+            var dv = c3 - 48;
+            if (ndig < XF_MAXDIG) {
+                if (ndig > 0) { _xb_mul_add(D, 10, dv); ndig = ndig + 1; if (pt == 1) { fd = fd + 1; } }
+                elif (dv != 0) { _xb_mul_add(D, 10, dv); ndig = 1; if (pt == 1) { fd = fd + 1; } }
+                else { if (pt == 1) { fd = fd + 1; } }
+            } else {
+                if (dv != 0) { lost3 = 1; }
+                if (pt == 0) { extra3 = extra3 + 1; }
+            }
+            j3 = j3 + 1;
+        } elif (c3 == 46) {
+            if (pt == 0) { pt = 1; j3 = j3 + 1; } else { go3 = 0; }
+        } else { go3 = 0; }
+    }
+    if (any == 0) { return 0; }
+    var e10: i64 = 0;
+    if (_xf_lower(load8(s + j3)) == 101) {
+        var k3 = j3 + 1;
+        var en: i64 = 0;
+        if (load8(s + k3) == 45) { en = 1; k3 = k3 + 1; }
+        elif (load8(s + k3) == 43) { k3 = k3 + 1; }
+        if (_xf_isdigit(load8(s + k3)) == 1) {
+            var e3: i64 = 0;
+            e10 = _xf_exp_digits(s, k3, &e3);
+            if (en == 1) { e10 = 0 - e10; }
+            j3 = e3;
+        }
+    }
+    if (_xb_is_zero(D) == 1) {
+        if (lost3 == 0) {
+            xf_set(out, XF_ZERO, sign, 0, 0);
+            return j3;
+        }
+    }
+    if (lost3 == 1) { _xb_mul_add(D, 10, 1); fd = fd + 1; }
+    var ex10 = e10 - fd + extra3;
+    # The decimal magnitude: D has `nd` digits, so the value is below 10^(nd + ex10).
+    var nd10 = ndig;
+    if (lost3 == 1) { nd10 = nd10 + 1; }
+    var mag = nd10 + ex10;
+    var maxmag: i64 = 4934;
+    var minmag: i64 = 0 - 4952;
+    if (fmt == XF_DBL) { maxmag = 310; minmag = 0 - 325; }
+    if (mag > maxmag) {
+        _xf_erange = 1;
+        xf_set(out, XF_INF, sign, 0, 0);
+        return j3;
+    }
+    if (mag < minmag) {
+        _xf_erange = 1;
+        xf_set(out, XF_ZERO, sign, 0, 0);
+        return j3;
+    }
+    if (ex10 >= 0) {
+        _xb_mul_pow10(D, ex10);
+        _xf_round(D, 0, sign, fmt, out);
+        return j3;
+    }
+    _xf_div_pow10(0 - ex10, sign, fmt, out);
+    return j3;
+}
+
+# --- decimal big integers, for writing ---------------------------------------------
+#
+# Base 10^9 limbs, least significant first, in the same 24-byte shape as `_xb_`. A limb times a
+# multiplier below 2^33, plus the carry, stays below 2^63.
+
+fn _xd_mul_add(b, m, a): i64 {
+    var n = load64(b);
+    _xb_reserve(b, n + 1);
+    var d = load64(b + 16);
+    var carry = a;
+    var i: i64 = 0;
+    while (i < n) {
+        var t = load64(d + i * 8) * m + carry;
+        store64(d + i * 8, t % 1000000000);
+        carry = t / 1000000000;
+        i = i + 1;
+    }
+    while (carry != 0) {
+        _xb_reserve(b, load64(b) + 1);
+        d = load64(b + 16);
+        store64(d + load64(b) * 8, carry % 1000000000);
+        store64(b, load64(b) + 1);
+        carry = carry / 1000000000;
+    }
+    return 0;
+}
+
+fn _xd_set_u64(b, v): i64 {
+    store64(b, 0);
+    _xd_mul_add(b, 1, (v >> 32) & 4294967295);
+    _xd_mul_add(b, 4294967296, v & 4294967295);
+    return 0;
+}
+
+fn _xd_mul_pow2(b, k): i64 {
+    var r = k;
+    while (r >= 31) { _xd_mul_add(b, 2147483648, 0); r = r - 31; }
+    if (r > 0) { _xd_mul_add(b, 1 << r, 0); }
+    return 0;
+}
+
+fn _xd_mul_pow5(b, k): i64 {
+    var r = k;
+    while (r >= 13) { _xd_mul_add(b, 1220703125, 0); r = r - 13; }
+    var m: i64 = 1;
+    while (r > 0) { m = m * 5; r = r - 1; }
+    if (m > 1) { _xd_mul_add(b, m, 0); }
+    return 0;
+}
+
+# The exact digits of a finite value's magnitude: `_xf_dg` (ASCII), `_xf_dn` of them, and the value
+# is DIGITS * 10^(_xf_dp - _xf_dn), so `_xf_dp` digits stand before the point. Zero is "0", dp 1.
+var _xf_dg = 0;
+var _xf_dcap = 0;
+var _xf_dn = 0;
+var _xf_dp = 0;
+
+fn _xf_dg_reserve(n): i64 {
+    if (n <= _xf_dcap) { return 0; }
+    var c = _xf_dcap * 2;
+    if (c < 64) { c = 64; }
+    while (c < n) { c = c * 2; }
+    var nd = alloc(c);
+    if (_xf_dn > 0) { memcpy(nd, _xf_dg, _xf_dn); }
+    _xf_dg = nd;
+    _xf_dcap = c;
+    return 0;
+}
+
+fn _xf_decimal(r): i64 {
+    _xf_init();
+    var sig = load64(r + XF_SIG);
+    var k = load64(r + XF_EXP) - 63;
+    if (load64(r + XF_CLS) != XF_FIN) { sig = 0; }
+    if (sig == 0) {
+        _xf_dg_reserve(1);
+        store8(_xf_dg, 48);
+        _xf_dn = 1;
+        _xf_dp = 1;
+        return 0;
+    }
+    while ((sig & 1) == 0) { sig = sig >> 1; k = k + 1; }
+    var d = _xf_b4;
+    _xd_set_u64(d, sig);
+    if (k >= 0) { _xd_mul_pow2(d, k); } else { _xd_mul_pow5(d, 0 - k); }
+    var n = load64(d);
+    _xf_dn = 0;
+    _xf_dg_reserve(n * 9 + 9);
+    var buf[16];
+    var top = _xb_limb(d, n - 1);
+    var tl: i64 = 0;
+    var t = top;
+    while (t > 0) { store8(&buf + tl, 48 + t % 10); t = t / 10; tl = tl + 1; }
+    var q: i64 = 0;
+    while (q < tl) { store8(_xf_dg + q, load8(&buf + tl - 1 - q)); q = q + 1; }
+    var w = tl;
+    var i = n - 1;
+    while (i > 0) {
+        i = i - 1;
+        var v = _xb_limb(d, i);
+        var j: i64 = 8;
+        while (j >= 0) { store8(_xf_dg + w + j, 48 + v % 10); v = v / 10; j = j - 1; }
+        w = w + 9;
+    }
+    _xf_dn = w;
+    if (k >= 0) { _xf_dp = w; } else { _xf_dp = w + k; }
+    return 0;
+}
+
+# Round those digits to `keep` from the first, half to even on the exact rest: `_xf_rd` (`_xf_rl`
+# digits: `keep`, all of them when there are fewer, none when a keep of 0 or less rounds down, one
+# when it rounds up) and `_xf_rdp`, the new count of digits before the point. The value is then
+# RD * 10^(_xf_rdp - _xf_rl), and `_xf_rdig` reads a zero past RD's end.
+var _xf_rd = 0;
+var _xf_rcap = 0;
+var _xf_rl = 0;
+var _xf_rdp = 0;
+
+fn _xf_round_digits(keep): i64 {
+    # ⚠ Never more than the exact digits: a precision of 2^31 is a zero run, not a buffer.
+    var need = keep + 2;
+    if (keep > _xf_dn) { need = _xf_dn + 2; }
+    if (need < 2) { need = 2; }
+    if (need > _xf_rcap) {
+        var c = _xf_rcap * 2;
+        if (c < 64) { c = 64; }
+        while (c < need) { c = c * 2; }
+        _xf_rd = alloc(c);
+        _xf_rcap = c;
+    }
+    _xf_rdp = _xf_dp;
+    if (keep >= _xf_dn) {
+        # Nothing to round: the digits stand, and `_xf_rdig` reads zeros past them.
+        memcpy(_xf_rd, _xf_dg, _xf_dn);
+        _xf_rl = _xf_dn;
+        return 0;
+    }
+    # Is the dropped part above, at or below half a unit of the last kept digit?
+    var up: i64 = 0;
+    if (keep >= 0) {
+        var c0 = load8(_xf_dg + keep);
+        if (c0 > 53) { up = 1; }
+        if (c0 == 53) {
+            var rest: i64 = 0;
+            var j = keep + 1;
+            while (j < _xf_dn) {
+                if (load8(_xf_dg + j) != 48) { rest = 1; j = _xf_dn; }
+                j = j + 1;
+            }
+            if (rest == 1) { up = 1; }
+            else {
+                # A tie: to even. With nothing kept the kept value is 0, which is even.
+                if (keep > 0) { if (((load8(_xf_dg + keep - 1) - 48) & 1) == 1) { up = 1; } }
+            }
+        }
+    }
+    if (keep <= 0) {
+        if (up == 1) {
+            store8(_xf_rd, 49);
+            _xf_rl = 1;
+            _xf_rdp = _xf_dp - keep + 1;
+        } else {
+            _xf_rl = 0;
+        }
+        return 0;
+    }
+    memcpy(_xf_rd, _xf_dg, keep);
+    _xf_rl = keep;
+    if (up == 1) {
+        var i = keep - 1;
+        var carrying: i64 = 1;
+        while (carrying == 1) {
+            if (i < 0) {
+                # 99...9 became 100...0: one more digit before the point, and the last kept is 0.
+                store8(_xf_rd, 49);
+                var z2: i64 = 1;
+                while (z2 < keep) { store8(_xf_rd + z2, 48); z2 = z2 + 1; }
+                _xf_rdp = _xf_rdp + 1;
+                carrying = 0;
+            } else {
+                var dc = load8(_xf_rd + i);
+                if (dc == 57) {
+                    store8(_xf_rd + i, 48);
+                    i = i - 1;
+                } else {
+                    store8(_xf_rd + i, dc + 1);
+                    carrying = 0;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+# The rounded digit at index `i` of RD, '0' outside it.
+fn _xf_rdig(i): i64 {
+    if (i < 0) { return 48; }
+    if (i >= _xf_rl) { return 48; }
+    return load8(_xf_rd + i);
+}
+
+# --- writing ------------------------------------------------------------------------
+#
+# A formatted value is laid out as GNU's is: [spaces][sign and 0x][zeros][BODY][ZERO RUN][SUFFIX]
+# [spaces]. ⚠ The zero run is a COUNT: `%.2147483647f` is two gigabytes of zeros after a few
+# digits, and is written in chunks rather than held.
+
+enum XfFlag {
+    XF_FL_LEFT  = 1;
+    XF_FL_PLUS  = 2;
+    XF_FL_SPACE = 4;
+    XF_FL_HASH  = 8;
+    XF_FL_ZERO  = 16;
+}
+
+var _xo_pre = 0;   # sign, and 0x for %a
+var _xo_pl = 0;
+var _xo_body = 0;
+var _xo_bcap = 0;
+var _xo_bl = 0;
+var _xo_zr = 0;    # zeros after the body
+var _xo_suf = 0;   # e+NN / p+N
+var _xo_sl = 0;
+var _xo_lpad = 0;  # spaces before
+var _xo_zpad = 0;  # zeros after the prefix
+var _xo_rpad = 0;  # spaces after
+
+fn _xo_reset(): i64 {
+    if (_xo_pre == 0) {
+        _xo_pre = alloc(8);
+        _xo_suf = alloc(32);
+        _xo_body = alloc(256);
+        _xo_bcap = 256;
+    }
+    _xo_pl = 0;
+    _xo_bl = 0;
+    _xo_zr = 0;
+    _xo_sl = 0;
+    _xo_lpad = 0;
+    _xo_zpad = 0;
+    _xo_rpad = 0;
+    return 0;
+}
+
+fn _xo_put(c): i64 {
+    if (_xo_bl + 1 > _xo_bcap) {
+        var nc = _xo_bcap * 2;
+        var nb = alloc(nc);
+        memcpy(nb, _xo_body, _xo_bl);
+        _xo_body = nb;
+        _xo_bcap = nc;
+    }
+    store8(_xo_body + _xo_bl, c);
+    _xo_bl = _xo_bl + 1;
+    return 0;
+}
+
+fn _xo_pre_put(c): i64 { store8(_xo_pre + _xo_pl, c); _xo_pl = _xo_pl + 1; return 0; }
+
+# The exponent suffix: `mark` then a sign and at least `mind` digits.
+fn _xo_exp(mark, e, mind): i64 {
+    store8(_xo_suf, mark);
+    var v = e;
+    var sg: i64 = 43;
+    if (v < 0) { sg = 45; v = 0 - v; }
+    store8(_xo_suf + 1, sg);
+    var tmp[24];
+    var n: i64 = 0;
+    while (v > 0) { store8(&tmp + n, 48 + v % 10); v = v / 10; n = n + 1; }
+    while (n < mind) { store8(&tmp + n, 48); n = n + 1; }
+    var i: i64 = 0;
+    while (i < n) { store8(_xo_suf + 2 + i, load8(&tmp + n - 1 - i)); i = i + 1; }
+    _xo_sl = 2 + n;
+    return 0;
+}
+
+# Is the byte upper case for this conversion?
+fn _xf_upper(conv): i64 {
+    if (conv == 69) { return 1; }
+    if (conv == 70) { return 1; }
+    if (conv == 71) { return 1; }
+    if (conv == 65) { return 1; }
+    return 0;
+}
+
+# ⭐ %f WITHOUT THE WHOLE EXPANSION (1.9.0). For a value with a fraction, SIG * 2^-s, rounded to
+# p places is round(SIG * 10^p / 2^s): one small product and a shift, half to even on the bits
+# shifted out. The exact expansion is SIG * 5^s's digits, `s` up to 16,500, and `seq 0 0.001 1000`
+# paid it a million times. Used for p up to 400; past that the zero run of the general path wins.
+fn _xf_fixed(r, p): i64 {
+    var sig = load64(r + XF_SIG);
+    var s = 63 - load64(r + XF_EXP);
+    # ⚠ Not past the binary point: an integer value keeps s at 0 (10.0 is 5 * 2^1).
+    var stripping: i64 = 1;
+    while (stripping == 1) {
+        if (s <= 0) { stripping = 0; }
+        elif ((sig & 1) != 0) { stripping = 0; }
+        else { sig = sig >> 1; s = s - 1; }
+    }
+    var B = _xf_b1;
+    _xb_set_u64(B, sig);
+    _xb_mul_pow10(B, p);
+    var half = _xb_bit(B, s - 1);
+    var sticky = _xb_any_below(B, s - 1);
+    var odd = _xb_bit(B, s);
+    _xb_shr(B, s);
+    if (half == 1) {
+        var up: i64 = 0;
+        if (sticky == 1) { up = 1; }
+        if (odd == 1) { up = 1; }
+        if (up == 1) {
+            _xb_set_u64(_xf_b2, 1);
+            _xb_add(B, _xf_b2);
+        }
+    }
+    # Its decimal digits, nine at a time from the bottom.
+    var groups = _xf_b3;
+    store64(groups, 0);
+    var ng: i64 = 0;
+    while (_xb_is_zero(B) == 0) {
+        var g = _xb_div_small(B, 1000000000);
+        # ⛔ The count goes in BEFORE the reserve, which copies only the limbs in use: with it at 0,
+        # growing past eight groups (72 digits) dropped the first eight, and `%.70f 62061.1971` was
+        # `62000.000…` (found by the fuzz in the 9.4 and 9.7 containers, 1.9.0).
+        store64(groups, ng);
+        _xb_reserve(groups, ng + 1);
+        store64(load64(groups + 16) + ng * 8, g);
+        ng = ng + 1;
+    }
+    _xf_dn = 0;
+    _xf_dg_reserve(ng * 9 + 9);
+    if (ng == 0) {
+        store8(_xf_dg, 48);
+        _xf_dn = 1;
+        return 0;
+    }
+    var tmp[16];
+    var top = load64(load64(groups + 16) + (ng - 1) * 8);
+    var tl: i64 = 0;
+    while (top > 0) { store8(&tmp + tl, 48 + top % 10); top = top / 10; tl = tl + 1; }
+    var q: i64 = 0;
+    while (q < tl) { store8(_xf_dg + q, load8(&tmp + tl - 1 - q)); q = q + 1; }
+    var w = tl;
+    var i = ng - 1;
+    while (i > 0) {
+        i = i - 1;
+        var v = load64(load64(groups + 16) + i * 8);
+        var j: i64 = 8;
+        while (j >= 0) { store8(_xf_dg + w + j, 48 + v % 10); v = v / 10; j = j - 1; }
+        w = w + 9;
+    }
+    _xf_dn = w;
+    return 0;
+}
+
+fn _xf_body_f_fixed(p, hash): i64 {
+    # `_xf_dg` holds round(|v| * 10^p): the last p digits are the places.
+    var n = _xf_dn;
+    if (n <= p) {
+        _xo_put(48);
+        _xo_put(46);
+        var z = p - n;
+        while (z > 0) { _xo_put(48); z = z - 1; }
+        var k: i64 = 0;
+        while (k < n) { _xo_put(load8(_xf_dg + k)); k = k + 1; }
+        return 0;
+    }
+    var ip = n - p;
+    var a: i64 = 0;
+    while (a < ip) { _xo_put(load8(_xf_dg + a)); a = a + 1; }
+    if (p > 0) {
+        _xo_put(46);
+        while (a < n) { _xo_put(load8(_xf_dg + a)); a = a + 1; }
+    } else {
+        if (hash == 1) { _xo_put(46); }
+    }
+    return 0;
+}
+
+# %f's digits after a rounding to `p` places: integer part, then `p` places.
+fn _xf_body_f(p, hash): i64 {
+    _xf_round_digits(_xf_dp + p);
+    if (_xf_rdp <= 0) { _xo_put(48); }
+    else {
+        var i: i64 = 0;
+        while (i < _xf_rdp) { _xo_put(_xf_rdig(i)); i = i + 1; }
+    }
+    if (p > 0) {
+        _xo_put(46);
+        # Places 0..p-1 are RD indices rdp .. rdp+p-1; past the digits, a zero run.
+        var j: i64 = 0;
+        var last = _xf_rl - _xf_rdp;   # places that hold a digit
+        if (last > p) { last = p; }
+        while (j < last) { _xo_put(_xf_rdig(_xf_rdp + j)); j = j + 1; }
+        if (j < 0) { j = 0; }
+        _xo_zr = p - j;
+    } else {
+        if (hash == 1) { _xo_put(46); }
+    }
+    return 0;
+}
+
+# %e's: d.ddd (p places) and the exponent, from digits rounded to p + 1 significant.
+fn _xf_body_e(p, hash, zero_val, conv): i64 {
+    var x: i64 = 0;
+    if (zero_val == 1) {
+        _xo_put(48);
+        if (p > 0) { _xo_put(46); _xo_zr = p; }
+        else { if (hash == 1) { _xo_put(46); } }
+    } else {
+        _xf_round_digits(p + 1);
+        x = _xf_rdp - 1;
+        _xo_put(_xf_rdig(0));
+        if (p > 0) {
+            _xo_put(46);
+            var j: i64 = 1;
+            var have = _xf_rl;
+            if (have > p + 1) { have = p + 1; }
+            while (j < have) { _xo_put(_xf_rdig(j)); j = j + 1; }
+            _xo_zr = p + 1 - have;
+        } else {
+            if (hash == 1) { _xo_put(46); }
+        }
+    }
+    var mark: i64 = 101;
+    if (_xf_upper(conv) == 1) { mark = 69; }
+    _xo_exp(mark, x, 2);
+    return 0;
+}
+
+# Drop trailing zeros after a point, and the point when nothing follows it (%g without #).
+fn _xf_strip_zeros(): i64 {
+    _xo_zr = 0;
+    var has_point: i64 = 0;
+    var i: i64 = 0;
+    while (i < _xo_bl) { if (load8(_xo_body + i) == 46) { has_point = 1; } i = i + 1; }
+    if (has_point == 0) { return 0; }
+    while (_xo_bl > 0) {
+        var c = load8(_xo_body + _xo_bl - 1);
+        if (c == 48) { _xo_bl = _xo_bl - 1; }
+        elif (c == 46) { _xo_bl = _xo_bl - 1; return 0; }
+        else { return 0; }
+    }
+    return 0;
+}
+
+fn _xf_hexdig(v, upper): i64 {
+    if (v < 10) { return 48 + v; }
+    if (upper == 1) { return 55 + v; }
+    return 87 + v;
+}
+
+# %a for the extended format: the leading hex digit is the significand's top four bits, so 1 is
+# `0x8p-3` and 0.1 `0xc.ccccccccccccccdp-7`, as glibc writes a long double on x86.
+fn _xf_body_a(r, p, hash, conv): i64 {
+    var up = _xf_upper(conv);
+    var sig = load64(r + XF_SIG);
+    var lead: i64 = 0;
+    var frac: i64 = 0;
+    var ex: i64 = 0;
+    if (load64(r + XF_CLS) == XF_FIN) {
+        lead = (sig >> 60) & 15;
+        frac = sig & 1152921504606846975;     # 2^60 - 1: fifteen hex digits
+        ex = load64(r + XF_EXP) - 3;
+    }
+    var nd: i64 = 15;
+    if (p < 0) {
+        # As many digits as are not trailing zeros.
+        while (nd > 0) {
+            if (((frac >> (4 * (15 - nd))) & 15) == 0) { nd = nd - 1; } else { p = nd; nd = 0 - 1; }
+        }
+        if (nd == 0) { p = 0; }
+        nd = 15;
+    }
+    var digits = frac;
+    var shown = p;
+    if (shown > 15) { shown = 15; }
+    if (p < 15) {
+        var drop = 60 - 4 * p;
+        var kept = frac >> drop;
+        var rem = frac & ((1 << drop) - 1);
+        var half = 1 << (drop - 1);
+        var rup: i64 = 0;
+        if (rem > half) { rup = 1; }
+        if (rem == half) {
+            if (p == 0) { if ((lead & 1) == 1) { rup = 1; } }
+            else { if ((kept & 1) == 1) { rup = 1; } }
+        }
+        if (rup == 1) {
+            if (p == 0) { lead = lead + 1; }
+            else {
+                kept = kept + 1;
+                if (kept == (1 << (4 * p))) { kept = 0; lead = lead + 1; }
+            }
+        }
+        if (lead == 16) { lead = 1; ex = ex + 4; }
+        digits = kept << drop;
+    }
+    _xo_pre_put(48);
+    if (up == 1) { _xo_pre_put(88); } else { _xo_pre_put(120); }
+    _xo_put(_xf_hexdig(lead, up));
+    if (p > 0) { _xo_put(46); }
+    else { if (hash == 1) { _xo_put(46); } }
+    var i: i64 = 0;
+    while (i < shown) {
+        _xo_put(_xf_hexdig((digits >> (4 * (14 - i))) & 15, up));
+        i = i + 1;
+    }
+    if (p > 15) { _xo_zr = p - 15; }
+    var mark: i64 = 112;
+    if (up == 1) { mark = 80; }
+    _xo_exp(mark, ex, 1);
+    return 0;
+}
+
+# Lay out `r` under conversion `conv` (e E f F g G a A), flags, `width` (< 0 none) and `prec`
+# (< 0 none). The result is in the `_xo_` pieces; `xf_out_len`, `xf_emit_fd` and `xf_to_str` read it.
+fn xf_format(r, conv, flags, width, prec): i64 {
+    _xo_reset();
+    var cls = load64(r + XF_CLS);
+    var neg = load64(r + XF_SIGN);
+    var hash: i64 = 0;
+    if ((flags & XF_FL_HASH) != 0) { hash = 1; }
+    if (neg == 1) { _xo_pre_put(45); }
+    elif ((flags & XF_FL_PLUS) != 0) { _xo_pre_put(43); }
+    elif ((flags & XF_FL_SPACE) != 0) { _xo_pre_put(32); }
+    var up = _xf_upper(conv);
+    var lc = _xf_lower(conv);
+    var finite: i64 = 1;
+    if (cls == XF_INF) {
+        finite = 0;
+        if (up == 1) { _xo_put(73); _xo_put(78); _xo_put(70); } else { _xo_put(105); _xo_put(110); _xo_put(102); }
+    } elif (cls == XF_NAN) {
+        finite = 0;
+        if (up == 1) { _xo_put(78); _xo_put(65); _xo_put(78); } else { _xo_put(110); _xo_put(97); _xo_put(110); }
+    } elif (lc == 97) {
+        _xf_body_a(r, prec, hash, conv);
+    } else {
+        var p = prec;
+        if (p < 0) { p = 6; }
+        var zv: i64 = 0;
+        if (cls == XF_ZERO) { zv = 1; }
+        if (lc == 102) {
+            var fast: i64 = 0;
+            if (zv == 0) {
+                if (p <= 400) {
+                    if (load64(r + XF_EXP) < 63) { fast = 1; }
+                }
+            }
+            if (fast == 1) {
+                _xf_fixed(r, p);
+                _xf_body_f_fixed(p, hash);
+            } else {
+                _xf_decimal(r);
+                _xf_body_f(p, hash);
+            }
+        }
+        elif (lc == 101) { _xf_decimal(r); _xf_body_e(p, hash, zv, conv); }
+        else {
+            # %g: P significant digits; %e's exponent X after that rounding decides the style.
+            _xf_decimal(r);
+            var P = p;
+            if (P == 0) { P = 1; }
+            var x: i64 = 0;
+            if (zv == 0) {
+                _xf_round_digits(P);
+                x = _xf_rdp - 1;
+            }
+            if (x < P) {
+                if (x >= 0 - 4) { _xf_body_f(P - 1 - x, hash); }
+                else { _xf_body_e(P - 1, hash, zv, conv); }
+            } else {
+                # ⚠ glibc's carry, copied: a value with exactly P integer digits that rounds up into
+                # the next decade is written with NO fraction digits, `%#.2g 99.96` as `1.e+02`
+                # where C's rule gives `1.0e+02` (measured, glibc 2.39 to 2.43). glibc chose %f
+                # with 0 places from the unrounded value and keeps that count when it switches.
+                # Without # the zeros go anyway, so only # shows it.
+                var ep = P - 1;
+                if (zv == 0) {
+                    if (hash == 1) {
+                        if (_xf_dp - 1 == P - 1) { if (x == P) { ep = 0; } }
+                    }
+                }
+                _xf_body_e(ep, hash, zv, conv);
+            }
+            if (hash == 0) { _xf_strip_zeros(); }
+        }
+    }
+    var total = _xo_pl + _xo_bl + _xo_zr + _xo_sl;
+    if (width > total) {
+        var pad = width - total;
+        if ((flags & XF_FL_LEFT) != 0) { _xo_rpad = pad; }
+        elif ((flags & XF_FL_ZERO) != 0) {
+            if (finite == 1) { _xo_zpad = pad; } else { _xo_lpad = pad; }
+        } else { _xo_lpad = pad; }
+    }
+    return 0;
+}
+
+fn xf_out_len(): i64 {
+    return _xo_lpad + _xo_pl + _xo_zpad + _xo_bl + _xo_zr + _xo_sl + _xo_rpad;
+}
+
+# Write `n` copies of byte `c` to `fd`, in chunks.
+fn _xo_run(fd, c, n): i64 {
+    if (n <= 0) { return 0; }
+    var chunk[512];
+    var k: i64 = 0;
+    while (k < 512) { store8(&chunk + k, c); k = k + 1; }
+    var left = n;
+    while (left > 0) {
+        var w = left;
+        if (w > 512) { w = 512; }
+        k_write( fd, &chunk, w);
+        left = left - w;
+    }
+    return 0;
+}
+
+fn xf_emit_fd(fd): i64 {
+    _xo_run(fd, 32, _xo_lpad);
+    if (_xo_pl > 0) { k_write( fd, _xo_pre, _xo_pl); }
+    _xo_run(fd, 48, _xo_zpad);
+    if (_xo_bl > 0) { k_write( fd, _xo_body, _xo_bl); }
+    _xo_run(fd, 48, _xo_zr);
+    if (_xo_sl > 0) { k_write( fd, _xo_suf, _xo_sl); }
+    _xo_run(fd, 32, _xo_rpad);
+    return 0;
+}
+
+fn _xo_fill(dst, c, n): i64 {
+    var i: i64 = 0;
+    while (i < n) { store8(dst + i, c); i = i + 1; }
+    return n;
+}
+
+# The whole field into `dst`, which has room for `xf_out_len()` bytes. Returns the length.
+fn xf_write_to(dst): i64 {
+    var w: i64 = 0;
+    w = w + _xo_fill(dst + w, 32, _xo_lpad);
+    memcpy(dst + w, _xo_pre, _xo_pl); w = w + _xo_pl;
+    w = w + _xo_fill(dst + w, 48, _xo_zpad);
+    memcpy(dst + w, _xo_body, _xo_bl); w = w + _xo_bl;
+    w = w + _xo_fill(dst + w, 48, _xo_zr);
+    memcpy(dst + w, _xo_suf, _xo_sl); w = w + _xo_sl;
+    w = w + _xo_fill(dst + w, 32, _xo_rpad);
+    return w;
+}
+
+# The whole field as a NUL-terminated string.
+fn xf_to_str(): i64 {
+    var n = xf_out_len();
+    var s = alloc(n + 1);
+    var w: i64 = 0;
+    w = w + _xo_fill(s + w, 32, _xo_lpad);
+    memcpy(s + w, _xo_pre, _xo_pl); w = w + _xo_pl;
+    w = w + _xo_fill(s + w, 48, _xo_zpad);
+    memcpy(s + w, _xo_body, _xo_bl); w = w + _xo_bl;
+    w = w + _xo_fill(s + w, 48, _xo_zr);
+    memcpy(s + w, _xo_suf, _xo_sl); w = w + _xo_sl;
+    w = w + _xo_fill(s + w, 32, _xo_rpad);
+    store8(s + w, 0);
+    return s;
+}
+
+# --- arithmetic, for seq -------------------------------------------------------------
+#
+# Each is the exact result rounded once into the extended format, as the x87 does: GNU's `seq`
+# computes `first + i * step` in `long double`, two roundings, and its output depends on both.
+
+fn xf_from_i64(n, out): i64 {
+    _xf_init();
+    if (n == 0) { xf_set(out, XF_ZERO, 0, 0, 0); return 0; }
+    var sign: i64 = 0;
+    var m = n;
+    if (n < 0) { sign = 1; m = 0 - n; }      # i64's minimum reads right unsigned
+    _xb_set_u64(_xf_b1, m);
+    _xf_round(_xf_b1, 0, sign, XF_LDBL, out);
+    return 0;
+}
+
+fn xf_is_nan(r): i64 { if (load64(r + XF_CLS) == XF_NAN) { return 1; } return 0; }
+fn xf_is_inf(r): i64 { if (load64(r + XF_CLS) == XF_INF) { return 1; } return 0; }
+fn xf_is_zero(r): i64 { if (load64(r + XF_CLS) == XF_ZERO) { return 1; } return 0; }
+
+# x86's default NaN, which glibc prints as `-nan`.
+fn _xf_default_nan(out): i64 { xf_set(out, XF_NAN, 1, 0, 0); return 0; }
+
+fn xf_mul(a, b, out): i64 {
+    _xf_init();
+    var ca = load64(a + XF_CLS);
+    var cb = load64(b + XF_CLS);
+    var sign = load64(a + XF_SIGN) ^ load64(b + XF_SIGN);
+    if (ca == XF_NAN) { xf_copy(out, a); return 0; }
+    if (cb == XF_NAN) { xf_copy(out, b); return 0; }
+    if (ca == XF_INF) {
+        if (cb == XF_ZERO) { _xf_default_nan(out); return 0; }
+        xf_set(out, XF_INF, sign, 0, 0);
+        return 0;
+    }
+    if (cb == XF_INF) {
+        if (ca == XF_ZERO) { _xf_default_nan(out); return 0; }
+        xf_set(out, XF_INF, sign, 0, 0);
+        return 0;
+    }
+    if (ca == XF_ZERO) { xf_set(out, XF_ZERO, sign, 0, 0); return 0; }
+    if (cb == XF_ZERO) { xf_set(out, XF_ZERO, sign, 0, 0); return 0; }
+    _xb_set_u64(_xf_b2, load64(a + XF_SIG));
+    _xb_set_u64(_xf_b3, load64(b + XF_SIG));
+    _xb_mul(_xf_b1, _xf_b2, _xf_b3);
+    var e = (load64(a + XF_EXP) - 63) + (load64(b + XF_EXP) - 63);
+    _xf_round(_xf_b1, e, sign, XF_LDBL, out);
+    return 0;
+}
+
+fn xf_add(a, b, out): i64 {
+    _xf_init();
+    var ca = load64(a + XF_CLS);
+    var cb = load64(b + XF_CLS);
+    var sa = load64(a + XF_SIGN);
+    var sb = load64(b + XF_SIGN);
+    if (ca == XF_NAN) { xf_copy(out, a); return 0; }
+    if (cb == XF_NAN) { xf_copy(out, b); return 0; }
+    if (ca == XF_INF) {
+        if (cb == XF_INF) {
+            if (sa != sb) { _xf_default_nan(out); return 0; }
+        }
+        xf_copy(out, a);
+        return 0;
+    }
+    if (cb == XF_INF) { xf_copy(out, b); return 0; }
+    if (ca == XF_ZERO) {
+        if (cb == XF_ZERO) {
+            # -0 + -0 is -0; any other sum of zeros is +0, rounding to nearest.
+            xf_set(out, XF_ZERO, sa & sb, 0, 0);
+            return 0;
+        }
+        xf_copy(out, b);
+        return 0;
+    }
+    if (cb == XF_ZERO) { xf_copy(out, a); return 0; }
+    var ea = load64(a + XF_EXP) - 63;
+    var eb = load64(b + XF_EXP) - 63;
+    var m = ea;
+    if (eb < m) { m = eb; }
+    var A = _xf_b1;
+    var B = _xf_b2;
+    _xb_set_u64(A, load64(a + XF_SIG));
+    _xb_shl(A, ea - m);
+    _xb_set_u64(B, load64(b + XF_SIG));
+    _xb_shl(B, eb - m);
+    var sign = sa;
+    if (sa == sb) {
+        _xb_add(A, B);
+    } else {
+        var c = _xb_cmp(A, B);
+        if (c == 0) { xf_set(out, XF_ZERO, 0, 0, 0); return 0; }
+        if (c > 0) { _xb_sub(A, B); }
+        else {
+            _xb_sub(B, A);
+            _xb_copy(A, B);
+            sign = sb;
+        }
+    }
+    _xf_round(A, m, sign, XF_LDBL, out);
+    return 0;
+}
+
+# -1, 0 or 1 as a < b, a == b, a > b; 2 when either is a NaN.
+fn xf_cmp(a, b): i64 {
+    var ca = load64(a + XF_CLS);
+    var cb = load64(b + XF_CLS);
+    if (ca == XF_NAN) { return 2; }
+    if (cb == XF_NAN) { return 2; }
+    var sa = load64(a + XF_SIGN);
+    var sb = load64(b + XF_SIGN);
+    if (ca == XF_ZERO) { sa = 0; }
+    if (cb == XF_ZERO) { sb = 0; }
+    if (ca == XF_ZERO) { if (cb == XF_ZERO) { return 0; } }
+    if (sa != sb) {
+        if (sa == 1) { return 0 - 1; }
+        return 1;
+    }
+    # The same sign: compare magnitudes, then flip for negatives.
+    var mag: i64 = 0;
+    if (ca != cb) {
+        if (ca > cb) { mag = 1; } else { mag = 0 - 1; }
+        # ZERO < FIN < INF, which is the enum's order.
+    } else {
+        if (ca == XF_FIN) {
+            var xa = load64(a + XF_EXP);
+            var xb = load64(b + XF_EXP);
+            if (xa != xb) {
+                if (xa > xb) { mag = 1; } else { mag = 0 - 1; }
+            } else {
+                var ga = load64(a + XF_SIG) ^ 0x8000000000000000;
+                var gb = load64(b + XF_SIG) ^ 0x8000000000000000;
+                if (ga != gb) {
+                    if (ga > gb) { mag = 1; } else { mag = 0 - 1; }
+                }
+            }
+        }
+    }
+    if (sa == 1) { return 0 - mag; }
+    return mag;
+}
+
+# A binary64 record (`xf_parse` with XF_DBL) as its IEEE bits.
+fn xf_to_f64(r): i64 {
+    var cls = load64(r + XF_CLS);
+    var sbit: i64 = 0;
+    if (load64(r + XF_SIGN) == 1) { sbit = 0x8000000000000000; }
+    if (cls == XF_ZERO) { return sbit; }
+    if (cls == XF_INF) { return sbit | 0x7FF0000000000000; }
+    if (cls == XF_NAN) { return sbit | 0x7FF8000000000000; }
+    var m = (load64(r + XF_SIG) >> 11) & 0x1FFFFFFFFFFFFF;
+    if ((m >> 52) == 0) { return sbit | m; }       # subnormal: biased exponent 0
+    var be = load64(r + XF_EXP) + 1023;
+    return sbit | (be << 52) | (m & 0xFFFFFFFFFFFFF);
+}

@@ -11,6 +11,8 @@
 #                   c=bytes, w=two-byte words, k=KiB, M=MiB, G=GiB)
 #   -mtime [+-]N    last-modified N*24h ago (sign per GNU semantics)
 #   -mmin  [+-]N    last-modified N minutes ago
+#                   N is a binary64 `double`, fractions and exponents included
+#                   (`-mtime 0.5`, `-mmin 1e3`), as findutils reads it (1.9.0)
 #   -perm MODE      the permission bits are exactly MODE; -perm -MODE: at least
 #                   those bits; -perm /MODE: any of them. MODE is octal or
 #                   symbolic (`u=rwx,go=rx`), as `chmod` takes it (1.7.1)
@@ -134,6 +136,7 @@ var _f_pos       = 0;
 var _f_err       = 0;
 var _f_err_msg   = 0;
 var _f_now_secs  = 0;
+var _f_now_nsec  = 0;
 var _f_path_env  = 0;   # cached PATH (heap-copied at startup, stable across exec)
 
 # Walk state.
@@ -326,27 +329,6 @@ fn _f_tok_eq(s): i64 {
     var t = _f_tok();
     if (t == 0) { return 0; }
     return streq(t, s);
-}
-
-# Parse +/-/exact number prefix. On entry s points to "+N", "-N", or "N".
-# Stores sign in *sign_ptr, returns the integer value (or -1 on bad).
-#
-# ⛔ N WRAPPED PAST 2^64 until 1.6.16: `-mmin -18446744073709551617` asked for
-# "less than 1 minute" and matched nothing, where GNU matches everything. N
-# SATURATES now, as GNU's does — a time that far back is "longer ago than any
-# file" — and the callers only compare it, never multiply it.
-fn _f_parse_signed_int(s, sign_ptr): i64 {
-    if (s == 0) { return 0 - 1; }
-    var i: i64 = 0;
-    var sign: i64 = F_SIGN_EXACT;
-    if (load8(s) == 43) { sign = F_SIGN_PLUS;  i = 1; }
-    elif (load8(s) == 45) { sign = F_SIGN_MINUS; i = 1; }
-    if (load8(s + i) == 0) { return 0 - 1; }
-    var len: i64 = 0;
-    var n = kriya_count_digits(s + i, &len);
-    if (load8(s + i + len) != 0) { return 0 - 1; }
-    store64(sign_ptr, sign);
-    return n;
 }
 
 # A number the way GNU's `get_num` reads one for -uid, -gid and -size: `+` (more
@@ -570,19 +552,13 @@ fn _f_parse_primary(): i64 {
         _f_consume();
         var ma = _f_consume();
         if (ma == 0) { _f_set_err("-mtime needs an argument"); return 0; }
-        var sg: i64 = 0;
-        var n = _f_parse_signed_int(ma, &sg);
-        if (n < 0) { _f_set_err("bad -mtime argument"); return 0; }
-        return _f_node_new(F_N_MTIME, sg, n, 0);
+        return _f_time_node(F_N_MTIME, ma);
     }
     if (streq(t, "-mmin") == 1) {
         _f_consume();
         var mma = _f_consume();
         if (mma == 0) { _f_set_err("-mmin needs an argument"); return 0; }
-        var sg2: i64 = 0;
-        var n2 = _f_parse_signed_int(mma, &sg2);
-        if (n2 < 0) { _f_set_err("bad -mmin argument"); return 0; }
-        return _f_node_new(F_N_MMIN, sg2, n2, 0);
+        return _f_time_node(F_N_MMIN, mma);
     }
     if (streq(t, "-empty") == 1) {
         _f_consume();
@@ -970,24 +946,134 @@ fn _f_eval_perm_predicate(kind, vfile, vdir, stat_buf): i64 {
     return 0;
 }
 
-fn _f_eval_mtime_predicate(sign, want_days, mtime): i64 {
-    # GNU: file ages floor((now - mtime) / 86400) days. -N means age<N,
-    # +N means age>N, exact means floor(age) == N.
-    var age = _f_now_secs - mtime;
-    if (age < 0) { age = 0; }
-    var age_days = age / 86400;
-    if (sign == F_SIGN_PLUS)  { if (age_days > want_days) { return 1; } return 0; }
-    if (sign == F_SIGN_MINUS) { if (age_days < want_days) { return 1; } return 0; }
-    return (age_days == want_days);
+# ⭐ -mtime AND -mmin ARE FINDUTILS' ARITHMETIC (1.9.0): `get_relative_timestamp` and
+# `pred_timewindow`, in binary64 as GNU's `double`s are, with nanoseconds. N is read with `strtod`
+# (`src/lib/xfloat.cyr` in XF_DBL), so `-mtime 0.5`, `-mmin -1.5`, `-mtime 1e1` and `-mtime 0x1p0`
+# run where kriya refused all four. A reference time is the origin less N * 86400 (or * 60)
+# seconds, split with `modf`; a file matches by comparing its (sec, nsec) with it:
+#   +N   older than the reference      -N   newer than it
+#   N    newer, by at most a day (a minute)
+# The origin is the start of the run less a day for -mtime, plus 86,399 s for `-N`, and the start
+# for -mmin. ⛔ kriya compared whole-second AGES, so a file dated in the future was age 0 and
+# matched `-mtime 0`, where GNU's window leaves it out, and the second a boundary fell in was
+# decided without its nanoseconds.
+# ⚠ The x86 conversion is copied: a double out of the i64 range becomes the i64 minimum, so
+# `-mtime 1e300` matches nothing and `-mtime --1e300` is GNU's overflow error.
+enum FTimeCmp {
+    F_TC_EQ = 0;
+    F_TC_LT = 1;    # file time before the reference (`+N`)
+    F_TC_GT = 2;    # after it (`-N`)
 }
 
-fn _f_eval_mmin_predicate(sign, want_min, mtime): i64 {
-    var age = _f_now_secs - mtime;
-    if (age < 0) { age = 0; }
-    var age_min = age / 60;
-    if (sign == F_SIGN_PLUS)  { if (age_min > want_min) { return 1; } return 0; }
-    if (sign == F_SIGN_MINUS) { if (age_min < want_min) { return 1; } return 0; }
-    return (age_min == want_min);
+fn _f_dtoi(x): i64 {
+    # cvttsd2si: truncation, and 0x8000000000000000 outside the range or for a NaN.
+    if (f64_lt(x, 0x43E0000000000000) == 1) {
+        if (f64_ge(x, 0xC3E0000000000000) == 1) { return f64_to(x); }
+    }
+    return 0x8000000000000000;
+}
+
+var _f_trec = 0;
+fn _f_time_node(kind, arg): i64 {
+    var name = "-mtime";
+    var unit = 0x40F5180000000000;            # 86400.0
+    var unitword = "days";
+    if (kind == F_N_MMIN) { name = "-mmin"; unit = 0x404E000000000000; unitword = "minutes"; }   # 60.0
+    var cmp = F_TC_EQ;
+    var rest = arg;
+    if (load8(arg) == 43) { cmp = F_TC_LT; rest = arg + 1; }
+    elif (load8(arg) == 45) { cmp = F_TC_GT; rest = arg + 1; }
+    if (_f_trec == 0) { _f_trec = xf_new(); }
+    var n = xf_parse(rest, XF_DBL, _f_trec);
+    var ok: i64 = 1;
+    if (n == 0) { ok = 0; }
+    elif (load8(rest + n) != 0) { ok = 0; }
+    elif (_xf_erange == 1) { if (xf_is_inf(_f_trec) == 1) { ok = 0; } }
+    if (ok == 0) {
+        if (kind == F_N_MMIN) { _f_set_err("bad -mmin argument"); } else { _f_set_err("bad -mtime argument"); }
+        return 0;
+    }
+    if (xf_is_nan(_f_trec) == 1) {
+        if (kind == F_N_MMIN) { _f_set_err("bad -mmin argument: not a number"); }
+        else { _f_set_err("bad -mtime argument: not a number"); }
+        return 0;
+    }
+    var offset = xf_to_f64(_f_trec);
+    var osec = _f_now_secs;
+    var onsec = _f_now_nsec;
+    if (kind == F_N_MTIME) {
+        osec = osec - 86400;
+        if (cmp == F_TC_GT) { osec = osec + 86399; }
+    }
+    var prod = f64_mul(offset, unit);
+    var seconds = f64_trunc(prod);
+    var frac: i64 = 0;
+    if (xf_is_inf(_f_trec) == 0) { frac = f64_sub(prod, seconds); }
+    var nanosec = f64_mul(frac, 0x41CDCD6500000000);   # 1e9
+    var tsec = _f_dtoi(f64_sub(f64_from(osec), seconds));
+    var sneg = f64_lt(seconds, 0);
+    var later: i64 = 0;
+    if (osec < tsec) { later = 1; }
+    if (later != sneg) {
+        var m = alloc(strlen(rest) + 96);
+        memcpy(m, "arithmetic overflow while converting ", 37);
+        memcpy(m + 37, rest, strlen(rest));
+        var w = 37 + strlen(rest);
+        memcpy(m + w, " ", 1);
+        memcpy(m + w + 1, unitword, strlen(unitword));
+        w = w + 1 + strlen(unitword);
+        memcpy(m + w, " to a number of seconds", 24);
+        _f_set_err(m);
+        return 0;
+    }
+    var tnsec = _f_dtoi(f64_sub(f64_from(onsec), nanosec));
+    if (f64_lt(f64_from(onsec), nanosec) == 1) {
+        tnsec = tnsec + 1000000000;
+        tsec = tsec - 1;
+    }
+    return _f_node_new(kind, cmp, tsec, tnsec);
+}
+
+# glibc's `difftime`: the exact difference, rounded once to a double.
+fn _f_difftime(a, b): i64 {
+    var d = a - b;
+    var over: i64 = 0;
+    if (a >= 0) { if (b < 0) { if (d < 0) { over = 1; } } }
+    if (a < 0) { if (b >= 0) { if (d >= 0) { over = 1; } } }
+    if (over == 0) { return f64_from(d); }
+    # |a - b| is 2^63 or more: halve, convert, double; the lost bit cannot reach a comparison.
+    return f64_mul(f64_from((a >>> 1) - (b >>> 1)), 0x4000000000000000);
+}
+
+# findutils' `ts_difference` and `compare_ts`.
+fn _f_ts_diff(asec, ansec, bsec, bnsec): i64 {
+    return f64_add(_f_difftime(asec, bsec), f64_mul(0x3E112E0BE826D695, f64_from(ansec - bnsec)));   # 1e-9
+}
+
+fn _f_eval_time(n, st): i64 {
+    var cmp = load64(n + 8);
+    var rs = load64(n + 16);
+    var rn = load64(n + 24);
+    var ts = load64(st + 88);
+    var tn = load64(st + 96);
+    var window = 0x40F5180000000000;            # 86400.0
+    if (load64(n) == F_N_MMIN) { window = 0x404E000000000000; }   # 60.0
+    if (cmp == F_TC_EQ) {
+        var delta = _f_ts_diff(ts, tn, rs, rn);
+        if (f64_gt(delta, 0) == 1) {
+            if (f64_le(delta, window) == 1) { return 1; }
+        }
+        return 0;
+    }
+    var c: i64 = 0;
+    if (ts != rs) { c = 2; }
+    if (tn != rn) { c = 2; }
+    if (c == 2) {
+        if (f64_lt(_f_ts_diff(ts, tn, rs, rn), 0) == 1) { c = 0 - 1; } else { c = 1; }
+    }
+    if (cmp == F_TC_GT) { if (c > 0) { return 1; } return 0; }
+    if (c < 0) { return 1; }
+    return 0;
 }
 
 fn _f_eval_type_predicate(letter, stat_buf): i64 {
@@ -1637,8 +1723,8 @@ fn _f_eval_leaf(n, ctx): i64 {
     if (k == F_N_TYPE)   { return _f_eval_type_predicate(load64(n + 8), st); }
     if (k == F_N_SIZE)   { return _f_eval_size_predicate(load64(n + 8), load64(n + 16), load64(n + 24),
           load64(st + 48)); }
-    if (k == F_N_MTIME)  { return _f_eval_mtime_predicate(load64(n + 8), load64(n + 16), load64(st + 88)); }
-    if (k == F_N_MMIN)   { return _f_eval_mmin_predicate (load64(n + 8), load64(n + 16), load64(st + 88)); }
+    if (k == F_N_MTIME)  { return _f_eval_time(n, st); }
+    if (k == F_N_MMIN)   { return _f_eval_time(n, st); }
     if (k == F_N_EMPTY)  { return _f_eval_empty_predicate(ctx, st, depth); }
     if (k == F_N_PERM)   { return _f_eval_perm_predicate(load64(n + 8), load64(n + 16), load64(n + 24), st); }
     if (k == F_N_PRUNE) {
@@ -2065,7 +2151,9 @@ fn cmd_find(start: i64): i64 {
     # as unknown options. Instead we walk argv directly: -L / -H / -P
     # may appear as the first one or two tokens, then start paths, then
     # the expression.
-    _f_now_secs = clock_epoch_secs();
+    var now_ns = clock_epoch_ns();
+    _f_now_secs = now_ns / 1000000000;
+    _f_now_nsec = now_ns % 1000000000;
     _f_any_failed = 0;
     _f_err = 0;
     _f_err_msg = 0;

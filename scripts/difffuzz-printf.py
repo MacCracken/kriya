@@ -16,9 +16,10 @@ installed. Run it by hand when `src/cmd/printf.cyr` changes.
 
 ⚠ KNOWN, DELIBERATE DIFFERENCES are skipped rather than counted:
   - `\\c` after a conversion error: GNU exits 0, kriya 1, as POSIX requires.
-  - GNU 9.11's `%N$` positional arguments (roadmap 1.9.0); 9.4 refuses them, as
-    kriya does. Never generated.
-  - The floats and `%q`, which kriya refuses by name. Never generated.
+  - `%N$` numbered arguments, kriya's since 1.9.0 as GNU 9.7's, which 9.4
+    refuses. Never generated here; `smoke-printf.sh` probes the oracle for them.
+  - The floats and `%q`, kriya's since 1.9.0. Never generated here:
+    `difffuzz-float.py` is their fuzz.
   - No FORMAT at all (`printf --`): a usage error, exit 2 by ADR 0008, where
     GNU's *missing operand* exits 1.
 """
