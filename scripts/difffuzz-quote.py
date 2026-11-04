@@ -65,15 +65,18 @@ try:
         bad = []
         for cmd in RENDER:
             argv = [c.encode() for c in cmd] + [b"--", nm]
-            # ⚠ GNU 9.12's `ls` writes a newline in a name as `?` off a tty, which kriya has not
-            # decided to follow (roadmap 1.8.11, audit § 3); its own option turns that off, and it
-            # is a no-op on older versions, so the comparison measures the quoting alone.
+            # ⚠ `ls` writes a newline in a name as `?` off a tty, GNU from 9.12 and kriya from
+            # 1.8.11 (ADR 0031), and 9.4–9.11 write the byte. Both sides get the option that
+            # turns the rule off, a no-op off a tty before 9.12, so the comparison measures the
+            # quoting alone on every version; `smoke-ls.sh` tests the rule.
             gargv = argv[1:]
+            kargv = argv
             if argv[0] == b"ls":
                 gargv = [b"--show-control-chars"] + gargv
+                kargv = [argv[0], b"--show-control-chars"] + argv[1:]
             g = subprocess.run([b"/usr/bin/" + argv[0]] + gargv, cwd=d, env=ENV,
                                capture_output=True, timeout=20).stdout
-            k = subprocess.run([KRIYA.encode()] + argv, cwd=d, env=ENV,
+            k = subprocess.run([KRIYA.encode()] + kargv, cwd=d, env=ENV,
                                capture_output=True, timeout=20).stdout
             if g != k:
                 bad.append((" ".join(cmd), g, k))

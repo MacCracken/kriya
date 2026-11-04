@@ -40,6 +40,10 @@
 #   -T / --tabsize COLS     tab stops for column padding (0 = spaces only).
 #   --color[=WHEN]          GNU's LS_COLORS table, all 24 keys.
 #   --quoting-style=WORD    GNU's nine styles; shell-escape on a tty.
+#   --zero                  end each entry with a NUL, not a newline (one per line,
+#                           literal names, no colour, each overridable by a later option).
+# ⭐ A newline in a name is written `?` wherever a newline separates entries (GNU 9.12,
+# ADR 0031); `--show-control-chars` and `--zero` keep it.
 #
 # Default output is GNU-style multi-column (column-major, fill down then
 # across) sized to the terminal — ioctl(TIOCGWINSZ) on Linux, winsize()#60
@@ -106,6 +110,7 @@ var _ls_k_idx  = 0;
 var _ls_p_idx  = 0;
 var _ls_H_idx  = 0;
 var _ls_L_idx  = 0;
+var _ls_zero_idx = 0;
 
 # ── 1.6.12 display state, all resolved ONCE in `cmd_ls` before any listing
 
@@ -151,6 +156,59 @@ var _ls_qmark = 0;
 # because of the tab, and `shell-escape`, `c` and `escape` have nothing raw to mask.
 var _ls_q_idx = 0;
 var _ls_sc_idx = 0;
+
+# ⭐ A NEWLINE IN A NAME IS `?` WHEREVER A NEWLINE SEPARATES ENTRIES (1.8.11, GNU 9.12,
+# [ADR 0031](../../docs/adr/0031-ls-writes-a-newline-in-a-name-as-a-question-mark-where-newlines-separate-entries.md)).
+# Off a terminal kriya wrote the byte, so `nl<LF>X` listed as two entries and
+# `ls | while read -r f; do rm -- "$f"; done` removed `nl` and `X`, which nobody named. GNU 9.12's
+# `qmark_newline`, measured: the newline becomes `?` in `-1`, `-l`, and `-C`/`-x`/`-m` with a
+# finite width; for the styles that write control bytes raw (literal, shell, shell-always);
+# in names, `-l` link targets and `-R` headers alike; and not under `--show-control-chars`,
+# `--zero` or `--dired`. A deviation from POSIX's `-q`, which allows `?` by default only on a
+# terminal; its Issue 8 direction (Defect 251) is away from the raw byte.
+var _ls_nlq = 0;
+# ⭐ `--zero` (1.8.11): each entry, and `total`, ends with this byte. ⚠ A section header and
+# the blank line before it keep their newlines, as GNU's do.
+var _ls_eolb = 10;
+
+fn _ls_eol(): i64 {
+    var b[8];
+    store8(&b, _ls_eolb);
+    _ls_out(&b, 1);
+    return 0;
+}
+
+# 1 for the styles that write a control byte as itself.
+fn _ls_q_raw(): i64 {
+    if (_ls_qstyle == LS_Q_LITERAL) { return 1; }
+    if (_ls_qstyle == QUOTE_SHELL) { return 1; }
+    if (_ls_qstyle == QUOTE_SHELL_ALWAYS) { return 1; }
+    return 0;
+}
+
+# `buf` (`n` bytes, already quoted) with each newline written `?`, when the rule above applies.
+# ⚠ A copy: `buf` can be the record's own name.
+fn _ls_nl_mask(buf, n): i64 {
+    if (_ls_nlq == 0) { return buf; }
+    if (_ls_qmark == 1) { return buf; }
+    if (_ls_q_raw() == 0) { return buf; }
+    var any: i64 = 0;
+    var i: i64 = 0;
+    while (i < n) {
+        if (load8(buf + i) == 10) { any = 1; }
+        i = i + 1;
+    }
+    if (any == 0) { return buf; }
+    var cp = alloc(n + 1);
+    i = 0;
+    while (i < n) {
+        var c = load8(buf + i);
+        if (c == 10) { c = 63; }
+        store8(cp + i, c);
+        i = i + 1;
+    }
+    return cp;
+}
 
 # ⛔ `--dired`: two-space indent on long-format lines and a trailing byte-offset
 # index for Emacs. ⚠ The offsets EXCLUDE colour escapes — GNU counts only what
@@ -266,6 +324,11 @@ fn _ls_scan_format(): i64 {
                                 # columns, `ls -C --dired` long with offsets).
                                 if (streq(tok, "--full-time") == 1) { _ls_format = LS_FMT_LONG; }
                                 if (streq(tok, "--dired") == 1) { _ls_format = LS_FMT_LONG; }
+                                # ⭐ `--zero` (1.8.11) is one per line unless the format is long
+                                # by then: `ls -l --zero` stays long, `ls --zero -C` is columns.
+                                if (streq(tok, "--zero") == 1) {
+                                    if (_ls_format != LS_FMT_LONG) { _ls_format = LS_FMT_SINGLE; }
+                                }
                                 if (streq(tok, "--format") == 1) { skip_next = 1; }
                                 if (streq(tok, "--width") == 1)  { _ls_w_given = 1; skip_next = 2; }
                                 if (streq(tok, "--tabsize") == 1) { _ls_T_given = 1; skip_next = 2; }
@@ -356,6 +419,7 @@ fn _ls_init_spec(): i64 {
     _ls_p_idx = flags_add_bool(s, 112, "",                0, "append / to directories");
     _ls_H_idx = flags_add_bool(s, 72,  "dereference-command-line", 0, "follow symbolic links named as operands");
     _ls_L_idx = flags_add_bool(s, 76,  "dereference",     0, "follow every symbolic link");
+    _ls_zero_idx = flags_add_bool(s, 0, "zero",           0, "end each entry with a NUL, not a newline");
     # ⭐ POSIX's `-q` (1.8.8), and GNU's way back out: last one wins (see `_ls_qmark`).
     _ls_q_idx = flags_add_bool(s, 113, "hide-control-chars", 0, "write ? for each non-printable byte");
     _ls_sc_idx = flags_add_bool(s, 0, "show-control-chars", 0, "write non-printable bytes as they are");
@@ -1586,6 +1650,7 @@ fn _ls_render_name(name, nlen): i64 {
         }
         buf = cp;
     }
+    buf = _ls_nl_mask(buf, n);
     _ls_rn_len = n;
     return buf;
 }
@@ -2538,7 +2603,7 @@ fn _ls_print_columns(entries, F_mode, inode_mode, width, across): i64 {
             }
             k2 = k2 + 1;
         }
-        _ls_out("\n", 1);
+        _ls_eol();
         r = r + 1;
     }
     return 0;
@@ -2566,7 +2631,8 @@ fn _ls_print_commas(entries, F_mode, inode_mode, width): i64 {
             var follows: i64 = 0;
             if (i < n - 1) { follows = 1; }
             if (pos + 2 + ew + follows > width) {
-                _ls_out(",\n", 2);
+                _ls_out(",", 1);
+                _ls_eol();
                 pos = 0;
             } else {
                 _ls_out(", ", 2);
@@ -2579,7 +2645,7 @@ fn _ls_print_commas(entries, F_mode, inode_mode, width): i64 {
         pos = pos + ew;
         i = i + 1;
     }
-    _ls_out("\n", 1);
+    _ls_eol();
     return 0;
 }
 
@@ -2608,7 +2674,7 @@ fn _ls_print_simple(entries, F_mode, inode_mode): i64 {
         _ls_cell_open(rec, inode_mode, ino_w);
         _ls_emit_name(rec, 0);
         if (F_mode == 1) { _ls_emit_suffix(_ls_rec_st(rec)); }
-        _ls_out("\n", 1);
+        _ls_eol();
         i = i + 1;
     }
     return 0;
@@ -2647,7 +2713,7 @@ fn _ls_print_total(entries, human): i64 {
     if (human == 1) { k = _ls_human(tot, 512, 1, 1, &buf); }
     else { k = _ls_human(tot, 512, 1024, 0, &buf); }
     _ls_out(&buf, k);
-    _ls_out("\n", 1);
+    _ls_eol();
     return 0;
 }
 
@@ -2797,7 +2863,7 @@ fn _ls_print_long(entries, human, F_mode, inode_mode, numeric): i64 {
         } else {
             if (F_mode == 1) { _ls_emit_suffix(st); }
         }
-        _ls_out("\n", 1);
+        _ls_eol();
         i = i + 1;
     }
     return 0;
@@ -2832,6 +2898,7 @@ fn _ls_render_header(path): i64 {
         }
         buf = cp;
     }
+    buf = _ls_nl_mask(buf, n);
     _ls_rn_len = n;
     return buf;
 }
@@ -3032,6 +3099,11 @@ fn cmd_ls(start: i64): i64 {
     # ⭐ THE FORMAT COMES FROM THE ARGV WALK, NOT FROM THE FLAG BITS, because the
     # group is last-wins and the table has no order.
     _ls_scan_format();
+    # ⭐ `--zero` (1.8.11), GNU's: NUL-terminated entries, and at its place in the command line it
+    # also turns colour off, quoting literal and control bytes raw. Each of those a later option
+    # sets again: `--zero --color=always` colours, `--color=always --zero` does not.
+    var zs = kriya_opt_seq(_ls_spec, 0, "zero");
+    if (zs > 0) { _ls_eolb = 0; }
     if (_ls_format == LS_FMT_BAD) {
         k_write( 2, "kriya ls: error: unknown --format value ", 40);
         k_write( 2, "(want vertical, across, horizontal, commas, long, verbose or single-column)\n", 76);
@@ -3091,6 +3163,15 @@ fn cmd_ls(start: i64): i64 {
             _ls_dired_subs = vec_new();
         }
     }
+    # ⚠ An index of byte offsets into NUL-terminated lines is GNU's one refusal for `--zero`, in
+    # either order, and only where `--dired` is in effect (a long format).
+    if (zs > 0) {
+        if (_ls_dired == 1) {
+            var zm = "kriya ls: error: --dired and --zero are incompatible\n";
+            k_write( 2, zm, strlen(zm));
+            return EXIT_USAGE;
+        }
+    }
     if (long_mode == 1) {
         if (_ls_resolve_time_style() != 0) { return EXIT_USAGE; }
         var t0 = clock_epoch_ns();
@@ -3119,6 +3200,7 @@ fn cmd_ls(start: i64): i64 {
             return EXIT_USAGE;
         }
     }
+    if (zs > kriya_opt_seq(_ls_spec, 0, "color")) { cw = LS_CW_NEVER; }
     if (cw == LS_CW_ALWAYS) { _ls_color = 1; }
     if (cw == LS_CW_AUTO) {
         # ⚠ agnos has no tty concept and `k_isatty` returns 0 there, so `=auto`
@@ -3152,8 +3234,17 @@ fn cmd_ls(start: i64): i64 {
     }
     var hq = kriya_opt_seq(_ls_spec, 113, "hide-control-chars");
     var sq = kriya_opt_seq(_ls_spec, 0, "show-control-chars");
+    if (zs > sq) { sq = zs; }   # `--zero` is a `--show-control-chars` at its place
     if (hq > sq) { _ls_qmark = 1; }
     if (sq > hq) { _ls_qmark = 0; }
+    # GNU's `hide_control_chars_opt != false`: the newline rule is off once the last of the
+    # three is `--show-control-chars` or `--zero`.
+    var show_cc: i64 = 0;
+    if (sq > hq) { show_cc = 1; }
+    if (zs > 0) {
+        _ls_qstyle = LS_Q_LITERAL;
+        _ls_qs_name = "literal";
+    }
     var qs = flags_get_str(_ls_spec, _ls_qs_idx);
     if (qs != 0) {
         if (load8(qs) != 0) {
@@ -3163,8 +3254,11 @@ fn cmd_ls(start: i64): i64 {
                 k_write( 2, "shell-escape, shell-escape-always, c, escape, locale or clocale)\n", 65);
                 return EXIT_USAGE;
             }
-            _ls_qstyle = qv;
-            _ls_qs_name = qs;
+            # ⚠ Checked in any order, as GNU's parser checks it, but applied only after `--zero`.
+            if (kriya_opt_seq(_ls_spec, 0, "quoting-style") > zs) {
+                _ls_qstyle = qv;
+                _ls_qs_name = qs;
+            }
         }
     }
     # Width and tab size, once — each can warn, and a warning is not per directory.
@@ -3185,6 +3279,18 @@ fn cmd_ls(start: i64): i64 {
     # over widths 20–80 differed from GNU 9.4 and 9.7. ⚠ After the resolve, so a bad $TABSIZE
     # still warns, as in GNU.
     if (_ls_color == 1) { _ls_tabsize = 0; }
+    # The newline rule's formats: one per line, long, or columns and commas with a width.
+    var nl_fmt: i64 = 0;
+    if (fmt_now == LS_FMT_SINGLE) { nl_fmt = 1; }
+    if (fmt_now == LS_FMT_LONG) { nl_fmt = 1; }
+    if (columnar == 1) {
+        if (_ls_line_length != 0) { nl_fmt = 1; }
+    }
+    if (nl_fmt == 1) {
+        if (show_cc == 0) {
+            if (_ls_dired == 0) { _ls_nlq = 1; }
+        }
+    }
     # ⚠ Clear-to-EOL is a non-long, coloured-output concern.
     if (_ls_color == 1) {
         if (long_mode == 0) { _ls_cl_width = _ls_line_length; }

@@ -513,17 +513,22 @@ tab_name=$(printf 'tab\there'); : > "$tab_name"
 : > 'a=b'; : > 'mid#hash'; : > 'mid~tilde'; : > 'br]ack'; : > 'cur{ly}'
 cd ..
 
-# ⛔ GNU 9.12 WRITES A NEWLINE IN A NAME AS `?` off a tty too, wherever newlines
-# separate entries, for the styles that do not escape (`literal`, `shell`,
-# `shell-always`). 9.4–9.11 and kriya write the byte. `--show-control-chars`
-# turns off exactly that replacement on 9.12 and does nothing off a tty before
-# it, so GNU's side gets it on every case that lists `nl⏎X`. It is version-
-# independent with no probe (docs/audit/2026-11-03-gnu-9.12-parity.md § 3).
-GNU_RAW=--show-control-chars
+# ⛔ A NEWLINE IN A NAME IS `?` off a tty too, wherever newlines separate entries,
+# for the styles that do not escape (`literal`, `shell`, `shell-always`): GNU 9.12's
+# rule, and kriya's since 1.8.11 (ADR 0031). 9.4–9.11 write the byte. PROBED: on a
+# 9.12 oracle both sides run as they are; on an older one kriya's side gets
+# `--show-control-chars`, which turns off exactly that replacement, so the case still
+# measures the quoting, and the rule itself is asserted in the 1.8.11 block below.
+# (docs/audit/2026-11-03-gnu-9.12-parity.md § 3.) Until 1.8.11 GNU's side was pinned
+# with that option instead, while kriya wrote the byte.
+GNU_NLQ=0
+[ "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C ls -1 --quoting-style=literal | grep -c '^nl?X$' || true)" = 1 ] && GNU_NLQ=1
+K_RAW=--show-control-chars
+[ "$GNU_NLQ" = 1 ] && K_RAW=
 qs_same() {
     label=$1; style=$2
-    g=$(cd qdir && env -u QUOTING_STYLE LC_ALL=C ls -1 $GNU_RAW "--quoting-style=$style")
-    k=$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1 "--quoting-style=$style")
+    g=$(cd qdir && env -u QUOTING_STYLE LC_ALL=C ls -1 "--quoting-style=$style")
+    k=$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1 $K_RAW "--quoting-style=$style")
     expect_eq "quote: $label" "$g" "$k"
 }
 qs_same "shell-escape matches GNU"        shell-escape
@@ -579,10 +584,10 @@ expect_eq "quote: always-quote differs from if-needed" "'plain'" \
 rc=0; (cd qdir && "$BIN" ls --quoting-style=bogus) >/dev/null 2>&1 || rc=$?
 expect_eq "quote: unknown style refused" "2" "$rc"
 
-# The piped DEFAULT must stay RAW — the regression that would break scripts.
-expect_eq "quote: piped default is raw" \
-    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C ls -1 $GNU_RAW)" \
-    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1)"
+# The piped DEFAULT must stay UNQUOTED — the regression that would break scripts.
+expect_eq "quote: piped default is unquoted" \
+    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C ls -1)" \
+    "$(cd qdir && env -u QUOTING_STYLE LC_ALL=C "$BIN" ls -1 $K_RAW)"
 # ⚠ Look for a WRAPPED name, not for a quote character: one fixture is literally
 # called `it's`, so raw output contains a `'` legitimately.
 praw=$(cd qdir && env -u QUOTING_STYLE "$BIN" ls -1)
@@ -948,15 +953,17 @@ expect_eq "...while a space is still quoted" "1" \
 # <message>` (architecture 001) and GNU's is `ls: ...`. The count still catches
 # a warning one side prints and the other does not.
 L612_ENV="-u COLUMNS -u TABSIZE -u TIME_STYLE -u LS_BLOCK_SIZE -u BLOCK_SIZE -u LS_COLORS -u COLORTERM TERM=dumb TZ=UTC LC_ALL=C"
-# L612_GA: words for GNU's side only, word-split; empty unless a block sets it.
+# L612_GA / L612_KA: words for GNU's / kriya's side only, word-split; empty unless a
+# block sets them.
 L612_GA=
+L612_KA=
 l612() {   # l612 <name> <env-words> <ls-arg...>; LS_COLORS comes from LC612 if set
     _n=$1; _e=$2; shift 2
     _grc=0
     (cd l612 && env $L612_ENV $_e ${LC612+"LS_COLORS=$LC612"} ls $L612_GA "$@" \
         >"$WORK/g.out" 2>"$WORK/g.err") || _grc=$?
     _krc=0
-    (cd l612 && env $L612_ENV $_e ${LC612+"LS_COLORS=$LC612"} "$BIN" ls "$@" \
+    (cd l612 && env $L612_ENV $_e ${LC612+"LS_COLORS=$LC612"} "$BIN" ls $L612_KA "$@" \
         >"$WORK/k.out" 2>"$WORK/k.err") || _krc=$?
     expect_eq "$_n" \
         "$(od -An -c "$WORK/g.out") rc=$_grc stderr=$(wc -l < "$WORK/g.err" | tr -d ' ')" \
@@ -1073,7 +1080,7 @@ l612 "COLUMNS= empty is ignored quietly"         "COLUMNS=" -C ../gapw
 # columns, GNU indents a name that needed no quotes by one space so it lines up
 # with the quoted ones beside it.
 cd qdir && : > "$(printf 'hi\351x')" && : > "$(printf 'esc\033x')" && : > "$(printf 'del\177x')" && cd ..
-L612_GA=$GNU_RAW   # qdir and h612 hold names with a newline: § 3 of the audit
+L612_KA=$K_RAW   # qdir and h612 hold names with a newline: § 3 of the audit
 for _qs in literal shell shell-always shell-escape shell-escape-always c escape \
            locale clocale; do
     l612 "--quoting-style=$_qs"                  "" -1 "--quoting-style=$_qs" ../qdir
@@ -1108,7 +1115,7 @@ for _qs in literal shell shell-escape c escape; do
     l612 "headers, $_qs"                         "" -R "--quoting-style=$_qs" ../h612
 done
 l612 "operand headers"                           "" --quoting-style=shell-escape '../h612/a b' ../h612/a:b
-L612_GA=
+L612_KA=
 
 # ⛔ AN UNREADABLE DIRECTORY LEAVES NO SECTION BEHIND — no blank line, no
 # header. GNU writes both only once the directory has opened; kriya wrote them
@@ -1223,6 +1230,10 @@ if script -qec true /dev/null >/dev/null 2>&1; then
     pty612 "tty: --show-control-chars, literal"      "-1 --quoting-style=literal --show-control-chars"
     pty612 "tty: -q then --show-control-chars"       "-1 --quoting-style=literal -q --show-control-chars"
     pty612 "tty: --show-control-chars then -q"       "-1 --quoting-style=literal --show-control-chars -q"
+    # ⭐ 1.8.11: `--zero` quotes literally, where a terminal's default is shell-escape. Only a
+    # terminal shows it: off one the default is literal already.
+    pty612 "tty: --zero quotes literally"           "--zero"
+    pty612 "tty: --zero then --quoting-style=shell" "--zero --quoting-style=shell"
 else
     echo "note: no util-linux script(1) — the tty's ? masking is unverified here"
 fi
@@ -1395,6 +1406,173 @@ if [ "$SKIP_UNSTAT" = "0" ]; then
 else
     echo "note: running as root — the unreadable -i / -s cases are skipped"
 fi
+
+# --- 1.8.11: a newline in a name is `?` where newlines separate entries; --zero -----
+#
+# ⭐ GNU 9.12's rule, and kriya's since 1.8.11 (ADR 0031): in `-1`, `-l` and `-C`/`-x`/`-m`
+# with a width, for literal, shell and shell-always; in names, link targets and `-R`
+# headers; not under `--show-control-chars`, `--zero` or `--dired`. PROBED (GNU_NLQ, above):
+# a 9.12 oracle is compared against; on an older one, which writes the byte, kriya's answer
+# is asserted as 9.12's, written out below. The dates are UTC, set under TZ=UTC, so the
+# answers hold on any runner.
+mkdir -p o1811/q o1811/hd
+(
+    cd o1811/q
+    : > plain; : > 'a b'; : > 'a,b'; : > "$(printf 'nl\nX')"; ln -s "$(printf 'nl\nX')" lk
+    chmod 644 plain 'a b' 'a,b' "$(printf 'nl\nX')"
+    TZ=UTC touch -d '2021-01-01 00:00:00' plain 'a b' 'a,b' "$(printf 'nl\nX')"
+    TZ=UTC touch -h -d '2021-01-01 00:00:00' lk
+)
+mkdir "o1811/hd/$(printf 'n\nl')"; : > "o1811/hd/$(printf 'n\nl')/f"
+L18_ENV="-u COLUMNS -u TABSIZE -u LS_COLORS -u QUOTING_STYLE TZ=UTC LC_ALL=C"
+nl18() {  # nl18 <name> <9.12's answer, through cat -A> <arg...>, in o1811
+    _n=$1; _x=$2; shift 2
+    if [ "$GNU_NLQ" = 1 ]; then _x=$(cd o1811 && env $L18_ENV ls "$@" 2>&1 | cat -A); fi
+    expect_eq "newline: $_n" "$_x" "$(cd o1811 && env $L18_ENV "$BIN" ls "$@" 2>&1 | cat -A)"
+}
+nl18 "-1 writes ?" "$(cat <<'X'
+a b$
+a,b$
+lk$
+nl?X$
+plain$
+X
+)" -1 q
+nl18 "-l, the link target too" "$(cat <<'X'
+total 0$
+-rw-r--r-- 1 0 2021-01-01 00:00 a b$
+-rw-r--r-- 1 0 2021-01-01 00:00 a,b$
+lrwxrwxrwx 1 4 2021-01-01 00:00 lk -> nl?X$
+-rw-r--r-- 1 0 2021-01-01 00:00 nl?X$
+-rw-r--r-- 1 0 2021-01-01 00:00 plain$
+X
+)" -lgo --time-style=long-iso q
+nl18 "-C at a width" "$(cat <<'X'
+a b  a,b  lk  nl?X  plain$
+X
+)" -C -w 40 q
+nl18 "-x at a width" "$(cat <<'X'
+a b  a,b  lk  nl?X  plain$
+X
+)" -x -w 40 q
+nl18 "-m at a width" "$(cat <<'X'
+a b, a,b, lk, nl?X,$
+plain$
+X
+)" -m -w 20 q
+nl18 "-C -w 0 keeps the byte" "$(cat <<'X'
+a b  a,b  lk  nl$
+X  plain$
+X
+)" -C -w 0 q
+nl18 "shell" "$(cat <<'X'
+'a b'$
+a,b$
+lk$
+'nl?X'$
+plain$
+X
+)" --quoting-style=shell -1 q
+nl18 "shell-always" "$(cat <<'X'
+'a b'$
+'a,b'$
+'lk'$
+'nl?X'$
+'plain'$
+X
+)" --quoting-style=shell-always -1 q
+nl18 "shell-escape escapes instead" "$(cat <<'X'
+'a b'$
+a,b$
+lk$
+'nl'$'\n''X'$
+plain$
+X
+)" --quoting-style=shell-escape -1 q
+nl18 "c escapes instead" "$(cat <<'X'
+"a b"$
+"a,b"$
+"lk"$
+"nl\nX"$
+"plain"$
+X
+)" --quoting-style=c -1 q
+nl18 "--show-control-chars keeps the byte" "$(cat <<'X'
+a b$
+a,b$
+lk$
+nl$
+X$
+plain$
+X
+)" --show-control-chars -1 q
+nl18 "-q then --show-control-chars" "$(cat <<'X'
+a b$
+a,b$
+lk$
+nl$
+X$
+plain$
+X
+)" -q --show-control-chars -1 q
+nl18 "-R headers too" "$(cat <<'X'
+hd:$
+n?l$
+$
+hd/n?l:$
+f$
+X
+)" -R hd
+nl18 "--dired keeps the byte" "$(cat <<'X'
+  total 0$
+  -rw-r--r-- 1 0 2021-01-01 00:00 a b$
+  -rw-r--r-- 1 0 2021-01-01 00:00 a,b$
+  lrwxrwxrwx 1 4 2021-01-01 00:00 lk -> nl$
+X$
+  -rw-r--r-- 1 0 2021-01-01 00:00 nl$
+X$
+  -rw-r--r-- 1 0 2021-01-01 00:00 plain$
+//DIRED// 44 47 82 85 120 122 165 169 204 209$
+//DIRED-OPTIONS// --quoting-style=literal$
+X
+)" -lgo --dired --time-style=long-iso q
+# Operands too: a file operand's name, and a directory operand's header.
+nl18 "a file operand" "$(printf 'q/nl?X$')" -1 "q/$(printf 'nl\nX')"
+nl18 "a directory operand's header" "$(printf 'q/plain$\n$\nhd/n?l:$\nf$')" "hd/$(printf 'n\nl')" q/plain
+# ⚠ An absolute, whatever the oracle: the default off a terminal is the rule.
+expect_eq "newline: the piped default writes ?, on any oracle" "1" \
+    "$(cd o1811 && env $L18_ENV "$BIN" ls q | grep -c '^nl?X$' || true)"
+
+# ⭐ `--zero` (1.8.11): NUL after each entry and `total`, the header lines kept, and at its
+# place in the command line one per line unless long, colour off, quoting literal and control
+# bytes raw, each of which a later option sets again. 9.4, 9.7 and 9.12 agree on every case
+# here, so each is compared against GNU. ⚠ A bare `--dired` is long only from 9.5, so the
+# refusal is asked with `-l`.
+z18() {   # z18 <name> <arg...>: stdout through cat -A and the exit status, against GNU, in o1811
+    _n=$1; shift
+    _grc=0; (cd o1811 && env $L18_ENV LS_COLORS='di=01;34:ln=01;36' ls "$@") > z18.g 2>/dev/null || _grc=$?
+    _krc=0; (cd o1811 && env $L18_ENV LS_COLORS='di=01;34:ln=01;36' "$BIN" ls "$@") > z18.k 2>/dev/null || _krc=$?
+    expect_eq "--zero: $_n" "$(cat -A z18.g) rc=$_grc" "$(cat -A z18.k) rc=$_krc"
+}
+z18 "NUL after each entry"                     --zero q
+z18 "-l --zero stays long"                     -l --zero --time-style=long-iso q
+z18 "--zero -l"                                --zero -l --time-style=long-iso q
+z18 "-C --zero is one per line"                -C --zero q
+z18 "--zero -C: columns, NUL after each row"   --zero -C -w 30 q
+z18 "--zero -m"                                --zero -m -w 12 q
+z18 "--zero -x -w 0"                           --zero -x -w 0 q
+z18 "-R: headers keep their newlines"          --zero -R hd
+z18 "--zero --color=always colours"            --zero --color=always q
+z18 "--color=always --zero does not"           --color=always --zero q
+z18 "--zero --quoting-style=shell quotes"      --zero --quoting-style=shell q
+z18 "--quoting-style=shell --zero does not"    --quoting-style=shell --zero q
+z18 "--zero -q masks"                          --zero -q q
+z18 "-q --zero does not"                       -q --zero q
+z18 "-s --zero: total too"                     -s --zero q
+z18 "--zero -F"                                --zero -F q
+z18 "--zero -i"                                --zero -i q
+z18 "-l --dired --zero is refused"             -l --dired --zero q
+z18 "--zero -l --dired too"                    --zero -l --dired q
 
 # --- summary ---
 TOTAL=$((PASS + FAIL))
